@@ -61,7 +61,7 @@ fn build_docker_ctx() -> ToolContext {
             host_key_verification: HostKeyVerification::Off,
             proxy_jump: None,
             socks_proxy: None,
-            sudo_password: Some("testpass123".to_string()),
+            sudo_password: Some(zeroize::Zeroizing::new("testpass123".to_string())),
             tags: Vec::new(),
             os_type: OsType::Linux,
             shell: None,

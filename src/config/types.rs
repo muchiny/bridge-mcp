@@ -242,9 +242,14 @@ pub struct HostConfig {
     #[serde(default)]
     pub socks_proxy: Option<SocksProxyConfig>,
 
-    /// Optional sudo password for this host (used with sudo commands)
+    /// Optional sudo password for this host (used with sudo commands).
+    ///
+    /// Wrapped in [`Zeroizing<String>`] so the byte buffer is overwritten when
+    /// the value is dropped (FIND-028). Hot-reload via `config/watcher.rs`
+    /// drops the old `HostConfig`, which now wipes the prior password
+    /// instead of leaving it resident on the heap for the process lifetime.
     #[serde(default)]
-    pub sudo_password: Option<String>,
+    pub sudo_password: Option<Zeroizing<String>>,
 
     /// Tags for grouping hosts (e.g., "production", "staging", "database")
     #[serde(default)]
