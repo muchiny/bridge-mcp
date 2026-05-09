@@ -32,6 +32,7 @@ This file is the **single source of truth** for every concrete problem the audit
 | FIND-008 | `src/ssh/client.rs:339, 285` | `russh::client::Config { ..Default::default() }` does NOT pin `Preferred { kex, key, cipher, mac }`. Russh upstream default may include legacy algorithms. Also no rekey `Limits` set — pool sessions live up to 1 h (`pool.rs:58-59`) accumulating data without rekey. | Set explicit `Preferred` allowlist (CURVE25519, ED25519, CHACHA20_POLY1305, AES_256_GCM, HMAC_SHA2_256_ETM) per `audit/2026-05-09/surface/context7/russh.md`. Set `Limits::new(1<<30, 1<<30, Duration::from_secs(3600))`. | Task 4 (context7 drift) + Task 5 (ssh/client section) | open |
 | FIND-009 | `src/mcp/transport/oauth.rs:184-194` | JWT alg-allowlist excludes `EdDSA` (Ed25519 / RFC 8037). RS/ES/PS families allowed. Likely intentional but undocumented. | Decide: confirm intentional + document in module comment, OR add `Algorithm::EdDSA` to the allowlist. | Task 5 (oauth section open Q) | open |
 | FIND-022 | `src/config/types.rs:516` | `SecurityConfig.require_elicitation_on_destructive: false` default. 97 P0-bucket destructive handlers (per `surface/entry-points.md`) execute without MCP `elicitation/create` confirmation by default. Compromised MCP client can mass-execute destructive tools without surfacing to human. | Flip default to `true` with documented opt-out, OR document the opt-in clearly in `config.example.yaml` and security model docs. | Task 9 (insecure-defaults) | open |
+| FIND-026 | `Cargo.toml` (`serde-saphyr = "=0.0.21"`) | Pre-1.0 single-maintainer YAML parser on critical-path. Primary author has 649/667 commits, 167 GitHub stars, 0 open issues (low scrutiny). Parses ALL config + runbook YAML. Maintainer-takeover or buggy update would compromise everything that goes through `from_str` (FIND-001..004). | Stay pinned at `=0.0.21`, subscribe to release notifications, plan migration when crate reaches 1.0 or alternative emerges. Vendor source as fallback. | Task 10 (supply-chain) | open |
 
 ---
 
@@ -49,6 +50,8 @@ This file is the **single source of truth** for every concrete problem the audit
 | FIND-017 | `src/config/types.rs` (multiple structs) | `#[serde(deny_unknown_fields)]` not on `Config` and most nested config structs. Saphyr strict-typing partially compensates but explicit attribute is belt-and-suspenders. | Add `#[serde(deny_unknown_fields)]` to every config struct. | Task 4 (context7 drift) | open |
 | FIND-023 | `src/config/types.rs:1090` (default fn at L1101) | `SshConfigDiscovery.enabled: true` default — `~/.ssh/config` parsed at startup and every Host entry auto-registered as reachable target. MCP client can enumerate operator's full personal host inventory (often >> YAML-declared production set). | Flip default to `false`; document opt-in for ergonomic time-to-first-command users. | Task 9 (insecure-defaults) | open |
 | FIND-024 | `src/config/types.rs:1247-1250` | `ToolGroupsConfig`: groups not listed are enabled by default. All 75 groups / 357 handlers exposed out-of-box. Operator who only needs `docker` + `service` is also exposed to AD/LDAP/Vault/K8s/AWS/ESXi/HyperV groups. | Flip to default-disabled; require explicit opt-in per group. Or ship a profile system (`profile: minimal\|standard\|full`) so operators don't have to enumerate 75 groups manually. | Task 9 (insecure-defaults) | open |
+| FIND-025 | `Cargo.toml` (`shellexpand = "3"`) used at `src/ssh/client.rs:487` | `shellexpand` GitHub repo is **archived** (last push 2026-02-25, 97 stars). No more security patches. Used on the SSH-key auth path for `~` expansion — regression could cause silent fallback to wrong key. | Replace with `dirs::home_dir()` + manual `~` strip (~30 LOC, `dirs` crate already in deps). OR vendor shellexpand source in-tree under `vendor/`. | Task 10 (supply-chain) | open |
+| FIND-027 | `Cargo.toml` (`tokio-socks = "0.5"`) used at `src/ssh/client.rs:373-413` | `tokio-socks` (sticnarf/tokio-socks) — last push 2025-02-19 (>14 months stale), 102 stars, not archived but inactive. SOCKS proxy is auth-perimeter relevant. | Monitor `sticnarf/tokio-socks` for activity. If no release by 2026-08, plan vendoring (crate is ~1500 LOC). | Task 10 (supply-chain) | open |
 
 ---
 
@@ -116,11 +119,11 @@ For Open Questions resolved by a later task: update the OQ row's "Owner task" co
 ## Summary counters (auto-update at end of each commit)
 
 - P0: **6**
-- P1: **4**
-- P2: **10**
+- P1: **5**
+- P2: **12**
 - P3: **4**
 - FP (proven): **5**
 - OQ (open): **12**
-- **Total open findings: 24**
+- **Total open findings: 27**
 
-**Last assigned ID:** FIND-024
+**Last assigned ID:** FIND-027
