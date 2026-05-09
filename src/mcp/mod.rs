@@ -16,6 +16,7 @@ pub mod resource_registry;
 pub mod resources;
 pub mod sampling;
 mod server;
+pub mod session_capabilities;
 pub mod standard_tool;
 pub mod tool_handlers;
 pub mod transport;

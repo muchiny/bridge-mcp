@@ -23,6 +23,7 @@ use super::logger::McpLogger;
 use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{IncomingMessage, JsonRpcMessage, RootEntry, RootsListResult};
+use super::session_capabilities::SessionCapabilities;
 use super::transport::{Session, Transport, stdio::StdioTransport};
 
 use super::history::CommandHistory;
@@ -76,17 +77,6 @@ pub struct McpServer {
     resource_subscriptions: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Client-declared roots (MCP Roots capability).
     roots: Arc<RwLock<Vec<RootEntry>>>,
-    /// Whether the client supports `roots/list`.
-    client_supports_roots: AtomicBool,
-    /// Whether the client supports `elicitation/create` (MCP 2025-06-18+).
-    /// Populated from `InitializeParams.capabilities.elicitation` during the
-    /// handshake. Used by `handle_tools_call` to gate destructive operations
-    /// when `security.require_elicitation_on_destructive` is enabled.
-    client_supports_elicitation: AtomicBool,
-    /// Whether the client advertised the `sampling` capability during initialize.
-    /// Read by `ToolContext::sample` to short-circuit when the client cannot
-    /// satisfy `sampling/createMessage` requests.
-    client_supports_sampling: AtomicBool,
     /// Application metrics for token consumption analytics.
     metrics: Arc<crate::metrics::Metrics>,
     /// Map of in-flight MCP request IDs to their `CancellationToken`.
@@ -207,9 +197,6 @@ impl McpServer {
             completion_provider: DefaultCompletionProvider,
             resource_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             roots: Arc::new(RwLock::new(Vec::new())),
-            client_supports_roots: AtomicBool::new(false),
-            client_supports_elicitation: AtomicBool::new(false),
-            client_supports_sampling: AtomicBool::new(false),
             metrics: Arc::new(crate::metrics::Metrics::new()),
             active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -229,6 +216,22 @@ impl McpServer {
     #[must_use]
     pub fn allocate_session_pending_for_test(&self) -> Arc<PendingRequests> {
         Arc::new(PendingRequests::new())
+    }
+
+    /// Allocate a fresh per-session capabilities handle.
+    ///
+    /// Test helper used by `tests/multisession_isolation.rs` to verify
+    /// that two sessions on the same `McpServer` instance get independent
+    /// `Arc<SessionCapabilities>` instances (Vuln 9 audit 2026-05-09).
+    /// Integration tests live in their own crate so this helper cannot
+    /// be `#[cfg(test)]`; it is gated `#[doc(hidden)]` instead so it
+    /// stays out of the public docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn allocate_session_capabilities_for_test(
+        &self,
+    ) -> Arc<crate::mcp::session_capabilities::SessionCapabilities> {
+        Arc::new(crate::mcp::session_capabilities::SessionCapabilities::new())
     }
 
     /// Register a new in-flight request and return its `CancellationToken`.
@@ -301,6 +304,7 @@ impl McpServer {
         arguments: Option<&Value>,
         notification_tx: Option<&mpsc::Sender<WriterMessage>>,
         session_pending: Option<&Arc<PendingRequests>>,
+        session_caps: Option<&Arc<SessionCapabilities>>,
     ) -> std::result::Result<(), String> {
         let require = {
             let cfg = self.config.read().await;
@@ -317,7 +321,13 @@ impl McpServer {
             return Ok(());
         }
 
-        if !self.client_supports_elicitation.load(Ordering::Relaxed) {
+        // Per-session capabilities (Vuln 9 audit 2026-05-09): the server no
+        // longer keeps a global `client_supports_elicitation` AtomicBool, so
+        // the gate MUST consult THIS session's `SessionCapabilities`. Without
+        // a session handle (legacy non-MCP code paths), refuse the operation
+        // since we cannot prove the connected client advertised the capability.
+        let supports_elicitation = session_caps.is_some_and(|c| c.supports_elicitation());
+        if !supports_elicitation {
             return Err(format!(
                 "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is enabled, but the client does not support elicitation. Either upgrade the client or set `security.require_elicitation_on_destructive: false`."
             ));
@@ -383,6 +393,7 @@ impl McpServer {
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
         progress_token: Option<Value>,
         session_pending: Option<Arc<PendingRequests>>,
+        session_caps: Option<Arc<SessionCapabilities>>,
     ) -> ToolContext {
         // Read config snapshot
         let mut config_snapshot = {
@@ -415,8 +426,14 @@ impl McpServer {
         ctx.notification_tx = notification_tx;
         ctx.progress_token = progress_token;
         ctx.pending_requests = session_pending;
-        ctx.client_supports_elicitation = self.client_supports_elicitation.load(Ordering::Relaxed);
-        ctx.client_supports_sampling = self.client_supports_sampling.load(Ordering::Relaxed);
+        // Per-session capabilities (Vuln 9 audit 2026-05-09): the server no
+        // longer holds global `client_supports_*` flags. Snapshot the
+        // current session's flags into `ToolContext`; default to `false`
+        // when no session handle is available (legacy non-MCP code paths).
+        ctx.client_supports_elicitation = session_caps
+            .as_ref()
+            .is_some_and(|c| c.supports_elicitation());
+        ctx.client_supports_sampling = session_caps.as_ref().is_some_and(|c| c.supports_sampling());
         ctx.mcp_logger = self.mcp_logger.read().await.as_ref().map(Arc::clone);
         ctx
     }
@@ -623,6 +640,11 @@ impl McpServer {
         // an id minted by client A.
         let session_pending = Arc::new(PendingRequests::new());
 
+        // Per-session capability flags (Vuln 9 audit 2026-05-09). Each
+        // connected client populates these from its OWN `initialize`
+        // capabilities; a flag set by client A never leaks into client B.
+        let session_caps = Arc::new(SessionCapabilities::new());
+
         // Store the per-session writer channel globally so config
         // watcher + background workers can find a live sender. With
         // stdio this is set once and cleared on exit; with multi-
@@ -670,7 +692,7 @@ impl McpServer {
             match incoming {
                 IncomingMessage::Single(message) => {
                     let Some(request) = self
-                        .route_incoming_message(message, &tx, &session_pending)
+                        .route_incoming_message(message, &tx, &session_pending, &session_caps)
                         .await
                     else {
                         continue;
@@ -709,6 +731,7 @@ impl McpServer {
                     );
                     let session_tx = tx.clone();
                     let session_pending_for_task = Arc::clone(&session_pending);
+                    let session_caps_for_task = Arc::clone(&session_caps);
                     tokio::spawn(
                         async move {
                             let response = server
@@ -717,6 +740,7 @@ impl McpServer {
                                     cancel_token,
                                     Some(session_tx),
                                     Some(session_pending_for_task),
+                                    Some(session_caps_for_task),
                                 )
                                 .await;
                             let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
@@ -840,6 +864,7 @@ impl McpServer {
         message: JsonRpcMessage,
         tx: &mpsc::Sender<WriterMessage>,
         session_pending: &Arc<PendingRequests>,
+        session_caps: &Arc<SessionCapabilities>,
     ) -> Option<JsonRpcRequest> {
         // If no method, it's a response to a server-initiated request (elicitation/sampling)
         if message.method.is_none() {
@@ -866,7 +891,8 @@ impl McpServer {
 
         // Handle client notifications (no response needed per JSON-RPC 2.0)
         if message.method.as_deref() == Some("notifications/roots/list_changed") {
-            self.handle_roots_changed(tx, session_pending).await;
+            self.handle_roots_changed(tx, session_pending, session_caps)
+                .await;
             return None;
         }
         if message.method.as_deref() == Some("notifications/cancelled") {
@@ -874,7 +900,7 @@ impl McpServer {
             return None;
         }
         if message.method.as_deref() == Some("notifications/initialized") {
-            self.handle_initialized_notification(tx, session_pending)
+            self.handle_initialized_notification(tx, session_pending, session_caps)
                 .await;
             return None;
         }
@@ -897,8 +923,9 @@ impl McpServer {
         &self,
         tx: &mpsc::Sender<WriterMessage>,
         session_pending: &Arc<PendingRequests>,
+        session_caps: &Arc<SessionCapabilities>,
     ) {
-        if !self.client_supports_roots.load(Ordering::Relaxed) {
+        if !session_caps.supports_roots() {
             return;
         }
 
@@ -926,9 +953,10 @@ impl McpServer {
         &self,
         tx: &mpsc::Sender<WriterMessage>,
         session_pending: &Arc<PendingRequests>,
+        session_caps: &Arc<SessionCapabilities>,
     ) {
         info!("Client roots changed, re-fetching");
-        self.fetch_roots(tx, session_pending).await;
+        self.fetch_roots(tx, session_pending, session_caps).await;
     }
 
     /// Handle `notifications/initialized` — fetch client roots if supported.
@@ -937,9 +965,10 @@ impl McpServer {
         &self,
         tx: &mpsc::Sender<WriterMessage>,
         session_pending: &Arc<PendingRequests>,
+        session_caps: &Arc<SessionCapabilities>,
     ) {
         info!("Client sent notifications/initialized; fetching roots");
-        self.fetch_roots(tx, session_pending).await;
+        self.fetch_roots(tx, session_pending, session_caps).await;
     }
 
     /// Get the current client roots (for path validation).
@@ -960,7 +989,7 @@ impl McpServer {
     /// supplied. Use [`Self::serve`] / [`Self::serve_session`] for full
     /// MCP feature support.
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
-        self.handle_request_with_cancel(request, None, None, None)
+        self.handle_request_with_cancel(request, None, None, None, None)
             .await
     }
 
@@ -986,11 +1015,15 @@ impl McpServer {
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
         session_pending: Option<Arc<PendingRequests>>,
+        session_caps: Option<Arc<SessionCapabilities>>,
     ) -> JsonRpcResponse {
         let id = request.id.clone();
 
         match request.method.as_str() {
-            "initialize" => self.handle_initialize(id, request.params).await,
+            "initialize" => {
+                self.handle_initialize(id, request.params, session_caps.as_ref())
+                    .await
+            }
             "tools/list" => self.handle_tools_list(id, request.params.as_ref()),
             "tools/call" => {
                 self.handle_tools_call(
@@ -999,6 +1032,7 @@ impl McpServer {
                     cancel_token,
                     notification_tx,
                     session_pending,
+                    session_caps,
                 )
                 .await
             }
@@ -1046,7 +1080,12 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn handle_initialize(&self, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
+    async fn handle_initialize(
+        &self,
+        id: Option<Value>,
+        params: Option<Value>,
+        session_caps: Option<&Arc<SessionCapabilities>>,
+    ) -> JsonRpcResponse {
         // Parse initialize params, negotiate version, and store client info
         let mut negotiated_version = PROTOCOL_VERSION.to_string();
 
@@ -1086,22 +1125,30 @@ impl McpServer {
                         *self.runtime_max_output_chars.write().await = Some(effective);
                     }
 
-                    // Check if client supports roots capability
+                    // Per-session capabilities (Vuln 9 audit 2026-05-09): write
+                    // each client's advertised flags to its OWN
+                    // `SessionCapabilities`, not a server-wide AtomicBool. The
+                    // legacy non-MCP code paths (`handle_request`) pass `None`
+                    // and silently drop these flags — that's fine because they
+                    // also can't initiate elicitation/sampling/roots.
                     if init_params.capabilities.roots.is_some() {
-                        self.client_supports_roots.store(true, Ordering::Relaxed);
+                        if let Some(caps) = session_caps {
+                            caps.set_supports_roots(true);
+                        }
                         info!("Client supports roots capability");
                     }
 
-                    // Check if client supports elicitation capability
                     if init_params.capabilities.elicitation.is_some() {
-                        self.client_supports_elicitation
-                            .store(true, Ordering::Relaxed);
+                        if let Some(caps) = session_caps {
+                            caps.set_supports_elicitation(true);
+                        }
                         info!("Client supports elicitation capability");
                     }
 
-                    // Check if client supports sampling capability
                     if init_params.capabilities.sampling.is_some() {
-                        self.client_supports_sampling.store(true, Ordering::Relaxed);
+                        if let Some(caps) = session_caps {
+                            caps.set_supports_sampling(true);
+                        }
                         info!("Client supports sampling capability");
                     }
 
@@ -1231,7 +1278,7 @@ impl McpServer {
         JsonRpcResponse::success_or_serialize_error(id, &result)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     async fn handle_tools_call(
         &self,
         id: Option<Value>,
@@ -1239,6 +1286,7 @@ impl McpServer {
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
         session_pending: Option<Arc<PendingRequests>>,
+        session_caps: Option<Arc<SessionCapabilities>>,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
@@ -1295,6 +1343,7 @@ impl McpServer {
                 call_params.arguments.as_ref(),
                 notification_tx.as_ref(),
                 session_pending.as_ref(),
+                session_caps.as_ref(),
             )
             .await
         {
@@ -1318,6 +1367,7 @@ impl McpServer {
                         .as_ref()
                         .and_then(|m| m.progress_token.clone()),
                     session_pending,
+                    session_caps,
                 )
                 .await;
         }
@@ -1336,6 +1386,7 @@ impl McpServer {
                     .as_ref()
                     .and_then(|m| m.progress_token.clone()),
                 session_pending,
+                session_caps,
             )
             .await;
 
@@ -1453,6 +1504,7 @@ impl McpServer {
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
         progress_token: Option<Value>,
         session_pending: Option<Arc<PendingRequests>>,
+        session_caps: Option<Arc<SessionCapabilities>>,
     ) -> JsonRpcResponse {
         // Get the handler first to validate the tool exists
         let Some(handler) = self.registry.get(&tool_name) else {
@@ -1510,6 +1562,7 @@ impl McpServer {
                 notification_tx,
                 progress_token,
                 session_pending,
+                session_caps,
             )
             .await;
 
@@ -1600,7 +1653,7 @@ impl McpServer {
 
         info!(prompt = %get_params.name, "Prompt get");
 
-        let ctx = self.create_tool_context(None, None, None, None).await;
+        let ctx = self.create_tool_context(None, None, None, None, None).await;
 
         match self
             .prompt_registry
@@ -1619,7 +1672,7 @@ impl McpServer {
     }
 
     async fn handle_resources_list(&self, id: Option<Value>) -> JsonRpcResponse {
-        let ctx = self.create_tool_context(None, None, None, None).await;
+        let ctx = self.create_tool_context(None, None, None, None, None).await;
 
         match self.resource_registry.list(&ctx).await {
             Ok(resources) => {
@@ -1654,7 +1707,7 @@ impl McpServer {
 
         info!(uri = %read_params.uri, "Resource read");
 
-        let ctx = self.create_tool_context(None, None, None, None).await;
+        let ctx = self.create_tool_context(None, None, None, None, None).await;
 
         match self.resource_registry.read(&read_params.uri, &ctx).await {
             Ok(contents) => {
@@ -2059,7 +2112,9 @@ mod tests {
             }
         });
 
-        let response = server.handle_initialize(Some(json!(1)), Some(params)).await;
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -2082,7 +2137,9 @@ mod tests {
             }
         });
 
-        let response = server.handle_initialize(Some(json!(1)), Some(params)).await;
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -2102,7 +2159,9 @@ mod tests {
             }
         });
 
-        let response = server.handle_initialize(Some(json!(1)), Some(params)).await;
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -2114,7 +2173,7 @@ mod tests {
     async fn test_handle_initialize_no_params_uses_default_version() {
         let server = create_test_server();
 
-        let response = server.handle_initialize(Some(json!(1)), None).await;
+        let response = server.handle_initialize(Some(json!(1)), None, None).await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -2133,7 +2192,9 @@ mod tests {
             }
         });
 
-        let response = server.handle_initialize(Some(json!(1)), Some(params)).await;
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
         let result = response.result.unwrap();
 
         assert!(result["serverInfo"]["description"].is_string());
@@ -2146,7 +2207,7 @@ mod tests {
         let server = create_test_server();
         assert!(!server.initialized.load(Ordering::SeqCst));
 
-        server.handle_initialize(Some(json!(1)), None).await;
+        server.handle_initialize(Some(json!(1)), None, None).await;
 
         assert!(server.initialized.load(Ordering::SeqCst));
     }
@@ -2154,7 +2215,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_initialize_includes_extensions() {
         let server = create_test_server();
-        let response = server.handle_initialize(Some(json!(1)), None).await;
+        let response = server.handle_initialize(Some(json!(1)), None, None).await;
         let result = response.result.unwrap();
         let caps = &result["capabilities"];
 
@@ -2216,7 +2277,7 @@ mod tests {
         let server = create_test_server();
 
         let response = server
-            .handle_tools_call(Some(json!(1)), None, None, None, None)
+            .handle_tools_call(Some(json!(1)), None, None, None, None, None)
             .await;
 
         assert!(response.error.is_some());
@@ -2233,7 +2294,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         assert!(response.error.is_some());
@@ -2250,7 +2311,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         // Unknown tool returns success with error content (MCP spec)
@@ -2283,7 +2344,7 @@ mod tests {
             "arguments": {"host": "prod", "name": "backup"}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -2318,7 +2379,7 @@ mod tests {
             "arguments": {}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
         let result = response.result.unwrap();
         assert_ne!(result["isError"].as_bool(), Some(true));
@@ -2335,7 +2396,7 @@ mod tests {
             "arguments": {"query": "docker", "limit": 3}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
         let result = response.result.unwrap();
         assert_ne!(result["isError"].as_bool(), Some(true));
@@ -2365,7 +2426,7 @@ mod tests {
             "arguments": {"name": first_real}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
         let result = response.result.unwrap();
         assert_ne!(result["isError"].as_bool(), Some(true));
@@ -2387,7 +2448,7 @@ mod tests {
             "arguments": {"host": "nonexistent", "name": "x"}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
@@ -2448,8 +2509,9 @@ mod tests {
         };
 
         let session_pending = Arc::new(PendingRequests::new());
+        let session_caps = Arc::new(SessionCapabilities::new());
         let routed = server
-            .route_incoming_message(message, &tx, &session_pending)
+            .route_incoming_message(message, &tx, &session_pending, &session_caps)
             .await;
 
         assert!(routed.is_none(), "notification must not be dispatched");
@@ -2469,9 +2531,8 @@ mod tests {
         // drive `route_incoming_message` in a background task and just verify
         // the outbound `roots/list` shows up on tx.
         let server = Arc::new(create_test_server());
-        server
-            .client_supports_roots
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let session_caps = Arc::new(SessionCapabilities::new());
+        session_caps.set_supports_roots(true);
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
@@ -2486,7 +2547,7 @@ mod tests {
         let session_pending = Arc::new(PendingRequests::new());
         let route_handle = tokio::spawn(async move {
             server_bg
-                .route_incoming_message(message, &tx, &session_pending)
+                .route_incoming_message(message, &tx, &session_pending, &session_caps)
                 .await
         });
 
@@ -2513,7 +2574,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -2633,7 +2694,9 @@ mod tests {
             }
         });
 
-        let response = server.handle_initialize(Some(json!(1)), Some(params)).await;
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -2645,7 +2708,7 @@ mod tests {
     #[tokio::test]
     async fn test_initialize_with_null_id() {
         let server = create_test_server();
-        let response = server.handle_initialize(None, None).await;
+        let response = server.handle_initialize(None, None, None).await;
 
         assert!(response.error.is_none());
         assert!(response.id.is_none());
@@ -2655,7 +2718,7 @@ mod tests {
     async fn test_initialize_with_string_id() {
         let server = create_test_server();
         let response = server
-            .handle_initialize(Some(json!("request-1")), None)
+            .handle_initialize(Some(json!("request-1")), None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -2665,7 +2728,7 @@ mod tests {
     #[tokio::test]
     async fn test_initialize_includes_resources_capability() {
         let server = create_test_server();
-        let response = server.handle_initialize(Some(json!(1)), None).await;
+        let response = server.handle_initialize(Some(json!(1)), None, None).await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -2676,8 +2739,8 @@ mod tests {
     async fn test_initialize_multiple_times() {
         let server = create_test_server();
 
-        let response1 = server.handle_initialize(Some(json!(1)), None).await;
-        let response2 = server.handle_initialize(Some(json!(2)), None).await;
+        let response1 = server.handle_initialize(Some(json!(1)), None, None).await;
+        let response2 = server.handle_initialize(Some(json!(2)), None, None).await;
 
         // Both should succeed (no state prevents re-initialization)
         assert!(response1.error.is_none());
@@ -2692,7 +2755,9 @@ mod tests {
             "completely": "wrong"
         });
 
-        let response = server.handle_initialize(Some(json!(1)), Some(params)).await;
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
 
         // Should still succeed (params are optional/best-effort)
         assert!(response.error.is_none());
@@ -2732,7 +2797,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         // Should succeed (null arguments treated as empty)
@@ -2748,7 +2813,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         // Empty name should result in tool not found
@@ -2944,7 +3009,7 @@ mod tests {
         assert!(!server.initialized.load(std::sync::atomic::Ordering::SeqCst));
 
         // After initialize call
-        server.handle_initialize(Some(json!(1)), None).await;
+        server.handle_initialize(Some(json!(1)), None, None).await;
 
         // Should be initialized
         assert!(server.initialized.load(std::sync::atomic::Ordering::SeqCst));
@@ -2998,7 +3063,9 @@ mod tests {
             }
         });
 
-        let response = server.handle_initialize(Some(json!(1)), Some(params)).await;
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
 
         let result = response.result.unwrap();
         assert!(result["capabilities"]["tasks"].is_object());
@@ -3033,7 +3100,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         // Synchronous: should return content directly (not CreateTaskResult)
@@ -3052,7 +3119,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -3078,7 +3145,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, Some(tx), None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(tx), None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -3123,7 +3190,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
 
         // Unknown tool should return error content, not CreateTaskResult
@@ -3142,7 +3209,7 @@ mod tests {
             "task": {"ttl": 60000}
         });
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(call_params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(call_params), None, None, None, None)
             .await;
         let task_id = call_response.result.unwrap()["task"]["taskId"]
             .as_str()
@@ -3237,7 +3304,7 @@ mod tests {
         });
 
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None, None)
             .await;
         let task_id = call_response.result.unwrap()["task"]["taskId"]
             .as_str()
@@ -4068,7 +4135,7 @@ mod tests {
         // runs; deeper verification lives in the full integration test
         // added in commit 6.
         let response = server
-            .handle_request_with_cancel(request, Some(token), None, None)
+            .handle_request_with_cancel(request, Some(token), None, None, None)
             .await;
         assert!(response.result.is_some() || response.error.is_some());
     }
