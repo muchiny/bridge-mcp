@@ -261,7 +261,7 @@ fn success_json(value: Value) -> ToolCallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::registry::create_default_registry;
+    use crate::mcp::registry::create_all_enabled_registry;
 
     #[test]
     fn is_meta_tool_recognises_all_three() {
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn list_groups_returns_structured_payload() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let result = execute(LIST_TOOL_GROUPS, None, &registry).expect("meta tool");
         let payload = result.structured_content.expect("structured");
         assert!(payload["total_groups"].as_u64().unwrap() > 0);
@@ -294,14 +294,14 @@ mod tests {
 
     #[test]
     fn search_requires_query() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let result = execute(SEARCH_TOOLS, Some(&json!({})), &registry).expect("meta tool");
         assert_eq!(result.is_error, Some(true));
     }
 
     #[test]
     fn search_matches_on_name_substring() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let result = execute(
             SEARCH_TOOLS,
             Some(&json!({"query": "docker", "limit": 5})),
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn search_respects_group_filter() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let result = execute(
             SEARCH_TOOLS,
             Some(&json!({"query": "", "group": "docker", "limit": 50})),
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn describe_unknown_returns_error() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let result = execute(
             DESCRIBE_TOOL,
             Some(&json!({"name": "nonexistent_xyz"})),
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn describe_known_returns_schema() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         // Pick any real tool from the registry.
         let some_tool = registry
             .list_tools()
@@ -375,7 +375,7 @@ mod tests {
     /// only return tools whose group **equals** the filter.
     #[test]
     fn search_with_group_filter_returns_only_matching_group() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let result = execute(
             SEARCH_TOOLS,
             Some(&json!({"query": "ps", "group": "docker", "limit": 50})),

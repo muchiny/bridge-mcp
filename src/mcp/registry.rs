@@ -389,10 +389,42 @@ pub fn tool_meta(tool_name: &str) -> Option<Value> {
     }
 }
 
-/// Create a registry with all default tool handlers
+/// Create a registry with the default tool group profile
+/// (FIND-024: 8 minimal-profile groups; everything else is opt-in).
 #[must_use]
 pub fn create_default_registry() -> ToolRegistry {
     create_filtered_registry(&ToolGroupsConfig::default())
+}
+
+/// Create a registry with EVERY tool group enabled — the pre-FIND-024 default.
+///
+/// Use only for tests that need to exercise the full inventory (e.g.
+/// pagination, group dispatch, default-list assertions). Production code must
+/// always use [`create_filtered_registry`] with the operator's `ToolGroupsConfig`.
+#[must_use]
+#[doc(hidden)]
+pub fn create_all_enabled_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    for entry in inventory::iter::<ToolRegistryEntry>() {
+        registry.register((entry.factory)());
+    }
+    registry
+}
+
+/// Build a `ToolGroupsConfig` that explicitly enables every group registered
+/// via `#[mcp_tool]` / `#[mcp_standard_tool]` — the pre-FIND-024 default.
+///
+/// Use only for tests that need to exercise the full handler inventory
+/// (e.g. pagination, group dispatch, all-tools-present assertions).
+/// Production code must always use the operator-supplied `ToolGroupsConfig`.
+#[must_use]
+#[doc(hidden)]
+pub fn all_enabled_tool_groups_config_for_test() -> ToolGroupsConfig {
+    let mut groups = HashMap::new();
+    for entry in inventory::iter::<ToolRegistryEntry>() {
+        groups.insert(entry.group.to_string(), true);
+    }
+    ToolGroupsConfig { groups }
 }
 
 /// Create a registry filtered by the tool groups configuration.
@@ -501,8 +533,12 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn test_default_registry_has_all_tools() {
-        let registry = create_default_registry();
+    fn test_all_enabled_registry_has_all_tools() {
+        // FIND-024: `create_default_registry()` now returns the minimal
+        // 8-group profile. This test exists to verify that every handler
+        // declared via `#[mcp_tool]` / `#[mcp_standard_tool]` is present
+        // when ALL groups are enabled, so we use `create_all_enabled_registry()`.
+        let registry = create_all_enabled_registry();
         assert_eq!(registry.len(), all_tools_count());
         // Core
         assert!(registry.get("ssh_exec").is_some());
@@ -1110,14 +1146,16 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_all_enabled() {
-        let config = ToolGroupsConfig::default();
+        // Pre-FIND-024 behaviour: a config that explicitly enables every
+        // group must register every tool from the inventory.
+        let config = all_enabled_tool_groups_config_for_test();
         let registry = create_filtered_registry(&config);
         assert_eq!(registry.len(), all_tools_count());
     }
 
     #[test]
     fn test_filtered_registry_disable_sessions() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("sessions".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1134,7 +1172,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_monitoring() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("monitoring".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1148,7 +1186,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_file_transfer() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("file_transfer".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1165,7 +1203,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_multiple_groups() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("sessions".to_string(), false);
         groups.insert("monitoring".to_string(), false);
         groups.insert("file_transfer".to_string(), false);
@@ -1184,19 +1222,20 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_explicit_enable() {
-        let mut groups = std::collections::HashMap::new();
+        // FIND-024: explicit `true` for `core` + `sessions` on top of an
+        // all-enabled fixture is a no-op; every tool stays registered.
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("core".to_string(), true);
         groups.insert("sessions".to_string(), true);
         let config = ToolGroupsConfig { groups };
 
         let registry = create_filtered_registry(&config);
-        // All groups enabled (unlisted default to true)
         assert_eq!(registry.len(), all_tools_count());
     }
 
     #[test]
     fn test_filtered_registry_disable_tunnels() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("tunnels".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1212,7 +1251,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_kubernetes() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("kubernetes".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1244,7 +1283,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_ansible() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("ansible".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1267,7 +1306,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_awx() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("awx".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1294,7 +1333,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_docker() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("docker".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1319,7 +1358,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_esxi() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("esxi".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1341,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_git() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("git".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1362,7 +1401,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_systemd() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("systemd".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1383,7 +1422,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_network() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("network".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1401,7 +1440,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_process() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("process".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1416,7 +1455,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_package() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("package".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1433,7 +1472,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_firewall() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("firewall".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1449,7 +1488,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_cron() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("cron".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1464,7 +1503,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_certificates() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("certificates".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1482,7 +1521,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_nginx() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("nginx".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1498,7 +1537,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_redis() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("redis".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1513,7 +1552,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_terraform() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("terraform".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1530,7 +1569,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_vault() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("vault".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1546,7 +1585,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_config() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("config".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1562,7 +1601,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_services() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_services".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1585,7 +1624,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_events() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_events".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1605,7 +1644,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_active_directory() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("active_directory".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1626,7 +1665,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_scheduled_tasks() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("scheduled_tasks".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1646,7 +1685,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_firewall() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_firewall".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1666,7 +1705,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_iis() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("iis".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1684,7 +1723,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_updates() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_updates".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1704,7 +1743,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_perf() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_perf".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1725,7 +1764,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_hyperv() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("hyperv".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1745,7 +1784,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_registry() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_registry".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1765,7 +1804,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_features() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_features".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1784,7 +1823,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_network() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_network".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1805,7 +1844,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_windows_process() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_process".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1825,7 +1864,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_directory() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("directory".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1839,7 +1878,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_database() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("database".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1854,7 +1893,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_backup() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("backup".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1872,7 +1911,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_cron_analysis() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("cron_analysis".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1890,7 +1929,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_performance() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("performance".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1909,7 +1948,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_container_logs() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("container_logs".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1928,7 +1967,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_network_security() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("network_security".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1947,7 +1986,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_compliance() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("compliance".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1963,7 +2002,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_alerting() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("alerting".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1978,7 +2017,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_capacity() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("capacity".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -1993,7 +2032,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_incident() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("incident".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2007,7 +2046,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_log_aggregation() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("log_aggregation".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2025,7 +2064,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_key_management() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("key_management".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2043,7 +2082,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_chatops() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("chatops".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2057,7 +2096,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_templates() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("templates".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2074,7 +2113,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_pty() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("pty".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2089,7 +2128,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_cloud() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("cloud".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2105,7 +2144,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_inventory() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("inventory".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2120,7 +2159,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_multicloud() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("multicloud".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2135,7 +2174,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_postgresql() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("postgresql".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2149,7 +2188,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_mysql() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("mysql".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2163,7 +2202,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_apache() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("apache".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2177,7 +2216,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_letsencrypt() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("letsencrypt".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2193,7 +2232,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_mongodb() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("mongodb".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2206,7 +2245,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_diagnostics() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("diagnostics".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2224,7 +2263,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_runbooks() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("runbooks".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2239,7 +2278,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_recording() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("recording".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2256,7 +2295,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_orchestration() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("orchestration".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2274,7 +2313,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_drift() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("drift".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2289,7 +2328,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_security_scan() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("security_scan".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2307,7 +2346,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_file_ops() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("file_ops".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2328,7 +2367,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_user_management() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("user_management".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2351,7 +2390,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_storage() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("storage".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2370,7 +2409,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_journald() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("journald".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2386,7 +2425,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_systemd_timers() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("systemd_timers".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2406,7 +2445,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_security_modules() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("security_modules".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2426,7 +2465,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_network_equipment() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("network_equipment".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2449,7 +2488,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_podman() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("podman".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2467,7 +2506,7 @@ mod tests {
 
     #[test]
     fn test_filtered_registry_disable_ldap() {
-        let mut groups = std::collections::HashMap::new();
+        let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("ldap".to_string(), false);
         let config = ToolGroupsConfig { groups };
 
@@ -2484,7 +2523,7 @@ mod tests {
 
     #[test]
     fn test_all_tools_have_annotations_with_title() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         for tool in registry.list_tools() {
             let ann = tool_annotations(&tool.name);
             assert!(
@@ -2497,7 +2536,7 @@ mod tests {
 
     #[test]
     fn test_list_tools_includes_annotations() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let tools = registry.list_tools();
         // All tools should have annotations since all have titles
         for tool in &tools {
@@ -2642,7 +2681,7 @@ mod tests {
 
     #[test]
     fn test_no_duplicate_tool_names() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         let tools = registry.list_tools();
         let mut seen = std::collections::HashSet::new();
         for tool in &tools {
@@ -2656,7 +2695,7 @@ mod tests {
 
     #[test]
     fn test_all_tools_have_valid_schema_json() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         for tool in registry.list_tools() {
             assert!(
                 tool.input_schema.is_object(),
@@ -2755,7 +2794,7 @@ mod tests {
             "templates",
             "pty",
         ];
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         for tool in registry.list_tools() {
             let group = tool_group(&tool.name);
             assert!(
@@ -2768,7 +2807,7 @@ mod tests {
 
     #[test]
     fn test_annotation_consistency_read_only_not_destructive() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         for tool in registry.list_tools() {
             let ann = tool_annotations(&tool.name);
             if ann.read_only_hint == Some(true) {
@@ -2784,7 +2823,7 @@ mod tests {
 
     #[test]
     fn test_annotation_consistency_destructive_not_read_only() {
-        let registry = create_default_registry();
+        let registry = create_all_enabled_registry();
         for tool in registry.list_tools() {
             let ann = tool_annotations(&tool.name);
             if ann.destructive_hint == Some(true) {
@@ -2796,6 +2835,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// FIND-024 regression: `create_default_registry()` must only register
+    /// tools whose group is in `MINIMAL_DEFAULT_GROUPS`. The pre-FIND-024
+    /// behaviour exposed all 357 handlers by default — that is the bug
+    /// this test pins.
+    #[test]
+    fn test_default_registry_only_contains_minimal_profile() {
+        use crate::config::types::MINIMAL_DEFAULT_GROUPS;
+
+        let registry = create_default_registry();
+        let tools: Vec<String> = registry
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        // Every tool in the default registry must belong to a
+        // minimal-profile group.
+        for tool_name in &tools {
+            let g = tool_group(tool_name);
+            assert!(
+                MINIMAL_DEFAULT_GROUPS.contains(&g),
+                "FIND-024: tool '{tool_name}' (group '{g}') is in default \
+                 registry but not in MINIMAL_DEFAULT_GROUPS"
+            );
+        }
+
+        // Each minimal-profile group must register at least one handler.
+        for &g in MINIMAL_DEFAULT_GROUPS {
+            let count_in_g = tools
+                .iter()
+                .filter(|t| tool_group(t) == g)
+                .count();
+            assert!(
+                count_in_g > 0,
+                "FIND-024: minimal-profile group '{g}' should have at \
+                 least one tool registered"
+            );
+        }
+
+        // Sanity: the default profile must not register every handler
+        // (otherwise the FIND-024 fix is silently regressed).
+        assert!(
+            tools.len() < all_tools_count(),
+            "FIND-024: default registry size ({}) equals total tool \
+             count ({}) — has the default-disabled semantic regressed?",
+            tools.len(),
+            all_tools_count()
+        );
     }
 
     #[test]

@@ -1314,17 +1314,55 @@ fn default_ssh_config_path() -> String {
 #[serde(deny_unknown_fields)]
 pub struct ToolGroupsConfig {
     /// Map of group name to enabled status.
-    /// Groups not listed are enabled by default.
+    ///
+    /// FIND-024 (audit 2026-05-09): unlisted groups are now treated as
+    /// **disabled** unless they appear in [`MINIMAL_DEFAULT_GROUPS`]. The
+    /// previous semantics (unlisted = enabled) exposed all 75 groups /
+    /// 357 handlers out of the box, violating least-privilege for
+    /// operators who only need a small subset (e.g. `docker` + `service`).
+    ///
+    /// The default value is an empty map; resolution falls through to
+    /// `MINIMAL_DEFAULT_GROUPS` membership in [`Self::is_group_enabled`].
+    /// A YAML config that explicitly lists `core: false` still wins over
+    /// the default profile.
+    ///
+    /// To enable a non-default group, list it explicitly with `true`. To
+    /// disable a group from the default profile, list it with `false`.
     #[serde(default)]
     pub groups: HashMap<String, bool>,
 }
 
+/// Default-enabled tool groups (FIND-024).
+///
+/// Covers the eight groups that nearly every operator workflow uses:
+/// raw exec, file ops, directory listing, process management, system
+/// monitoring, network diagnostics, systemd service management, and
+/// persistent tmux sessions. Everything else (containers, K8s, AD/LDAP,
+/// cloud, `ESXi`, Hyper-V, Windows-specific, etc.) requires explicit
+/// opt-in via the YAML map.
+pub const MINIMAL_DEFAULT_GROUPS: &[&str] = &[
+    "core",
+    "file_ops",
+    "directory",
+    "process",
+    "monitoring",
+    "network",
+    "systemd",
+    "sessions",
+];
+
 impl ToolGroupsConfig {
     /// Check if a given tool group is enabled.
-    /// Groups not explicitly listed default to enabled.
+    ///
+    /// Resolution order:
+    /// 1. If the group appears in `self.groups` with an explicit value, use it.
+    /// 2. Otherwise, group is enabled iff it is in [`MINIMAL_DEFAULT_GROUPS`].
     #[must_use]
     pub fn is_group_enabled(&self, group: &str) -> bool {
-        self.groups.get(group).copied().unwrap_or(true)
+        match self.groups.get(group).copied() {
+            Some(explicit) => explicit,
+            None => MINIMAL_DEFAULT_GROUPS.contains(&group),
+        }
     }
 }
 
@@ -1748,11 +1786,26 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_groups_config_unlisted_group_is_enabled() {
+    fn test_tool_groups_config_default_profile_membership() {
+        // FIND-024: default profile is the 8 groups in MINIMAL_DEFAULT_GROUPS.
+        // Everything else is opt-in.
         let config = ToolGroupsConfig::default();
+
+        // In default profile.
         assert!(config.is_group_enabled("core"));
         assert!(config.is_group_enabled("sessions"));
-        assert!(config.is_group_enabled("anything"));
+        assert!(config.is_group_enabled("file_ops"));
+        assert!(config.is_group_enabled("directory"));
+        assert!(config.is_group_enabled("process"));
+        assert!(config.is_group_enabled("monitoring"));
+        assert!(config.is_group_enabled("network"));
+        assert!(config.is_group_enabled("systemd"));
+
+        // NOT in default profile — must be opt-in now.
+        assert!(!config.is_group_enabled("docker"));
+        assert!(!config.is_group_enabled("kubernetes"));
+        assert!(!config.is_group_enabled("active_directory"));
+        assert!(!config.is_group_enabled("anything"));
     }
 
     #[test]
@@ -1786,15 +1839,19 @@ mod tests {
         assert!(!config.is_group_enabled("sessions"));
         assert!(!config.is_group_enabled("monitoring"));
         assert!(config.is_group_enabled("core"));
-        assert!(config.is_group_enabled("file_transfer")); // Unlisted = enabled
+        // FIND-024: `file_transfer` is NOT in MINIMAL_DEFAULT_GROUPS, so
+        // unlisted means disabled now (was enabled prior to FIND-024).
+        assert!(!config.is_group_enabled("file_transfer"));
     }
 
     #[test]
     fn test_tool_groups_config_empty_deserialization() {
+        // FIND-024: empty config -> default profile via MINIMAL_DEFAULT_GROUPS.
         let yaml = "{}";
         let config: ToolGroupsConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(config.groups.is_empty());
-        assert!(config.is_group_enabled("core"));
+        assert!(config.is_group_enabled("core")); // in default profile
+        assert!(!config.is_group_enabled("docker")); // not in default profile
     }
 
     #[test]

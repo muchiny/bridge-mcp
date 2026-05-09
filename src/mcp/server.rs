@@ -2135,13 +2135,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn create_test_server() -> McpServer {
+        // Tests in this module exercise the full handler inventory
+        // (pagination, group filters, etc.). FIND-024 changed the
+        // default profile to a minimal 8-group set, so we explicitly
+        // opt every group in for the test fixture. Production code paths
+        // continue to use whatever the operator put in `tool_groups`.
         let config = Config {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
             audit: AuditConfig::default(),
             sessions: SessionConfig::default(),
-            tool_groups: ToolGroupsConfig::default(),
+            tool_groups:
+                crate::mcp::registry::all_enabled_tool_groups_config_for_test(),
             ssh_config: SshConfigDiscovery::default(),
             http: HttpTransportConfig::default(),
             rbac: crate::security::rbac::RbacConfig::default(),
@@ -2374,13 +2380,16 @@ mod tests {
     #[tokio::test]
     async fn test_destructive_gate_blocks_when_elicitation_unsupported() {
         // Enable the gate; client has not advertised elicitation support.
+        // Use all-enabled tool groups to keep `ssh_cron_remove` registered
+        // (FIND-024 default profile excludes the `cron` group).
         let mut config = Config {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
             audit: AuditConfig::default(),
             sessions: SessionConfig::default(),
-            tool_groups: ToolGroupsConfig::default(),
+            tool_groups:
+                crate::mcp::registry::all_enabled_tool_groups_config_for_test(),
             ssh_config: SshConfigDiscovery::default(),
             http: HttpTransportConfig::default(),
             rbac: crate::security::rbac::RbacConfig::default(),

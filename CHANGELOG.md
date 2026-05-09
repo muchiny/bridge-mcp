@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (BREAKING)
 
+- **Security: `tool_groups` default-disabled, ships an 8-group minimal
+  profile** (FIND-024). The pre-FIND-024 behaviour was "unlisted =
+  enabled": `tool_groups: { groups: {} }` registered all 75 groups /
+  357 handlers out of the box. An operator who only needed `docker` +
+  `service` was also exposed to AD/LDAP/Vault/K8s/AWS/ESXi/HyperV /
+  Windows-only handlers. Unlisted groups now resolve via membership in
+  the new `MINIMAL_DEFAULT_GROUPS` const: `[core, file_ops, directory,
+  process, monitoring, network, systemd, sessions]` — everything else
+  requires explicit opt-in via `tool_groups.groups: { groupname: true }`.
+  Operators who relied on the old all-enabled behaviour must enumerate
+  the groups they need (or set every group they want to `true`).
+  Source-of-truth: audit FIND-024 (`docs/audit-2026-05-09-findings.md`);
+  migration documented in `config/config.example.yaml`.
+
 - **Security: `security.require_elicitation_on_destructive` now defaults to
   `true`** (was `false`). Destructive tools annotated `destructive_hint: true`
   (e.g., `ssh_process_kill`, `ssh_file_write`, `ssh_k8s_delete`,

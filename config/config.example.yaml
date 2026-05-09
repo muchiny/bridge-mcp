@@ -359,9 +359,38 @@ audit:
 # 🔧 TOOL GROUPS
 # =============================================================================
 # Enable or disable groups of tools to reduce the MCP context sent to the LLM.
-# By default, all groups are enabled. Set a group to false to disable it.
 #
-# Available groups (74 groups, 337 tools):
+# ⚠️  BREAKING (FIND-024, security audit 2026-05-09):
+# Unlisted groups are now DISABLED by default. The pre-FIND-024 behaviour was
+# "unlisted = enabled", which exposed all 75 groups / 357 handlers out of the
+# box (AD, LDAP, Vault, K8s, AWS, ESXi, Hyper-V, Windows-only tools, ...) to
+# every operator workflow regardless of whether they were needed.
+#
+# The default profile now ships only 8 minimal-and-broadly-useful groups:
+#
+#   core         (ssh_exec / exec_multi / status / health / history / output_fetch)
+#   file_ops     (ssh_file_read / write / chmod / chown / stat / diff / patch / template)
+#   directory    (ssh_ls, ssh_find)
+#   process      (ssh_process_list / kill / top)
+#   monitoring   (ssh_metrics / metrics_multi / tail / disk_usage)
+#   network      (ssh_net_connections / interfaces / routes / ping / traceroute / dns)
+#   systemd      (ssh_service_status / start / stop / restart / enable / disable / logs / list / daemon_reload)
+#   sessions     (ssh_session_create / exec / list / close)
+#
+# Anything else (containers, K8s, AD, LDAP, cloud, ESXi, Hyper-V, Windows-specific,
+# vault, terraform, git, ...) requires explicit opt-in below.
+#
+# To enable a non-default group, list it explicitly with `true`. To disable a
+# group from the default profile, list it with `false`.
+#
+# Examples:
+#   tool_groups:
+#     groups:
+#       docker: true       # opt in to Docker tools
+#       kubernetes: true   # opt in to kubectl + helm
+#       sessions: false    # remove tmux sessions from the default profile
+#
+# Available groups (75 groups, 357 tools):
 #
 #   --- Linux (59 groups) ---
 #   core              - ssh_exec, ssh_exec_multi, ssh_status, ssh_health, ssh_history,
@@ -490,83 +519,91 @@ audit:
 #                       ssh_recording_replay, ssh_recording_verify
 
 tool_groups:
+  # FIND-024: empty map -> default profile (the 8 groups listed in the doc
+  # block above). Add `groupname: true` to OPT IN to a non-default group;
+  # `groupname: false` to OPT OUT of a default-profile group.
   groups: {}
-    # --- Linux ---
-    # sessions: false         # Disable persistent shell sessions
-    # monitoring: false        # Disable metrics and tail tools
-    # file_transfer: false     # Disable SFTP upload/download/sync
+    # --- Default-profile groups (already enabled — uncomment with `false` to OPT OUT) ---
+    # core: false              # ⚠️ removes ssh_exec — every diagnostic command depends on it
     # file_ops: false          # Disable file read/write/chmod/diff/patch/template
-    # tunnels: false           # Disable SSH port forwarding tunnels
     # directory: false         # Disable directory listing and file search
     # process: false           # Disable process management
+    # monitoring: false        # Disable metrics and tail tools
     # network: false           # Disable network diagnostics
     # systemd: false           # Disable systemd service management
-    # systemd_timers: false    # Disable systemd timer management
-    # firewall: false          # Disable firewall management
-    # package: false           # Disable package management
-    # cron: false              # Disable cron job management
-    # user_management: false   # Disable user/group management
-    # storage: false           # Disable storage/LVM/mount tools
-    # journald: false          # Disable journald log queries
-    # security_modules: false  # Disable SELinux/AppArmor tools
-    # backup: false            # Disable backup tools
-    # network_equipment: false # Disable network switch/router tools
-    # ldap: false              # Disable LDAP directory tools
-    # database: false          # Disable generic database tools
-    # redis: false             # Disable Redis tools
-    # postgresql: false        # Disable PostgreSQL tools
-    # mysql: false             # Disable MySQL tools
-    # mongodb: false           # Disable MongoDB tools
-    # docker: false            # Disable Docker tools
-    # podman: false            # Disable Podman tools
-    # kubernetes: false        # Disable kubectl/helm tools
-    # esxi: false              # Disable VMware ESXi tools
-    # nginx: false             # Disable Nginx tools
-    # apache: false            # Disable Apache HTTPD tools
-    # letsencrypt: false       # Disable Let's Encrypt tools
-    # ansible: false           # Disable Ansible tools
-    # terraform: false         # Disable Terraform IaC tools
-    # vault: false             # Disable HashiCorp Vault tools
-    # git: false               # Disable Git repository tools
-    # certificates: false      # Disable TLS certificate tools
-    # network_security: false  # Disable port scan/SSL audit/fail2ban
-    # compliance: false        # Disable CIS/STIG benchmark tools
-    # security_scan: false     # Disable SBOM & vulnerability scanning
-    # diagnostics: false       # Disable intelligent diagnostics
-    # performance: false       # Disable performance profiling tools
-    # container_logs: false    # Disable container log analysis
-    # cron_analysis: false     # Disable cron conflict analysis
-    # drift: false             # Disable environment drift detection
-    # cloud: false             # Disable AWS CLI/cloud metadata tools
-    # inventory: false         # Disable host discovery/CMDB sync
-    # multicloud: false        # Disable multi-cloud resource tools
-    # alerting: false          # Disable alert monitoring tools
-    # capacity: false          # Disable capacity forecasting tools
-    # incident: false          # Disable incident response tools
-    # orchestration: false     # Disable multi-host orchestration
-    # runbooks: false          # Disable runbook engine tools
-    # log_aggregation: false   # Disable cross-host log tools
-    # key_management: false    # Disable SSH key management tools
-    # chatops: false           # Disable webhook/Slack notification tools
-    # templates: false         # Disable config template tools
-    # pty: false               # Disable interactive PTY tools
+    # sessions: false          # Disable persistent shell sessions
+    #
+    # --- Opt-in groups (currently DISABLED — uncomment with `true` to OPT IN) ---
+    # --- Linux ---
+    # file_transfer: true      # Enable SFTP upload/download/sync
+    # tunnels: true            # Enable SSH port forwarding tunnels
+    # systemd_timers: true     # Enable systemd timer management
+    # firewall: true           # Enable firewall management
+    # package: true            # Enable package management
+    # cron: true               # Enable cron job management
+    # user_management: true    # Enable user/group management
+    # storage: true            # Enable storage/LVM/mount tools
+    # journald: true           # Enable journald log queries
+    # security_modules: true   # Enable SELinux/AppArmor tools
+    # backup: true             # Enable backup tools
+    # network_equipment: true  # Enable network switch/router tools
+    # ldap: true               # Enable LDAP directory tools
+    # database: true           # Enable generic database tools
+    # redis: true              # Enable Redis tools
+    # postgresql: true         # Enable PostgreSQL tools
+    # mysql: true              # Enable MySQL tools
+    # mongodb: true            # Enable MongoDB tools
+    # docker: true             # Enable Docker tools
+    # podman: true             # Enable Podman tools
+    # kubernetes: true         # Enable kubectl/helm tools
+    # esxi: true               # Enable VMware ESXi tools
+    # nginx: true              # Enable Nginx tools
+    # apache: true             # Enable Apache HTTPD tools
+    # letsencrypt: true        # Enable Let's Encrypt tools
+    # ansible: true            # Enable Ansible tools
+    # terraform: true          # Enable Terraform IaC tools
+    # vault: true              # Enable HashiCorp Vault tools
+    # git: true                # Enable Git repository tools
+    # certificates: true       # Enable TLS certificate tools
+    # network_security: true   # Enable port scan/SSL audit/fail2ban
+    # compliance: true         # Enable CIS/STIG benchmark tools
+    # security_scan: true      # Enable SBOM & vulnerability scanning
+    # diagnostics: true        # Enable intelligent diagnostics
+    # performance: true        # Enable performance profiling tools
+    # container_logs: true     # Enable container log analysis
+    # cron_analysis: true      # Enable cron conflict analysis
+    # drift: true              # Enable environment drift detection
+    # cloud: true              # Enable AWS CLI/cloud metadata tools
+    # inventory: true          # Enable host discovery/CMDB sync
+    # multicloud: true         # Enable multi-cloud resource tools
+    # alerting: true           # Enable alert monitoring tools
+    # capacity: true           # Enable capacity forecasting tools
+    # incident: true           # Enable incident response tools
+    # orchestration: true      # Enable multi-host orchestration
+    # runbooks: true           # Enable runbook engine tools
+    # log_aggregation: true    # Enable cross-host log tools
+    # key_management: true     # Enable SSH key management tools
+    # chatops: true            # Enable webhook/Slack notification tools
+    # templates: true          # Enable config template tools
+    # pty: true                # Enable interactive PTY tools
+    # awx: true                # Enable AWX REST API tools
     # --- Windows ---
-    # windows_services: false  # Disable Windows service management
-    # windows_events: false    # Disable Windows Event Log tools
-    # active_directory: false  # Disable Active Directory tools
-    # scheduled_tasks: false   # Disable Windows Scheduled Tasks
-    # windows_firewall: false  # Disable Windows Firewall tools
-    # iis: false               # Disable IIS web server tools
-    # windows_updates: false   # Disable Windows Update tools
-    # windows_perf: false      # Disable Windows Performance Counter tools
-    # hyperv: false            # Disable Hyper-V virtual machine tools
-    # windows_registry: false  # Disable Windows Registry tools
-    # windows_features: false  # Disable Windows Features tools
-    # windows_network: false   # Disable Windows Network tools
-    # windows_process: false   # Disable Windows Process tools
+    # windows_services: true   # Enable Windows service management
+    # windows_events: true     # Enable Windows Event Log tools
+    # active_directory: true   # Enable Active Directory tools
+    # scheduled_tasks: true    # Enable Windows Scheduled Tasks
+    # windows_firewall: true   # Enable Windows Firewall tools
+    # iis: true                # Enable IIS web server tools
+    # windows_updates: true    # Enable Windows Update tools
+    # windows_perf: true       # Enable Windows Performance Counter tools
+    # hyperv: true             # Enable Hyper-V virtual machine tools
+    # windows_registry: true   # Enable Windows Registry tools
+    # windows_features: true   # Enable Windows Features tools
+    # windows_network: true    # Enable Windows Network tools
+    # windows_process: true    # Enable Windows Process tools
     # --- Cross-platform ---
-    # config: false            # Disable runtime config tools
-    # recording: false         # Disable session recording tools
+    # config: true             # Enable runtime config tools
+    # recording: true          # Enable session recording tools
 
 # =============================================================================
 # OBSERVABILITY (feature = "otel")
