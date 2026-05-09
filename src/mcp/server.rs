@@ -119,13 +119,19 @@ impl McpServer {
         ));
 
         // Create audit logger (async with background writer task)
-        let (audit_logger, audit_task) = match AuditLogger::new(&config.audit) {
-            Ok((logger, task)) => (logger, task),
-            Err(e) => {
-                warn!(error = %e, "Failed to create audit logger, using disabled logger");
-                (AuditLogger::disabled(), None)
-            }
-        };
+        // Vuln 3 (audit 2026-05-09): wire a sanitizer so `event.command` is
+        // masked before tracing emission AND before file write — the audit
+        // log used to leak MYSQL_PWD/PGPASSWORD/Bearer tokens/webhook URLs.
+        let sanitizer_for_audit =
+            crate::security::Sanitizer::from_config(&config.security.sanitize);
+        let (audit_logger, audit_task) =
+            match AuditLogger::new_with_sanitizer(&config.audit, sanitizer_for_audit) {
+                Ok((logger, task)) => (logger, task),
+                Err(e) => {
+                    warn!(error = %e, "Failed to create audit logger, using disabled logger");
+                    (AuditLogger::disabled(), None)
+                }
+            };
         let audit_logger = Arc::new(audit_logger);
 
         // Create command history

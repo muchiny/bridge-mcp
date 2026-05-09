@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -72,18 +73,27 @@ impl AuditEvent {
 pub struct AuditLogger {
     config: AuditConfig,
     sender: Option<mpsc::UnboundedSender<AuditEvent>>,
+    sanitizer: Option<Arc<crate::security::Sanitizer>>,
 }
 
 /// Background task that writes audit events to a file
 pub struct AuditWriterTask {
     rx: mpsc::UnboundedReceiver<AuditEvent>,
     file: File,
+    sanitizer: Option<Arc<crate::security::Sanitizer>>,
 }
 
 impl AuditWriterTask {
     /// Run the writer task, consuming events from the channel
     pub async fn run(mut self) {
-        while let Some(event) = self.rx.recv().await {
+        while let Some(mut event) = self.rx.recv().await {
+            // Defensive: sanitize at the writer side too in case a logger
+            // sent us an event without sanitizing first. Belt-and-braces:
+            // when both sides share the same `Arc<Sanitizer>` we guarantee
+            // no secret ever lands in the JSONL file.
+            if let Some(ref s) = self.sanitizer {
+                event.command = s.sanitize(&event.command).into_owned();
+            }
             if let Ok(json) = serde_json::to_string(&event) {
                 let line = format!("{json}\n");
                 // Clone file handle for spawn_blocking
@@ -121,10 +131,16 @@ impl AuditLogger {
             std::fs::create_dir_all(parent)?;
         }
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&config.path)?;
+        let file = {
+            let mut opts = OpenOptions::new();
+            opts.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            opts.open(&config.path)?
+        };
 
         // Create channel for async logging
         let (tx, rx) = mpsc::unbounded_channel();
@@ -132,11 +148,39 @@ impl AuditLogger {
         let logger = Self {
             config: config.clone(),
             sender: Some(tx),
+            sanitizer: None,
         };
 
-        let task = AuditWriterTask { rx, file };
+        let task = AuditWriterTask {
+            rx,
+            file,
+            sanitizer: None,
+        };
 
         Ok((logger, Some(task)))
+    }
+
+    /// Like `new` but applies a sanitizer to `event.command` before write/log.
+    ///
+    /// The same `Arc<Sanitizer>` is shared between the logger (for tracing
+    /// emission) and the writer task (for the JSONL file), so secrets are
+    /// masked on both sinks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the audit log file cannot be created or opened.
+    pub fn new_with_sanitizer(
+        config: &AuditConfig,
+        sanitizer: crate::security::Sanitizer,
+    ) -> std::io::Result<(Self, Option<AuditWriterTask>)> {
+        let (mut logger, task) = Self::new(config)?;
+        let san = Arc::new(sanitizer);
+        logger.sanitizer = Some(Arc::clone(&san));
+        let task = task.map(|mut t| {
+            t.sanitizer = Some(san);
+            t
+        });
+        Ok((logger, task))
     }
 
     /// Create a disabled audit logger (for testing or when audit is off)
@@ -145,13 +189,22 @@ impl AuditLogger {
         Self {
             config: AuditConfig::default(),
             sender: None,
+            sanitizer: None,
         }
     }
 
     /// Log an audit event (non-blocking)
     ///
     /// The event is sent to a background task for file writing.
+    /// If a sanitizer is configured, `event.command` is masked BEFORE the
+    /// tracing emission and BEFORE the channel send (so neither sink ever
+    /// sees the unredacted command).
     pub fn log(&self, event: AuditEvent) {
+        let mut event = event;
+        if let Some(ref s) = self.sanitizer {
+            event.command = s.sanitize(&event.command).into_owned();
+        }
+
         // Always log to tracing (fast, synchronous)
         Self::log_to_tracing(&event);
 
@@ -631,7 +684,11 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = mpsc::unbounded_channel();
-        let task = AuditWriterTask { rx, file };
+        let task = AuditWriterTask {
+            rx,
+            file,
+            sanitizer: None,
+        };
 
         // Send an event
         let event = AuditEvent::new(
