@@ -110,7 +110,7 @@ rayon = "1"
 # HTTP transport (optional, for Streamable HTTP + OAuth)
 axum = { version = "0.8", features = ["json"], optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", features = ["cors", "limit"], optional = true }
+tower-http = { version = "0.6", features = ["cors", "limit", "timeout", "request-id", "sensitive-headers"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 tokio-stream = { version = "0.1", optional = true }
 
