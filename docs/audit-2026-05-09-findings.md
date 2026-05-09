@@ -110,6 +110,7 @@ These are anchor points for Tasks 9–13 to resolve. Each becomes a finding (or 
 | OQ-011 | Task 5 runbook | 8 open questions in runbook section. Covered: FIND-001/002/003. Remaining: saphyr internal Budget defaults; `command: Some("")` evasion of validator; `save_as` mechanism not implemented despite shipped runbooks referencing it; missing `deny_unknown_fields` on `Runbook`/`RunbookStep`/`RunbookParam` (covered by FIND-017 for `Config` only); HashMap iteration-order non-determinism in `apply_template`; `require_elicitation_on_destructive` gate applied to `ssh_runbook_execute`. | `src/domain/runbook.rs`, saphyr crate, runbook YAML files | Tasks 11, 14 |
 | OQ-012 | Task 5 (cross-section) | `McpServer` server-singleton state distinct from Vuln 8/9: `runtime_max_output_chars`, `roots`, `client_info`, `notification_tx`. Are any of these latent Vuln 10/11 cross-session leaks, or all acceptable design? | `src/mcp/server.rs:46-92` field-by-field | Task 13 (variant-analysis) |
 | OQ-013 | Task 11 (zeroize-audit) | Does `russh::keys::PrivateKey` (russh 0.60.1) implement `ZeroizeOnDrop`? If not, secret key bytes persist in heap until Arc refcount=0; even then, depends on Drop impl wiping. After `load_secret_key` returns at `src/ssh/client.rs:502`, `Arc::new(key_pair)` wraps the secret. | `~/.cargo/registry/src/index.crates.io-*/russh-keys-*/src/private.rs` or upstream `Eugeny/russh` | Task 11 deferred / manual follow-up |
+| OQ-014 | Task 15 (mutation-testing) | `cargo mutants` initial run produced 0 mutants due to `--file` glob quoting issue. SKIPPED per user request. Mutation-testing coverage gap on `src/security/{validator,sanitizer,audit,rate_limiter,rbac}.rs` remains. Next audit cycle should re-run with unquoted path: `cargo mutants -j 4 --file src/security/validator.rs --timeout 120`. | `audit/2026-05-09/variant/mutants-summary.md` | next audit cycle |
 
 ---
 
@@ -135,7 +136,7 @@ For Open Questions resolved by a later task: update the OQ row's "Owner task" co
 - P2: **14**
 - P3: **5**
 - FP (proven): **5** (sanitizer self-tests) **+ 4 confirmed test-only saphyr matches** (rbac.rs:299, runbook.rs:336/355/375)
-- OQ (open): **13**
+- OQ (open): **14**
 - **Total open findings: 38**
 
 **Last assigned ID:** FIND-038
