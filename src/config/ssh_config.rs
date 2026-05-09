@@ -144,8 +144,8 @@ impl PartialHost {
 
         let auth = if let Some(key_path) = identity_file {
             // Expand ~ in the path
-            let expanded = shellexpand::tilde(key_path);
-            let path = std::path::Path::new(expanded.as_ref());
+            let expanded = crate::path_utils::home_expand_or_input(key_path);
+            let path = std::path::Path::new(&expanded);
             if path.exists() {
                 AuthConfig::Key {
                     path: key_path.clone(),

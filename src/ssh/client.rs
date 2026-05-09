@@ -572,8 +572,8 @@ impl SshClient {
         path: &str,
         passphrase: Option<&str>,
     ) -> Result<Self> {
-        let expanded = shellexpand::tilde(path);
-        let key_path = Path::new(expanded.as_ref());
+        let expanded = crate::path_utils::home_expand_or_input(path);
+        let key_path = Path::new(&expanded);
 
         let key_pair =
             load_secret_key(key_path, passphrase).map_err(|e| BridgeError::SshKeyInvalid {

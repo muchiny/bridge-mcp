@@ -57,8 +57,8 @@ pub fn load_config(path: &Path) -> Result<Config> {
 /// Discover hosts from SSH config and merge into the main config.
 /// YAML-defined hosts take precedence over discovered ones.
 fn merge_ssh_config_hosts(config: &mut Config) {
-    let ssh_config_path = shellexpand::tilde(&config.ssh_config.path);
-    let path = Path::new(ssh_config_path.as_ref());
+    let ssh_config_path = crate::path_utils::home_expand_or_input(&config.ssh_config.path);
+    let path = Path::new(&ssh_config_path);
 
     if !path.exists() {
         debug!(path = %ssh_config_path, "SSH config file not found, skipping discovery");
@@ -154,8 +154,8 @@ fn validate_config(config: &Config) -> Result<()> {
 
         // Validate key path exists and permissions (for key auth)
         if let super::types::AuthConfig::Key { path, .. } = &host.auth {
-            let expanded = shellexpand::tilde(path);
-            let key_path = Path::new(expanded.as_ref());
+            let expanded = crate::path_utils::home_expand_or_input(path);
+            let key_path = Path::new(&expanded);
             if !key_path.exists() {
                 return Err(BridgeError::SshKeyNotFound { path: path.clone() });
             }

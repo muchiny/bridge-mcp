@@ -152,7 +152,7 @@ impl ToolHandler for SshFilesWriteHandler {
             ctx.validate_root_scope(&entry.remote_path)?;
             if let Some(lp) = &entry.local_path {
                 validate_path(lp)?;
-                let expanded = shellexpand::tilde(lp).to_string();
+                let expanded = crate::path_utils::home_expand_or_input(lp);
                 if !Path::new(&expanded).exists() {
                     return Err(BridgeError::FileTransfer {
                         reason: format!("Local file not found: {lp}"),
@@ -239,7 +239,7 @@ impl ToolHandler for SshFilesWriteHandler {
                 )
                 .await
             } else if let Some(local_path) = &entry.local_path {
-                let expanded = shellexpand::tilde(local_path).to_string();
+                let expanded = crate::path_utils::home_expand_or_input(local_path);
                 let options = crate::ssh::TransferOptions::default();
                 sftp.upload_file::<fn(crate::ssh::TransferProgress)>(
                     Path::new(&expanded),

@@ -33,6 +33,7 @@ pub mod domain;
 pub mod error;
 pub mod mcp;
 pub mod metrics;
+pub mod path_utils;
 pub mod ports;
 pub mod security;
 pub mod ssh;

@@ -134,8 +134,8 @@ impl ToolHandler for SshUploadHandler {
                 ),
             })?;
 
-        // Expand local path
-        let local_path = shellexpand::tilde(&args.local_path).to_string();
+        // Expand local path (`~` -> home dir; non-tilde inputs are passed through).
+        let local_path = crate::path_utils::home_expand_or_input(&args.local_path);
         let local_path = Path::new(&local_path);
 
         // Check local file exists

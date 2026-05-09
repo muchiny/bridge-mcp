@@ -369,8 +369,8 @@ pub async fn run_validate(config: Arc<Config>) -> Result<()> {
             issues.push(format!("Host '{name}': user is empty"));
         }
         if let crate::config::AuthConfig::Key { ref path, .. } = host.auth {
-            let expanded = shellexpand::tilde(path);
-            if !std::path::Path::new(expanded.as_ref()).exists() {
+            let expanded = crate::path_utils::home_expand_or_input(path);
+            if !std::path::Path::new(&expanded).exists() {
                 warnings.push(format!("Host '{name}': key file '{path}' not found"));
             }
         }
@@ -830,9 +830,9 @@ pub async fn run_upload(
         ),
     })?;
 
-    // Expand and check local path
+    // Expand and check local path (`~` -> home dir; pass-through otherwise).
     let local_path_str = local_path.to_string_lossy();
-    let expanded_path = shellexpand::tilde(&local_path_str).to_string();
+    let expanded_path = crate::path_utils::home_expand_or_input(&local_path_str);
     let local_path = Path::new(&expanded_path);
 
     if !local_path.exists() {
@@ -996,9 +996,9 @@ pub async fn run_download(
         ),
     })?;
 
-    // Expand local path
+    // Expand local path (`~` -> home dir; pass-through otherwise).
     let local_path_str = local_path.to_string_lossy();
-    let expanded_path = shellexpand::tilde(&local_path_str).to_string();
+    let expanded_path = crate::path_utils::home_expand_or_input(&local_path_str);
     let local_path = Path::new(&expanded_path);
 
     // Create parent directories if needed
