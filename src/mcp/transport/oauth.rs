@@ -5,17 +5,24 @@
 //! (RSA or ECDSA family — HMAC algorithms are rejected to prevent
 //! `alg`-confusion attacks).
 //!
+//! # Production wiring
+//!
+//! Use [`build_validator`] at server startup to construct a single
+//! [`OAuthValidator`] from a [`HttpOAuthConfig`]. The validator pre-loads
+//! every signing key declared in `static_keys` and is shared across
+//! requests as `Arc<OAuthValidator>` via Axum extensions; the middleware
+//! reads the shared instance instead of building a fresh empty validator
+//! per request. `build_validator` returns `Err` when OAuth is enabled but
+//! no key source is configured, so the server fails closed at boot
+//! rather than rejecting every token.
+//!
 //! # Limitations
 //!
-//! The Axum middleware constructs an [`OAuthValidator`] per request from the
-//! [`OAuthConfig`] in extensions. That constructor produces an empty key map,
-//! so production deployments must populate keys explicitly via
-//! [`OAuthValidator::set_static_keys`] (or [`OAuthValidator::load_jwks`])
-//! before the validator is wired into the router. Wiring an
-//! `Arc<OAuthValidator>` through Axum extensions is left for a follow-up;
-//! until then, OAuth-enabled deployments rely on the per-request validator
-//! having empty keys, which rejects every token with "Unknown JWT signing
-//! key".
+//! JWKS HTTP fetching (`jwks_uri`) is not yet wired here: the `http`
+//! feature does not pull in an HTTP client, so the configuration field is
+//! reserved but currently rejected by `build_validator` with a clear
+//! error. Until reqwest/hyper are piped through extensions, populate the
+//! validator via `static_keys`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,6 +58,12 @@ pub struct OAuthConfig {
     /// Required scopes for access.
     #[serde(default)]
     pub required_scopes: Vec<String>,
+    /// Static signing keys, keyed by `kid`. Populated from
+    /// [`crate::config::types::HttpOAuthConfig::static_keys`] at boot;
+    /// kept on the runtime config so [`build_validator`] can pre-load
+    /// the validator's key map.
+    #[serde(default)]
+    pub static_keys: Vec<(String, String)>,
 }
 
 /// Validated token claims extracted from a Bearer token.
@@ -240,7 +253,90 @@ impl OAuthValidator {
     }
 }
 
+/// Build an [`OAuthValidator`] from a YAML config: pre-populates static
+/// keys so token validation succeeds at request time rather than per-
+/// request constructing an empty key map.
+///
+/// JWKS HTTP fetching is not yet wired here — see the module-level
+/// "Limitations" section. When `jwks_uri` is configured but no static
+/// keys are present, this function returns an explicit error rather
+/// than silently building a validator that rejects every token.
+///
+/// # Errors
+/// Returns `Err` when OAuth is enabled but no usable key source is
+/// configured, so the server fails closed at boot.
+// Async because the FIND-006 follow-up will replace the
+// `jwks_uri` rejection with an actual fetch (`reqwest`/`hyper`),
+// and the public signature should not need to change again.
+#[allow(clippy::unused_async)]
+pub async fn build_validator(
+    cfg: &crate::config::types::HttpOAuthConfig,
+) -> Result<OAuthValidator, String> {
+    let runtime_cfg = OAuthConfig {
+        enabled: cfg.enabled,
+        issuer: cfg.issuer.clone(),
+        audience: cfg.audience.clone(),
+        jwks_uri: cfg.jwks_uri.clone(),
+        client_id: cfg.client_id.clone(),
+        required_scopes: cfg.required_scopes.clone(),
+        static_keys: cfg
+            .static_keys
+            .iter()
+            .map(|k| (k.kid.clone(), k.public_key_pem.clone()))
+            .collect(),
+    };
+
+    build_validator_from_runtime(&runtime_cfg).await
+}
+
+/// Build an [`OAuthValidator`] from the runtime [`OAuthConfig`].
+///
+/// Used by the HTTP server start-up path, which already converts the
+/// YAML config into the runtime shape before constructing
+/// [`super::http::HttpTransportConfig`]. Same fail-closed semantics as
+/// [`build_validator`].
+///
+/// # Errors
+/// Returns `Err` when OAuth is enabled but no usable key source is
+/// configured.
+// See `build_validator` — async kept to absorb the FIND-006 follow-up
+// (JWKS HTTP fetch) without breaking the public signature.
+#[allow(clippy::unused_async)]
+pub async fn build_validator_from_runtime(
+    cfg: &OAuthConfig,
+) -> Result<OAuthValidator, String> {
+    let mut v = OAuthValidator::new(cfg.clone());
+
+    if !cfg.static_keys.is_empty() {
+        v.set_static_keys(cfg.static_keys.clone());
+    }
+
+    if cfg.jwks_uri.is_some() && v.key_count() == 0 {
+        return Err(
+            "oauth.jwks_uri configured but JWKS HTTP fetching is not yet wired; \
+             configure oauth.static_keys for now (FIND-006 follow-up will pipe \
+             reqwest through extensions)"
+                .into(),
+        );
+    }
+
+    if cfg.enabled && v.key_count() == 0 {
+        return Err(
+            "oauth.enabled=true but no static_keys (or supported jwks_uri) configured; \
+             refusing to start with an empty key map"
+                .into(),
+        );
+    }
+
+    Ok(v)
+}
+
 /// Axum middleware that validates OAuth Bearer tokens.
+///
+/// Reads the shared `Arc<OAuthValidator>` installed by [`build_validator`]
+/// from request extensions. When the validator extension is absent (server
+/// misconfiguration) the request is rejected with HTTP 503 rather than
+/// silently falling back to an empty key map.
 pub async fn oauth_middleware(request: Request, next: Next) -> Response {
     // Extract the OAuth config from extensions
     let config = request.extensions().get::<Arc<OAuthConfig>>().cloned();
@@ -269,10 +365,13 @@ pub async fn oauth_middleware(request: Request, next: Next) -> Response {
     };
     let token = token.trim();
 
-    // Validate the token. NOTE: this validator has no keys loaded; until the
-    // router wires `Arc<OAuthValidator>` through extensions, OAuth-enabled
-    // deployments will reject every request. See module-level docs.
-    let validator = OAuthValidator::new((*config).clone());
+    // Read the boot-time validator from extensions. If it is missing the
+    // server was wired incorrectly — fail closed with 503 rather than
+    // building a fresh empty validator that rejects every token.
+    let Some(validator) = request.extensions().get::<Arc<OAuthValidator>>().cloned() else {
+        warn!("OAuthValidator extension missing — server misconfigured");
+        return service_unavailable("OAuth validator not configured on this server");
+    };
     match validator.validate_token(token) {
         Ok(claims) => {
             debug!(sub = %claims.sub, scopes = ?claims.scopes, "Token validated");
@@ -283,6 +382,17 @@ pub async fn oauth_middleware(request: Request, next: Next) -> Response {
             unauthorized(&e)
         }
     }
+}
+
+fn service_unavailable(message: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(json!({
+            "error": "service_unavailable",
+            "message": message,
+        })),
+    )
+        .into_response()
 }
 
 fn unauthorized(message: &str) -> Response {
@@ -405,6 +515,7 @@ mod jwt_verification_tests {
             jwks_uri: None,
             client_id: "test".to_string(),
             required_scopes: vec!["mcp:tools:execute".to_string()],
+            static_keys: vec![],
         };
         let mut v = OAuthValidator::new(cfg);
         v.set_static_keys(vec![("kid-test".to_string(), pub_pem().to_string())]);
@@ -495,5 +606,53 @@ mod jwt_verification_tests {
         let claims = v.validate_token(&token).expect("valid token");
         assert_eq!(claims.sub, "alice");
         assert!(claims.scopes.iter().any(|s| s == "mcp:tools:execute"));
+    }
+
+    #[tokio::test]
+    async fn build_validator_static_key_validates_token() {
+        use crate::config::types::{HttpOAuthConfig, HttpOAuthStaticKey};
+
+        let cfg = HttpOAuthConfig {
+            enabled: true,
+            issuer: "iss".into(),
+            audience: "aud".into(),
+            client_id: "test".into(),
+            required_scopes: vec!["mcp:tools:execute".into()],
+            jwks_uri: None,
+            static_keys: vec![HttpOAuthStaticKey {
+                kid: "kid-test".into(),
+                public_key_pem: pub_pem().into(),
+            }],
+        };
+
+        let v = super::build_validator(&cfg)
+            .await
+            .expect("validator built from static keys");
+        assert_eq!(v.key_count(), 1);
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({
+            "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute",
+            "exp": now + 600, "iat": now, "sub": "bob",
+        });
+        let token = sign_token(claims);
+        let parsed = v.validate_token(&token).expect("valid token");
+        assert_eq!(parsed.sub, "bob");
+    }
+
+    #[tokio::test]
+    async fn build_validator_rejects_empty_when_enabled() {
+        use crate::config::types::HttpOAuthConfig;
+
+        let cfg = HttpOAuthConfig {
+            enabled: true,
+            issuer: "iss".into(),
+            audience: "aud".into(),
+            client_id: "test".into(),
+            required_scopes: vec![],
+            jwks_uri: None,
+            static_keys: vec![],
+        };
+        assert!(super::build_validator(&cfg).await.is_err());
     }
 }

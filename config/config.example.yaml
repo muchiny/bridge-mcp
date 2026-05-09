@@ -599,6 +599,41 @@ tool_groups:
 #   # → open http://localhost:16686 and search service "mcp-ssh-bridge"
 
 # =============================================================================
+# HTTP TRANSPORT (Streamable HTTP, MCP 2025-11-25)
+# =============================================================================
+# Optional. Enables `mcp-ssh-bridge serve-http`. Required only when running
+# the bridge as a remote MCP server; stdio mode does not need this section.
+#
+# OAuth: when oauth.enabled = true, EITHER static_keys OR jwks_uri MUST be
+# configured. The server fails closed at boot otherwise (FIND-006).
+#
+# JWKS HTTP fetching is not yet wired — configure static_keys for now.
+#
+# http:
+#   bind: "127.0.0.1:3000"
+#   max_body_size: 1048576       # 1 MiB
+#   sessionTimeoutSeconds: 1800  # 30 min
+#   max_sessions: 100
+#   allowed_origins:
+#     - "https://app.example.com"
+#   oauth:
+#     enabled: true
+#     issuer: "https://auth.example.com"
+#     audience: "mcp-ssh-bridge"
+#     clientId: "mcp-ssh-bridge"
+#     requiredScopes: ["mcp:tools:execute"]
+#     # Static keys are loaded once at boot and addressed by JWT `kid`.
+#     # Use this when your IdP exposes long-lived signing keys you can copy
+#     # in. Prefer jwksUri (once wired) for IdPs that rotate keys.
+#     staticKeys:
+#       - kid: "kid-2026-q2"
+#         publicKeyPem: |
+#           -----BEGIN PUBLIC KEY-----
+#           MIIB...
+#           -----END PUBLIC KEY-----
+#     # jwksUri: "https://auth.example.com/.well-known/jwks.json"
+
+# =============================================================================
 # SSH CONFIG AUTO-DISCOVERY
 # =============================================================================
 # Automatically discover hosts from your ~/.ssh/config file.

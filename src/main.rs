@@ -77,6 +77,13 @@ async fn main() -> Result<()> {
                 jwks_uri: config.http.oauth.jwks_uri.clone(),
                 client_id: config.http.oauth.client_id.clone(),
                 required_scopes: config.http.oauth.required_scopes.clone(),
+                static_keys: config
+                    .http
+                    .oauth
+                    .static_keys
+                    .iter()
+                    .map(|k| (k.kid.clone(), k.public_key_pem.clone()))
+                    .collect(),
             };
 
             let http_config = http_transport::HttpTransportConfig {

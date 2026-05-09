@@ -34,7 +34,7 @@ use tracing::{info, warn};
 /// from holding connections open indefinitely. Returns HTTP 408 on expiry.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-use super::oauth::{OAuthConfig, OAuthMetadata};
+use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator};
 use super::session_store::{InMemorySessionStore, SessionData, SessionStore};
 
 use crate::mcp::protocol::{
@@ -160,8 +160,32 @@ fn forbidden(message: &str) -> Response {
 }
 
 /// Build the axum Router for the MCP HTTP transport.
+///
+/// When OAuth is enabled, callers must use
+/// [`build_router_with_validator`] (or the wrapping [`serve`] function)
+/// to install a boot-time [`OAuthValidator`]. This entry point omits the
+/// validator extension; if OAuth is enabled the middleware will respond
+/// with HTTP 503 to every protected request, surfacing the
+/// misconfiguration loudly instead of silently rejecting tokens with
+/// "Unknown JWT signing key" (FIND-006).
 pub fn build_router(server: Arc<McpServer>, config: HttpTransportConfig) -> Router {
-    build_router_with_store(server, config, Arc::new(InMemorySessionStore::new()))
+    build_router_with_store(server, config, Arc::new(InMemorySessionStore::new()), None)
+}
+
+/// Build the axum Router with a pre-built [`OAuthValidator`] installed
+/// as a request extension. Used by [`serve`] after the validator has
+/// been constructed at boot via [`super::oauth::build_validator_from_runtime`].
+pub fn build_router_with_validator(
+    server: Arc<McpServer>,
+    config: HttpTransportConfig,
+    validator: &Arc<OAuthValidator>,
+) -> Router {
+    build_router_with_store(
+        server,
+        config,
+        Arc::new(InMemorySessionStore::new()),
+        Some(validator),
+    )
 }
 
 /// Variant of [`build_router`] that accepts a caller-provided session
@@ -171,6 +195,7 @@ pub fn build_router_with_store(
     server: Arc<McpServer>,
     config: HttpTransportConfig,
     sessions: Arc<dyn SessionStore>,
+    validator: Option<&Arc<OAuthValidator>>,
 ) -> Router {
     let oauth_config = Arc::new(config.oauth.clone());
 
@@ -190,6 +215,9 @@ pub fn build_router_with_store(
     if oauth_config.enabled {
         router = router.layer(axum::middleware::from_fn(super::oauth::oauth_middleware));
         router = router.layer(axum::Extension(Arc::clone(&oauth_config)));
+        if let Some(v) = validator {
+            router = router.layer(axum::Extension(Arc::clone(v)));
+        }
     }
 
     // Discovery and health endpoints (not behind OAuth, but still
@@ -282,6 +310,12 @@ pub fn build_router_with_store(
 /// This binds to the configured address and serves MCP over HTTP.
 /// Refuses to start when binding to a non-loopback address without OAuth
 /// enabled, unless `allow_unsafe_bind` is explicitly set.
+///
+/// When OAuth is enabled, builds a single [`OAuthValidator`] from the
+/// supplied config and installs it as an Axum extension so the middleware
+/// reads the boot-time key map instead of constructing an empty validator
+/// per request (FIND-006). Fails closed at boot when OAuth is enabled but
+/// no static keys are configured.
 pub async fn serve(
     server: Arc<McpServer>,
     config: HttpTransportConfig,
@@ -289,7 +323,21 @@ pub async fn serve(
     refuse_unsafe_bind(&config)?;
 
     let bind = config.bind.clone();
-    let router = build_router(server, config);
+
+    let validator = if config.oauth.enabled {
+        let v = super::oauth::build_validator_from_runtime(&config.oauth)
+            .await
+            .map_err(crate::error::BridgeError::McpInvalidRequest)?;
+        Some(Arc::new(v))
+    } else {
+        None
+    };
+
+    let router = if let Some(v) = validator.as_ref() {
+        build_router_with_validator(server, config, v)
+    } else {
+        build_router(server, config)
+    };
 
     info!(bind = %bind, "Starting MCP HTTP transport");
 

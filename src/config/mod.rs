@@ -1,6 +1,6 @@
 mod loader;
 pub mod ssh_config;
-mod types;
+pub mod types;
 mod watcher;
 
 pub use loader::{default_config_path, load_config};

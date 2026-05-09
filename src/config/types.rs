@@ -169,6 +169,11 @@ pub struct HttpOAuthConfig {
     pub audience: String,
 
     /// JWKS endpoint for key validation.
+    ///
+    /// NOTE: JWKS HTTP fetching is not yet wired in this build —
+    /// configure [`Self::static_keys`] for now. The follow-up will pipe
+    /// `reqwest`/`hyper` through extensions and fetch this document at
+    /// boot.
     #[serde(default)]
     pub jwks_uri: Option<String>,
 
@@ -179,6 +184,29 @@ pub struct HttpOAuthConfig {
     /// Required scopes for access.
     #[serde(default)]
     pub required_scopes: Vec<String>,
+
+    /// Static signing keys for token validation, keyed by `kid`.
+    ///
+    /// Each entry is `(key_id, pem_encoded_public_key)`. Either
+    /// `static_keys` or `jwks_uri` MUST be configured when
+    /// `enabled = true`; otherwise the server fails closed at boot
+    /// rather than rejecting every token at request time.
+    #[serde(default)]
+    pub static_keys: Vec<HttpOAuthStaticKey>,
+}
+
+/// A single OAuth signing key entry for static-key validation.
+///
+/// Used by [`HttpOAuthConfig::static_keys`] to populate the validator's
+/// in-memory key map at boot. Keys are addressed by their JWT `kid`
+/// header.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpOAuthStaticKey {
+    /// JWT `kid` header value this key matches.
+    pub kid: String,
+    /// PEM-encoded RSA public key (PKCS#1 or `SubjectPublicKeyInfo`).
+    pub public_key_pem: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
