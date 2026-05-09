@@ -225,6 +225,12 @@ impl OAuthValidator {
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[self.config.issuer.as_str()]);
         validation.set_audience(&[self.config.audience.as_str()]);
+        // Explicitly require all four spec claims. `jsonwebtoken` 9.x only
+        // requires `exp` by default; without this line a token missing
+        // `sub` would pass validation. `iss`/`aud` enforcement is already
+        // implied by `set_issuer`/`set_audience` above, but listing them
+        // here keeps the contract explicit (FIND-007).
+        validation.set_required_spec_claims(&["exp", "sub", "iss", "aud"]);
         validation.validate_exp = true;
         validation.validate_nbf = true;
         validation.leeway = 30;
@@ -638,6 +644,66 @@ mod jwt_verification_tests {
         let token = sign_token(claims);
         let parsed = v.validate_token(&token).expect("valid token");
         assert_eq!(parsed.sub, "bob");
+    }
+
+    /// Build a JWT claims object with all four required spec claims
+    /// (`exp`, `sub`, `iss`, `aud`) populated, then remove the named claim
+    /// before signing. Used by the "missing required claim" tests below.
+    fn claims_omitting(name: &str) -> serde_json::Value {
+        let now = chrono::Utc::now().timestamp();
+        let mut claims = json!({
+            "iss": "iss",
+            "aud": "aud",
+            "scope": "mcp:tools:execute",
+            "exp": now + 600,
+            "iat": now,
+            "sub": "alice",
+        });
+        claims
+            .as_object_mut()
+            .expect("claims is an object")
+            .remove(name);
+        claims
+    }
+
+    #[test]
+    fn token_missing_sub_is_rejected() {
+        let v = make_validator();
+        let token = sign_token(claims_omitting("sub"));
+        assert!(
+            v.validate_token(&token).is_err(),
+            "token without `sub` claim must be rejected"
+        );
+    }
+
+    #[test]
+    fn token_missing_iss_is_rejected() {
+        let v = make_validator();
+        let token = sign_token(claims_omitting("iss"));
+        assert!(
+            v.validate_token(&token).is_err(),
+            "token without `iss` claim must be rejected"
+        );
+    }
+
+    #[test]
+    fn token_missing_aud_is_rejected() {
+        let v = make_validator();
+        let token = sign_token(claims_omitting("aud"));
+        assert!(
+            v.validate_token(&token).is_err(),
+            "token without `aud` claim must be rejected"
+        );
+    }
+
+    #[test]
+    fn token_missing_exp_is_rejected() {
+        let v = make_validator();
+        let token = sign_token(claims_omitting("exp"));
+        assert!(
+            v.validate_token(&token).is_err(),
+            "token without `exp` claim must be rejected"
+        );
     }
 
     #[tokio::test]
