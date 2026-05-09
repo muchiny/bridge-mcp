@@ -449,9 +449,14 @@ pub struct SocksProxyConfig {
     #[serde(default)]
     pub username: Option<String>,
 
-    /// Optional password for SOCKS5 authentication
+    /// Optional password for SOCKS5 authentication.
+    ///
+    /// Wrapped in `Zeroizing<String>` so the byte buffer is overwritten
+    /// when the value is dropped (FIND-014). `SocksProxyConfig` lives for
+    /// the entire process; without `Zeroizing` the password sits in heap
+    /// from start to exit.
     #[serde(default)]
-    pub password: Option<String>,
+    pub password: Option<Zeroizing<String>>,
 }
 
 /// SOCKS protocol version
@@ -1593,7 +1598,7 @@ mod tests {
         assert_eq!(config.port, 9050);
         assert_eq!(config.version, SocksVersion::Socks4);
         assert_eq!(config.username, Some("user".to_string()));
-        assert_eq!(config.password, Some("pass".to_string()));
+        assert_eq!(config.password.as_deref().map(String::as_str), Some("pass"));
     }
 
     #[test]
