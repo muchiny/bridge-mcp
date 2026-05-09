@@ -233,4 +233,4 @@ must_use_candidate = "allow"
 # (`webpki-roots`) that blocks `cargo outdated` resolution. Local fork
 # carries the fix; pin to it until winrm-rs > 1.0 is published.
 [patch.crates-io]
-winrm-rs = { path = "../winrm-rs" }
+winrm-rs = { git = "https://github.com/muchiny/winrm-rs.git", rev = "573dadf5abcaed681f65999f216164c9f33a6250" }
