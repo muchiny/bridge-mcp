@@ -114,8 +114,10 @@ fn rekey_limits_set_to_one_gigabyte_one_hour() {
 
 #[test]
 fn keepalive_uses_limits_config() {
-    let mut limits = LimitsConfig::default();
-    limits.keepalive_interval_seconds = 42;
+    let limits = LimitsConfig {
+        keepalive_interval_seconds: 42,
+        ..LimitsConfig::default()
+    };
     let cfg = build_russh_client_config(&limits);
     assert_eq!(
         cfg.keepalive_interval,

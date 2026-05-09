@@ -83,7 +83,6 @@ async fn audit_log_file_has_0600_permissions() {
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(
         mode, 0o600,
-        "audit log must be created with mode 0600 (got {:o})",
-        mode
+        "audit log must be created with mode 0600 (got {mode:o})"
     );
 }

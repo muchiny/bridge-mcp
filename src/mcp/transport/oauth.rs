@@ -528,12 +528,12 @@ mod jwt_verification_tests {
         v
     }
 
-    fn sign_token(claims: serde_json::Value) -> String {
+    fn sign_token(claims: &serde_json::Value) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("kid-test".to_string());
         encode(
             &header,
-            &claims,
+            claims,
             &EncodingKey::from_rsa_pem(priv_pem().as_bytes()).unwrap(),
         )
         .unwrap()
@@ -547,7 +547,7 @@ mod jwt_verification_tests {
             "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute",
             "exp": now + 60, "iat": now, "sub": "alice",
         });
-        let valid = sign_token(claims);
+        let valid = sign_token(&claims);
         let mut parts: Vec<String> = valid.split('.').map(String::from).collect();
         parts[2] = "AAAA".to_string();
         let forged = parts.join(".");
@@ -572,7 +572,7 @@ mod jwt_verification_tests {
             "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute",
             "exp": 1_000_000, "iat": 999_000, "sub": "alice",
         });
-        let token = sign_token(claims);
+        let token = sign_token(&claims);
         assert!(v.validate_token(&token).is_err());
     }
 
@@ -584,7 +584,7 @@ mod jwt_verification_tests {
             "iss": "evil", "aud": "aud", "scope": "mcp:tools:execute",
             "exp": now + 60, "iat": now, "sub": "alice",
         });
-        let token = sign_token(claims);
+        let token = sign_token(&claims);
         assert!(v.validate_token(&token).is_err());
     }
 
@@ -596,7 +596,7 @@ mod jwt_verification_tests {
             "iss": "iss", "aud": "aud", "scope": "mcp:tools:read",
             "exp": now + 60, "iat": now, "sub": "alice",
         });
-        let token = sign_token(claims);
+        let token = sign_token(&claims);
         assert!(v.validate_token(&token).is_err());
     }
 
@@ -608,7 +608,7 @@ mod jwt_verification_tests {
             "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute mcp:admin",
             "exp": now + 600, "iat": now, "sub": "alice",
         });
-        let token = sign_token(claims);
+        let token = sign_token(&claims);
         let claims = v.validate_token(&token).expect("valid token");
         assert_eq!(claims.sub, "alice");
         assert!(claims.scopes.iter().any(|s| s == "mcp:tools:execute"));
@@ -641,7 +641,7 @@ mod jwt_verification_tests {
             "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute",
             "exp": now + 600, "iat": now, "sub": "bob",
         });
-        let token = sign_token(claims);
+        let token = sign_token(&claims);
         let parsed = v.validate_token(&token).expect("valid token");
         assert_eq!(parsed.sub, "bob");
     }
@@ -669,7 +669,7 @@ mod jwt_verification_tests {
     #[test]
     fn token_missing_sub_is_rejected() {
         let v = make_validator();
-        let token = sign_token(claims_omitting("sub"));
+        let token = sign_token(&claims_omitting("sub"));
         assert!(
             v.validate_token(&token).is_err(),
             "token without `sub` claim must be rejected"
@@ -679,7 +679,7 @@ mod jwt_verification_tests {
     #[test]
     fn token_missing_iss_is_rejected() {
         let v = make_validator();
-        let token = sign_token(claims_omitting("iss"));
+        let token = sign_token(&claims_omitting("iss"));
         assert!(
             v.validate_token(&token).is_err(),
             "token without `iss` claim must be rejected"
@@ -689,7 +689,7 @@ mod jwt_verification_tests {
     #[test]
     fn token_missing_aud_is_rejected() {
         let v = make_validator();
-        let token = sign_token(claims_omitting("aud"));
+        let token = sign_token(&claims_omitting("aud"));
         assert!(
             v.validate_token(&token).is_err(),
             "token without `aud` claim must be rejected"
@@ -699,7 +699,7 @@ mod jwt_verification_tests {
     #[test]
     fn token_missing_exp_is_rejected() {
         let v = make_validator();
-        let token = sign_token(claims_omitting("exp"));
+        let token = sign_token(&claims_omitting("exp"));
         assert!(
             v.validate_token(&token).is_err(),
             "token without `exp` claim must be rejected"
