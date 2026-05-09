@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use tokio::sync::oneshot;
@@ -27,7 +26,6 @@ pub enum ClientResponse {
 
 /// Tracks server-to-client requests awaiting responses.
 pub struct PendingRequests {
-    next_id: AtomicU64,
     pending: Mutex<HashMap<String, oneshot::Sender<ClientResponse>>>,
 }
 
@@ -36,17 +34,17 @@ impl PendingRequests {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
         }
     }
 
     /// Create a new pending request. Returns (`request_id`, receiver).
     ///
-    /// IDs use `"srv-"` prefix to avoid collision with client-generated IDs.
+    /// IDs are `"srv-{uuid_v4_simple}"` — unguessable and unique. Combined with
+    /// the per-session allocation (Vuln 8 audit 2026-05-09) this prevents one
+    /// client from resolving another client's pending server-initiated request.
     pub fn create_request(&self) -> (String, oneshot::Receiver<ClientResponse>) {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = format!("srv-{id_num}");
+        let id = format!("srv-{}", uuid::Uuid::new_v4().simple());
         let (tx, rx) = oneshot::channel();
 
         let mut pending = self.pending.lock().expect("pending lock poisoned");
@@ -99,7 +97,17 @@ mod tests {
         let (id2, _rx2) = pr.create_request();
         assert_ne!(id1, id2);
         assert!(id1.starts_with("srv-"));
-        assert!(id2.starts_with("srv-"));
+        assert!(id1.len() >= 32, "id should embed a UUID for unguessability");
+        assert_ne!(id1, "srv-1");
+    }
+
+    #[test]
+    fn test_resolve_predictable_legacy_id_does_not_succeed() {
+        let pr = PendingRequests::new();
+        let _ = pr.create_request();
+        // Legacy ids "srv-1", "srv-2" must not match anything any more.
+        assert!(!pr.resolve("srv-1", ClientResponse::Success(serde_json::json!(null))));
+        assert!(!pr.resolve("srv-2", ClientResponse::Success(serde_json::json!(null))));
     }
 
     #[test]
