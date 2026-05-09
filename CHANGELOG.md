@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (BREAKING)
+
+- **Security: `security.require_elicitation_on_destructive` now defaults to
+  `true`** (was `false`). Destructive tools annotated `destructive_hint: true`
+  (e.g., `ssh_process_kill`, `ssh_file_write`, `ssh_k8s_delete`,
+  `ssh_terraform_apply`, …) now require MCP `elicitation/create`
+  confirmation by default. Operators who relied on the old permissive
+  behaviour must explicitly set
+  `security.require_elicitation_on_destructive: false` in their config
+  (NOT RECOMMENDED in production — a compromised MCP client could
+  otherwise mass-execute destructive tools without surfacing to a human).
+  Source-of-truth: audit FIND-022 (`docs/audit-2026-05-09-findings.md`).
+
 ## [1.16.0] - 2026-05-03
 
 ### Summary

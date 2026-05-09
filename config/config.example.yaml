@@ -238,8 +238,12 @@ security:
   # When true, the server asks the user to confirm via the client UI before
   # executing the destructive operation; on decline the call is rejected.
   # Requires a client that advertises the elicitation capability.
-  # Default: false (opt-in).
-  require_elicitation_on_destructive: false
+  #
+  # Default: true (security-first; FIND-022). Set to `false` to opt out and
+  # allow destructive tools to execute without confirmation — NOT RECOMMENDED
+  # in production. A compromised MCP client could otherwise mass-execute
+  # destructive tools without surfacing to a human.
+  require_elicitation_on_destructive: true
 
 # =============================================================================
 # LIMITS AND TIMEOUTS

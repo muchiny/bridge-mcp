@@ -532,7 +532,11 @@ pub struct SecurityConfig {
     /// `elicitation` capability, the server asks the user to confirm; on
     /// decline/cancel the tool call returns an error without executing.
     /// When the client does not support elicitation, the call is rejected.
-    #[serde(default)]
+    ///
+    /// Defaults to `true` (security-first); set to `false` to opt out
+    /// (NOT RECOMMENDED in production — a compromised MCP client can
+    /// mass-execute destructive tools without surfacing to a human).
+    #[serde(default = "default_require_elicitation_on_destructive")]
     pub require_elicitation_on_destructive: bool,
 }
 
@@ -544,9 +548,18 @@ impl Default for SecurityConfig {
             blacklist: default_blacklist(),
             sanitize_patterns: Vec::new(),
             sanitize: SanitizeConfig::default(),
-            require_elicitation_on_destructive: false,
+            require_elicitation_on_destructive: default_require_elicitation_on_destructive(),
         }
     }
+}
+
+/// Default for `SecurityConfig::require_elicitation_on_destructive`.
+///
+/// FIND-022: defaults to `true` (security-first). Operators who want the
+/// legacy permissive behaviour must opt out explicitly via
+/// `security.require_elicitation_on_destructive: false`.
+fn default_require_elicitation_on_destructive() -> bool {
+    true
 }
 
 /// Advanced sanitizer configuration

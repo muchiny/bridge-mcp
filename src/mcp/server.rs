@@ -2514,11 +2514,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_destructive_gate_disabled_by_default() {
-        // Default config: require_elicitation_on_destructive = false.
-        // A destructive tool call should not be blocked by the gate
-        // (it will still fail for other reasons, e.g. unknown host),
-        // but the error must not be the elicitation-refusal error.
+    async fn test_destructive_gate_enabled_by_default() {
+        // FIND-022: default config now sets
+        // `require_elicitation_on_destructive = true` (security-first).
+        // A destructive tool call from a client without elicitation
+        // capability MUST be rejected by the gate before execution.
         let server = create_test_server();
         let params = json!({
             "name": "ssh_cron_remove",
@@ -2530,8 +2530,8 @@ mod tests {
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
-            !text.contains("does not support elicitation"),
-            "gate fired with feature disabled: {text}"
+            text.contains("does not support elicitation"),
+            "gate must fire by default (FIND-022): {text}"
         );
     }
 
