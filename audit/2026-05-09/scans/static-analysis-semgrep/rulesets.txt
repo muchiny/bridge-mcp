@@ -1,0 +1,6 @@
+# Approved rulesets for mcp-ssh-bridge Rust scan (2026-05-09)
+# Mode: important-only (severity MEDIUM+, post-filtered by category=security + confidence/impact)
+r/rust
+p/security-audit
+r/generic.secrets
+audit/2026-05-09/scans/static-analysis-semgrep/repos/trailofbits-semgrep-rules/rust
