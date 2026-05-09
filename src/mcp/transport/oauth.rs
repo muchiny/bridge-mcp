@@ -1,14 +1,30 @@
 //! OAuth 2.0 Authentication Middleware for MCP HTTP Transport
 //!
 //! Validates Bearer tokens on incoming HTTP requests when OAuth is enabled.
-//! Supports JWT validation with configurable issuer, audience, and scope checks.
+//! Tokens are verified as JWTs against a configured set of public keys
+//! (RSA or ECDSA family — HMAC algorithms are rejected to prevent
+//! `alg`-confusion attacks).
+//!
+//! # Limitations
+//!
+//! The Axum middleware constructs an [`OAuthValidator`] per request from the
+//! [`OAuthConfig`] in extensions. That constructor produces an empty key map,
+//! so production deployments must populate keys explicitly via
+//! [`OAuthValidator::set_static_keys`] (or [`OAuthValidator::load_jwks`])
+//! before the validator is wired into the router. Wiring an
+//! `Arc<OAuthValidator>` through Axum extensions is left for a follow-up;
+//! until then, OAuth-enabled deployments rely on the per-request validator
+//! having empty keys, which rejects every token with "Unknown JWT signing
+//! key".
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{debug, warn};
@@ -68,64 +84,151 @@ pub mod scopes {
     pub const ADMIN: &str = "mcp:admin";
 }
 
+/// Internal JWT claims layout deserialised from the verified token payload.
+#[derive(Debug, Deserialize)]
+struct JwtClaims {
+    #[serde(default)]
+    sub: Option<String>,
+    iss: String,
+    /// `aud` may be a single string or an array per RFC 7519 §4.1.3.
+    /// `jsonwebtoken` validates it through [`Validation::set_audience`]; we
+    /// only need to deserialise it without rejecting either shape.
+    #[allow(dead_code)]
+    aud: serde_json::Value,
+    #[serde(default)]
+    scope: String,
+    #[allow(dead_code)]
+    exp: i64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    nbf: Option<i64>,
+}
+
 /// OAuth validator that checks Bearer tokens.
+///
+/// Tokens must be JWTs signed with one of the accepted asymmetric algorithms
+/// (`RS256`/`RS384`/`RS512`, `ES256`/`ES384`, `PS256`/`PS384`/`PS512`).
+/// HMAC algorithms (`HS*`) and `none` are rejected to prevent
+/// `alg`-confusion attacks.
+///
+/// Public keys are addressed by their JWK `kid`. Two key shapes are accepted:
+/// - PEM-encoded RSA public key (PKCS#1 or `SubjectPublicKeyInfo`)
+/// - `n.e` JWK components stored as `"<n>.<e>"` (populated by
+///   [`Self::refresh_jwks`])
 pub struct OAuthValidator {
     config: OAuthConfig,
+    /// Public keys keyed by `kid`. Each value is either a PEM blob or the
+    /// `n.e` JWK components when populated by [`Self::refresh_jwks`].
+    keys: HashMap<String, String>,
 }
 
 impl OAuthValidator {
-    /// Create a new OAuth validator.
+    /// Create a new OAuth validator with no signing keys.
+    ///
+    /// Callers must populate keys via [`Self::set_static_keys`] or
+    /// [`Self::refresh_jwks`] before any token will be accepted.
     #[must_use]
     pub fn new(config: OAuthConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            keys: HashMap::new(),
+        }
+    }
+
+    /// Replace the in-memory key map with the supplied `(kid, pem)` pairs.
+    pub fn set_static_keys(&mut self, keys: Vec<(String, String)>) {
+        self.keys = keys.into_iter().collect();
+    }
+
+    /// Number of signing keys currently loaded (mostly useful in tests).
+    #[must_use]
+    pub fn key_count(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Replace the in-memory key map from a parsed JWKS document.
+    ///
+    /// The document must follow RFC 7517 (`{ "keys": [ { "kid": ..., "n":
+    /// ..., "e": ... } ] }`). The HTTP fetch is intentionally not bundled
+    /// here so the `http` feature does not pull in an HTTP client; callers
+    /// (or a follow-up that pipes `reqwest`/`hyper` through extensions)
+    /// fetch the document and pass the parsed JSON in.
+    ///
+    /// # Errors
+    /// Returns a string describing the parse failure.
+    pub fn load_jwks(&mut self, jwks: &serde_json::Value) -> Result<(), String> {
+        let mut keys = HashMap::new();
+        for k in jwks["keys"]
+            .as_array()
+            .ok_or("jwks.keys not an array")?
+        {
+            let kid = k["kid"].as_str().unwrap_or_default().to_string();
+            let n = k["n"].as_str().ok_or("jwk.n missing")?;
+            let e = k["e"].as_str().ok_or("jwk.e missing")?;
+            keys.insert(kid, format!("{n}.{e}"));
+        }
+        self.keys = keys;
+        Ok(())
     }
 
     /// Validate a Bearer token string.
     ///
-    /// In a production implementation, this would verify JWT signatures
-    /// against JWKS keys. For now, it performs basic structural validation
-    /// and extracts claims from the JWT payload.
+    /// Verifies the JWT signature against the configured public key map,
+    /// enforces `iss`/`aud`/`exp`/`nbf` (with 30s leeway) and the configured
+    /// `required_scopes`. Returns the extracted claims on success.
+    ///
+    /// # Errors
+    /// Returns a human-readable description of the first validation failure.
     pub fn validate_token(&self, token: &str) -> Result<TokenClaims, String> {
-        // JWT format: header.payload.signature
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 {
-            return Err("Invalid JWT format: expected 3 parts".to_string());
+        // Decode the unverified header to learn the algorithm and key id.
+        let header = decode_header(token).map_err(|e| format!("Invalid JWT header: {e}"))?;
+
+        // Reject HMAC and `none` algorithms to prevent alg-confusion attacks.
+        match header.alg {
+            Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::ES256
+            | Algorithm::ES384
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512 => {}
+            other => return Err(format!("Algorithm '{other:?}' not accepted")),
         }
 
-        // Decode the payload (base64url)
-        let payload =
-            base64url_decode(parts[1]).map_err(|e| format!("Invalid JWT payload encoding: {e}"))?;
+        let kid = header
+            .kid
+            .ok_or_else(|| "JWT missing kid header".to_string())?;
+        let key_material = self
+            .keys
+            .get(&kid)
+            .ok_or_else(|| format!("Unknown JWT signing key: {kid}"))?;
 
-        let claims: serde_json::Value = serde_json::from_slice(&payload)
-            .map_err(|e| format!("Invalid JWT payload JSON: {e}"))?;
+        let decoding_key = if let Some((n, e)) = key_material.split_once('.') {
+            DecodingKey::from_rsa_components(n, e)
+                .map_err(|err| format!("Invalid JWKS RSA components: {err}"))?
+        } else {
+            DecodingKey::from_rsa_pem(key_material.as_bytes())
+                .map_err(|err| format!("Invalid PEM signing key: {err}"))?
+        };
 
-        // Validate issuer
-        if !self.config.issuer.is_empty() {
-            let iss = claims["iss"].as_str().unwrap_or_default();
-            if iss != self.config.issuer {
-                return Err(format!(
-                    "Invalid issuer: expected '{}', got '{iss}'",
-                    self.config.issuer
-                ));
-            }
-        }
+        let mut validation = Validation::new(header.alg);
+        validation.set_issuer(&[self.config.issuer.as_str()]);
+        validation.set_audience(&[self.config.audience.as_str()]);
+        validation.validate_exp = true;
+        validation.validate_nbf = true;
+        validation.leeway = 30;
 
-        // Validate audience
-        if !self.config.audience.is_empty() {
-            let aud = claims["aud"].as_str().unwrap_or_default();
-            if aud != self.config.audience {
-                return Err(format!(
-                    "Invalid audience: expected '{}', got '{aud}'",
-                    self.config.audience
-                ));
-            }
-        }
+        let data = decode::<JwtClaims>(token, &decoding_key, &validation)
+            .map_err(|e| format!("JWT validation failed: {e}"))?;
 
-        // Extract scopes
-        let scopes_str = claims["scope"].as_str().unwrap_or_default();
-        let scopes: Vec<String> = scopes_str.split_whitespace().map(String::from).collect();
+        let scopes: Vec<String> = data
+            .claims
+            .scope
+            .split_whitespace()
+            .map(String::from)
+            .collect();
 
-        // Check required scopes
         for required in &self.config.required_scopes {
             if !scopes.iter().any(|s| s == required) {
                 return Err(format!("Missing required scope: {required}"));
@@ -133,8 +236,8 @@ impl OAuthValidator {
         }
 
         Ok(TokenClaims {
-            sub: claims["sub"].as_str().unwrap_or_default().to_string(),
-            iss: claims["iss"].as_str().unwrap_or_default().to_string(),
+            sub: data.claims.sub.unwrap_or_default(),
+            iss: data.claims.iss,
             scopes,
         })
     }
@@ -169,7 +272,9 @@ pub async fn oauth_middleware(request: Request, next: Next) -> Response {
     };
     let token = token.trim();
 
-    // Validate the token
+    // Validate the token. NOTE: this validator has no keys loaded; until the
+    // router wires `Arc<OAuthValidator>` through extensions, OAuth-enabled
+    // deployments will reject every request. See module-level docs.
     let validator = OAuthValidator::new((*config).clone());
     match validator.validate_token(token) {
         Ok(claims) => {
@@ -192,63 +297,6 @@ fn unauthorized(message: &str) -> Response {
         })),
     )
         .into_response()
-}
-
-/// Decode a base64url-encoded string (no padding).
-fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
-    // Replace URL-safe chars with standard base64
-    let standard = input.replace('-', "+").replace('_', "/");
-
-    // Add padding
-    let padded = match standard.len() % 4 {
-        2 => format!("{standard}=="),
-        3 => format!("{standard}="),
-        _ => standard,
-    };
-
-    base64_decode_simple(&padded).map_err(|e| format!("base64 decode error: {e}"))
-}
-
-/// Simple base64 decoder (avoids adding a base64 crate dependency).
-#[allow(clippy::cast_possible_truncation)]
-fn base64_decode_simple(input: &str) -> Result<Vec<u8>, &'static str> {
-    fn decode_char(c: u8) -> Result<u8, &'static str> {
-        match c {
-            b'A'..=b'Z' => Ok(c - b'A'),
-            b'a'..=b'z' => Ok(c - b'a' + 26),
-            b'0'..=b'9' => Ok(c - b'0' + 52),
-            b'+' => Ok(62),
-            b'/' => Ok(63),
-            b'=' => Ok(0),
-            _ => Err("invalid base64 character"),
-        }
-    }
-
-    let bytes = input.as_bytes();
-    if !bytes.len().is_multiple_of(4) {
-        return Err("invalid base64 length");
-    }
-
-    let mut output = Vec::with_capacity(bytes.len() * 3 / 4);
-
-    for chunk in bytes.chunks(4) {
-        let a = decode_char(chunk[0])?;
-        let b = decode_char(chunk[1])?;
-        let c = decode_char(chunk[2])?;
-        let d = decode_char(chunk[3])?;
-
-        let triple = u32::from(a) << 18 | u32::from(b) << 12 | u32::from(c) << 6 | u32::from(d);
-
-        output.push((triple >> 16) as u8);
-        if chunk[2] != b'=' {
-            output.push((triple >> 8) as u8);
-        }
-        if chunk[3] != b'=' {
-            output.push(triple as u8);
-        }
-    }
-
-    Ok(output)
 }
 
 /// OAuth Authorization Server Metadata (RFC 8414).
@@ -294,21 +342,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_base64url_decode() {
-        // "Hello" in base64url
-        let encoded = "SGVsbG8";
-        let decoded = base64url_decode(encoded).unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello");
-    }
-
-    #[test]
-    fn test_base64url_decode_with_padding() {
-        let encoded = "dGVzdA";
-        let decoded = base64url_decode(encoded).unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "test");
-    }
-
-    #[test]
     fn test_token_claims_has_scope() {
         let claims = TokenClaims {
             sub: "user1".to_string(),
@@ -351,47 +384,119 @@ mod tests {
         let result = validator.validate_token("not-a-jwt");
         assert!(result.is_err());
     }
+}
 
-    #[test]
-    fn test_validate_token_valid_structure() {
-        let config = OAuthConfig::default();
-        let validator = OAuthValidator::new(config);
+#[cfg(test)]
+mod jwt_verification_tests {
+    use super::*;
+    use base64::Engine;
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use serde_json::json;
 
-        // Create a minimal JWT with base64url-encoded payload
-        let payload = serde_json::json!({
-            "sub": "test-user",
-            "iss": "",
-            "aud": "",
-            "scope": "mcp:tools:read mcp:admin"
-        });
-        let payload_b64 = base64url_encode(&serde_json::to_vec(&payload).unwrap());
-        let header_b64 = base64url_encode(b"{\"alg\":\"none\"}");
-        let token = format!("{header_b64}.{payload_b64}.sig");
-
-        let claims = validator.validate_token(&token).unwrap();
-        assert_eq!(claims.sub, "test-user");
-        assert_eq!(claims.scopes.len(), 2);
-        assert!(claims.has_scope("mcp:tools:read"));
+    fn priv_pem() -> &'static str {
+        include_str!("../../../tests/fixtures/oauth/test_priv.pem")
+    }
+    fn pub_pem() -> &'static str {
+        include_str!("../../../tests/fixtures/oauth/test_pub.pem")
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    fn base64url_encode(data: &[u8]) -> String {
-        const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut result = String::new();
-        for chunk in data.chunks(3) {
-            let b0 = chunk[0];
-            let b1 = chunk.get(1).copied().unwrap_or(0);
-            let b2 = chunk.get(2).copied().unwrap_or(0);
-            let triple = u32::from(b0) << 16 | u32::from(b1) << 8 | u32::from(b2);
-            result.push(CHARSET[(triple >> 18) as usize & 63] as char);
-            result.push(CHARSET[(triple >> 12) as usize & 63] as char);
-            if chunk.len() > 1 {
-                result.push(CHARSET[(triple >> 6) as usize & 63] as char);
-            }
-            if chunk.len() > 2 {
-                result.push(CHARSET[triple as usize & 63] as char);
-            }
-        }
-        result.replace('+', "-").replace('/', "_")
+    fn make_validator() -> OAuthValidator {
+        let cfg = OAuthConfig {
+            enabled: true,
+            issuer: "iss".to_string(),
+            audience: "aud".to_string(),
+            jwks_uri: None,
+            client_id: "test".to_string(),
+            required_scopes: vec!["mcp:tools:execute".to_string()],
+        };
+        let mut v = OAuthValidator::new(cfg);
+        v.set_static_keys(vec![("kid-test".to_string(), pub_pem().to_string())]);
+        v
+    }
+
+    fn sign_token(claims: serde_json::Value) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("kid-test".to_string());
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_rsa_pem(priv_pem().as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rejects_token_with_invalid_signature() {
+        let v = make_validator();
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({
+            "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute",
+            "exp": now + 60, "iat": now, "sub": "alice",
+        });
+        let valid = sign_token(claims);
+        let mut parts: Vec<String> = valid.split('.').map(String::from).collect();
+        parts[2] = "AAAA".to_string();
+        let forged = parts.join(".");
+        assert!(v.validate_token(&forged).is_err());
+    }
+
+    #[test]
+    fn rejects_alg_none() {
+        let v = make_validator();
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"alg":"none","kid":"kid-test"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"iss":"iss","aud":"aud","scope":"mcp:tools:execute","exp":99999999999}"#);
+        let none_token = format!("{header}.{payload}.");
+        assert!(v.validate_token(&none_token).is_err());
+    }
+
+    #[test]
+    fn rejects_expired_token() {
+        let v = make_validator();
+        let claims = json!({
+            "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute",
+            "exp": 1_000_000, "iat": 999_000, "sub": "alice",
+        });
+        let token = sign_token(claims);
+        assert!(v.validate_token(&token).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_issuer() {
+        let v = make_validator();
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({
+            "iss": "evil", "aud": "aud", "scope": "mcp:tools:execute",
+            "exp": now + 60, "iat": now, "sub": "alice",
+        });
+        let token = sign_token(claims);
+        assert!(v.validate_token(&token).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_scope() {
+        let v = make_validator();
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({
+            "iss": "iss", "aud": "aud", "scope": "mcp:tools:read",
+            "exp": now + 60, "iat": now, "sub": "alice",
+        });
+        let token = sign_token(claims);
+        assert!(v.validate_token(&token).is_err());
+    }
+
+    #[test]
+    fn accepts_well_formed_token() {
+        let v = make_validator();
+        let now = chrono::Utc::now().timestamp();
+        let claims = json!({
+            "iss": "iss", "aud": "aud", "scope": "mcp:tools:execute mcp:admin",
+            "exp": now + 600, "iat": now, "sub": "alice",
+        });
+        let token = sign_token(claims);
+        let claims = v.validate_token(&token).expect("valid token");
+        assert_eq!(claims.sub, "alice");
+        assert!(claims.scopes.iter().any(|s| s == "mcp:tools:execute"));
     }
 }

@@ -72,6 +72,9 @@ flamegraph.svg
 id_rsa
 id_rsa.pub
 id_ed25519
+
+# Allow OAuth test-only RSA fixtures (synthetic, never used outside tests)
+!tests/fixtures/oauth/*.pem
 id_ed25519.pub
 id_ecdsa
 id_ecdsa.pub
