@@ -109,9 +109,16 @@ pub enum Commands {
     /// Start MCP server over Streamable HTTP transport
     #[cfg(feature = "http")]
     ServeHttp {
-        /// Bind address (overrides config, e.g. "0.0.0.0:3000")
+        /// Bind address (overrides config, e.g. "127.0.0.1:3000")
         #[arg(short, long)]
         bind: Option<String>,
+
+        /// SECURITY: allow binding to a non-loopback address with OAuth
+        /// disabled. Required only when fronted by an external auth proxy.
+        /// Without this flag, non-loopback binds are refused unless OAuth
+        /// is enabled in config.
+        #[arg(long)]
+        insecure_bind: bool,
     },
 
     /// Execute a command on a remote host

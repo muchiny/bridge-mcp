@@ -77,7 +77,7 @@ fn default_true() -> bool {
 /// HTTP transport configuration for the YAML config.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpTransportConfig {
-    /// Bind address (default: `"0.0.0.0:3000"`).
+    /// Bind address (default: `"127.0.0.1:3000"` — loopback only).
     #[serde(default = "default_http_bind")]
     pub bind: String,
 
@@ -102,6 +102,13 @@ pub struct HttpTransportConfig {
     /// their public origin (e.g. `https://app.example.com`).
     #[serde(default = "default_http_allowed_origins")]
     pub allowed_origins: Vec<String>,
+
+    /// SECURITY: bypass the loopback-or-OAuth check enforced by `serve`.
+    /// Required only when intentionally exposing the bridge on a public
+    /// interface without OAuth (e.g. behind a separate auth proxy).
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub allow_unsafe_bind: bool,
 }
 
 impl Default for HttpTransportConfig {
@@ -113,12 +120,13 @@ impl Default for HttpTransportConfig {
             max_sessions: default_http_max_sessions(),
             oauth: HttpOAuthConfig::default(),
             allowed_origins: default_http_allowed_origins(),
+            allow_unsafe_bind: false,
         }
     }
 }
 
 fn default_http_bind() -> String {
-    "0.0.0.0:3000".to_string()
+    "127.0.0.1:3000".to_string()
 }
 
 fn default_http_allowed_origins() -> Vec<String> {

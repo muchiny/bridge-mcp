@@ -60,7 +60,10 @@ async fn main() -> Result<()> {
             server.run(audit_task, Some(&config_path)).await?;
         }
         #[cfg(feature = "http")]
-        Some(Commands::ServeHttp { bind }) => {
+        Some(Commands::ServeHttp {
+            bind,
+            insecure_bind,
+        }) => {
             use mcp_ssh_bridge::mcp::transport::http as http_transport;
             use mcp_ssh_bridge::mcp::transport::oauth::OAuthConfig as TransportOAuthConfig;
 
@@ -85,6 +88,7 @@ async fn main() -> Result<()> {
                 max_sessions: config.http.max_sessions,
                 oauth,
                 allowed_origins: config.http.allowed_origins.clone(),
+                allow_unsafe_bind: insecure_bind || config.http.allow_unsafe_bind,
             };
 
             http_transport::serve(server, http_config).await?;
