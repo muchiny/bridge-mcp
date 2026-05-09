@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/audit_2026_05_09_proptests.rs (target/debug/deps/audit_2026_05_09_proptests-45c32509205d9c25)
+
+running 2 tests
+test validator_does_not_normalize_hex_or_default_value_expansion ... ok
+test validator_blacklist_normalization_resists_whitespace_encodings ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.65s
+
