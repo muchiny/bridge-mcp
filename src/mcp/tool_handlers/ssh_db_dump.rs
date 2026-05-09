@@ -4,6 +4,7 @@
 //! Supports `MySQL` (`mysqldump`) and `PostgreSQL` (`pg_dump`).
 
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::config::HostConfig;
 use crate::domain::{DatabaseCommandBuilder, DatabaseType};
@@ -23,8 +24,14 @@ pub struct SshDbDumpArgs {
     db_port: Option<u16>,
     #[serde(default)]
     db_user: Option<String>,
+    /// DB password from MCP JSON-RPC request body. Wrapped in
+    /// `Zeroizing<String>` so the heap allocation is wiped on drop
+    /// (FIND-029). Production read sites pass it to the builder as
+    /// `Option<&str>` via `.as_deref().map(String::as_str)` — `as_deref()`
+    /// peels `Zeroizing<String>` -> `&String`, then `String::as_str`
+    /// gives the final `&str`.
     #[serde(default)]
-    db_password: Option<String>,
+    db_password: Option<Zeroizing<String>>,
     #[serde(default)]
     tables: Option<Vec<String>>,
     #[serde(default)]
@@ -119,7 +126,7 @@ impl StandardTool for DbDumpTool {
             db_host,
             db_port,
             db_user,
-            args.db_password.as_deref(),
+            args.db_password.as_deref().map(String::as_str),
             &args.database,
             args.tables.as_deref(),
             args.compress.as_deref(),
@@ -469,7 +476,7 @@ mod tests {
             db_host: Some("dbhost".to_string()),
             db_port: Some(5433),
             db_user: Some("admin".to_string()),
-            db_password: Some("secret".to_string()),
+            db_password: Some(Zeroizing::new("secret".to_string())),
             tables: Some(vec!["users".to_string()]),
             compress: Some("xz".to_string()),
             timeout_seconds: None,
@@ -485,5 +492,29 @@ mod tests {
         assert!(cmd.contains("-U 'admin'"));
         assert!(cmd.contains("-t 'users'"));
         assert!(cmd.contains("| xz >"));
+    }
+
+    /// Regression: FIND-029. The `db_password` field MUST be wrapped in
+    /// `Zeroizing<String>` so the heap allocation is wiped on drop.
+    /// This test is load-bearing at the type level: only
+    /// `Option<Zeroizing<String>>` compiles below.
+    #[test]
+    fn test_db_password_field_is_zeroizing() {
+        let args: SshDbDumpArgs = serde_json::from_value(json!({
+            "host": "h",
+            "db_type": "mysql",
+            "database": "d",
+            "output_file": "/tmp/dump.sql",
+            "db_password": "secret",
+        }))
+        .expect("deserialize");
+
+        // Type proof: `Option<Zeroizing<String>>::as_deref()` yields
+        // `Option<&String>`; bridge to `&str` via `.map(String::as_str)`.
+        let pw: Option<&str> = args.db_password.as_deref().map(String::as_str);
+        assert_eq!(pw, Some("secret"));
+        // Final type-pinning assertion: only compiles when the field is
+        // exactly `Option<Zeroizing<String>>`.
+        let _typed: &Option<Zeroizing<String>> = &args.db_password;
     }
 }

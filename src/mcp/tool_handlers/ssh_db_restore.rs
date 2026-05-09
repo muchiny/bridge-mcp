@@ -4,6 +4,7 @@
 //! Supports `MySQL` and `PostgreSQL`.
 
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::config::HostConfig;
 use crate::domain::{DatabaseCommandBuilder, DatabaseType};
@@ -23,8 +24,14 @@ pub struct SshDbRestoreArgs {
     db_port: Option<u16>,
     #[serde(default)]
     db_user: Option<String>,
+    /// DB password from MCP JSON-RPC request body. Wrapped in
+    /// `Zeroizing<String>` so the heap allocation is wiped on drop
+    /// (FIND-029). Production read sites pass it to the builder as
+    /// `Option<&str>` via `.as_deref().map(String::as_str)` — `as_deref()`
+    /// peels `Zeroizing<String>` -> `&String`, then `String::as_str`
+    /// gives the final `&str`.
     #[serde(default)]
-    db_password: Option<String>,
+    db_password: Option<Zeroizing<String>>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     max_output: Option<u64>,
@@ -105,7 +112,7 @@ impl StandardTool for DbRestoreTool {
             db_host,
             db_port,
             db_user,
-            args.db_password.as_deref(),
+            args.db_password.as_deref().map(String::as_str),
             &args.database,
             &args.input_file,
         ))
@@ -245,7 +252,10 @@ mod tests {
         assert_eq!(args.db_host, Some("dbhost".to_string()));
         assert_eq!(args.db_port, Some(3307));
         assert_eq!(args.db_user, Some("admin".to_string()));
-        assert_eq!(args.db_password, Some("secret".to_string()));
+        assert_eq!(
+            args.db_password.as_deref().map(String::as_str),
+            Some("secret")
+        );
         assert_eq!(args.timeout_seconds, Some(600));
     }
 
@@ -324,5 +334,29 @@ mod tests {
             BridgeError::McpInvalidRequest(_) => {}
             e => panic!("Expected McpInvalidRequest error, got: {e:?}"),
         }
+    }
+
+    /// Regression: FIND-029. The `db_password` field MUST be wrapped in
+    /// `Zeroizing<String>` so the heap allocation is wiped on drop.
+    /// This test is load-bearing at the type level: only
+    /// `Option<Zeroizing<String>>` compiles below.
+    #[test]
+    fn test_db_password_field_is_zeroizing() {
+        let args: SshDbRestoreArgs = serde_json::from_value(json!({
+            "host": "h",
+            "db_type": "postgresql",
+            "database": "d",
+            "input_file": "/tmp/dump.sql",
+            "db_password": "secret",
+        }))
+        .expect("deserialize");
+
+        // Type proof: `Option<Zeroizing<String>>::as_deref()` yields
+        // `Option<&String>`; bridge to `&str` via `.map(String::as_str)`.
+        let pw: Option<&str> = args.db_password.as_deref().map(String::as_str);
+        assert_eq!(pw, Some("secret"));
+        // Final type-pinning assertion: only compiles when the field is
+        // exactly `Option<Zeroizing<String>>`.
+        let _typed: &Option<Zeroizing<String>> = &args.db_password;
     }
 }

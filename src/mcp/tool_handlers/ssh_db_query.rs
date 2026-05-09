@@ -4,6 +4,7 @@
 //! Supports `MySQL` and `PostgreSQL` using their respective CLI clients.
 
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::config::HostConfig;
 use crate::domain::{DatabaseCommandBuilder, DatabaseType};
@@ -23,8 +24,14 @@ pub struct SshDbQueryArgs {
     db_port: Option<u16>,
     #[serde(default)]
     db_user: Option<String>,
+    /// DB password from MCP JSON-RPC request body. Wrapped in
+    /// `Zeroizing<String>` so the heap allocation is wiped on drop
+    /// (FIND-029). Production read sites pass it to the builder as
+    /// `Option<&str>` via `.as_deref().map(String::as_str)` — `as_deref()`
+    /// peels `Zeroizing<String>` -> `&String`, then `String::as_str`
+    /// gives the final `&str`.
     #[serde(default)]
-    db_password: Option<String>,
+    db_password: Option<Zeroizing<String>>,
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
@@ -126,7 +133,7 @@ impl StandardTool for DbQueryTool {
             db_host,
             db_port,
             db_user,
-            args.db_password.as_deref(),
+            args.db_password.as_deref().map(String::as_str),
             &args.database,
             &args.query,
             args.format.as_deref(),
@@ -328,7 +335,10 @@ mod tests {
         assert_eq!(args.db_host, Some("dbhost".to_string()));
         assert_eq!(args.db_port, Some(3307));
         assert_eq!(args.db_user, Some("admin".to_string()));
-        assert_eq!(args.db_password, Some("secret".to_string()));
+        assert_eq!(
+            args.db_password.as_deref().map(String::as_str),
+            Some("secret")
+        );
         assert_eq!(args.format, Some("csv".to_string()));
         assert_eq!(args.timeout_seconds, Some(120));
         assert_eq!(args.max_output, Some(5000));
@@ -479,7 +489,7 @@ mod tests {
             db_host: Some("dbhost".to_string()),
             db_port: Some(5433),
             db_user: Some("admin".to_string()),
-            db_password: Some("secret".to_string()),
+            db_password: Some(Zeroizing::new("secret".to_string())),
             format: None,
             timeout_seconds: None,
             max_output: None,
@@ -514,6 +524,31 @@ mod tests {
 
         let cmd = DbQueryTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("-B"));
+    }
+
+    /// Regression: FIND-029. The `db_password` field MUST be wrapped in
+    /// `Zeroizing<String>` so the heap allocation is wiped on drop.
+    /// This test is load-bearing at the type level: only
+    /// `Option<Zeroizing<String>>` compiles below.
+    #[test]
+    fn test_db_password_field_is_zeroizing() {
+        let args: SshDbQueryArgs = serde_json::from_value(json!({
+            "host": "h",
+            "db_type": "mysql",
+            "query": "SELECT 1",
+            "database": "d",
+            "db_password": "secret",
+        }))
+        .expect("deserialize");
+
+        // Type proof: `Option<Zeroizing<String>>::as_deref()` yields
+        // `Option<&String>` (one level of deref through `Zeroizing<T>`).
+        // We bridge to `Option<&str>` via `.map(String::as_str)`.
+        let pw: Option<&str> = args.db_password.as_deref().map(String::as_str);
+        assert_eq!(pw, Some("secret"));
+        // Final type-pinning assertion: this line only compiles when the
+        // field is exactly `Option<Zeroizing<String>>`.
+        let _typed: &Option<Zeroizing<String>> = &args.db_password;
     }
 
     #[test]
