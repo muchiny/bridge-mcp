@@ -138,12 +138,18 @@ impl VaultCommandBuilder {
     /// Build a `vault kv put` command.
     ///
     /// Constructs: `vault kv put [-mount={mount}] {path} {key=value}...`
+    ///
+    /// `data` carries `key=value` pairs; values are typically secrets, so the
+    /// caller is expected to pass `Zeroizing<String>` (FIND-030) to avoid
+    /// gratuitous heap residency. The slice is borrowed immutably here; the
+    /// owner controls when the secret bytes are wiped.
+    ///
     /// # Errors
     ///
     /// Returns [`BridgeError::CommandDenied`] if `path` contains unsafe characters.
     pub fn build_write_command(
         path: &str,
-        data: &[String],
+        data: &[zeroize::Zeroizing<String>],
         vault_addr: Option<&str>,
         mount: Option<&str>,
     ) -> Result<String> {
@@ -257,7 +263,10 @@ mod tests {
 
     #[test]
     fn test_write_simple() {
-        let data = vec!["username=admin".to_string(), "password=secret".to_string()];
+        let data = vec![
+            zeroize::Zeroizing::new("username=admin".to_string()),
+            zeroize::Zeroizing::new("password=secret".to_string()),
+        ];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
         assert!(cmd.contains("vault kv put 'secret/myapp'"));
@@ -267,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_write_with_mount() {
-        let data = vec!["key=value".to_string()];
+        let data = vec![zeroize::Zeroizing::new("key=value".to_string())];
         let cmd = VaultCommandBuilder::build_write_command("myapp/config", &data, None, Some("kv"))
             .unwrap();
         assert!(cmd.contains("-mount='kv'"));
@@ -284,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_write_injection_in_data_value() {
-        let data = vec!["password=s3cr3t; rm -rf /".to_string()];
+        let data = vec![zeroize::Zeroizing::new("password=s3cr3t; rm -rf /".to_string())];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/app", &data, None, None).unwrap();
         assert!(cmd.contains("'password=s3cr3t; rm -rf /'"));
@@ -339,7 +348,10 @@ mod tests {
 
     #[test]
     fn test_write_all_options() {
-        let data = vec!["user=admin".to_string(), "pass=secret".to_string()];
+        let data = vec![
+            zeroize::Zeroizing::new("user=admin".to_string()),
+            zeroize::Zeroizing::new("pass=secret".to_string()),
+        ];
         let cmd = VaultCommandBuilder::build_write_command(
             "secret/myapp",
             &data,
@@ -366,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_write_empty_data() {
-        let data: Vec<String> = vec![];
+        let data: Vec<zeroize::Zeroizing<String>> = vec![];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
         assert!(cmd.contains("vault kv put 'secret/myapp'"));
@@ -374,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_write_single_data_item() {
-        let data = vec!["key=val".to_string()];
+        let data = vec![zeroize::Zeroizing::new("key=val".to_string())];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
         assert!(cmd.contains("'secret/myapp' 'key=val'"));
@@ -382,7 +394,7 @@ mod tests {
 
     #[test]
     fn test_write_data_with_single_quotes() {
-        let data = vec!["msg=it's secret".to_string()];
+        let data = vec![zeroize::Zeroizing::new("msg=it's secret".to_string())];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/app", &data, None, None).unwrap();
         assert!(cmd.contains("it'\\''s secret"));

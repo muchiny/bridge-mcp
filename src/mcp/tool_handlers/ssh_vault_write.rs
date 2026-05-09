@@ -10,7 +10,11 @@ use crate::mcp_standard_tool;
 pub struct SshVaultWriteArgs {
     host: String,
     path: String,
-    data: Vec<String>,
+    /// FIND-030: each `key=value` pair is wrapped in `Zeroizing<String>` so
+    /// the heap allocation is wiped when this `Args` instance is dropped.
+    /// Local heap residency was gratuitous — the secret only needs to live
+    /// long enough to build the remote `vault kv put` command.
+    data: Vec<zeroize::Zeroizing<String>>,
     vault_addr: Option<String>,
     mount: Option<String>,
     timeout_seconds: Option<u64>,
@@ -151,7 +155,9 @@ mod tests {
         let args: SshVaultWriteArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
         assert_eq!(args.path, "secret/data/myapp");
-        assert_eq!(args.data, vec!["username=admin", "password=secret123"]);
+        // FIND-030: data is Vec<Zeroizing<String>>; deref to compare as &str.
+        let data_strs: Vec<&str> = args.data.iter().map(|s| s.as_str()).collect();
+        assert_eq!(data_strs, vec!["username=admin", "password=secret123"]);
         assert_eq!(
             args.vault_addr.as_deref(),
             Some("https://vault.example.com:8200")
@@ -168,7 +174,8 @@ mod tests {
         let args: SshVaultWriteArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
         assert_eq!(args.path, "secret/data/myapp");
-        assert_eq!(args.data, vec!["key=value"]);
+        let data_strs: Vec<&str> = args.data.iter().map(|s| s.as_str()).collect();
+        assert_eq!(data_strs, vec!["key=value"]);
         assert!(args.vault_addr.is_none());
         assert!(args.mount.is_none());
         assert!(args.timeout_seconds.is_none());
