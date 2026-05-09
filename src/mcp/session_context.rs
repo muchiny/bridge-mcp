@@ -18,11 +18,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 
 use tokio::sync::{RwLock, mpsc};
 
 use super::pending_requests::PendingRequests;
-use super::protocol::{RootEntry, WriterMessage};
+use super::protocol::{LogLevel, RootEntry, WriterMessage};
 use super::session_capabilities::SessionCapabilities;
 
 /// All per-session state bundled into one cloneable handle.
@@ -51,6 +52,12 @@ pub struct SessionContext {
     /// Per-session client-declared workspace roots. Written by
     /// `fetch_roots` after `notifications/initialized`. FIND-037.
     pub roots: Arc<RwLock<Vec<RootEntry>>>,
+    /// Per-session log-level threshold for `notifications/message`.
+    /// Updated by `notifications/setLevel` from THIS session, read by
+    /// the per-session `McpLogger`. FIND-035: previously a global
+    /// `Arc<AtomicU8>` on `McpServer`, so client B's setLevel could
+    /// mute client A's notifications.
+    pub log_level: Arc<AtomicU8>,
 }
 
 impl SessionContext {
@@ -66,6 +73,7 @@ impl SessionContext {
             runtime_max_output: Arc::new(RwLock::new(None)),
             resource_subs: Arc::new(RwLock::new(HashMap::new())),
             roots: Arc::new(RwLock::new(Vec::new())),
+            log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
         }
     }
 }

@@ -720,7 +720,13 @@ impl McpServer {
 
         // Create / refresh MCP logger (writes `notifications/message`
         // to the client) now that we have a tx for this session.
-        let mcp_logger = Arc::new(McpLogger::new(Arc::clone(&self.log_level), tx.clone()));
+        // FIND-035: McpLogger is gated by the SESSION's log_level so
+        // `notifications/setLevel` from this client cannot mute another
+        // client's notifications.
+        let mcp_logger = Arc::new(McpLogger::new(
+            Arc::clone(&session_ctx.log_level),
+            tx.clone(),
+        ));
         *self.mcp_logger.write().await = Some(Arc::clone(&mcp_logger));
 
         // Writer task: consume the channel, forward every message to
@@ -1078,7 +1084,7 @@ impl McpServer {
             "tasks/list" => self.handle_tasks_list(id, request.params).await,
             "tasks/cancel" => self.handle_tasks_cancel(id, request.params).await,
             "completions/complete" => self.handle_completions_complete(id, request.params),
-            "logging/setLevel" => self.handle_logging_set_level(id, request.params),
+            "logging/setLevel" => self.handle_logging_set_level(id, request.params, session),
             "resources/templates/list" => self.handle_resource_templates_list(id),
             "resources/subscribe" => {
                 self.handle_resource_subscribe(id, request.params, session)
@@ -2101,6 +2107,7 @@ impl McpServer {
         &self,
         id: Option<Value>,
         params: Option<Value>,
+        session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
@@ -2116,8 +2123,16 @@ impl McpServer {
             }
         };
 
-        self.log_level
-            .store(level_params.level.severity(), Ordering::Relaxed);
+        // FIND-035: write to the SESSION's log_level so that
+        // `notifications/setLevel` from this client cannot mute another
+        // session's `notifications/message` stream. Falls back to the
+        // server-wide field for legacy non-session call paths (tests).
+        let target = if let Some(s) = session {
+            Arc::clone(&s.log_level)
+        } else {
+            Arc::clone(&self.log_level)
+        };
+        target.store(level_params.level.severity(), Ordering::Relaxed);
         info!(level = ?level_params.level, "MCP log level updated");
 
         JsonRpcResponse::success(id, json!({}))
@@ -3873,7 +3888,7 @@ mod tests {
     #[test]
     fn test_logging_set_level_missing_params() {
         let server = create_test_server();
-        let response = server.handle_logging_set_level(Some(json!(1)), None);
+        let response = server.handle_logging_set_level(Some(json!(1)), None, None);
 
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, -32602);
@@ -3883,7 +3898,7 @@ mod tests {
     fn test_logging_set_level_invalid_params() {
         let server = create_test_server();
         let params = json!({ "level": "nonexistent" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params));
+        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
 
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, -32602);
@@ -3893,7 +3908,7 @@ mod tests {
     fn test_logging_set_level_debug() {
         let server = create_test_server();
         let params = json!({ "level": "debug" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params));
+        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
 
         assert!(response.error.is_none());
         assert_eq!(server.log_level.load(Ordering::Relaxed), 0); // debug = 0
@@ -3903,7 +3918,7 @@ mod tests {
     fn test_logging_set_level_error() {
         let server = create_test_server();
         let params = json!({ "level": "error" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params));
+        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
 
         assert!(response.error.is_none());
         assert_eq!(server.log_level.load(Ordering::Relaxed), 4); // error = 4
