@@ -72,8 +72,6 @@ pub struct McpServer {
     mcp_logger: Arc<RwLock<Option<Arc<McpLogger>>>>,
     /// Completion provider for argument auto-completion.
     completion_provider: DefaultCompletionProvider,
-    /// Pending server-to-client requests (elicitation, sampling).
-    pending_requests: Arc<PendingRequests>,
     /// Active resource subscriptions (uri -> list of subscription IDs).
     resource_subscriptions: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Client-declared roots (MCP Roots capability).
@@ -207,7 +205,6 @@ impl McpServer {
             log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
             mcp_logger: Arc::new(RwLock::new(None)),
             completion_provider: DefaultCompletionProvider,
-            pending_requests: Arc::new(PendingRequests::new()),
             resource_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             roots: Arc::new(RwLock::new(Vec::new())),
             client_supports_roots: AtomicBool::new(false),
@@ -218,6 +215,20 @@ impl McpServer {
         };
 
         (server, audit_task)
+    }
+
+    /// Allocate a fresh per-session pending-requests handle.
+    ///
+    /// Test helper used by `tests/multisession_isolation.rs` to verify
+    /// that two sessions on the same `McpServer` instance get independent
+    /// `Arc<PendingRequests>` instances (Vuln 8 audit 2026-05-09).
+    /// Integration tests live in their own crate so this helper cannot
+    /// be `#[cfg(test)]`; it is gated `#[doc(hidden)]` instead so it
+    /// stays out of the public docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn allocate_session_pending_for_test(&self) -> Arc<PendingRequests> {
+        Arc::new(PendingRequests::new())
     }
 
     /// Register a new in-flight request and return its `CancellationToken`.
@@ -289,6 +300,7 @@ impl McpServer {
         tool_name: &str,
         arguments: Option<&Value>,
         notification_tx: Option<&mpsc::Sender<WriterMessage>>,
+        session_pending: Option<&Arc<PendingRequests>>,
     ) -> std::result::Result<(), String> {
         let require = {
             let cfg = self.config.read().await;
@@ -322,6 +334,15 @@ impl McpServer {
             ));
         };
 
+        // Per-session pending-requests map (Vuln 8 audit 2026-05-09): the
+        // server no longer keeps a global handle, so the elicitation
+        // round-trip MUST run against the session-local map.
+        let Some(pending) = session_pending.cloned() else {
+            return Err(format!(
+                "Tool `{tool_name}` requires user confirmation but no pending-requests slot is available for this session."
+            ));
+        };
+
         let summary = arguments.map_or_else(
             || "(no arguments)".to_string(),
             |v| {
@@ -336,7 +357,7 @@ impl McpServer {
 
         let requester = Arc::new(super::client_requester::ClientRequester::new(
             tx,
-            Arc::clone(&self.pending_requests),
+            pending,
             std::time::Duration::from_secs(120),
         ));
         let elicitation = super::elicitation::ElicitationService::new(requester);
@@ -361,6 +382,7 @@ impl McpServer {
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
         progress_token: Option<Value>,
+        session_pending: Option<Arc<PendingRequests>>,
     ) -> ToolContext {
         // Read config snapshot
         let mut config_snapshot = {
@@ -392,7 +414,7 @@ impl McpServer {
         ctx.cancel_token = cancel_token;
         ctx.notification_tx = notification_tx;
         ctx.progress_token = progress_token;
-        ctx.pending_requests = Some(Arc::clone(&self.pending_requests));
+        ctx.pending_requests = session_pending;
         ctx.client_supports_elicitation = self.client_supports_elicitation.load(Ordering::Relaxed);
         ctx.client_supports_sampling = self.client_supports_sampling.load(Ordering::Relaxed);
         ctx.mcp_logger = self.mcp_logger.read().await.as_ref().map(Arc::clone);
@@ -596,6 +618,11 @@ impl McpServer {
     async fn serve_session(self: Arc<Self>, session: Session) {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(100);
 
+        // Per-session pending-requests map (Vuln 8 audit 2026-05-09).
+        // Each connected client gets its own map; client B cannot resolve
+        // an id minted by client A.
+        let session_pending = Arc::new(PendingRequests::new());
+
         // Store the per-session writer channel globally so config
         // watcher + background workers can find a live sender. With
         // stdio this is set once and cleared on exit; with multi-
@@ -642,7 +669,10 @@ impl McpServer {
 
             match incoming {
                 IncomingMessage::Single(message) => {
-                    let Some(request) = self.route_incoming_message(message, &tx).await else {
+                    let Some(request) = self
+                        .route_incoming_message(message, &tx, &session_pending)
+                        .await
+                    else {
                         continue;
                     };
 
@@ -678,10 +708,16 @@ impl McpServer {
                         method = %request.method,
                     );
                     let session_tx = tx.clone();
+                    let session_pending_for_task = Arc::clone(&session_pending);
                     tokio::spawn(
                         async move {
                             let response = server
-                                .handle_request_with_cancel(request, cancel_token, Some(session_tx))
+                                .handle_request_with_cancel(
+                                    request,
+                                    cancel_token,
+                                    Some(session_tx),
+                                    Some(session_pending_for_task),
+                                )
                                 .await;
                             let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
                             if let Some(rid) = rid_cleanup {
@@ -793,10 +829,17 @@ impl McpServer {
     ///
     /// Returns `Some(JsonRpcRequest)` if it's a request to be dispatched,
     /// or `None` if it was handled inline (e.g., a client response or notification).
+    ///
+    /// The `session_pending` argument is the per-session pending-requests
+    /// map (Vuln 8 audit 2026-05-09). Client responses to server-initiated
+    /// requests are resolved against THIS session's map only — a different
+    /// client on the same daemon cannot resolve a request another session
+    /// initiated.
     async fn route_incoming_message(
         &self,
         message: JsonRpcMessage,
         tx: &mpsc::Sender<WriterMessage>,
+        session_pending: &Arc<PendingRequests>,
     ) -> Option<JsonRpcRequest> {
         // If no method, it's a response to a server-initiated request (elicitation/sampling)
         if message.method.is_none() {
@@ -814,7 +857,7 @@ impl McpServer {
                 } else {
                     ClientResponse::Success(message.result.unwrap_or(Value::Null))
                 };
-                if !self.pending_requests.resolve(&id_str, response) {
+                if !session_pending.resolve(&id_str, response) {
                     debug!(id = %id_str, "Received response for unknown request ID");
                 }
             }
@@ -823,7 +866,7 @@ impl McpServer {
 
         // Handle client notifications (no response needed per JSON-RPC 2.0)
         if message.method.as_deref() == Some("notifications/roots/list_changed") {
-            self.handle_roots_changed(tx).await;
+            self.handle_roots_changed(tx, session_pending).await;
             return None;
         }
         if message.method.as_deref() == Some("notifications/cancelled") {
@@ -831,7 +874,8 @@ impl McpServer {
             return None;
         }
         if message.method.as_deref() == Some("notifications/initialized") {
-            self.handle_initialized_notification(tx).await;
+            self.handle_initialized_notification(tx, session_pending)
+                .await;
             return None;
         }
 
@@ -845,14 +889,22 @@ impl McpServer {
     }
 
     /// Fetch roots from the client after initialization.
-    async fn fetch_roots(&self, tx: &mpsc::Sender<WriterMessage>) {
+    ///
+    /// Uses the SESSION-LOCAL pending-requests map so a `roots/list`
+    /// response coming back from the client is resolved against this
+    /// session only (Vuln 8 audit 2026-05-09).
+    async fn fetch_roots(
+        &self,
+        tx: &mpsc::Sender<WriterMessage>,
+        session_pending: &Arc<PendingRequests>,
+    ) {
         if !self.client_supports_roots.load(Ordering::Relaxed) {
             return;
         }
 
         let requester = super::client_requester::ClientRequester::new(
             tx.clone(),
-            Arc::clone(&self.pending_requests),
+            Arc::clone(session_pending),
             std::time::Duration::from_secs(10),
         );
 
@@ -870,16 +922,24 @@ impl McpServer {
     }
 
     /// Handle `notifications/roots/list_changed` — re-fetch roots.
-    async fn handle_roots_changed(&self, tx: &mpsc::Sender<WriterMessage>) {
+    async fn handle_roots_changed(
+        &self,
+        tx: &mpsc::Sender<WriterMessage>,
+        session_pending: &Arc<PendingRequests>,
+    ) {
         info!("Client roots changed, re-fetching");
-        self.fetch_roots(tx).await;
+        self.fetch_roots(tx, session_pending).await;
     }
 
     /// Handle `notifications/initialized` — fetch client roots if supported.
     /// No response is emitted (per JSON-RPC 2.0 notification semantics).
-    async fn handle_initialized_notification(&self, tx: &mpsc::Sender<WriterMessage>) {
+    async fn handle_initialized_notification(
+        &self,
+        tx: &mpsc::Sender<WriterMessage>,
+        session_pending: &Arc<PendingRequests>,
+    ) {
         info!("Client sent notifications/initialized; fetching roots");
-        self.fetch_roots(tx).await;
+        self.fetch_roots(tx, session_pending).await;
     }
 
     /// Get the current client roots (for path validation).
@@ -894,8 +954,14 @@ impl McpServer {
     /// request. The stdio `run()` loop uses the internal
     /// `handle_request_with_cancel` variant to honor MCP
     /// `notifications/cancelled`.
+    ///
+    /// Server-to-client features (elicitation, sampling) are unavailable on
+    /// this code path because no per-session pending-requests map is
+    /// supplied. Use [`Self::serve`] / [`Self::serve_session`] for full
+    /// MCP feature support.
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
-        self.handle_request_with_cancel(request, None, None).await
+        self.handle_request_with_cancel(request, None, None, None)
+            .await
     }
 
     /// Dispatch a JSON-RPC request with an optional cancellation token
@@ -919,6 +985,7 @@ impl McpServer {
         request: JsonRpcRequest,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
+        session_pending: Option<Arc<PendingRequests>>,
     ) -> JsonRpcResponse {
         let id = request.id.clone();
 
@@ -926,8 +993,14 @@ impl McpServer {
             "initialize" => self.handle_initialize(id, request.params).await,
             "tools/list" => self.handle_tools_list(id, request.params.as_ref()),
             "tools/call" => {
-                self.handle_tools_call(id, request.params, cancel_token, notification_tx)
-                    .await
+                self.handle_tools_call(
+                    id,
+                    request.params,
+                    cancel_token,
+                    notification_tx,
+                    session_pending,
+                )
+                .await
             }
             "prompts/list" => self.handle_prompts_list(id),
             "prompts/get" => self.handle_prompts_get(id, request.params).await,
@@ -1165,6 +1238,7 @@ impl McpServer {
         params: Option<Value>,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
+        session_pending: Option<Arc<PendingRequests>>,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
@@ -1220,6 +1294,7 @@ impl McpServer {
                 &call_params.name,
                 call_params.arguments.as_ref(),
                 notification_tx.as_ref(),
+                session_pending.as_ref(),
             )
             .await
         {
@@ -1242,6 +1317,7 @@ impl McpServer {
                         .meta
                         .as_ref()
                         .and_then(|m| m.progress_token.clone()),
+                    session_pending,
                 )
                 .await;
         }
@@ -1259,6 +1335,7 @@ impl McpServer {
                     .meta
                     .as_ref()
                     .and_then(|m| m.progress_token.clone()),
+                session_pending,
             )
             .await;
 
@@ -1366,6 +1443,7 @@ impl McpServer {
 
     /// Handle a task-augmented `tools/call`: create a task, spawn a background
     /// worker, and return `CreateTaskResult` immediately.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_tools_call_async(
         &self,
         tool_name: String,
@@ -1374,6 +1452,7 @@ impl McpServer {
         id: Option<Value>,
         notification_tx: Option<mpsc::Sender<WriterMessage>>,
         progress_token: Option<Value>,
+        session_pending: Option<Arc<PendingRequests>>,
     ) -> JsonRpcResponse {
         // Get the handler first to validate the tool exists
         let Some(handler) = self.registry.get(&tool_name) else {
@@ -1426,7 +1505,12 @@ impl McpServer {
         // handler can do clean shutdown (e.g. evicting the SSH connection
         // from the pool) when the task is cancelled via `tasks/cancel`.
         let ctx = self
-            .create_tool_context(Some(cancel_token.clone()), notification_tx, progress_token)
+            .create_tool_context(
+                Some(cancel_token.clone()),
+                notification_tx,
+                progress_token,
+                session_pending,
+            )
             .await;
 
         // Spawn the background worker
@@ -1516,7 +1600,7 @@ impl McpServer {
 
         info!(prompt = %get_params.name, "Prompt get");
 
-        let ctx = self.create_tool_context(None, None, None).await;
+        let ctx = self.create_tool_context(None, None, None, None).await;
 
         match self
             .prompt_registry
@@ -1535,7 +1619,7 @@ impl McpServer {
     }
 
     async fn handle_resources_list(&self, id: Option<Value>) -> JsonRpcResponse {
-        let ctx = self.create_tool_context(None, None, None).await;
+        let ctx = self.create_tool_context(None, None, None, None).await;
 
         match self.resource_registry.list(&ctx).await {
             Ok(resources) => {
@@ -1570,7 +1654,7 @@ impl McpServer {
 
         info!(uri = %read_params.uri, "Resource read");
 
-        let ctx = self.create_tool_context(None, None, None).await;
+        let ctx = self.create_tool_context(None, None, None, None).await;
 
         match self.resource_registry.read(&read_params.uri, &ctx).await {
             Ok(contents) => {
@@ -2132,7 +2216,7 @@ mod tests {
         let server = create_test_server();
 
         let response = server
-            .handle_tools_call(Some(json!(1)), None, None, None)
+            .handle_tools_call(Some(json!(1)), None, None, None, None)
             .await;
 
         assert!(response.error.is_some());
@@ -2149,7 +2233,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         assert!(response.error.is_some());
@@ -2166,7 +2250,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         // Unknown tool returns success with error content (MCP spec)
@@ -2199,7 +2283,7 @@ mod tests {
             "arguments": {"host": "prod", "name": "backup"}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -2234,7 +2318,7 @@ mod tests {
             "arguments": {}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
         let result = response.result.unwrap();
         assert_ne!(result["isError"].as_bool(), Some(true));
@@ -2251,7 +2335,7 @@ mod tests {
             "arguments": {"query": "docker", "limit": 3}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
         let result = response.result.unwrap();
         assert_ne!(result["isError"].as_bool(), Some(true));
@@ -2281,7 +2365,7 @@ mod tests {
             "arguments": {"name": first_real}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
         let result = response.result.unwrap();
         assert_ne!(result["isError"].as_bool(), Some(true));
@@ -2303,7 +2387,7 @@ mod tests {
             "arguments": {"host": "nonexistent", "name": "x"}
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
@@ -2363,7 +2447,10 @@ mod tests {
             error: None,
         };
 
-        let routed = server.route_incoming_message(message, &tx).await;
+        let session_pending = Arc::new(PendingRequests::new());
+        let routed = server
+            .route_incoming_message(message, &tx, &session_pending)
+            .await;
 
         assert!(routed.is_none(), "notification must not be dispatched");
         assert!(
@@ -2396,8 +2483,12 @@ mod tests {
         };
 
         let server_bg = Arc::clone(&server);
-        let route_handle =
-            tokio::spawn(async move { server_bg.route_incoming_message(message, &tx).await });
+        let session_pending = Arc::new(PendingRequests::new());
+        let route_handle = tokio::spawn(async move {
+            server_bg
+                .route_incoming_message(message, &tx, &session_pending)
+                .await
+        });
 
         let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
@@ -2422,7 +2513,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -2641,7 +2732,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         // Should succeed (null arguments treated as empty)
@@ -2657,7 +2748,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         // Empty name should result in tool not found
@@ -2942,7 +3033,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         // Synchronous: should return content directly (not CreateTaskResult)
@@ -2961,7 +3052,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         assert!(response.error.is_none());
@@ -2987,7 +3078,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, Some(tx))
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(tx), None)
             .await;
 
         assert!(response.error.is_none());
@@ -3032,7 +3123,7 @@ mod tests {
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
 
         // Unknown tool should return error content, not CreateTaskResult
@@ -3051,7 +3142,7 @@ mod tests {
             "task": {"ttl": 60000}
         });
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(call_params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(call_params), None, None, None)
             .await;
         let task_id = call_response.result.unwrap()["task"]["taskId"]
             .as_str()
@@ -3146,7 +3237,7 @@ mod tests {
         });
 
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, None, None)
             .await;
         let task_id = call_response.result.unwrap()["task"]["taskId"]
             .as_str()
@@ -3977,7 +4068,7 @@ mod tests {
         // runs; deeper verification lives in the full integration test
         // added in commit 6.
         let response = server
-            .handle_request_with_cancel(request, Some(token), None)
+            .handle_request_with_cancel(request, Some(token), None, None)
             .await;
         assert!(response.result.is_some() || response.error.is_some());
     }

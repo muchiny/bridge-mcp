@@ -422,18 +422,31 @@ mod tests {
 
     /// Resolve the most-recently-issued pending request with the given
     /// JSON-RPC response value. Used by the decline/cancel tests.
-    fn resolve_only_pending(pending: &PendingRequests, response: Value) {
-        // The test never has more than one in-flight request at a time,
-        // so we discover the id by issuing a `create_request` and
-        // resolving the *previous* one. Cleaner: use the locked
-        // hashmap directly via `len()` and resolve "srv-1" since the
-        // counter starts at 1.
+    ///
+    /// IDs are now UUID-based (Vuln 8, audit 2026-05-09), so we cannot
+    /// hard-code `"srv-1"`. Tests pass the id observed on the writer
+    /// channel (extracted via `extract_outbound_id`).
+    fn resolve_only_pending(pending: &PendingRequests, id: &str, response: Value) {
         assert_eq!(pending.len(), 1, "exactly one request must be in flight");
         let resolved = pending.resolve(
-            "srv-1",
+            id,
             crate::mcp::pending_requests::ClientResponse::Success(response),
         );
         assert!(resolved, "must resolve the pending request");
+    }
+
+    /// Pull the request id out of an outbound `WriterMessage::Request`,
+    /// stringifying it the same way `route_incoming_message` does so
+    /// `pending.resolve` lookups match.
+    fn extract_outbound_id(msg: &super::super::protocol::WriterMessage) -> String {
+        if let super::super::protocol::WriterMessage::Request(req) = msg {
+            return match &req.id {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+        }
+        let _ = msg;
+        panic!("expected WriterMessage::Request, got a different WriterMessage variant");
     }
 
     /// `delete match arm "decline"` on line 81 must change behavior:
@@ -448,12 +461,13 @@ mod tests {
         let handle = tokio::spawn(async move { service.elicit("Confirm?", None).await });
 
         // Drain the outgoing request so the requester registers the pending id.
-        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let outbound = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("request sent")
             .expect("channel open");
+        let id = extract_outbound_id(&outbound);
 
-        resolve_only_pending(&pending, serde_json::json!({"action": "decline"}));
+        resolve_only_pending(&pending, &id, serde_json::json!({"action": "decline"}));
 
         let result = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
@@ -474,12 +488,13 @@ mod tests {
 
         let handle = tokio::spawn(async move { service.elicit("Confirm?", None).await });
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let outbound = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("request sent")
             .expect("channel open");
+        let id = extract_outbound_id(&outbound);
 
-        resolve_only_pending(&pending, serde_json::json!({"action": "cancel"}));
+        resolve_only_pending(&pending, &id, serde_json::json!({"action": "cancel"}));
 
         let result = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
@@ -501,12 +516,13 @@ mod tests {
         let handle =
             tokio::spawn(async move { service.elicit_url("Open", "https://example.com").await });
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let outbound = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("request sent")
             .expect("channel open");
+        let id = extract_outbound_id(&outbound);
 
-        resolve_only_pending(&pending, serde_json::json!({"action": "decline"}));
+        resolve_only_pending(&pending, &id, serde_json::json!({"action": "decline"}));
 
         let result = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
@@ -526,12 +542,13 @@ mod tests {
         let handle =
             tokio::spawn(async move { service.elicit_url("Open", "https://example.com").await });
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let outbound = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("request sent")
             .expect("channel open");
+        let id = extract_outbound_id(&outbound);
 
-        resolve_only_pending(&pending, serde_json::json!({"action": "cancel"}));
+        resolve_only_pending(&pending, &id, serde_json::json!({"action": "cancel"}));
 
         let result = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
@@ -570,14 +587,15 @@ mod tests {
 
         let handle = tokio::spawn(async move { service.elicit("Confirm?", None).await });
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let outbound = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("request sent")
             .expect("channel open");
+        let id = extract_outbound_id(&outbound);
 
         // `ElicitationCreateResult` requires an `action` string field;
         // sending an integer makes `serde_json::from_value` fail.
-        resolve_only_pending(&pending, serde_json::json!(42));
+        resolve_only_pending(&pending, &id, serde_json::json!(42));
 
         let result = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
@@ -599,12 +617,13 @@ mod tests {
         let handle =
             tokio::spawn(async move { service.elicit_url("Open", "https://example.com").await });
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let outbound = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("request sent")
             .expect("channel open");
+        let id = extract_outbound_id(&outbound);
 
-        resolve_only_pending(&pending, serde_json::json!(42));
+        resolve_only_pending(&pending, &id, serde_json::json!(42));
 
         let result = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
