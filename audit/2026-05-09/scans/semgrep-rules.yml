@@ -1,0 +1,57 @@
+# Custom Semgrep rules for mcp-ssh-bridge audit 2026-05-09
+# Encodes the context7 drift findings as repeatable detections.
+
+rules:
+  - id: mcp-ssh-bridge.serde-saphyr-no-budget
+    languages: [rust]
+    severity: ERROR
+    message: |
+      `serde_saphyr::from_str` called WITHOUT explicit `Budget`
+      (billion-laughs / depth-bomb vector). Use
+      `serde_saphyr::from_str_with_options(yaml, options)` with a Budget.
+      Tracker: FIND-001..004.
+    metadata:
+      category: security
+      confidence: HIGH
+      impact: HIGH
+    pattern-either:
+      - pattern: serde_saphyr::from_str(...)
+      - pattern: serde_saphyr::from_slice(...)
+      - pattern: serde_saphyr::from_reader(...)
+
+  - id: mcp-ssh-bridge.jwt-validation-new
+    languages: [rust]
+    severity: WARNING
+    message: |
+      `jsonwebtoken::Validation::new(...)` constructed. Verify that
+      `set_required_spec_claims(&["exp", "sub", "iss", "aud"])` is called
+      on the resulting Validation. Default jsonwebtoken 9.x only requires `exp`.
+      Tracker: FIND-007.
+    metadata:
+      category: security
+      confidence: MEDIUM
+      impact: MEDIUM
+    pattern: Validation::new($X)
+
+  - id: mcp-ssh-bridge.russh-config-default
+    languages: [rust]
+    severity: WARNING
+    message: |
+      `russh::client::Config { ..Default::default() }` does NOT pin
+      `Preferred` algorithms or rekey `Limits`. Tracker: FIND-008.
+    metadata:
+      category: security
+      confidence: MEDIUM
+      impact: MEDIUM
+    pattern-either:
+      - pattern: Config { ..Default::default() }
+      - pattern: |
+          Config {
+              ...
+              ..Default::default()
+          }
+      - pattern: |
+          russh::client::Config {
+              ...
+              ..Default::default()
+          }

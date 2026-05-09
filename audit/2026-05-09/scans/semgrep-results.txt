@@ -1,0 +1,105 @@
+Paths that match both --include and --exclude will be skipped by Semgrep.
+semgrep-core rule validation failed (PatternParseError)
+               
+               
+┌─────────────┐
+│ Scan Status │
+└─────────────┘
+  Scanning 529 files tracked by git with 3 Code rules:
+  Scanning 529 files with 3 rust rules.
+[ERROR] Rule parse error in rule audit.2026-05-09.scans.mcp-ssh-bridge.russh-config-default:
+ Invalid pattern for Rust: Stdlib.Parsing.Parse_error
+----- pattern -----
+Config {
+    ...
+    ..Default::default()
+}
+
+----- end pattern -----
+
+                
+                
+┌──────────────┐
+│ Scan Summary │
+└──────────────┘
+✅ Scan completed successfully.
+ • Findings: 15 (15 blocking)
+ • Rules run: 3
+ • Targets scanned: 529
+ • Parsed lines: ~100.0%
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
+Ran 3 rules on 529 files: 15 findings.
+                    
+                    
+┌──────────────────┐
+│ 15 Code Findings │
+└──────────────────┘
+                        
+    src/config/loader.rs
+   ❯❯❱ audit.2026-05-09.scans.mcp-ssh-bridge.serde-saphyr-no-budget
+          ❰❰ Blocking ❱❱
+          `serde_saphyr::from_str` called WITHOUT explicit `Budget` (billion-laughs / depth-bomb vector). Use
+          `serde_saphyr::from_str_with_options(yaml, options)` with a Budget. Tracker: FIND-001..004.        
+                                                                                                             
+           45┆ let mut config: Config = serde_saphyr::from_str(&content)?;
+                       
+    src/config/types.rs
+   ❯❯❱ audit.2026-05-09.scans.mcp-ssh-bridge.serde-saphyr-no-budget
+          ❰❰ Blocking ❱❱
+          `serde_saphyr::from_str` called WITHOUT explicit `Budget` (billion-laughs / depth-bomb vector). Use
+          `serde_saphyr::from_str_with_options(yaml, options)` with a Budget. Tracker: FIND-001..004.        
+                                                                                                             
+          1715┆ let config: ToolGroupsConfig = serde_saphyr::from_str(yaml).unwrap();
+            ⋮┆----------------------------------------
+          1725┆ let config: ToolGroupsConfig = serde_saphyr::from_str(yaml).unwrap();
+            ⋮┆----------------------------------------
+          1823┆ let ov: ClientOverride = serde_saphyr::from_str(yaml).unwrap();
+            ⋮┆----------------------------------------
+          1836┆ let ov: ClientOverride = serde_saphyr::from_str(yaml).unwrap();
+            ⋮┆----------------------------------------
+          1843┆ let ov2: ClientOverride = serde_saphyr::from_str(yaml_contains).unwrap();
+            ⋮┆----------------------------------------
+          1857┆ let config: LimitsConfig = serde_saphyr::from_str(yaml).unwrap();
+                         
+    src/domain/runbook.rs
+   ❯❯❱ audit.2026-05-09.scans.mcp-ssh-bridge.serde-saphyr-no-budget
+          ❰❰ Blocking ❱❱
+          `serde_saphyr::from_str` called WITHOUT explicit `Budget` (billion-laughs / depth-bomb vector). Use
+          `serde_saphyr::from_str_with_options(yaml, options)` with a Budget. Tracker: FIND-001..004.        
+                                                                                                             
+          160┆ let runbook: Runbook = serde_saphyr::from_str(&content)
+            ⋮┆----------------------------------------
+          188┆ serde_saphyr::from_str(yaml)
+            ⋮┆----------------------------------------
+          336┆ let rb: Runbook = serde_saphyr::from_str(yaml).expect("parse");
+            ⋮┆----------------------------------------
+          355┆ let rb: Runbook = serde_saphyr::from_str(yaml).expect("parse");
+            ⋮┆----------------------------------------
+          375┆ let rb: Runbook = serde_saphyr::from_str(yaml).expect("parse");
+                           
+    src/domain/yq_filter.rs
+   ❯❯❱ audit.2026-05-09.scans.mcp-ssh-bridge.serde-saphyr-no-budget
+          ❰❰ Blocking ❱❱
+          `serde_saphyr::from_str` called WITHOUT explicit `Budget` (billion-laughs / depth-bomb vector). Use
+          `serde_saphyr::from_str_with_options(yaml, options)` with a Budget. Tracker: FIND-001..004.        
+                                                                                                             
+           42┆ let value: serde_json::Value = serde_saphyr::from_str(yaml).map_err(|e| {
+                              
+    src/mcp/transport/oauth.rs
+    ❯❱ audit.2026-05-09.scans.mcp-ssh-bridge.jwt-validation-new
+          ❰❰ Blocking ❱❱
+          `jsonwebtoken::Validation::new(...)` constructed. Verify that `set_required_spec_claims(&["exp",    
+          "sub", "iss", "aud"])` is called on the resulting Validation. Default jsonwebtoken 9.x only requires
+          `exp`. Tracker: FIND-007.                                                                           
+                                                                                                              
+          212┆ let mut validation = Validation::new(header.alg);
+                        
+    src/security/rbac.rs
+   ❯❯❱ audit.2026-05-09.scans.mcp-ssh-bridge.serde-saphyr-no-budget
+          ❰❰ Blocking ❱❱
+          `serde_saphyr::from_str` called WITHOUT explicit `Budget` (billion-laughs / depth-bomb vector). Use
+          `serde_saphyr::from_str_with_options(yaml, options)` with a Budget. Tracker: FIND-001..004.        
+                                                                                                             
+          299┆ let config: RbacConfig = serde_saphyr::from_str(yaml).unwrap();
+

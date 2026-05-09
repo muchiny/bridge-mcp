@@ -35,6 +35,7 @@ This file is the **single source of truth** for every concrete problem the audit
 | FIND-026 | `Cargo.toml` (`serde-saphyr = "=0.0.21"`) | Pre-1.0 single-maintainer YAML parser on critical-path. Primary author has 649/667 commits, 167 GitHub stars, 0 open issues (low scrutiny). Parses ALL config + runbook YAML. Maintainer-takeover or buggy update would compromise everything that goes through `from_str` (FIND-001..004). | Stay pinned at `=0.0.21`, subscribe to release notifications, plan migration when crate reaches 1.0 or alternative emerges. Vendor source as fallback. | Task 10 (supply-chain) | open |
 | FIND-028 | `src/config/types.rs:219` | `HostConfig.sudo_password: Option<String>` not `Zeroizing`. Same class as FIND-014 (SOCKS password) on the sibling field. `HostConfig` lives for entire process lifetime; password sits in heap from start to exit. Hot-reload (`src/config/watcher.rs`) does NOT wipe old allocations. | `pub sudo_password: Option<Zeroizing<String>>`. Update borrow sites with `.as_deref()` — no behavior change. | Task 11 (zeroize-audit) | open |
 | FIND-029 | `src/mcp/tool_handlers/ssh_db_query.rs:27` (+ likely `ssh_db_dump.rs`, `ssh_mysql_query.rs`, `ssh_postgresql_query.rs`) | `SshDbQueryArgs.db_password: Option<String>` arg not `Zeroizing`. Password from MCP JSON-RPC request body sits in plain heap during handler. `as_deref()` borrows the underlying `&str` for `database.rs::write_password_env`; drop of `Args` does NOT wipe. | `db_password: Option<Zeroizing<String>>` in every DB handler `Args` struct. | Task 11 (zeroize-audit) | open |
+| FIND-032 | `src/domain/yq_filter.rs:42` | `yaml_to_json_string` uses `serde_saphyr::from_str(yaml)` without `Budget`. The `yaml: &str` arg is attacker-influenceable (MCP request body OR captured `ssh_exec` stdout via `output_id`). Same billion-laughs / depth-bomb class as FIND-001..004. Missed by Task 4 context7 review because not a standard config file. | Same as FIND-001..004: `serde_saphyr::from_str_with_options(yaml, options! { budget: budget! { ... } })`. | Task 12 (custom semgrep rule confirmed) | open |
 
 ---
 
@@ -124,11 +125,11 @@ For Open Questions resolved by a later task: update the OQ row's "Owner task" co
 ## Summary counters (auto-update at end of each commit)
 
 - P0: **6**
-- P1: **7**
+- P1: **8**
 - P2: **14**
 - P3: **4**
-- FP (proven): **5**
+- FP (proven): **5** (sanitizer self-tests) **+ 4 confirmed test-only saphyr matches** (rbac.rs:299, runbook.rs:336/355/375)
 - OQ (open): **13**
-- **Total open findings: 31**
+- **Total open findings: 32**
 
-**Last assigned ID:** FIND-031
+**Last assigned ID:** FIND-032
