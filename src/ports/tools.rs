@@ -20,6 +20,29 @@ use crate::ssh::SessionManager;
 
 use super::executor_router::ExecutorRouter;
 
+/// Lexically normalize a POSIX-style absolute path: collapse `.`, `..`,
+/// and repeated `/` without touching the filesystem. Output stays
+/// absolute (leading `/`). Used by `validate_root_scope` so a path
+/// `/root/../etc/passwd` resolves to `/etc/passwd` before the prefix
+/// check rather than after.
+fn normalize_path_lexical(path: &str) -> String {
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {} // empty (leading/trailing/double slash) or current
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    if stack.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", stack.join("/"))
+    }
+}
+
 /// Schema definition for a tool
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
@@ -306,15 +329,21 @@ impl ToolContext {
     }
 
     /// Check if a path is within the declared client roots.
-    /// Returns Ok if no roots are declared (backward compatible) or if the path matches a root.
+    /// Returns Ok if no roots are declared (backward compatible) or if the
+    /// lexically-normalized path is a descendant of a declared root.
     pub fn validate_root_scope(&self, path: &str) -> Result<()> {
         if self.roots.is_empty() {
             return Ok(());
         }
-        // Extract path from file:// URIs in roots
+        let normalized = normalize_path_lexical(path);
+
         for root in &self.roots {
-            let root_path = root.uri.strip_prefix("file://").unwrap_or(&root.uri);
-            if root_path == "/" || path == root_path || path.starts_with(&format!("{root_path}/")) {
+            let raw = root.uri.strip_prefix("file://").unwrap_or(&root.uri);
+            let root_norm = normalize_path_lexical(raw);
+            if root_norm == "/"
+                || normalized == root_norm
+                || normalized.starts_with(&format!("{root_norm}/"))
+            {
                 return Ok(());
             }
         }
@@ -929,5 +958,39 @@ mod tests {
         .await
         .expect("must short-circuit and return without contacting the client");
         assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn validate_root_scope_rejects_parent_traversal() {
+        let mut ctx = mock::create_test_context();
+        ctx.roots = vec![root("file:///srv/app", None)];
+        assert!(ctx.validate_root_scope("/srv/app/../../etc/shadow").is_err());
+        assert!(
+            ctx.validate_root_scope("/srv/app/foo/../../../etc/passwd")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_root_scope_accepts_clean_descendant() {
+        let mut ctx = mock::create_test_context();
+        ctx.roots = vec![root("file:///srv/app", None)];
+        assert!(ctx.validate_root_scope("/srv/app/data/foo.txt").is_ok());
+        assert!(ctx.validate_root_scope("/srv/app/data/./foo.txt").is_ok());
+    }
+
+    #[test]
+    fn validate_root_scope_no_roots_still_passes() {
+        let ctx = mock::create_test_context();
+        assert!(ctx.validate_root_scope("/anywhere").is_ok());
+    }
+
+    #[test]
+    fn validate_root_scope_handles_root_with_trailing_slash() {
+        let mut ctx = mock::create_test_context();
+        ctx.roots = vec![root("file:///srv/app/", None)];
+        assert!(ctx.validate_root_scope("/srv/app/data").is_ok());
+        assert!(ctx.validate_root_scope("/srv/app").is_ok());
+        assert!(ctx.validate_root_scope("/srv/applications").is_err());
     }
 }
