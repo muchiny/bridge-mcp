@@ -840,6 +840,12 @@ impl JsonRpcNotification {
 ///
 /// The writer task serializes both responses and unsolicited notifications
 /// to the same stdout stream.
+///
+/// `Clone` is required for the per-session fanout introduced by
+/// FIND-034 (audit 2026-05-09): the config watcher broadcasts a single
+/// `WriterMessage` to every live session, and each `try_send` consumes
+/// one copy.
+#[derive(Clone)]
 pub enum WriterMessage {
     /// A JSON-RPC response to a client request.
     Response(Box<JsonRpcResponse>),
