@@ -32,19 +32,19 @@ use crate::error::BridgeError;
 /// Both the in-process length check and saphyr's own
 /// `max_reader_input_bytes` use this constant, so the rejection happens at
 /// the earliest possible point.
-pub const MAX_YAML_BYTES: usize = 1_048_576; // 1 MiB
+pub(crate) const MAX_YAML_BYTES: usize = 1_048_576; // 1 MiB
 
 /// Maximum distinct `&anchor` definitions before we reject the document.
-const MAX_ANCHORS: usize = 100;
+pub(crate) const MAX_ANCHORS: usize = 100;
 
 /// Maximum alias (`*ref`) events. Caps amplification on any anchor.
-const MAX_ALIASES: usize = 1_000;
+pub(crate) const MAX_ALIASES: usize = 1_000;
 
 /// Maximum structural nesting depth (sequences + mappings).
-const MAX_DEPTH: usize = 50;
+pub(crate) const MAX_DEPTH: usize = 50;
 
 /// Maximum total parser nodes (sequence-start / map-start / scalar events).
-const MAX_NODES: usize = 10_000;
+pub(crate) const MAX_NODES: usize = 10_000;
 
 /// Build the hardened parser options for our threat model.
 fn hardened_options() -> serde_saphyr::Options {

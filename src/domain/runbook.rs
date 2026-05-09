@@ -157,7 +157,7 @@ pub fn load_runbook(path: &Path) -> Result<Runbook, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
 
-    let runbook: Runbook = crate::config::yaml::parse_yaml(&content)
+    let runbook: Runbook = super::yaml::parse_yaml(&content)
         .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
 
     validate_runbook(&runbook)?;
@@ -185,7 +185,7 @@ pub fn builtin_runbooks() -> Vec<Runbook> {
     definitions
         .iter()
         .filter_map(|yaml| {
-            crate::config::yaml::parse_yaml(yaml)
+            super::yaml::parse_yaml(yaml)
                 .map_err(|e| warn!(error = %e, "Failed to parse built-in runbook"))
                 .ok()
         })

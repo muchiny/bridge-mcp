@@ -42,7 +42,7 @@ pub fn load_config(path: &Path) -> Result<Config> {
     }
 
     let content = std::fs::read_to_string(path)?;
-    let mut config: Config = super::yaml::parse_yaml(&content)?;
+    let mut config: Config = crate::domain::yaml::parse_yaml(&content)?;
 
     // Merge hosts from ~/.ssh/config if discovery is enabled
     if config.ssh_config.enabled {

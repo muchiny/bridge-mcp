@@ -72,7 +72,7 @@ impl ToolHandler for SshRunbookValidateHandler {
                 .map_err(|e| BridgeError::McpInvalidRequest(format!("Invalid arguments: {e}")))?;
 
         let rb = if let Some(ref yaml) = args.yaml_content {
-            crate::config::yaml::parse_yaml::<Runbook>(yaml)
+            crate::domain::yaml::parse_yaml::<Runbook>(yaml)
                 .map_err(|e| BridgeError::McpInvalidRequest(format!("YAML parse error: {e}")))?
         } else if let Some(ref name) = args.runbook_name {
             let mut all = runbook::builtin_runbooks();

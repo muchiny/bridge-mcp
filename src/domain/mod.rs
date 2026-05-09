@@ -14,6 +14,7 @@ pub mod output_truncator;
 pub mod runbook;
 pub mod task_store;
 pub mod use_cases;
+pub mod yaml;
 #[cfg(feature = "jq")]
 pub mod yq_filter;
 

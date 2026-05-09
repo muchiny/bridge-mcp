@@ -39,7 +39,7 @@ pub fn apply_yq_filter_tsv(input: &str, filter_expr: &str) -> Result<String> {
 /// Parse YAML to a `serde_json::Value` tree, then re-serialize to a
 /// JSON string suitable for the jq engine.
 fn yaml_to_json_string(yaml: &str) -> Result<String> {
-    let value: serde_json::Value = crate::config::yaml::parse_yaml(yaml).map_err(|e| {
+    let value: serde_json::Value = super::yaml::parse_yaml(yaml).map_err(|e| {
         BridgeError::McpInvalidRequest(format!(
             "yq_filter requires YAML input, but failed to parse: {e}"
         ))

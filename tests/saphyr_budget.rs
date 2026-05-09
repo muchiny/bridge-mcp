@@ -1,11 +1,11 @@
 //! Verifies our central `parse_yaml` helper enforces a Budget.
 //!
 //! Covers FIND-001/002/004/032 — we centralize all production YAML parsing
-//! through `crate::config::yaml::parse_yaml` so anti-DoS caps (anchors,
+//! through `crate::domain::yaml::parse_yaml` so anti-DoS caps (anchors,
 //! depth, nodes, input bytes) cannot be forgotten at any individual call
 //! site.
 
-use mcp_ssh_bridge::config::yaml::parse_yaml;
+use mcp_ssh_bridge::domain::yaml::parse_yaml;
 use serde_json::Value;
 
 const BILLION_LAUGHS: &str = r#"
