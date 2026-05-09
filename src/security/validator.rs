@@ -41,6 +41,27 @@ impl CompiledPatterns {
     }
 }
 
+/// Normalize a command before regex blacklist match so shell-side
+/// whitespace expansions do not evade patterns that expect literal
+/// whitespace between tokens.
+///
+/// Collapses:
+/// - `${IFS}` and `$IFS` -> single space
+/// - `$'\t'`, `$'\n'`, `$' '` (ANSI-C-quoted whitespace) -> single space
+/// - line continuation `\<NL>` -> single space
+///
+/// The whitelist match continues to run against the raw input so
+/// strict-mode whitelisting still requires byte-for-byte equality.
+fn normalize_for_blacklist_match(input: &str) -> String {
+    let mut s = input.replace("\\\n", " ");
+    s = s.replace("${IFS}", " ").replace("$IFS", " ");
+    s = s
+        .replace("$'\\t'", " ")
+        .replace("$'\\n'", " ")
+        .replace("$' '", " ");
+    s
+}
+
 /// Compiled security rules for command validation
 ///
 /// Supports hot-reload of patterns via the `reload()` method.
@@ -118,14 +139,20 @@ impl CommandValidator {
     /// Panics if the internal lock is poisoned (indicates a previous panic).
     #[expect(clippy::significant_drop_tightening)]
     pub fn validate(&self, command: &str) -> Result<()> {
-        let normalized = command.trim();
+        let raw = command.trim();
 
         // Reject empty commands
-        if normalized.is_empty() {
+        if raw.is_empty() {
             return Err(BridgeError::CommandDenied {
                 reason: "Command cannot be empty".to_string(),
             });
         }
+
+        // Normalize shell-side whitespace expansions (${IFS}, $'\t', \<NL>, ...)
+        // so default blacklist regexes that expect literal whitespace between
+        // tokens cannot be bypassed via shell expansion. Whitelist still matches
+        // the raw input below so strict-mode equality semantics are preserved.
+        let normalized_for_match = normalize_for_blacklist_match(raw);
 
         // Acquire read lock for patterns (recover from poisoned lock if needed)
         let patterns = self
@@ -135,16 +162,16 @@ impl CommandValidator {
 
         // Check blacklist first (always applies)
         for pattern in &patterns.blacklist {
-            if pattern.is_match(normalized) {
+            if pattern.is_match(&normalized_for_match) {
                 return Err(BridgeError::CommandDenied {
                     reason: format!("Command matches blacklist pattern: {pattern}"),
                 });
             }
         }
 
-        // In strict/standard mode, check whitelist
+        // In strict/standard mode, check whitelist (against raw, not normalized)
         if matches!(patterns.mode, SecurityMode::Strict | SecurityMode::Standard) {
-            let allowed = patterns.whitelist.iter().any(|p| p.is_match(normalized));
+            let allowed = patterns.whitelist.iter().any(|p| p.is_match(raw));
             if !allowed {
                 return Err(BridgeError::CommandDenied {
                     reason: format!(
@@ -173,13 +200,17 @@ impl CommandValidator {
     /// Returns an error if the command matches a blacklist pattern or is empty.
     #[expect(clippy::significant_drop_tightening)]
     pub fn validate_builtin(&self, command: &str) -> Result<()> {
-        let normalized = command.trim();
+        let raw = command.trim();
 
-        if normalized.is_empty() {
+        if raw.is_empty() {
             return Err(BridgeError::CommandDenied {
                 reason: "Command cannot be empty".to_string(),
             });
         }
+
+        // Same shell-expansion normalization as validate(); the blacklist is
+        // the only gate for builtin handlers, so the bypass surface is here.
+        let normalized_for_match = normalize_for_blacklist_match(raw);
 
         let patterns = self
             .patterns
@@ -188,7 +219,7 @@ impl CommandValidator {
 
         // Check blacklist (always applies, even for builtin tools)
         for pattern in &patterns.blacklist {
-            if pattern.is_match(normalized) {
+            if pattern.is_match(&normalized_for_match) {
                 return Err(BridgeError::CommandDenied {
                     reason: format!("Command matches blacklist pattern: {pattern}"),
                 });
@@ -802,6 +833,63 @@ mod tests {
         let result = validator.validate(&long_command);
         // In permissive mode with no blacklist, this should succeed
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Vuln 10 — shell-aware normalization for blacklist match
+    // =========================================================================
+
+    #[test]
+    fn validate_blocks_ifs_substitution() {
+        let cfg = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            ..SecurityConfig::default()
+        };
+        let v = CommandValidator::new(&cfg);
+        assert!(
+            v.validate("rm${IFS}-rf${IFS}/").is_err(),
+            "rm${{IFS}}-rf${{IFS}}/ must be blocked like 'rm -rf /'"
+        );
+    }
+
+    #[test]
+    fn validate_blocks_dollar_ifs_no_braces() {
+        let cfg = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            ..SecurityConfig::default()
+        };
+        let v = CommandValidator::new(&cfg);
+        assert!(v.validate("rm $IFS-rf $IFS/").is_err());
+    }
+
+    #[test]
+    fn validate_blocks_ansi_c_quoted_whitespace() {
+        let cfg = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            ..SecurityConfig::default()
+        };
+        let v = CommandValidator::new(&cfg);
+        assert!(v.validate(r"rm$'\t'-rf$'\t'/").is_err());
+    }
+
+    #[test]
+    fn validate_blocks_line_continuation() {
+        let cfg = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            ..SecurityConfig::default()
+        };
+        let v = CommandValidator::new(&cfg);
+        assert!(v.validate("rm \\\n-rf /").is_err());
+    }
+
+    #[test]
+    fn validate_passes_clean_safe_command_in_permissive() {
+        let cfg = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            ..SecurityConfig::default()
+        };
+        let v = CommandValidator::new(&cfg);
+        assert!(v.validate("ls -la /tmp").is_ok());
     }
 
     #[test]
