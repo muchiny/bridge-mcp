@@ -1,0 +1,40 @@
+# src/security/
+audit.rs
+entropy.rs
+mod.rs
+rate_limiter.rs
+rbac.rs
+recording.rs
+sanitizer.rs
+validator.rs
+
+# src/ssh/
+src/ssh/client.rs
+src/ssh/connector.rs
+src/ssh/known_hosts.rs
+src/ssh/mod.rs
+src/ssh/pool.rs
+src/ssh/retry.rs
+src/ssh/session.rs
+src/ssh/sftp.rs
+
+# src/mcp/transport/
+src/mcp/transport/http.rs
+src/mcp/transport/mod.rs
+src/mcp/transport/oauth.rs
+src/mcp/transport/session_store.rs
+src/mcp/transport/stdio.rs
+src/mcp/transport/unix_socket.rs
+
+# config layer
+src/config/loader.rs
+src/config/mod.rs
+src/config/ssh_config.rs
+src/config/types.rs
+src/config/watcher.rs
+
+# winrm/psrp (also handle creds)
+src/psrp/mod.rs
+src/psrp/pool.rs
+src/winrm/mod.rs
+src/winrm/pool.rs

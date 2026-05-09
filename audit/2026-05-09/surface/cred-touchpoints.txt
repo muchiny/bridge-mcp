@@ -1,0 +1,1802 @@
+src/security/entropy.rs:1://! Shannon entropy-based secret detection
+src/security/entropy.rs:3://! Detects high-entropy strings that are likely secrets (API keys, tokens, passwords)
+src/security/entropy.rs:13:    /// Minimum token length to analyze
+src/security/entropy.rs:21:/// Replacement tag for high-entropy tokens
+src/security/entropy.rs:58:    /// - Hex secrets: 3.7-4.0 bits
+src/security/entropy.rs:59:    /// - Base64 secrets: 5.0-6.0 bits
+src/security/entropy.rs:81:    /// Scan text and replace high-entropy tokens with redaction markers
+src/security/entropy.rs:84:    /// Each token is checked for entropy and length thresholds.
+src/security/entropy.rs:92:        let tokens = Self::extract_tokens(text);
+src/security/entropy.rs:94:        // Sort tokens by length descending to replace longest first
+src/security/entropy.rs:96:        let mut tokens_sorted: Vec<&str> = tokens.collect();
+src/security/entropy.rs:97:        tokens_sorted.sort_by_key(|t| std::cmp::Reverse(t.len()));
+src/security/entropy.rs:99:        for token in tokens_sorted {
+src/security/entropy.rs:100:            if token.len() < self.min_length {
+src/security/entropy.rs:104:            // Skip whitelisted tokens
+src/security/entropy.rs:105:            if self.whitelist.iter().any(|w| w == token) {
+src/security/entropy.rs:109:            // Skip tokens that look like paths, URLs, or common patterns
+src/security/entropy.rs:110:            if Self::is_safe_token(token) {
+src/security/entropy.rs:114:            let entropy = Self::shannon_entropy(token);
+src/security/entropy.rs:116:                result = result.replace(token, ENTROPY_REDACTED);
+src/security/entropy.rs:123:    /// Extract potential secret tokens from text
+src/security/entropy.rs:124:    fn extract_tokens(text: &str) -> impl Iterator<Item = &str> {
+src/security/entropy.rs:131:    /// Check if a token is a safe non-secret (path, URL, command, etc.)
+src/security/entropy.rs:132:    fn is_safe_token(token: &str) -> bool {
+src/security/entropy.rs:134:        if token.starts_with('/') || token.starts_with("./") || token.starts_with("~/") {
+src/security/entropy.rs:139:        if token.starts_with("http://") || token.starts_with("https://") {
+src/security/entropy.rs:144:        if token.starts_with('#') && token.len() <= 7 {
+src/security/entropy.rs:149:        if token
+src/security/entropy.rs:153:            && token
+src/security/entropy.rs:156:            && token.contains('.')
+src/security/entropy.rs:162:        if token.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+src/security/entropy.rs:167:        if token.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+src/security/entropy.rs:171:        // UUIDs (8-4-4-4-12 hex format) — common, not secrets
+src/security/entropy.rs:172:        if token.len() == 36
+src/security/entropy.rs:173:            && token.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+src/security/entropy.rs:174:            && token.chars().filter(|&c| c == '-').count() == 4
+src/security/entropy.rs:228:    fn test_redact_high_entropy_token() {
+src/security/entropy.rs:234:            "High entropy token should be redacted: {result}"
+src/security/entropy.rs:238:            "Original token should not appear"
+src/security/entropy.rs:281:            "Whitelisted tokens should not be redacted"
+src/security/entropy.rs:294:    fn test_short_tokens_skipped() {
+src/security/entropy.rs:298:        assert_eq!(result, input, "Short tokens should be skipped");
+src/security/entropy.rs:342:        // High-entropy 8-char token (exactly at min_length)
+src/security/entropy.rs:345:        // The token "Xk9Z2mQ1" is 8 chars — should be checked
+src/daemon/mod.rs:93:    //    token so Ctrl+C unwinds the serve loop cleanly.
+src/daemon/mod.rs:95:    let shutdown_token = transport.shutdown_token();
+src/daemon/mod.rs:99:        shutdown_token.cancel();
+src/psrp/mod.rs:105:    /// Execute with cancellation token propagation.
+src/psrp/mod.rs:114:        token: Option<CancellationToken>,
+src/psrp/mod.rs:116:        let Some(cancel) = token else {
+src/psrp/mod.rs:325:                password: zeroize::Zeroizing::new("pass".to_string()),
+src/psrp/mod.rs:331:            sudo_password: None,
+src/psrp/pool.rs:105:        let (winrm_config, credentials) = crate::winrm::build_winrm_config(host_config)?;
+src/psrp/pool.rs:106:        let client = Arc::new(winrm_rs::WinrmClient::new(winrm_config, credentials)?);
+src/psrp/pool.rs:168:                password: zeroize::Zeroizing::new("pass".to_string()),
+src/psrp/pool.rs:174:            sudo_password: None,
+src/winrm/pool.rs:5://! and auth context (`NTLMv2` session tokens, etc.). Caching the client
+src/winrm/pool.rs:108:        let (winrm_config, credentials) = build_winrm_config(host_config)?;
+src/winrm/pool.rs:109:        let client = Arc::new(winrm_rs::WinrmClient::new(winrm_config, credentials)?);
+src/winrm/pool.rs:170:                password: zeroize::Zeroizing::new("pass".to_string()),
+src/winrm/pool.rs:176:            sudo_password: None,
+src/metrics.rs:35:    /// Estimated total tokens (~3.5 chars/token)
+src/metrics.rs:36:    pub estimated_tokens_total: AtomicU64,
+src/metrics.rs:67:            estimated_tokens_total: AtomicU64::new(0),
+src/metrics.rs:94:    /// Updates total output chars, estimated tokens (~3.5 chars/token),
+src/metrics.rs:99:        // ~3.5 chars/token → multiply by 10, divide by 35 to avoid floats
+src/metrics.rs:100:        let estimated_tokens = output_chars * 10 / 35;
+src/metrics.rs:101:        self.estimated_tokens_total
+src/metrics.rs:102:            .fetch_add(estimated_tokens, Ordering::Relaxed);
+src/metrics.rs:128:    /// Render a human-readable token consumption summary for `ssh_health`.
+src/metrics.rs:130:    pub fn render_token_summary(&self) -> String {
+src/metrics.rs:134:        let total_tokens = self.estimated_tokens_total.load(Ordering::Relaxed);
+src/metrics.rs:138:        let _ = writeln!(out, "Estimated tokens: {total_tokens} (~3.5 chars/token)");
+src/metrics.rs:142:            let _ = writeln!(out, "Avg tokens/call: {}", total_tokens / total_calls);
+src/metrics.rs:155:                    let tokens = *chars * 10 / 35;
+src/metrics.rs:159:                        "  {tool:<25} {chars} chars (~{tokens} tokens, {calls} calls)"
+src/metrics.rs:177:            let tokens_saved = saved * 10 / 35;
+src/metrics.rs:178:            let _ = writeln!(out, "  Savings: {pct}% (~{tokens_saved} tokens saved)");
+src/metrics.rs:289:            "# HELP mcp_ssh_bridge_estimated_tokens_total Estimated tokens (~3.5 chars/token)\n\
+src/metrics.rs:290:             # TYPE mcp_ssh_bridge_estimated_tokens_total counter\n\
+src/metrics.rs:291:             mcp_ssh_bridge_estimated_tokens_total {}\n\n",
+src/metrics.rs:292:            self.estimated_tokens_total.load(Ordering::Relaxed)
+src/metrics.rs:432:        assert_eq!(m.estimated_tokens_total.load(Ordering::Relaxed), 1200);
+src/metrics.rs:455:    fn test_render_token_summary() {
+src/metrics.rs:463:        let summary = m.render_token_summary();
+src/metrics.rs:472:    /// Pin the *numeric* output of `render_token_summary` so that
+src/metrics.rs:473:    /// arithmetic mutations on `/`, `*`, `+`, and `>` in the token /
+src/metrics.rs:474:    /// percentage / tokens-saved formulas produce observably wrong
+src/metrics.rs:478:    fn render_token_summary_pins_arithmetic_results() {
+src/metrics.rs:481:        m.record_tool_output("ssh_exec", 350); // 350*10/35 = 100 tokens
+src/metrics.rs:484:        let s = m.render_token_summary();
+src/metrics.rs:490:        // total_tokens = 350*10/35 = 100 — kills line 105 token math
+src/metrics.rs:491:        // (record_tool_output) and pins the Estimated tokens line.
+src/metrics.rs:493:            s.contains("Estimated tokens: 100"),
+src/metrics.rs:494:            "Estimated tokens=100 missing — got:\n{s}"
+src/metrics.rs:501:        // Avg tokens/call = 100/1 = 100
+src/metrics.rs:503:            s.contains("Avg tokens/call: 100"),
+src/metrics.rs:504:            "Avg tokens/call=100 missing — got:\n{s}"
+src/metrics.rs:506:        // Per-tool token line: 350 chars (~100 tokens, 1 calls) — kills
+src/metrics.rs:509:            s.contains("350 chars (~100 tokens, 1 calls)"),
+src/metrics.rs:513:        // tokens_saved = 500*10/35 = 142. Pins lines 175/176.
+src/metrics.rs:515:            s.contains("Savings: 50% (~142 tokens saved)"),
+src/metrics.rs:516:            "savings/tokens_saved wrong — got:\n{s}"
+src/metrics.rs:526:    /// `render_token_summary` must NOT divide by zero when no calls
+src/metrics.rs:531:    fn render_token_summary_handles_empty_state_safely() {
+src/metrics.rs:533:        let s = m.render_token_summary();
+src/metrics.rs:567:    fn render_token_summary_kind_percentages_use_division() {
+src/metrics.rs:572:        let s = m.render_token_summary();
+src/metrics.rs:584:    fn test_prometheus_includes_token_metrics() {
+src/metrics.rs:591:        assert!(output.contains("mcp_ssh_bridge_estimated_tokens_total"));
+src/k8s_exec/pool.rs:7://!   token helpers, OIDC refresh) and parses certificates.
+src/k8s_exec/pool.rs:18://! `host_name`, 300-second idle TTL (K8s auth tokens typically have
+src/ssm/mod.rs:49:    /// Returns an error if AWS credentials cannot be loaded.
+src/winrm/mod.rs:50:    let credentials = match &host_config.auth {
+src/winrm/mod.rs:51:        crate::config::AuthConfig::Password { password } => {
+src/winrm/mod.rs:53:            winrm_rs::WinrmCredentials::new(host_config.user.clone(), password.as_str(), "")
+src/winrm/mod.rs:55:        crate::config::AuthConfig::Ntlm { password, domain } => {
+src/winrm/mod.rs:59:                password.as_str(),
+src/winrm/mod.rs:80:                         use password, ntlm, certificate, or kerberos"
+src/winrm/mod.rs:88:                         use password, ntlm, certificate, or kerberos"
+src/winrm/mod.rs:94:    Ok((winrm_cfg, credentials))
+src/winrm/mod.rs:155:    /// Execute with cancellation token propagation.
+src/winrm/mod.rs:164:        token: Option<tokio_util::sync::CancellationToken>,
+src/winrm/mod.rs:166:        let Some(token) = token else {
+src/winrm/mod.rs:180:            .run_powershell_with_cancel(&self.host_name, command, token)
+src/winrm/mod.rs:216:                password: zeroize::Zeroizing::new("pass".to_string()),
+src/winrm/mod.rs:222:            sudo_password: None,
+src/winrm/mod.rs:236:    fn test_build_winrm_config_password_basic() {
+src/winrm/mod.rs:252:            password: zeroize::Zeroizing::new("secret".to_string()),
+src/winrm/mod.rs:286:            passphrase: None,
+src/security/audit.rs:93:            // no secret ever lands in the JSONL file.
+src/security/audit.rs:166:    /// emission) and the writer task (for the JSONL file), so secrets are
+src/security/validator.rs:46:/// whitespace between tokens.
+src/security/validator.rs:153:        // tokens cannot be bypassed via shell expansion. Whitelist still matches
+src/security/sanitizer.rs:38:/// let sensitive = sanitizer.sanitize("token: ghp_abc123def456ghi789jkl012mno345pqr678st");
+src/security/sanitizer.rs:47:    /// Aho-Corasick automaton for literal patterns (keywords that indicate secrets)
+src/security/sanitizer.rs:53:    /// Entropy-based secret detector (complements regex patterns)
+src/security/sanitizer.rs:255:        let literal_keywords = Self::secret_keywords();
+src/security/sanitizer.rs:275:            info!("Entropy-based secret detection enabled");
+src/security/sanitizer.rs:288:    /// Keywords that indicate potential secrets (for fast pre-filtering)
+src/security/sanitizer.rs:289:    fn secret_keywords() -> Vec<&'static str> {
+src/security/sanitizer.rs:292:            "password",
+src/security/sanitizer.rs:295:            "secret",
+src/security/sanitizer.rs:296:            "token",
+src/security/sanitizer.rs:297:            "bearer",
+src/security/sanitizer.rs:299:            "credential",
+src/security/sanitizer.rs:306:            "aws_secret",
+src/security/sanitizer.rs:315:            "docker_password",
+src/security/sanitizer.rs:316:            "registry_password",
+src/security/sanitizer.rs:353:            "vault_token",
+src/security/sanitizer.rs:370:            "npm_token",
+src/security/sanitizer.rs:371:            "pypi_token",
+src/security/sanitizer.rs:390:    /// - `github` - GitHub tokens
+src/security/sanitizer.rs:391:    /// - `gitlab` - GitLab tokens
+src/security/sanitizer.rs:392:    /// - `slack` - Slack tokens and webhooks
+src/security/sanitizer.rs:395:    /// - `aws` - AWS credentials
+src/security/sanitizer.rs:396:    /// - `k3s` - K3s/Kubernetes tokens
+src/security/sanitizer.rs:397:    /// - `jwt` - JWT tokens
+src/security/sanitizer.rs:399:    /// - `kubeconfig` - Kubeconfig credentials
+src/security/sanitizer.rs:401:    /// - `database` - Database connection strings and passwords
+src/security/sanitizer.rs:402:    /// - `ansible` - Ansible vault and become passwords
+src/security/sanitizer.rs:403:    /// - `azure` - Azure credentials
+src/security/sanitizer.rs:404:    /// - `gcp` - Google Cloud credentials
+src/security/sanitizer.rs:405:    /// - `hashicorp` - Vault and Consul tokens
+src/security/sanitizer.rs:406:    /// - `generic` - Generic password/secret/token patterns
+src/security/sanitizer.rs:415:            // GitHub tokens (very specific prefixes)
+src/security/sanitizer.rs:459:            // Slack tokens
+src/security/sanitizer.rs:463:                description: "Slack token",
+src/security/sanitizer.rs:493:            // K3s tokens
+src/security/sanitizer.rs:497:                description: "K3s server token",
+src/security/sanitizer.rs:503:                description: "K3s node token",
+src/security/sanitizer.rs:506:            // JWT tokens (generic format eyJ...)
+src/security/sanitizer.rs:510:                description: "Generic JWT token",
+src/security/sanitizer.rs:539:            // npm tokens (specific prefix npm_)
+src/security/sanitizer.rs:546:            // PyPI tokens (specific prefix pypi-)
+src/security/sanitizer.rs:634:                description: "Docker login command with password",
+src/security/sanitizer.rs:651:            // Terraform HCL-style secrets (key = "value" with quotes)
+src/security/sanitizer.rs:653:                pattern: r#"(?i)(password|secret|token|api_key)\s*=\s*"[^"]+""#,
+src/security/sanitizer.rs:655:                description: "Terraform HCL secrets with quoted values",
+src/security/sanitizer.rs:660:                pattern: r"(?im)^(password|secret|token|api[_-]?key)\s{2,}\S+",
+src/security/sanitizer.rs:662:                description: "Vault KV tabular output secrets",
+src/security/sanitizer.rs:679:                pattern: r"(?i)(aws[_-]?(access[_-]?key[_-]?id|secret[_-]?access[_-]?key))\s*[=:]\s*[^\s\n]+",
+src/security/sanitizer.rs:681:                description: "AWS credentials",
+src/security/sanitizer.rs:685:                pattern: r"(?i)aws[_-]?session[_-]?token\s*[=:]\s*[^\s\n]+",
+src/security/sanitizer.rs:686:                replacement: "aws_session_token=[REDACTED]",
+src/security/sanitizer.rs:694:                description: "Docker compose database passwords",
+src/security/sanitizer.rs:707:                description: "Database password variables",
+src/security/sanitizer.rs:713:                replacement: "vault_password=[REDACTED]",
+src/security/sanitizer.rs:714:                description: "Ansible Vault password",
+src/security/sanitizer.rs:719:                replacement: "ansible_become_password=[REDACTED]",
+src/security/sanitizer.rs:720:                description: "Ansible become password",
+src/security/sanitizer.rs:724:                pattern: r"(?i)--vault-password-file\s+[^\s]+",
+src/security/sanitizer.rs:725:                replacement: "--vault-password-file [REDACTED]",
+src/security/sanitizer.rs:726:                description: "Ansible vault password file path",
+src/security/sanitizer.rs:732:                description: "Ansible SSH password",
+src/security/sanitizer.rs:735:            // GitLab CI tokens
+src/security/sanitizer.rs:739:                description: "GitLab CI tokens",
+src/security/sanitizer.rs:746:                description: "Azure credentials",
+src/security/sanitizer.rs:752:                description: "GCP credentials",
+src/security/sanitizer.rs:758:                description: "DigitalOcean token",
+src/security/sanitizer.rs:763:                pattern: r"(?i)(VAULT_TOKEN|vault_token)\s*[=:]\s*[hs]\.[A-Za-z0-9]+",
+src/security/sanitizer.rs:765:                description: "HashiCorp Vault token",
+src/security/sanitizer.rs:771:                description: "Consul HTTP token",
+src/security/sanitizer.rs:776:                pattern: r"(?i)(docker[_-]?password|registry[_-]?password)\s*[=:]\s*[^\s\n]+",
+src/security/sanitizer.rs:778:                description: "Docker registry password",
+src/security/sanitizer.rs:785:                description: "SSH password/passphrase",
+src/security/sanitizer.rs:792:                description: "SMTP/Mail password",
+src/security/sanitizer.rs:797:                pattern: r"(?i)(npm[_-]?token|NPM_TOKEN)\s*[=:]\s*[^\s\n]+",
+src/security/sanitizer.rs:799:                description: "NPM token",
+src/security/sanitizer.rs:803:                pattern: r"(?i)(pypi[_-]?token|PYPI_TOKEN)\s*[=:]\s*[^\s\n]+",
+src/security/sanitizer.rs:805:                description: "PyPI token",
+src/security/sanitizer.rs:819:                pattern: r"(?i)(password|passwd|pwd)\s*[=:]\s*[^\s\n]+",
+src/security/sanitizer.rs:821:                description: "Generic password patterns",
+src/security/sanitizer.rs:825:                pattern: r"(?i)(api[_-]?key|auth[_-]?token)\s*[=:\s]\s*[A-Za-z0-9_\-\.]{8,}",
+src/security/sanitizer.rs:827:                description: "Generic API keys and auth tokens",
+src/security/sanitizer.rs:831:                pattern: r"(?i)(secret|credential)\s*[=:]\s*[^\s\n]+",
+src/security/sanitizer.rs:833:                description: "Generic secrets",
+src/security/sanitizer.rs:836:            // Note: Generic "token" pattern removed to avoid catching specific tokens
+src/security/sanitizer.rs:856:        // but shortest real secret pattern needs at least 4 chars)
+src/security/sanitizer.rs:873:        // If no keywords found, very likely no secrets present — but entropy may still catch some
+src/security/sanitizer.rs:877:                "No secret keywords detected, skipping regex"
+src/security/sanitizer.rs:879:            // Still run entropy detection (catches secrets without known keywords)
+src/security/sanitizer.rs:910:        // Tier 4: Entropy-based detection (catches secrets missed by regex)
+src/security/sanitizer.rs:946:    /// Note: When secrets are detected, we fall back to sequential processing
+src/security/sanitizer.rs:959:        // When secrets are found, fall back to sequential processing.
+src/security/sanitizer.rs:961:        // can change text length (e.g., "PASSWORD=secret123" -> "PASSWORD=[REDACTED]"),
+src/security/sanitizer.rs:992:    fn test_sanitize_password() {
+src/security/sanitizer.rs:995:        let input = "Connecting with password=secret123 to server";
+src/security/sanitizer.rs:997:        assert!(!output.contains("secret123"), "Password should be redacted");
+src/security/sanitizer.rs:1017:    fn test_sanitize_private_key() {
+src/security/sanitizer.rs:1040:        let input = "Connecting to mysql://admin:supersecret@localhost:3306/db";
+src/security/sanitizer.rs:1043:            !output.contains("supersecret"),
+src/security/sanitizer.rs:1048:            "Should have credentials marker"
+src/security/sanitizer.rs:1054:        let patterns = vec![r"custom_secret_\d+".to_string()];
+src/security/sanitizer.rs:1057:        let input = "Found custom_secret_12345 in output";
+src/security/sanitizer.rs:1060:            !output.contains("custom_secret_12345"),
+src/security/sanitizer.rs:1078:                    description: Some("internal token".to_string()),
+src/security/sanitizer.rs:1096:            "MYCORP token must be redacted, got: {output}"
+src/security/sanitizer.rs:1125:    /// The test input uses `token=` so the Aho-Corasick keyword
+src/security/sanitizer.rs:1140:                    pattern: r"valid_token_\d+".to_string(),
+src/security/sanitizer.rs:1151:        let input = "log: token=valid_token_4242 should be redacted";
+src/security/sanitizer.rs:1158:            !output.contains("valid_token_4242"),
+src/security/sanitizer.rs:1167:        let input = "This is normal output with no secrets";
+src/security/sanitizer.rs:1187:    fn test_github_token() {
+src/security/sanitizer.rs:1200:    fn test_k3s_token() {
+src/security/sanitizer.rs:1207:            "K3s token should be redacted"
+src/security/sanitizer.rs:1212:    fn test_docker_compose_password() {
+src/security/sanitizer.rs:1215:        let input = "MYSQL_ROOT_PASSWORD=supersecretpassword123";
+src/security/sanitizer.rs:1218:            !output.contains("supersecretpassword123"),
+src/security/sanitizer.rs:1219:            "MySQL password should be redacted"
+src/security/sanitizer.rs:1227:        let input = "vault_password=mysecretvaultpass";
+src/security/sanitizer.rs:1230:            !output.contains("mysecretvaultpass"),
+src/security/sanitizer.rs:1231:            "Vault password should be redacted"
+src/security/sanitizer.rs:1236:    fn test_jwt_token() {
+src/security/sanitizer.rs:1260:    fn test_slack_token() {
+src/security/sanitizer.rs:1267:            "Slack token should be redacted"
+src/security/sanitizer.rs:1287:    fn test_stripe_secret_key() {
+src/security/sanitizer.rs:1293:            "Stripe secret key should be redacted, got: {output}"
+src/security/sanitizer.rs:1298:    fn test_npm_access_token() {
+src/security/sanitizer.rs:1304:            "npm token should be redacted, got: {output}"
+src/security/sanitizer.rs:1309:    fn test_pypi_api_token() {
+src/security/sanitizer.rs:1315:            "PyPI token should be redacted, got: {output}"
+src/security/sanitizer.rs:1320:    fn test_pkcs8_private_key() {
+src/security/sanitizer.rs:1364:    fn test_large_input_no_secrets() {
+src/security/sanitizer.rs:1367:        // Generate large input without secrets
+src/security/sanitizer.rs:1372:        // Should be zero-copy since no secrets
+src/security/sanitizer.rs:1375:            "Large input without secrets should be zero-copy"
+src/security/sanitizer.rs:1380:    fn test_multiple_secrets_same_line() {
+src/security/sanitizer.rs:1383:        let input = "DB_PASSWORD=secret1 REDIS_PASSWORD=secret2 API_KEY=abc123xyz";
+src/security/sanitizer.rs:1386:            !output.contains("secret1"),
+src/security/sanitizer.rs:1387:            "First password should be redacted"
+src/security/sanitizer.rs:1390:            !output.contains("secret2"),
+src/security/sanitizer.rs:1391:            "Second password should be redacted"
+src/security/sanitizer.rs:1412:        // GitHub tokens should NOT be redacted (category disabled)
+src/security/sanitizer.rs:1413:        let github_input = "token: ghp_abcdefghijklmnopqrstuvwxyz123456";
+src/security/sanitizer.rs:1417:            "GitHub tokens should not be redacted when github category is disabled"
+src/security/sanitizer.rs:1420:        // But other secrets should still be redacted
+src/security/sanitizer.rs:1421:        let password_input = "password=mysecretpassword123";
+src/security/sanitizer.rs:1422:        let output = sanitizer.sanitize(password_input);
+src/security/sanitizer.rs:1424:            !output.contains("mysecretpassword"),
+src/security/sanitizer.rs:1445:        let input = "password=secret123";
+src/security/sanitizer.rs:1447:        assert!(!output.contains("secret123"), "Should still sanitize");
+src/security/sanitizer.rs:1498:        // Create input >= 512KB with a secret to trigger parallel path
+src/security/sanitizer.rs:1500:        let input = format!("{prefix}password=supersecret123");
+src/security/sanitizer.rs:1504:        // Should sanitize the secret even in parallel mode
+src/security/sanitizer.rs:1506:            !output.contains("supersecret123"),
+src/security/sanitizer.rs:1507:            "Large input should still sanitize secrets"
+src/security/sanitizer.rs:1511:            "Large input with secrets should return Cow::Owned"
+src/security/sanitizer.rs:1537:        // Input without secrets
+src/security/sanitizer.rs:1538:        let input = "normal text without secrets";
+src/security/sanitizer.rs:1540:        assert_eq!(output, "normal text without secrets");
+src/security/sanitizer.rs:1542:        // Input with secrets
+src/security/sanitizer.rs:1543:        let input_with_secret = "password=secret123";
+src/security/sanitizer.rs:1544:        let output = sanitizer.sanitize_to_string(input_with_secret);
+src/security/sanitizer.rs:1545:        assert!(!output.contains("secret123"));
+src/security/sanitizer.rs:1554:        // Even with secrets, disabled sanitizer should return borrowed
+src/security/sanitizer.rs:1555:        let input = "password=secret123 token=abc";
+src/security/sanitizer.rs:1565:    fn test_secret_keywords_are_used_for_detection() {
+src/security/sanitizer.rs:1568:        // Input with keyword but no actual secret pattern match
+src/security/sanitizer.rs:1569:        // The keyword "password" triggers the Aho-Corasick check
+src/security/sanitizer.rs:1571:        let input = "The word password appears but no actual secret";
+src/security/sanitizer.rs:1585:        // 511 KB input with secret
+src/security/sanitizer.rs:1587:        let input = format!("{prefix}password=test123");
+src/security/sanitizer.rs:1594:        // 513 KB input with secret (triggers parallel path)
+src/security/sanitizer.rs:1596:        let input = format!("{prefix}password=test456");
+src/security/sanitizer.rs:1605:    fn test_sanitize_parallel_preserves_non_secret_content() {
+src/security/sanitizer.rs:1608:        // Large input with a secret - verify non-secret content is preserved
+src/security/sanitizer.rs:1612:        let input = format!("{prefix}{middle}password=secret123 {suffix}");
+src/security/sanitizer.rs:1616:        // Verify the non-secret content is preserved
+src/security/sanitizer.rs:1625:        assert!(!output.contains("secret123"), "Secret should be redacted");
+src/security/sanitizer.rs:1640:        // Should still be borrowed since no secrets
+src/security/sanitizer.rs:1644:        let input_keyword = "password"; // exactly 8 chars
+src/security/sanitizer.rs:1653:        // Large input without secrets - parallel path should return same length
+src/security/sanitizer.rs:1654:        let input = "x".repeat(600 * 1024); // 600 KB, no secrets
+src/security/sanitizer.rs:1665:    fn test_secret_keywords_fast_path_works() {
+src/security/sanitizer.rs:1669:        // If secret_keywords returned vec![""], this would match everything
+src/security/sanitizer.rs:1670:        let no_keywords = "This text has no secret keywords whatsoever xyz123";
+src/security/sanitizer.rs:1678:        let with_keyword = "This text contains the word password but no actual secret";
+src/security/sanitizer.rs:1686:        let with_secret = "Connecting with password=secret123 to server";
+src/security/sanitizer.rs:1687:        let output = sanitizer.sanitize(with_secret);
+src/security/sanitizer.rs:1692:        assert!(!output.contains("secret123"), "Secret should be redacted");
+src/security/sanitizer.rs:1696:    fn test_exact_boundary_7_8_9_chars_with_secret() {
+src/security/sanitizer.rs:1699:        // 7 chars total with a potential secret pattern
+src/security/sanitizer.rs:1709:        // Need to test that 8-char input with secret IS processed
+src/security/sanitizer.rs:1710:        let eight = "pw=12345"; // 8 chars with password-like pattern
+src/security/sanitizer.rs:1715:        // 9 chars with a clear secret pattern
+src/security/sanitizer.rs:1724:            "9 char input with secret should be processed"
+src/security/sanitizer.rs:1729:    fn test_exact_boundary_512kb_with_secret() {
+src/security/sanitizer.rs:1735:        let under_with_secret = format!("{under}password=test1");
+src/security/sanitizer.rs:1737:            under_with_secret.len() < threshold,
+src/security/sanitizer.rs:1740:        let output = sanitizer.sanitize(&under_with_secret);
+src/security/sanitizer.rs:1747:        let padding_needed = threshold - "password=test2".len();
+src/security/sanitizer.rs:1748:        let at_threshold = format!("{}password=test2", "x".repeat(padding_needed));
+src/security/sanitizer.rs:1762:        let over_with_secret = format!("{over}password=test3");
+src/security/sanitizer.rs:1764:            over_with_secret.len() > threshold,
+src/security/sanitizer.rs:1767:        let output = sanitizer.sanitize(&over_with_secret);
+src/security/sanitizer.rs:1775:    fn test_terraform_hcl_secret() {
+src/security/sanitizer.rs:1779:  password = "supersecretdb123"
+src/security/sanitizer.rs:1783:            !output.contains("supersecretdb123"),
+src/security/sanitizer.rs:1784:            "Terraform HCL password should be redacted"
+src/security/sanitizer.rs:1792:        let input = "Key         Value\n---         -----\npassword    mysecretvalue123";
+src/security/sanitizer.rs:1795:            !output.contains("mysecretvalue123"),
+src/security/sanitizer.rs:1796:            "Vault KV tabular password should be redacted"
+src/security/sanitizer.rs:1804:        let input = "\"requirepass\"\n\"myredispassword\"";
+src/security/sanitizer.rs:1807:            !output.contains("myredispassword"),
+src/security/sanitizer.rs:1821:        let secret = "password=supersecret999";
+src/security/sanitizer.rs:1825:        let input = format!("{prefix}{padding}{secret}{suffix}");
+src/security/sanitizer.rs:1835:            !output.contains("supersecret999"),
+src/security/sanitizer.rs:1873:        let secret = "password=my_secret_value_here";
+src/security/sanitizer.rs:1874:        let input = format!("{padding}{secret}");
+src/security/sanitizer.rs:1885:        assert!(!sequential.contains("my_secret_value_here"));
+src/security/sanitizer.rs:1891:        let input = "password=secret API_KEY=sk-12345 very sensitive data";
+src/security/sanitizer.rs:1904:        // 1MB single line with embedded secrets
+src/security/sanitizer.rs:1906:        let input = format!("password=longlinetest {padding} API_KEY=sk-endofline");
+src/security/sanitizer.rs:1927:            "4-char text with no secrets stays unchanged"
+src/security/sanitizer.rs:1947:        // Input exactly at PARALLEL_THRESHOLD (512KB) with a secret
+src/security/sanitizer.rs:1949:        let input = format!("{padding}\npassword=secretval123");
+src/security/sanitizer.rs:1953:            !output.contains("secretval123"),
+src/security/sanitizer.rs:1959:        let input_below = format!("{padding_below}\npassword=belowthreshold");
+src/telnet/mod.rs:73:        let password = match &host_config.auth {
+src/telnet/mod.rs:74:            crate::config::AuthConfig::Password { password } => password.to_string(),
+src/telnet/mod.rs:77:                    "Telnet host '{host_name}' requires password authentication"
+src/telnet/mod.rs:122:                reason: format!("Telnet password prompt not received: {e}"),
+src/telnet/mod.rs:124:        conn.write_line(&password)
+src/telnet/mod.rs:127:                reason: format!("Telnet password send failed: {e}"),
+src/security/recording.rs:76:    auto_mask_secrets: bool,
+src/security/recording.rs:85:        auto_mask_secrets: bool,
+src/security/recording.rs:96:            auto_mask_secrets,
+src/security/recording.rs:100:    /// Whether auto secret masking is enabled
+src/security/recording.rs:102:    pub fn auto_mask_secrets(&self) -> bool {
+src/security/recording.rs:103:        self.auto_mask_secrets
+src/security/recording.rs:455:        SessionRecorder::new(dir.to_path_buf(), true, b"test-secret-key".to_vec(), false)
+src/security/recording.rs:516:        let key = b"my-secret-key".to_vec();
+src/security/recording.rs:533:        let key = b"secret".to_vec();
+src/security/recording.rs:655:    fn test_auto_mask_secrets_getter() {
+src/security/recording.rs:658:        assert!(recorder_on.auto_mask_secrets());
+src/security/recording.rs:661:        assert!(!recorder_off.auto_mask_secrets());
+src/config/watcher.rs:292:                sudo_password: None,
+src/config/watcher.rs:381:                sudo_password: None,
+src/config/watcher.rs:525:                sudo_password: None,
+src/config/watcher.rs:975:                sudo_password: None,
+src/config/watcher.rs:1068:                    sudo_password: None,
+src/ports/tools.rs:77:    /// Optional metrics collector for token consumption analytics.
+src/ports/tools.rs:79:    /// Cancellation token for the in-flight MCP request.
+src/ports/tools.rs:83:    /// `token.cancelled()` in a `tokio::select!` so that
+src/ports/tools.rs:88:    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+src/ports/tools.rs:104:    /// Client-provided progress token for `notifications/progress`.
+src/ports/tools.rs:108:    /// [`ToolContext::progress_reporter`] which couples this token with
+src/ports/tools.rs:116:    pub progress_token: Option<serde_json::Value>,
+src/ports/tools.rs:182:            cancel_token: None,
+src/ports/tools.rs:184:            progress_token: None,
+src/ports/tools.rs:214:        let token = self.progress_token.clone()?;
+src/ports/tools.rs:217:            token, tx, total,
+src/ports/tools.rs:287:    /// (e.g. the raw `ssh_diagnose` output). `max_tokens` caps the
+src/ports/tools.rs:302:        max_tokens: u32,
+src/ports/tools.rs:319:        match service.analyze(prompt, content, max_tokens).await {
+src/ports/tools.rs:458:                    passphrase: None,
+src/ports/tools.rs:464:                sudo_password: None,
+src/ports/tools.rs:556:            cancel_token: None,
+src/ports/tools.rs:558:            progress_token: None,
+src/ports/tools.rs:570:    /// propagated via `ToolContext.cancel_token` races ahead of the sleep.
+src/ports/tools.rs:611:            cancel_token: None,
+src/ports/tools.rs:613:            progress_token: None,
+src/ports/tools.rs:665:            cancel_token: None,
+src/ports/tools.rs:667:            progress_token: None,
+src/ports/tools.rs:706:            cancel_token: None,
+src/ports/tools.rs:708:            progress_token: None,
+src/ports/tools.rs:735:    fn test_progress_reporter_returns_none_without_token() {
+src/ports/tools.rs:857:    fn test_progress_reporter_returns_none_with_token_but_no_tx() {
+src/ports/tools.rs:859:        ctx.progress_token = Some(serde_json::json!("tok-test"));
+src/ports/tools.rs:864:    fn test_progress_reporter_emits_when_token_and_tx_present() {
+src/ports/tools.rs:868:        ctx.progress_token = Some(serde_json::json!("tok-99"));
+src/security/rate_limiter.rs:16:    tokens: f64,
+src/security/rate_limiter.rs:18:    max_tokens: f64,
+src/security/rate_limiter.rs:19:    refill_rate: f64, // tokens per second
+src/security/rate_limiter.rs:23:    fn new(tokens_per_second: u32) -> Self {
+src/security/rate_limiter.rs:24:        let max = f64::from(tokens_per_second);
+src/security/rate_limiter.rs:26:            tokens: max,
+src/security/rate_limiter.rs:28:            max_tokens: max,
+src/security/rate_limiter.rs:34:        // Refill tokens based on elapsed time
+src/security/rate_limiter.rs:37:        self.tokens = elapsed
+src/security/rate_limiter.rs:38:            .mul_add(self.refill_rate, self.tokens)
+src/security/rate_limiter.rs:39:            .min(self.max_tokens);
+src/security/rate_limiter.rs:42:        if self.tokens >= 1.0 {
+src/security/rate_limiter.rs:43:            self.tokens -= 1.0;
+src/security/rate_limiter.rs:51:/// Rate limiter with per-host token buckets
+src/security/rate_limiter.rs:62:/// // Each host has its own token bucket
+src/security/rate_limiter.rs:73:    tokens_per_second: u32,
+src/security/rate_limiter.rs:81:    /// * `tokens_per_second` - Maximum requests per second per host (0 = disabled)
+src/security/rate_limiter.rs:83:    pub fn new(tokens_per_second: u32) -> Self {
+src/security/rate_limiter.rs:86:            tokens_per_second,
+src/security/rate_limiter.rs:104:        if self.tokens_per_second == 0 {
+src/security/rate_limiter.rs:112:            .or_insert_with(|| TokenBucket::new(self.tokens_per_second))
+src/security/rate_limiter.rs:119:        self.tokens_per_second > 0
+src/security/rate_limiter.rs:125:        self.tokens_per_second
+src/security/rate_limiter.rs:152:        // First 2 should succeed (initial tokens)
+src/security/rate_limiter.rs:156:        // Third should fail (no tokens left)
+src/security/rate_limiter.rs:161:    fn test_token_refill() {
+src/security/rate_limiter.rs:164:        // Exhaust all tokens
+src/security/rate_limiter.rs:172:        // Wait for token refill (at least 100ms for 1 token at 10/s)
+src/security/rate_limiter.rs:183:        // host1 uses its token
+src/security/rate_limiter.rs:187:        // host2 should still have its token
+src/security/rate_limiter.rs:245:    fn test_single_token_rate_limit() {
+src/security/rate_limiter.rs:285:        // Exhaust all tokens
+src/security/rate_limiter.rs:291:        // Wait for partial refill (5 tokens)
+src/security/rate_limiter.rs:294:        // Should get about 5 tokens back
+src/security/rate_limiter.rs:305:    fn test_tokens_capped_at_max() {
+src/security/rate_limiter.rs:308:        // Use one token
+src/security/rate_limiter.rs:311:        // Wait long enough for many tokens to accumulate
+src/security/rate_limiter.rs:314:        // Should be capped at 5 tokens, not more
+src/security/rate_limiter.rs:368:        // Total successes should be at most the token count (100) plus a small
+src/security/rate_limiter.rs:369:        // margin for tokens refilled during test execution (100 tokens/sec).
+src/cli/mod.rs:44:    # Progressive tool discovery (token-efficient for AI agents)
+src/cli/mod.rs:92:    /// 60-80% token savings on list-shaped data. Equivalent to
+src/mcp/transport/oauth.rs:3://! Validates Bearer tokens on incoming HTTP requests when OAuth is enabled.
+src/mcp/transport/oauth.rs:17://! having empty keys, which rejects every token with "Unknown JWT signing
+src/mcp/transport/oauth.rs:27:use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+src/mcp/transport/oauth.rs:56:/// Validated token claims extracted from a Bearer token.
+src/mcp/transport/oauth.rs:68:    /// Check if the token has a specific scope.
+src/mcp/transport/oauth.rs:87:/// Internal JWT claims layout deserialised from the verified token payload.
+src/mcp/transport/oauth.rs:94:    /// `jsonwebtoken` validates it through [`Validation::set_audience`]; we
+src/mcp/transport/oauth.rs:107:/// OAuth validator that checks Bearer tokens.
+src/mcp/transport/oauth.rs:129:    /// [`Self::refresh_jwks`] before any token will be accepted.
+src/mcp/transport/oauth.rs:171:    /// Validate a Bearer token string.
+src/mcp/transport/oauth.rs:179:    pub fn validate_token(&self, token: &str) -> Result<TokenClaims, String> {
+src/mcp/transport/oauth.rs:181:        let header = decode_header(token).map_err(|e| format!("Invalid JWT header: {e}"))?;
+src/mcp/transport/oauth.rs:219:        let data = decode::<JwtClaims>(token, &decoding_key, &validation)
+src/mcp/transport/oauth.rs:243:/// Axum middleware that validates OAuth Bearer tokens.
+src/mcp/transport/oauth.rs:257:    // Extract Bearer token
+src/mcp/transport/oauth.rs:267:    let Some(token) = auth.strip_prefix("Bearer ") else {
+src/mcp/transport/oauth.rs:270:    let token = token.trim();
+src/mcp/transport/oauth.rs:272:    // Validate the token. NOTE: this validator has no keys loaded; until the
+src/mcp/transport/oauth.rs:276:    match validator.validate_token(token) {
+src/mcp/transport/oauth.rs:305:    pub token_endpoint: String,
+src/mcp/transport/oauth.rs:321:            token_endpoint: format!("{base_url}/oauth/token"),
+src/mcp/transport/oauth.rs:331:                "client_credentials".to_string(),
+src/mcp/transport/oauth.rs:342:    fn test_token_claims_has_scope() {
+src/mcp/transport/oauth.rs:373:                .contains(&"client_credentials".to_string())
+src/mcp/transport/oauth.rs:378:    fn test_validate_token_invalid_format() {
+src/mcp/transport/oauth.rs:381:        let result = validator.validate_token("not-a-jwt");
+src/mcp/transport/oauth.rs:390:    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+src/mcp/transport/oauth.rs:414:    fn sign_token(claims: serde_json::Value) -> String {
+src/mcp/transport/oauth.rs:426:    fn rejects_token_with_invalid_signature() {
+src/mcp/transport/oauth.rs:433:        let valid = sign_token(claims);
+src/mcp/transport/oauth.rs:437:        assert!(v.validate_token(&forged).is_err());
+src/mcp/transport/oauth.rs:447:        let none_token = format!("{header}.{payload}.");
+src/mcp/transport/oauth.rs:448:        assert!(v.validate_token(&none_token).is_err());
+src/mcp/transport/oauth.rs:452:    fn rejects_expired_token() {
+src/mcp/transport/oauth.rs:458:        let token = sign_token(claims);
+src/mcp/transport/oauth.rs:459:        assert!(v.validate_token(&token).is_err());
+src/mcp/transport/oauth.rs:470:        let token = sign_token(claims);
+src/mcp/transport/oauth.rs:471:        assert!(v.validate_token(&token).is_err());
+src/mcp/transport/oauth.rs:482:        let token = sign_token(claims);
+src/mcp/transport/oauth.rs:483:        assert!(v.validate_token(&token).is_err());
+src/mcp/transport/oauth.rs:487:    fn accepts_well_formed_token() {
+src/mcp/transport/oauth.rs:494:        let token = sign_token(claims);
+src/mcp/transport/oauth.rs:495:        let claims = v.validate_token(&token).expect("valid token");
+src/domain/diff.rs:101:/// * `normalize` — when `true`, strip volatile tokens (timestamps,
+src/domain/diff.rs:219:/// Strip volatile tokens so two hosts whose outputs differ only on
+src/config/types.rs:56:    /// `OAuth2` Bearer token for AWX API authentication.
+src/config/types.rs:57:    pub token: String,
+src/config/types.rs:217:    /// Optional sudo password for this host (used with sudo commands)
+src/config/types.rs:219:    pub sudo_password: Option<String>,
+src/config/types.rs:419:    /// Optional password for SOCKS5 authentication
+src/config/types.rs:421:    pub password: Option<String>,
+src/config/types.rs:444:/// Sensitive fields (`password`, `passphrase`) are wrapped in [`Zeroizing`]
+src/config/types.rs:453:        passphrase: Option<Zeroizing<String>>,
+src/config/types.rs:457:        password: Zeroizing<String>,
+src/config/types.rs:462:        password: Zeroizing<String>,
+src/config/types.rs:539:    /// - `"github"` - GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+src/config/types.rs:540:    /// - `"gitlab"` - GitLab tokens (glpat-)
+src/config/types.rs:541:    /// - `"slack"` - Slack tokens and webhooks
+src/config/types.rs:544:    /// - `"aws"` - AWS credentials (AKIA, access keys, session tokens)
+src/config/types.rs:545:    /// - `"k3s"` - K3s/Kubernetes tokens
+src/config/types.rs:546:    /// - `"jwt"` - JWT tokens (eyJ...)
+src/config/types.rs:548:    /// - `"kubeconfig"` - Kubeconfig credentials
+src/config/types.rs:550:    /// - `"database"` - Database connection strings and passwords
+src/config/types.rs:551:    /// - `"ansible"` - Ansible vault and become passwords
+src/config/types.rs:552:    /// - `"azure"` - Azure credentials
+src/config/types.rs:553:    /// - `"gcp"` - Google Cloud credentials
+src/config/types.rs:554:    /// - `"hashicorp"` - Vault and Consul tokens
+src/config/types.rs:555:    /// - `"generic"` - Generic password/secret/token patterns
+src/config/types.rs:563:    /// Enable entropy-based secret detection (default: true)
+src/config/types.rs:565:    /// Detects high-entropy strings that may be secrets even when
+src/config/types.rs:572:    /// Tokens with entropy above this value are considered potential secrets.
+src/config/types.rs:574:    /// - Hex secrets: ~3.7-4.0 bits
+src/config/types.rs:575:    /// - Base64 secrets: ~5.0-6.0 bits
+src/config/types.rs:579:    /// Minimum token length for entropy analysis (default: 16)
+src/config/types.rs:727:    /// At ~3-4 chars/token, 40000 chars ≈ 10-13K tokens — a safe default that
+src/config/types.rs:769:    /// Maximum tokens for sampling `createMessage` requests (default: 4096).
+src/config/types.rs:770:    #[serde(default = "default_sampling_max_tokens")]
+src/config/types.rs:771:    pub sampling_max_tokens: u32,
+src/config/types.rs:799:            sampling_max_tokens: default_sampling_max_tokens(),
+src/config/types.rs:902:    40_000 // ~10-13K tokens, safe for 128K+ context models
+src/config/types.rs:912:        // Tier 1: Claude-based clients (200K context) → 80K chars (~20K tokens, ~10%)
+src/config/types.rs:923:        // Tier 2: Multi-model clients (128-200K context) → 50K chars (~13K tokens)
+src/config/types.rs:944:        // Tier 3: Model-agnostic clients (unknown context) → 30K chars (~8K tokens)
+src/config/types.rs:977:const fn default_sampling_max_tokens() -> u32 {
+src/config/types.rs:1354:            passphrase: Some(Zeroizing::new("secret".to_string())),
+src/config/types.rs:1369:    fn test_auth_config_password_serialization() {
+src/config/types.rs:1371:            password: Zeroizing::new("secret123".to_string()),
+src/config/types.rs:1374:        assert!(json.contains("\"type\":\"password\""));
+src/config/types.rs:1375:        assert!(json.contains("\"secret123\""));
+src/config/types.rs:1382:        let password_json = r#"{"type":"password","password":"secret"}"#;
+src/config/types.rs:1386:        let password: AuthConfig = serde_json::from_str(password_json).unwrap();
+src/config/types.rs:1390:        assert!(matches!(password, AuthConfig::Password { password } if *password == "secret"));
+src/config/types.rs:1459:            serde_json::from_str(r#"{"pattern": "secret_\\w+"}"#).unwrap();
+src/config/types.rs:1533:        assert!(config.password.is_none());
+src/config/types.rs:1543:            "password": "pass"
+src/config/types.rs:1550:        assert_eq!(config.password, Some("pass".to_string()));
+src/config/types.rs:1618:            password: None,
+src/cli/runner.rs:1561:            passphrase: None,
+src/cli/runner.rs:1567:    fn test_auth_type_name_key_with_passphrase() {
+src/cli/runner.rs:1570:            passphrase: Some(zeroize::Zeroizing::new("secret".to_string())),
+src/cli/runner.rs:1582:    fn test_auth_type_name_password() {
+src/cli/runner.rs:1584:            password: zeroize::Zeroizing::new("secret".to_string()),
+src/cli/runner.rs:1626:                sudo_password: None,
+src/cli/runner.rs:1879:                    sudo_password: None,
+src/cli/runner.rs:1929:                sudo_password: None,
+src/cli/runner.rs:1957:                sudo_password: None,
+src/cli/runner.rs:2025:                    passphrase: None,
+src/cli/runner.rs:2031:                sudo_password: None,
+src/cli/runner.rs:2233:                sudo_password: None,
+src/cli/runner.rs:2331:                sudo_password: None,
+src/cli/runner.rs:2397:                sudo_password: None,
+src/cli/runner.rs:2502:                sudo_password: None,
+src/cli/runner.rs:2574:            passphrase: Some(zeroize::Zeroizing::new("secret".to_string())),
+src/cli/runner.rs:2577:        let password_auth = AuthConfig::Password {
+src/cli/runner.rs:2578:            password: zeroize::Zeroizing::new("pass123".to_string()),
+src/cli/runner.rs:2583:        assert_eq!(auth_type_name(&password_auth), "Password");
+src/cli/runner.rs:2602:                    sudo_password: None,
+src/cli/runner.rs:2644:                sudo_password: None,
+src/cli/runner.rs:2868:                sudo_password: None,
+src/cloud_exec/azure.rs:31:/// Authentication uses Azure CLI credentials or managed identity
+src/cloud_exec/azure.rs:39:    access_token: String,
+src/cloud_exec/azure.rs:47:    /// Acquires an access token via Azure CLI (`az account get-access-token`)
+src/cloud_exec/azure.rs:48:    /// or environment credentials.
+src/cloud_exec/azure.rs:52:    /// Returns an error if Azure credentials cannot be obtained.
+src/cloud_exec/azure.rs:75:        // Get access token via Azure CLI
+src/cloud_exec/azure.rs:76:        let access_token = acquire_azure_token().await?;
+src/cloud_exec/azure.rs:97:            access_token,
+src/cloud_exec/azure.rs:133:            .bearer_auth(&self.access_token)
+src/cloud_exec/azure.rs:183:                .bearer_auth(&self.access_token)
+src/cloud_exec/azure.rs:212:/// Acquire an Azure access token via CLI.
+src/cloud_exec/azure.rs:213:async fn acquire_azure_token() -> Result<String> {
+src/cloud_exec/azure.rs:215:    if let Ok(token) = std::env::var("AZURE_ACCESS_TOKEN") {
+src/cloud_exec/azure.rs:216:        return Ok(token);
+src/cloud_exec/azure.rs:223:            "get-access-token",
+src/ssh/client.rs:10:use russh::keys::{PublicKey, load_secret_key};
+src/ssh/client.rs:20:/// Sanitize SSH error messages to prevent credential leakage.
+src/ssh/client.rs:21:/// Removes any potential password or key material from error strings,
+src/ssh/client.rs:202:    /// - Authentication fails (invalid credentials, key, or agent)
+src/ssh/client.rs:374:                            (&socks.username, &socks.password)
+src/ssh/client.rs:376:                            tokio_socks::tcp::Socks5Stream::connect_with_password(
+src/ssh/client.rs:455:            AuthConfig::Key { path, passphrase } => {
+src/ssh/client.rs:461:                    passphrase.as_ref().map(|s| s.as_str()),
+src/ssh/client.rs:465:            AuthConfig::Password { password } => {
+src/ssh/client.rs:466:                Self::auth_with_password(handle, host_name, host, password).await
+src/ssh/client.rs:485:        passphrase: Option<&str>,
+src/ssh/client.rs:491:            load_secret_key(key_path, passphrase).map_err(|e| BridgeError::SshKeyInvalid {
+src/ssh/client.rs:530:    /// Authenticate using a password
+src/ssh/client.rs:531:    async fn auth_with_password(
+src/ssh/client.rs:535:        password: &str,
+src/ssh/client.rs:538:            .authenticate_password(&host.user, password)
+src/ssh/client.rs:541:                tracing::error!(host = %host_name, user = %host.user, error = %sanitize_ssh_error(&e), method = "password", "SSH password authentication error");
+src/ssh/client.rs:549:            tracing::error!(host = %host_name, user = %host.user, method = "password", "SSH password authentication failed");
+src/ssh/client.rs:1502:            path: "~/.ssh/id_rsa: passphrase required".to_string(),
+src/ssh/client.rs:1505:        assert!(msg.contains("passphrase"));
+src/ssh/client.rs:1601:    fn test_sanitize_ssh_error_password_not_explicitly_masked() {
+src/ssh/client.rs:1602:        // "password" is not in the masking list (only auth method names)
+src/ssh/client.rs:1603:        let error = "password authentication failed";
+src/ssh/client.rs:1605:        assert_eq!(sanitized, "password authentication failed");
+src/domain/data_reduction.rs:37:    /// tabs and rows with newlines for maximum token efficiency.
+src/domain/task_store.rs:23:    cancel_token: CancellationToken,
+src/domain/task_store.rs:72:    /// Create a new task and return its ID + cancellation token.
+src/domain/task_store.rs:84:        let cancel_token = CancellationToken::new();
+src/domain/task_store.rs:98:            cancel_token: cancel_token.clone(),
+src/domain/task_store.rs:115:        Some((task_id, cancel_token))
+src/domain/task_store.rs:174:        entry.cancel_token.cancel();
+src/domain/task_store.rs:312:    async fn test_create_task_returns_id_and_token() {
+src/domain/task_store.rs:317:        let (id, token) = result.unwrap();
+src/domain/task_store.rs:319:        assert!(!token.is_cancelled());
+src/domain/task_store.rs:388:        let (id, token) = store.create_task(None).await.unwrap();
+src/domain/task_store.rs:389:        assert!(!token.is_cancelled());
+src/domain/task_store.rs:393:        assert!(token.is_cancelled());
+src/mcp/transport/unix_socket.rs:10://! (via [`UnixSocketTransport::shutdown_token`]) to break out of the
+src/mcp/transport/unix_socket.rs:60:    /// Calling `cancel()` on the returned token makes the next
+src/mcp/transport/unix_socket.rs:64:    pub fn shutdown_token(&self) -> CancellationToken {
+src/mcp/transport/unix_socket.rs:219:    async fn test_unix_transport_shutdown_token_ends_accept() {
+src/mcp/transport/unix_socket.rs:223:        let token = t.shutdown_token();
+src/mcp/transport/unix_socket.rs:225:        // Cancel the token immediately: next accept must return None.
+src/mcp/transport/unix_socket.rs:226:        token.cancel();
+src/mcp/transport/mod.rs:60:    /// stdio, or shutdown token fired on unix socket). Returns
+src/domain/output_truncator.rs:9:/// Default max output characters (~20-25K tokens, fits within Claude's 200K context).
+src/mcp/meta_tools.rs:104:                 `mcp_search_tools` to fetch the one schema you need; avoids the ~100 K-token \
+src/mcp/resource_registry.rs:170:            cancel_token: None,
+src/mcp/resource_registry.rs:172:            progress_token: None,
+src/mcp/tool_handlers/ssh_process_top.rs:222:            sudo_password: None,
+src/mcp/tool_handlers/ssh_process_top.rs:304:                sudo_password: None,
+src/mcp/tool_handlers/ssh_process_top.rs:373:            cancel_token: None,
+src/mcp/tool_handlers/ssh_process_top.rs:375:            progress_token: None,
+src/mcp/tool_handlers/ssh_net_dns.rs:220:            sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_exec.rs:291:            sudo_password: None,
+src/mcp/tool_handlers/ssh_terraform_init.rs:214:            sudo_password: None,
+src/mcp/tool_handlers/ssh_terraform_init.rs:269:                sudo_password: None,
+src/mcp/tool_handlers/ssh_terraform_init.rs:338:            cancel_token: None,
+src/mcp/tool_handlers/ssh_terraform_init.rs:340:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_service_status.rs:195:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_status.rs:248:                sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_info.rs:181:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_info.rs:234:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_computer_list.rs:227:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_computer_list.rs:289:                sudo_password: None,
+src/mcp/tool_handlers/ssh_helm_uninstall.rs:305:            sudo_password: None,
+src/mcp/tool_handlers/ssh_backup_verify.rs:199:            sudo_password: None,
+src/mcp/tool_handlers/ssh_incident_triage.rs:24:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_incident_triage.rs:27:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_incident_triage.rs:115:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_incident_triage.rs:117:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_incident_triage.rs:212:            sudo_password: None,
+src/mcp/tool_handlers/ssh_incident_triage.rs:239:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_incident_timeline.rs:218:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_list.rs:215:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_list.rs:282:                sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_list.rs:352:            cancel_token: None,
+src/mcp/tool_handlers/ssh_pkg_list.rs:354:            progress_token: None,
+src/mcp/tool_handlers/ssh_ad_domain_info.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_domain_info.rs:237:                sudo_password: None,
+src/mcp/tool_handlers/ssh_template_list.rs:235:            sudo_password: None,
+src/mcp/tool_handlers/ssh_file_read.rs:224:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_connections.rs:221:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_connections.rs:283:                sudo_password: None,
+src/mcp/tool_handlers/ssh_timer_disable.rs:192:            sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_logs.rs:301:            sudo_password: None,
+src/mcp/tool_handlers/ssh_fail2ban_status.rs:205:            sudo_password: None,
+src/mcp/tool_handlers/ssh_fail2ban_status.rs:268:                sudo_password: None,
+src/mcp/tool_handlers/ssh_fail2ban_status.rs:333:            cancel_token: None,
+src/mcp/tool_handlers/ssh_fail2ban_status.rs:335:            progress_token: None,
+src/mcp/tool_handlers/ssh_journal_disk_usage.rs:171:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_list.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_list.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_cli.rs:222:            sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_cli.rs:276:                sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_cli.rs:345:            cancel_token: None,
+src/mcp/tool_handlers/ssh_redis_cli.rs:347:            progress_token: None,
+src/mcp/tool_handlers/ssh_awx_status.rs:94:            &awx.token,
+src/mcp/tool_handlers/ssh_compliance_check.rs:4://! firewall, password policy, and sysctl settings.
+src/mcp/tool_handlers/ssh_compliance_check.rs:32:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_compliance_check.rs:35:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_compliance_check.rs:53:        permissions, SSH config, firewall, password policy, and sysctl settings.";
+src/mcp/tool_handlers/ssh_compliance_check.rs:86:            "summary_max_tokens": {
+src/mcp/tool_handlers/ssh_compliance_check.rs:88:                "description": "Maximum tokens for the LLM summary (default: 512). Only meaningful with summarize=true.",
+src/mcp/tool_handlers/ssh_compliance_check.rs:114:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_compliance_check.rs:119:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_compliance_check.rs:161:            sudo_password: None,
+src/mcp/tool_handlers/ssh_compliance_check.rs:246:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_compliance_check.rs:264:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_win_event_sources.rs:167:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_event_sources.rs:219:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_firewall_list.rs:210:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_firewall_list.rs:272:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cis_benchmark.rs:21:    /// Category to check (e.g., "filesystem", "ssh", "kernel", "password").
+src/mcp/tool_handlers/ssh_cis_benchmark.rs:51:        password policy, and audit rules according to CIS benchmark levels 1 and 2.";
+src/mcp/tool_handlers/ssh_cis_benchmark.rs:68:                        "description": "Category to check: filesystem, ssh, kernel, or password"
+src/mcp/tool_handlers/ssh_cis_benchmark.rs:218:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cis_benchmark.rs:283:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cis_benchmark.rs:348:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cis_benchmark.rs:350:            progress_token: None,
+src/mcp/tool_handlers/ssh_process_kill.rs:242:            sudo_password: None,
+src/mcp/tool_handlers/ssh_process_kill.rs:326:                sudo_password: None,
+src/mcp/tool_handlers/ssh_process_kill.rs:395:            cancel_token: None,
+src/mcp/tool_handlers/ssh_process_kill.rs:397:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_process_info.rs:177:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_info.rs:230:                sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_volume_inspect.rs:227:        // Exhaust the single token for server1
+src/mcp/tool_handlers/ssh_backup_restore.rs:231:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_disk.rs:168:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_disk.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_firewall_status.rs:208:            sudo_password: None,
+src/mcp/tool_handlers/ssh_discover_hosts.rs:273:                sudo_password: None,
+src/mcp/tool_handlers/ssh_discover_hosts.rs:342:            cancel_token: None,
+src/mcp/tool_handlers/ssh_discover_hosts.rs:344:            progress_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_run.rs:149:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_run.rs:201:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_run.rs:270:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_run.rs:272:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_perf_overview.rs:169:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_overview.rs:221:                sudo_password: None,
+src/mcp/tool_handlers/ssh_exec_multi.rs:53:    /// When `diff=true`, normalize volatile tokens (timestamps,
+src/mcp/tool_handlers/ssh_exec_multi.rs:150:                "description": "Normalize volatile tokens (timestamps, PIDs, UUIDs) before diffing so hosts that differ only on runtime metadata still count as matching. Only meaningful when diff=true. Default: false.",
+src/mcp/tool_handlers/ssh_exec_multi.rs:227:        let cancel_token = tokio_util::sync::CancellationToken::new();
+src/mcp/tool_handlers/ssh_exec_multi.rs:249:                cancel_token.clone(),
+src/mcp/tool_handlers/ssh_exec_multi.rs:378:    cancel_token: tokio_util::sync::CancellationToken,
+src/mcp/tool_handlers/ssh_exec_multi.rs:387:    if cancel_token.is_cancelled() {
+src/mcp/tool_handlers/ssh_exec_multi.rs:424:        if let Some(ref password) = host_config.sudo_password {
+src/mcp/tool_handlers/ssh_exec_multi.rs:427:                shell_escape(password),
+src/mcp/tool_handlers/ssh_exec_multi.rs:490:                cancel_token.cancel();
+src/mcp/tool_handlers/ssh_exec_multi.rs:506:                cancel_token.cancel();
+src/mcp/tool_handlers/ssh_exec_multi.rs:545:                    passphrase: None,
+src/mcp/tool_handlers/ssh_exec_multi.rs:551:                sudo_password: None,
+src/mcp/tool_handlers/ssh_exec_multi.rs:575:                    passphrase: None,
+src/mcp/tool_handlers/ssh_exec_multi.rs:581:                sudo_password: None,
+src/mcp/tool_handlers/ssh_exec_multi.rs:605:                    passphrase: None,
+src/mcp/tool_handlers/ssh_exec_multi.rs:611:                sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_scale.rs:120:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_info.rs:142:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_info.rs:218:                sudo_password: None,
+src/mcp/tool_handlers/ssh_user_info.rs:288:            cancel_token: None,
+src/mcp/tool_handlers/ssh_user_info.rs:290:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_event_tail.rs:193:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_event_tail.rs:246:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_feature_remove.rs:195:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_feature_remove.rs:248:                sudo_password: None,
+src/mcp/tool_handlers/ssh_container_log_stats.rs:244:            sudo_password: None,
+src/mcp/tool_handlers/ssh_git_checkout.rs:227:            sudo_password: None,
+src/mcp/tool_handlers/ssh_git_checkout.rs:283:                sudo_password: None,
+src/mcp/tool_handlers/ssh_git_checkout.rs:352:            cancel_token: None,
+src/mcp/tool_handlers/ssh_git_checkout.rs:354:            progress_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_routes.rs:143:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_routes.rs:195:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_routes.rs:264:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_routes.rs:266:            progress_token: None,
+src/mcp/tool_handlers/ssh_podman_images.rs:132:            sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_images.rs:185:                sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_images.rs:254:            cancel_token: None,
+src/mcp/tool_handlers/ssh_podman_images.rs:256:            progress_token: None,
+src/mcp/tool_handlers/ssh_service_daemon_reload.rs:171:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_remove.rs:219:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_remove.rs:305:                sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_remove.rs:374:            cancel_token: None,
+src/mcp/tool_handlers/ssh_pkg_remove.rs:376:            progress_token: None,
+src/mcp/tool_handlers/ssh_storage_fdisk.rs:208:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_fdisk.rs:289:                sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_fdisk.rs:354:            cancel_token: None,
+src/mcp/tool_handlers/ssh_storage_fdisk.rs:356:            progress_token: None,
+src/mcp/tool_handlers/ssh_git_clone.rs:235:            sudo_password: None,
+src/mcp/tool_handlers/ssh_aws_cli.rs:265:                sudo_password: None,
+src/mcp/tool_handlers/ssh_aws_cli.rs:334:            cancel_token: None,
+src/mcp/tool_handlers/ssh_aws_cli.rs:336:            progress_token: None,
+src/mcp/tool_handlers/ssh_terraform_state.rs:232:                sudo_password: None,
+src/mcp/tool_handlers/ssh_terraform_state.rs:301:            cancel_token: None,
+src/mcp/tool_handlers/ssh_terraform_state.rs:303:            progress_token: None,
+src/mcp/tool_handlers/ssh_alert_list.rs:230:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_start.rs:193:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_start.rs:246:                sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_list_sites.rs:247:            sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_list_sites.rs:332:                sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_list_sites.rs:397:            cancel_token: None,
+src/mcp/tool_handlers/ssh_nginx_list_sites.rs:399:            progress_token: None,
+src/mcp/tool_handlers/ssh_terraform_output.rs:229:                sudo_password: None,
+src/mcp/tool_handlers/ssh_terraform_output.rs:298:            cancel_token: None,
+src/mcp/tool_handlers/ssh_terraform_output.rs:300:            progress_token: None,
+src/mcp/tool_handlers/ssh_db_query.rs:27:    db_password: Option<String>,
+src/mcp/tool_handlers/ssh_db_query.rs:85:            "db_password": {
+src/mcp/tool_handlers/ssh_db_query.rs:87:                "description": "Database password"
+src/mcp/tool_handlers/ssh_db_query.rs:129:            args.db_password.as_deref(),
+src/mcp/tool_handlers/ssh_db_query.rs:301:        assert!(properties.contains_key("db_password"));
+src/mcp/tool_handlers/ssh_db_query.rs:317:            "db_password": "secret",
+src/mcp/tool_handlers/ssh_db_query.rs:331:        assert_eq!(args.db_password, Some("secret".to_string()));
+src/mcp/tool_handlers/ssh_db_query.rs:352:        assert!(args.db_password.is_none());
+src/mcp/tool_handlers/ssh_db_query.rs:425:            sudo_password: None,
+src/mcp/tool_handlers/ssh_db_query.rs:456:            db_password: None,
+src/mcp/tool_handlers/ssh_db_query.rs:473:    fn test_build_command_postgres_with_password() {
+src/mcp/tool_handlers/ssh_db_query.rs:482:            db_password: Some("secret".to_string()),
+src/mcp/tool_handlers/ssh_db_query.rs:508:            db_password: None,
+src/mcp/tool_handlers/ssh_db_query.rs:529:            db_password: None,
+src/mcp/tool_handlers/ssh_awx_job_summary.rs:61:         per host. ~200 tokens vs ~5000 for full stdout. Use jq_filter for extraction \
+src/mcp/tool_handlers/ssh_awx_job_summary.rs:97:            &awx.token,
+src/mcp/tool_handlers/ssh_win_feature_list.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_feature_list.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_logs.rs:157:            sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_logs.rs:211:                sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_logs.rs:280:            cancel_token: None,
+src/mcp/tool_handlers/ssh_podman_logs.rs:282:            progress_token: None,
+src/mcp/tool_handlers/ssh_env_snapshot.rs:91:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_stop.rs:241:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_stop.rs:294:                sudo_password: None,
+src/mcp/tool_handlers/ssh_latency_test.rs:235:            sudo_password: None,
+src/mcp/tool_handlers/ssh_latency_test.rs:321:                sudo_password: None,
+src/mcp/tool_handlers/ssh_latency_test.rs:386:            cancel_token: None,
+src/mcp/tool_handlers/ssh_latency_test.rs:388:            progress_token: None,
+src/mcp/tool_handlers/ssh_service_restart.rs:193:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_info.rs:213:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_info.rs:266:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_add.rs:257:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_kill.rs:199:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_kill.rs:252:                sudo_password: None,
+src/mcp/tool_handlers/ssh_git_log.rs:257:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_update.rs:220:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_update.rs:300:                sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_update.rs:369:            cancel_token: None,
+src/mcp/tool_handlers/ssh_pkg_update.rs:371:            progress_token: None,
+src/mcp/tool_handlers/ssh_ansible_events.rs:279:            sudo_password: None,
+src/mcp/tool_handlers/ssh_host_tags.rs:233:            sudo_password: None,
+src/mcp/tool_handlers/ssh_host_tags.rs:286:                sudo_password: None,
+src/mcp/tool_handlers/ssh_host_tags.rs:355:            cancel_token: None,
+src/mcp/tool_handlers/ssh_host_tags.rs:357:            progress_token: None,
+src/mcp/tool_handlers/ssh_backup_list.rs:265:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_save.rs:139:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_save.rs:191:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_save.rs:260:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_save.rs:262:            progress_token: None,
+src/mcp/tool_handlers/ssh_log_aggregate.rs:34:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_log_aggregate.rs:37:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_log_aggregate.rs:87:                    "summary_max_tokens": {
+src/mcp/tool_handlers/ssh_log_aggregate.rs:89:                        "description": "Maximum tokens for the LLM summary (default: 512). Only meaningful with summarize=true.",
+src/mcp/tool_handlers/ssh_log_aggregate.rs:133:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_log_aggregate.rs:138:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_log_aggregate.rs:276:            sudo_password: None,
+src/mcp/tool_handlers/ssh_log_aggregate.rs:306:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_log_aggregate.rs:322:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_hyperv_snapshot_create.rs:230:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_snapshot_create.rs:285:                sudo_password: None,
+src/mcp/tool_handlers/ssh_multicloud_list.rs:243:                sudo_password: None,
+src/mcp/tool_handlers/ssh_multicloud_list.rs:312:            cancel_token: None,
+src/mcp/tool_handlers/ssh_multicloud_list.rs:314:            progress_token: None,
+src/mcp/tool_handlers/ssh_fleet_diff.rs:163:            sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_status.rs:192:            sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_status.rs:254:                sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_status.rs:319:            cancel_token: None,
+src/mcp/tool_handlers/ssh_nginx_status.rs:321:            progress_token: None,
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:32:    credential: Option<u64>,
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:59:        "credential": {
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:151:        if let Some(credential) = args.credential {
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:153:                "credential".to_string(),
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:154:                serde_json::Value::Number(credential.into()),
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:173:            &awx.token,
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:247:            "credential": 10,
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:255:        assert_eq!(args.credential, Some(10));
+src/mcp/tool_handlers/ssh_awx_job_launch.rs:267:        assert!(args.credential.is_none());
+src/mcp/tool_handlers/ssh_net_equip_config.rs:171:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_config.rs:226:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_config.rs:295:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_config.rs:297:            progress_token: None,
+src/mcp/tool_handlers/ssh_user_delete.rs:178:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_delete.rs:265:                sudo_password: None,
+src/mcp/tool_handlers/ssh_user_delete.rs:334:            cancel_token: None,
+src/mcp/tool_handlers/ssh_user_delete.rs:336:            progress_token: None,
+src/mcp/tool_handlers/ssh_awx_job_events.rs:151:            &awx.token,
+src/mcp/tool_handlers/ssh_service_disable.rs:182:            sudo_password: None,
+src/mcp/tool_handlers/ssh_firewall_deny.rs:272:            sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_reload.rs:195:            sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_reload.rs:257:                sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_reload.rs:322:            cancel_token: None,
+src/mcp/tool_handlers/ssh_nginx_reload.rs:324:            progress_token: None,
+src/mcp/tool_handlers/ssh_podman_compose.rs:140:            sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_compose.rs:194:                sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_compose.rs:263:            cancel_token: None,
+src/mcp/tool_handlers/ssh_podman_compose.rs:265:            progress_token: None,
+src/mcp/tool_handlers/ssh_template_diff.rs:240:            sudo_password: None,
+src/mcp/tool_handlers/ssh_template_diff.rs:284:            sudo_password: None,
+src/mcp/tool_handlers/ssh_service_logs.rs:249:            sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_set.rs:231:            sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_set.rs:286:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ansible_adhoc.rs:378:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_routes.rs:167:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_routes.rs:219:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ansible_run_background.rs:322:            sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_inventory_hosts.rs:121:            &awx.token,
+src/mcp/tool_handlers/ssh_status.rs:141:                    passphrase: None,
+src/mcp/tool_handlers/ssh_status.rs:147:                sudo_password: None,
+src/mcp/tool_handlers/ssh_status.rs:189:                    passphrase: None,
+src/mcp/tool_handlers/ssh_status.rs:195:                sudo_password: None,
+src/mcp/tool_handlers/ssh_status.rs:223:                sudo_password: None,
+src/mcp/tool_handlers/ssh_status.rs:241:            "password_host".to_string(),
+src/mcp/tool_handlers/ssh_status.rs:247:                    password: zeroize::Zeroizing::new("secret".to_string()),
+src/mcp/tool_handlers/ssh_status.rs:253:                sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_network_inspect.rs:227:        // Exhaust the single token for server1
+src/mcp/tool_handlers/ssh_ad_user_list.rs:238:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_user_list.rs:300:                sudo_password: None,
+src/mcp/tool_handlers/ssh_capacity_collect.rs:192:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_list_sites.rs:206:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_list_sites.rs:268:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cloud_cost.rs:241:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cloud_cost.rs:310:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cloud_cost.rs:312:            progress_token: None,
+src/mcp/tool_handlers/ssh_helm_list.rs:329:            sudo_password: None,
+src/mcp/tool_handlers/ssh_timer_info.rs:180:            sudo_password: None,
+src/mcp/tool_handlers/ssh_timer_info.rs:238:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_modify.rs:143:            sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_job_status.rs:107:            &awx.token,
+src/mcp/tool_handlers/ssh_net_routes.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_routes.rs:268:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_routes.rs:333:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_routes.rs:335:            progress_token: None,
+src/mcp/tool_handlers/ssh_ansible_lint.rs:274:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_history.rs:178:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_history.rs:230:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_list.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_list.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_timer_enable.rs:192:            sudo_password: None,
+src/mcp/tool_handlers/ssh_vault_write.rs:31:    const DESCRIPTION: &'static str = "Write a secret to HashiCorp Vault on a remote host. Creates or updates secret data at \
+src/mcp/tool_handlers/ssh_vault_write.rs:114:                Some(json!({"host": "nonexistent", "path": "secret/data/myapp", "data": ["key=value"]})),
+src/mcp/tool_handlers/ssh_vault_write.rs:143:            "path": "secret/data/myapp",
+src/mcp/tool_handlers/ssh_vault_write.rs:144:            "data": ["username=admin", "password=secret123"],
+src/mcp/tool_handlers/ssh_vault_write.rs:146:            "mount": "secret",
+src/mcp/tool_handlers/ssh_vault_write.rs:153:        assert_eq!(args.path, "secret/data/myapp");
+src/mcp/tool_handlers/ssh_vault_write.rs:154:        assert_eq!(args.data, vec!["username=admin", "password=secret123"]);
+src/mcp/tool_handlers/ssh_vault_write.rs:159:        assert_eq!(args.mount.as_deref(), Some("secret"));
+src/mcp/tool_handlers/ssh_vault_write.rs:167:        let json = json!({"host": "myhost", "path": "secret/data/myapp", "data": ["key=value"]});
+src/mcp/tool_handlers/ssh_vault_write.rs:170:        assert_eq!(args.path, "secret/data/myapp");
+src/mcp/tool_handlers/ssh_vault_write.rs:194:        let json = json!({"host": "myhost", "path": "secret/data/myapp", "data": ["key=value"]});
+src/mcp/tool_handlers/ssh_vault_write.rs:227:            sudo_password: None,
+src/mcp/tool_handlers/ssh_vault_write.rs:251:            json!({"host": "s", "path": "secret/data/myapp", "data": ["key=value"]}),
+src/mcp/tool_handlers/ssh_vault_write.rs:283:                sudo_password: None,
+src/mcp/tool_handlers/ssh_vault_write.rs:352:            cancel_token: None,
+src/mcp/tool_handlers/ssh_vault_write.rs:354:            progress_token: None,
+src/mcp/tool_handlers/ssh_vault_write.rs:369:                    json!({"host": "server1", "path": "secret/data/myapp", "data": ["key=value"]}),
+src/mcp/tool_handlers/ssh_container_health_history.rs:237:            sudo_password: None,
+src/mcp/tool_handlers/ssh_esxi_snapshot.rs:290:            sudo_password: None,
+src/mcp/tool_handlers/ssh_group_delete.rs:158:            sudo_password: None,
+src/mcp/tool_handlers/ssh_group_delete.rs:233:                sudo_password: None,
+src/mcp/tool_handlers/ssh_group_delete.rs:302:            cancel_token: None,
+src/mcp/tool_handlers/ssh_group_delete.rs:304:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_firewall_status.rs:171:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_firewall_status.rs:223:                sudo_password: None,
+src/mcp/tool_handlers/ssh_mysql_query.rs:269:                sudo_password: None,
+src/mcp/tool_handlers/ssh_mysql_query.rs:338:            cancel_token: None,
+src/mcp/tool_handlers/ssh_mysql_query.rs:340:            progress_token: None,
+src/mcp/tool_handlers/ssh_reg_export.rs:204:            sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_export.rs:259:                sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_list.rs:186:            sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_list.rs:239:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_disk_usage.rs:168:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_disk_usage.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_group_members.rs:155:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_group_members.rs:211:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_group_members.rs:280:            cancel_token: None,
+src/mcp/tool_handlers/ssh_ldap_group_members.rs:282:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_firewall_deny.rs:207:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_firewall_deny.rs:260:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_add.rs:143:            sudo_password: None,
+src/mcp/tool_handlers/ssh_service_list.rs:247:            sudo_password: None,
+src/mcp/tool_handlers/ssh_service_list.rs:346:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cloud_tags.rs:230:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cloud_tags.rs:299:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cloud_tags.rs:301:            progress_token: None,
+src/mcp/tool_handlers/ssh_metrics.rs:429:                sudo_password: None,
+src/mcp/tool_handlers/ssh_service_enable.rs:182:            sudo_password: None,
+src/mcp/tool_handlers/ssh_git_pull.rs:228:            sudo_password: None,
+src/mcp/tool_handlers/ssh_git_pull.rs:283:                sudo_password: None,
+src/mcp/tool_handlers/ssh_git_pull.rs:352:            cancel_token: None,
+src/mcp/tool_handlers/ssh_git_pull.rs:354:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_process_by_name.rs:176:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_by_name.rs:229:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_firewall_allow.rs:207:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_firewall_allow.rs:260:                sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_test.rs:191:            sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_test.rs:253:                sudo_password: None,
+src/mcp/tool_handlers/ssh_nginx_test.rs:318:            cancel_token: None,
+src/mcp/tool_handlers/ssh_nginx_test.rs:320:            progress_token: None,
+src/mcp/tool_handlers/ssh_perf_trace.rs:211:            sudo_password: None,
+src/mcp/tool_handlers/ssh_perf_trace.rs:291:                sudo_password: None,
+src/mcp/tool_handlers/ssh_perf_trace.rs:356:            cancel_token: None,
+src/mcp/tool_handlers/ssh_perf_trace.rs:358:            progress_token: None,
+src/mcp/tool_handlers/ssh_docker_ps.rs:150:        // Replace text with TSV for token efficiency
+src/mcp/tool_handlers/ssh_docker_ps.rs:283:            sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_ps.rs:400:        // Exhaust the single token for server1
+src/mcp/tool_handlers/ssh_docker_ps.rs:449:                sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_stats.rs:289:            sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_stats.rs:405:                sudo_password: None,
+src/mcp/tool_handlers/ssh_port_scan.rs:111:        // ss/netstat output is columnar — convert to TSV for token efficiency
+src/mcp/tool_handlers/ssh_port_scan.rs:243:            sudo_password: None,
+src/mcp/tool_handlers/ssh_port_scan.rs:328:                sudo_password: None,
+src/mcp/tool_handlers/ssh_port_scan.rs:393:            cancel_token: None,
+src/mcp/tool_handlers/ssh_port_scan.rs:395:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_firewall_remove.rs:206:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_firewall_remove.rs:259:                sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_mount.rs:263:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_mount.rs:358:                sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_mount.rs:423:            cancel_token: None,
+src/mcp/tool_handlers/ssh_storage_mount.rs:425:            progress_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_interfaces.rs:153:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_interfaces.rs:206:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_interfaces.rs:275:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_interfaces.rs:277:            progress_token: None,
+src/mcp/tool_handlers/ssh_compliance_report.rs:25:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_compliance_report.rs:28:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_compliance_report.rs:59:        SSH configuration, kernel security, password policy, and audit status. Supports text \
+src/mcp/tool_handlers/ssh_compliance_report.rs:112:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_compliance_report.rs:114:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_compliance_report.rs:257:            sudo_password: None,
+src/mcp/tool_handlers/ssh_compliance_report.rs:321:                sudo_password: None,
+src/mcp/tool_handlers/ssh_compliance_report.rs:386:            cancel_token: None,
+src/mcp/tool_handlers/ssh_compliance_report.rs:388:            progress_token: None,
+src/mcp/tool_handlers/ssh_net_interfaces.rs:189:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_interfaces.rs:272:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_interfaces.rs:337:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_interfaces.rs:339:            progress_token: None,
+src/mcp/tool_handlers/ssh_incident_correlate.rs:25:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_incident_correlate.rs:28:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_incident_correlate.rs:115:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_incident_correlate.rs:117:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_incident_correlate.rs:265:            sudo_password: None,
+src/mcp/tool_handlers/ssh_incident_correlate.rs:296:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_incident_correlate.rs:312:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_storage_df.rs:260:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_df.rs:348:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_feature_info.rs:184:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_feature_info.rs:237:                sudo_password: None,
+src/mcp/tool_handlers/ssh_terraform_plan.rs:259:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_list.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_list.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_service_stop.rs:202:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_reboot.rs:167:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_reboot.rs:219:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_group_members.rs:208:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_group_members.rs:261:                sudo_password: None,
+src/mcp/tool_handlers/ssh_sbom_generate.rs:139:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_modify.rs:184:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_modify.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_user_modify.rs:340:            cancel_token: None,
+src/mcp/tool_handlers/ssh_user_modify.rs:342:            progress_token: None,
+src/mcp/tool_handlers/ssh_exec.rs:167:            if let Some(ref password) = host_config.sudo_password {
+src/mcp/tool_handlers/ssh_exec.rs:170:                    shell_escape(password),
+src/mcp/tool_handlers/ssh_exec.rs:561:                    passphrase: None,
+src/mcp/tool_handlers/ssh_exec.rs:567:                sudo_password: None,
+src/mcp/tool_handlers/ssh_exec.rs:609:        // Exhaust the single token for server1
+src/mcp/tool_handlers/ssh_exec.rs:628:            cancel_token: None,
+src/mcp/tool_handlers/ssh_exec.rs:630:            progress_token: None,
+src/mcp/tool_handlers/ssh_service_status.rs:183:            sudo_password: None,
+src/mcp/tool_handlers/ssh_service_status.rs:230:                sudo_password: None,
+src/mcp/tool_handlers/ssh_service_status.rs:278:                sudo_password: None,
+src/mcp/tool_handlers/ssh_io_trace.rs:206:            sudo_password: None,
+src/mcp/tool_handlers/ssh_io_trace.rs:286:                sudo_password: None,
+src/mcp/tool_handlers/ssh_io_trace.rs:351:            cancel_token: None,
+src/mcp/tool_handlers/ssh_io_trace.rs:353:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_event_export.rs:193:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_event_export.rs:247:                sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_network_ls.rs:262:            sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_network_ls.rs:360:        // Exhaust the single token for server1
+src/mcp/tool_handlers/ssh_docker_network_ls.rs:408:                sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_template_detail.rs:75:        "Get detailed information about an AWX job template including survey spec, credentials, \
+src/mcp/tool_handlers/ssh_awx_template_detail.rs:112:            &awx.token,
+src/mcp/tool_handlers/ssh_template_apply.rs:277:            sudo_password: None,
+src/mcp/tool_handlers/ssh_template_apply.rs:327:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_run.rs:182:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_run.rs:235:                sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_snapshot_list.rs:261:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_snapshot_list.rs:325:                sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_query.rs:202:            sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_query.rs:255:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_disable.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_disable.rs:238:                sudo_password: None,
+src/mcp/tool_handlers/ssh_mysql_status.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_mysql_status.rs:262:                sudo_password: None,
+src/mcp/tool_handlers/ssh_mysql_status.rs:331:            cancel_token: None,
+src/mcp/tool_handlers/ssh_mysql_status.rs:333:            progress_token: None,
+src/mcp/tool_handlers/ssh_metrics_multi.rs:206:        let cancel_token = tokio_util::sync::CancellationToken::new();
+src/mcp/tool_handlers/ssh_metrics_multi.rs:222:                cancel_token.clone(),
+src/mcp/tool_handlers/ssh_metrics_multi.rs:365:    cancel_token: tokio_util::sync::CancellationToken,
+src/mcp/tool_handlers/ssh_metrics_multi.rs:372:    if cancel_token.is_cancelled() {
+src/mcp/tool_handlers/ssh_metrics_multi.rs:450:                cancel_token.cancel();
+src/mcp/tool_handlers/ssh_metrics_multi.rs:515:                    passphrase: None,
+src/mcp/tool_handlers/ssh_metrics_multi.rs:521:                sudo_password: None,
+src/mcp/tool_handlers/ssh_metrics_multi.rs:545:                    passphrase: None,
+src/mcp/tool_handlers/ssh_metrics_multi.rs:551:                sudo_password: None,
+src/mcp/tool_handlers/ssh_metrics_multi.rs:575:                    passphrase: None,
+src/mcp/tool_handlers/ssh_metrics_multi.rs:581:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_history.rs:265:            sudo_password: None,
+src/mcp/tool_handlers/ssh_benchmark.rs:219:            sudo_password: None,
+src/mcp/tool_handlers/ssh_benchmark.rs:311:                sudo_password: None,
+src/mcp/tool_handlers/ssh_benchmark.rs:376:            cancel_token: None,
+src/mcp/tool_handlers/ssh_benchmark.rs:378:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_service_start.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_start.rs:238:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cloud_metadata.rs:216:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cloud_metadata.rs:285:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cloud_metadata.rs:287:            progress_token: None,
+src/mcp/tool_handlers/ssh_container_events.rs:239:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_fstab.rs:195:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_fstab.rs:267:                sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_fstab.rs:332:            cancel_token: None,
+src/mcp/tool_handlers/ssh_storage_fstab.rs:334:            progress_token: None,
+src/mcp/tool_handlers/ssh_rolling_exec.rs:176:            sudo_password: None,
+src/mcp/tool_handlers/ssh_find.rs:425:            cancel_token: None,
+src/mcp/tool_handlers/ssh_find.rs:427:            progress_token: None,
+src/mcp/tool_handlers/ssh_find.rs:449:                sudo_password: None,
+src/mcp/tool_handlers/ssh_backup_create.rs:275:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_stop.rs:203:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_stop.rs:256:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_search.rs:219:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_search.rs:288:            cancel_token: None,
+src/mcp/tool_handlers/ssh_ldap_search.rs:290:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_net_ping.rs:180:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_ping.rs:233:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ansible_config.rs:224:            sudo_password: None,
+src/mcp/tool_handlers/ssh_alert_check.rs:227:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ansible_inventory.rs:307:            sudo_password: None,
+src/mcp/tool_handlers/ssh_letsencrypt_status.rs:186:            sudo_password: None,
+src/mcp/tool_handlers/ssh_letsencrypt_status.rs:239:                sudo_password: None,
+src/mcp/tool_handlers/ssh_letsencrypt_status.rs:304:            cancel_token: None,
+src/mcp/tool_handlers/ssh_letsencrypt_status.rs:306:            progress_token: None,
+src/mcp/tool_handlers/ssh_pkg_install.rs:222:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_install.rs:308:                sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_install.rs:377:            cancel_token: None,
+src/mcp/tool_handlers/ssh_pkg_install.rs:379:            progress_token: None,
+src/mcp/tool_handlers/ssh_apache_status.rs:184:            sudo_password: None,
+src/mcp/tool_handlers/ssh_apache_status.rs:237:                sudo_password: None,
+src/mcp/tool_handlers/ssh_apache_status.rs:302:            cancel_token: None,
+src/mcp/tool_handlers/ssh_apache_status.rs:304:            progress_token: None,
+src/mcp/tool_handlers/ssh_env_diff.rs:23:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_env_diff.rs:26:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_env_diff.rs:94:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_env_diff.rs:96:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_env_diff.rs:138:            sudo_password: None,
+src/mcp/tool_handlers/ssh_env_diff.rs:217:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_compliance_score.rs:25:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_compliance_score.rs:28:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_compliance_score.rs:102:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_compliance_score.rs:104:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_compliance_score.rs:240:            sudo_password: None,
+src/mcp/tool_handlers/ssh_compliance_score.rs:292:                sudo_password: None,
+src/mcp/tool_handlers/ssh_compliance_score.rs:357:            cancel_token: None,
+src/mcp/tool_handlers/ssh_compliance_score.rs:359:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_update_search.rs:177:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_search.rs:230:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ansible_recap.rs:5://! output (~100-200 tokens vs ~5000+ for full stdout).
+src/mcp/tool_handlers/ssh_ansible_recap.rs:63:        output filtered to key events. Produces ~100-200 tokens vs ~5000+ for full stdout. \
+src/mcp/tool_handlers/ssh_ansible_recap.rs:353:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_analyze.rs:198:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_analyze.rs:251:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_analyze.rs:320:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cron_analyze.rs:322:            progress_token: None,
+src/mcp/tool_handlers/utils.rs:128:    /// Convert to TSV (tab-separated values) for token-efficient LLM consumption.
+src/mcp/tool_handlers/utils.rs:131:    /// TSV uses 30-40% fewer tokens than JSON for tabular data (pgEdge benchmark).
+src/mcp/tool_handlers/utils.rs:170:    /// Convert to TSV (tab-separated values) for token-efficient LLM consumption.
+src/mcp/tool_handlers/utils.rs:173:    /// TSV uses 30-40% fewer tokens than JSON for tabular data (pgEdge benchmark).
+src/mcp/tool_handlers/utils.rs:549:        assert!(validate_path("../secret").is_err());
+src/mcp/tool_handlers/utils.rs:682:        // app payload because long process tokens like
+src/mcp/tool_handlers/ssh_timer_trigger.rs:180:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ansible_facts.rs:281:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_search.rs:220:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_search.rs:306:                sudo_password: None,
+src/mcp/tool_handlers/ssh_pkg_search.rs:375:            cancel_token: None,
+src/mcp/tool_handlers/ssh_pkg_search.rs:377:            progress_token: None,
+src/mcp/tool_handlers/ssh_log_search_multi.rs:226:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_lvm.rs:191:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_lvm.rs:262:                sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_lvm.rs:327:            cancel_token: None,
+src/mcp/tool_handlers/ssh_storage_lvm.rs:329:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_event_logs.rs:236:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_event_logs.rs:300:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_arp.rs:140:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_arp.rs:192:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_arp.rs:261:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_arp.rs:263:            progress_token: None,
+src/mcp/tool_handlers/ssh_ansible_playbook.rs:75:        structured JSON output (works with jq_filter for token-efficient extraction). \
+src/mcp/tool_handlers/ssh_ansible_playbook.rs:486:            sudo_password: None,
+src/mcp/tool_handlers/ssh_journal_query.rs:23:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_journal_query.rs:26:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_journal_query.rs:141:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_journal_query.rs:143:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_journal_query.rs:283:            sudo_password: None,
+src/mcp/tool_handlers/ssh_journal_query.rs:360:                sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_logs.rs:259:            sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_rollout.rs:377:            sudo_password: None,
+src/mcp/tool_handlers/ssh_container_log_search.rs:269:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_disable.rs:183:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_disable.rs:236:                sudo_password: None,
+src/mcp/tool_handlers/ssh_webhook_send.rs:215:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_start.rs:177:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_start.rs:230:                sudo_password: None,
+src/mcp/tool_handlers/ssh_pty_exec.rs:248:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pty_exec.rs:293:            sudo_password: None,
+src/mcp/tool_handlers/ssh_group_list.rs:171:            sudo_password: None,
+src/mcp/tool_handlers/ssh_group_list.rs:254:                sudo_password: None,
+src/mcp/tool_handlers/ssh_notify.rs:221:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_list.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_list.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ssl_audit.rs:247:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ssl_audit.rs:306:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ssl_audit.rs:371:            cancel_token: None,
+src/mcp/tool_handlers/ssh_ssl_audit.rs:373:            progress_token: None,
+src/mcp/tool_handlers/ssh_ldap_user_info.rs:150:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_user_info.rs:206:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ldap_user_info.rs:275:            cancel_token: None,
+src/mcp/tool_handlers/ssh_ldap_user_info.rs:277:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_feature_install.rs:188:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_feature_install.rs:241:                sudo_password: None,
+src/mcp/tool_handlers/ssh_disk_usage.rs:370:                sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_status.rs:164:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_status.rs:216:                sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_info.rs:216:            sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_info.rs:283:                sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_info.rs:352:            cancel_token: None,
+src/mcp/tool_handlers/ssh_redis_info.rs:354:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_event_query.rs:245:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_event_query.rs:309:                sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_project_sync.rs:96:            &awx.token,
+src/mcp/tool_handlers/ssh_pty_resize.rs:236:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pty_resize.rs:279:            sudo_password: None,
+src/mcp/tool_handlers/ssh_file_chown.rs:231:            sudo_password: None,
+src/mcp/tool_handlers/ssh_canary_exec.rs:187:            sudo_password: None,
+src/mcp/tool_handlers/ssh_health.rs:146:            result.push_str(&metrics.render_token_summary());
+src/mcp/tool_handlers/ssh_win_net_dns.rs:186:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_dns.rs:239:                sudo_password: None,
+src/mcp/tool_handlers/ssh_mongodb_status.rs:202:            sudo_password: None,
+src/mcp/tool_handlers/ssh_mongodb_status.rs:264:                sudo_password: None,
+src/mcp/tool_handlers/ssh_mongodb_status.rs:333:            cancel_token: None,
+src/mcp/tool_handlers/ssh_mongodb_status.rs:335:            progress_token: None,
+src/mcp/tool_handlers/ssh_file_patch.rs:137:            sudo_password: None,
+src/mcp/tool_handlers/ssh_helm_install.rs:420:            sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_images.rs:265:            sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_images.rs:379:                sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_get.rs:335:            sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_get.rs:492:        // Exhaust the single token for server1
+src/mcp/tool_handlers/ssh_net_ping.rs:222:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_traceroute.rs:211:            sudo_password: None,
+src/mcp/tool_handlers/ssh_db_dump.rs:27:    db_password: Option<String>,
+src/mcp/tool_handlers/ssh_db_dump.rs:85:            "db_password": {
+src/mcp/tool_handlers/ssh_db_dump.rs:87:                "description": "Database password"
+src/mcp/tool_handlers/ssh_db_dump.rs:122:            args.db_password.as_deref(),
+src/mcp/tool_handlers/ssh_db_dump.rs:238:        assert!(properties.contains_key("db_password"));
+src/mcp/tool_handlers/ssh_db_dump.rs:254:            "db_password": "secret",
+src/mcp/tool_handlers/ssh_db_dump.rs:364:            sudo_password: None,
+src/mcp/tool_handlers/ssh_db_dump.rs:395:            db_password: None,
+src/mcp/tool_handlers/ssh_db_dump.rs:422:            db_password: None,
+src/mcp/tool_handlers/ssh_db_dump.rs:446:            db_password: None,
+src/mcp/tool_handlers/ssh_db_dump.rs:472:            db_password: Some("secret".to_string()),
+src/mcp/tool_handlers/ssh_podman_exec.rs:150:            sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_exec.rs:205:                sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_exec.rs:274:            cancel_token: None,
+src/mcp/tool_handlers/ssh_podman_exec.rs:276:            progress_token: None,
+src/mcp/tool_handlers/ssh_journal_follow.rs:192:            sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_job_cancel.rs:95:            &awx.token,
+src/mcp/tool_handlers/ssh_backup_schedule.rs:247:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_list.rs:215:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_list.rs:283:                sudo_password: None,
+src/mcp/tool_handlers/ssh_pty_interact.rs:233:            sudo_password: None,
+src/mcp/tool_handlers/ssh_pty_interact.rs:277:            sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_ps.rs:163:                sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_ps.rs:232:            cancel_token: None,
+src/mcp/tool_handlers/ssh_podman_ps.rs:234:            progress_token: None,
+src/mcp/tool_handlers/ssh_timer_list.rs:182:            sudo_password: None,
+src/mcp/tool_handlers/ssh_timer_list.rs:248:                sudo_password: None,
+src/mcp/tool_handlers/ssh_helm_status.rs:286:            sudo_password: None,
+src/mcp/tool_handlers/ssh_template_validate.rs:240:            sudo_password: None,
+src/mcp/tool_handlers/ssh_template_validate.rs:283:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_enable.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_enable.rs:238:                sudo_password: None,
+src/mcp/tool_handlers/ssh_key_distribute.rs:213:            sudo_password: None,
+src/mcp/tool_handlers/ssh_selinux_status.rs:167:            sudo_password: None,
+src/mcp/tool_handlers/ssh_selinux_status.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_selinux_status.rs:285:            cancel_token: None,
+src/mcp/tool_handlers/ssh_selinux_status.rs:287:            progress_token: None,
+src/mcp/tool_handlers/ssh_apparmor_status.rs:167:            sudo_password: None,
+src/mcp/tool_handlers/ssh_apparmor_status.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_apparmor_status.rs:285:            cancel_token: None,
+src/mcp/tool_handlers/ssh_apparmor_status.rs:287:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_service_restart.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_restart.rs:238:                sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_list.rs:226:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_vm_list.rs:288:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_user_info.rs:205:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_user_info.rs:258:                sudo_password: None,
+src/mcp/tool_handlers/ssh_security_audit.rs:30:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_security_audit.rs:33:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_security_audit.rs:51:        users without passwords, SUID binaries, world-writable files, and listening ports.";
+src/mcp/tool_handlers/ssh_security_audit.rs:77:            "summary_max_tokens": {
+src/mcp/tool_handlers/ssh_security_audit.rs:79:                "description": "Maximum tokens for the LLM summary (default: 512). Only meaningful with summarize=true.",
+src/mcp/tool_handlers/ssh_security_audit.rs:125:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_security_audit.rs:132:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_security_audit.rs:251:            sudo_password: None,
+src/mcp/tool_handlers/ssh_security_audit.rs:303:                sudo_password: None,
+src/mcp/tool_handlers/ssh_security_audit.rs:368:            cancel_token: None,
+src/mcp/tool_handlers/ssh_security_audit.rs:370:            progress_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_version.rs:144:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_version.rs:197:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_version.rs:266:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_version.rs:268:            progress_token: None,
+src/mcp/tool_handlers/ssh_at_jobs.rs:198:            sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_job_stdout.rs:70:         ssh_awx_job_summary for token-efficient monitoring."
+src/mcp/tool_handlers/ssh_awx_job_stdout.rs:109:            &awx.token,
+src/mcp/tool_handlers/ssh_key_audit.rs:192:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_lsblk.rs:210:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_lsblk.rs:291:                sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_lsblk.rs:356:            cancel_token: None,
+src/mcp/tool_handlers/ssh_storage_lsblk.rs:358:            progress_token: None,
+src/mcp/tool_handlers/ssh_reg_delete.rs:225:            sudo_password: None,
+src/mcp/tool_handlers/ssh_reg_delete.rs:280:                sudo_password: None,
+src/mcp/tool_handlers/ssh_apparmor_profiles.rs:167:            sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_inventories.rs:113:            &awx.token,
+src/mcp/tool_handlers/ssh_win_perf_memory.rs:168:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_memory.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_firewall_allow.rs:252:            sudo_password: None,
+src/mcp/tool_handlers/ssh_group_add.rs:160:            sudo_password: None,
+src/mcp/tool_handlers/ssh_group_add.rs:246:                sudo_password: None,
+src/mcp/tool_handlers/ssh_group_add.rs:315:            cancel_token: None,
+src/mcp/tool_handlers/ssh_group_add.rs:317:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_update_install.rs:182:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_update_install.rs:235:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_network.rs:168:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_network.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_compose.rs:334:            sudo_password: None,
+src/mcp/tool_handlers/ssh_process_list.rs:273:            sudo_password: None,
+src/mcp/tool_handlers/ssh_process_list.rs:372:                sudo_password: None,
+src/mcp/tool_handlers/ssh_recording_verify.rs:147:        let json = json!({"file_path": "/tmp/rec.cast", "hash_key": "secret"});
+src/mcp/tool_handlers/ssh_recording_verify.rs:150:        assert_eq!(args.hash_key, Some("secret".to_string()));
+src/mcp/tool_handlers/ssh_podman_inspect.rs:138:            sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_inspect.rs:192:                sudo_password: None,
+src/mcp/tool_handlers/ssh_podman_inspect.rs:261:            cancel_token: None,
+src/mcp/tool_handlers/ssh_podman_inspect.rs:263:            progress_token: None,
+src/mcp/tool_handlers/ssh_k8s_delete.rs:367:            sudo_password: None,
+src/mcp/tool_handlers/ssh_vault_read.rs:33:    const DESCRIPTION: &'static str = "Read a secret from HashiCorp Vault on a remote host. Returns secret data at the given \
+src/mcp/tool_handlers/ssh_vault_read.rs:35:        secret paths first.";
+src/mcp/tool_handlers/ssh_vault_read.rs:58:                        "description": "Specific field to read from the secret"
+src/mcp/tool_handlers/ssh_vault_read.rs:123:                Some(json!({"host": "nonexistent", "path": "secret/data/myapp"})),
+src/mcp/tool_handlers/ssh_vault_read.rs:151:            "path": "secret/data/myapp",
+src/mcp/tool_handlers/ssh_vault_read.rs:153:            "mount": "secret",
+src/mcp/tool_handlers/ssh_vault_read.rs:154:            "field": "password",
+src/mcp/tool_handlers/ssh_vault_read.rs:162:        assert_eq!(args.path, "secret/data/myapp");
+src/mcp/tool_handlers/ssh_vault_read.rs:167:        assert_eq!(args.mount.as_deref(), Some("secret"));
+src/mcp/tool_handlers/ssh_vault_read.rs:168:        assert_eq!(args.field.as_deref(), Some("password"));
+src/mcp/tool_handlers/ssh_vault_read.rs:177:        let json = json!({"host": "myhost", "path": "secret/data/myapp"});
+src/mcp/tool_handlers/ssh_vault_read.rs:180:        assert_eq!(args.path, "secret/data/myapp");
+src/mcp/tool_handlers/ssh_vault_read.rs:207:        let json = json!({"host": "myhost", "path": "secret/data/myapp"});
+src/mcp/tool_handlers/ssh_vault_read.rs:250:                sudo_password: None,
+src/mcp/tool_handlers/ssh_vault_read.rs:319:            cancel_token: None,
+src/mcp/tool_handlers/ssh_vault_read.rs:321:            progress_token: None,
+src/mcp/tool_handlers/ssh_vault_read.rs:335:                Some(json!({"host": "server1", "path": "secret/data/myapp"})),
+src/mcp/tool_handlers/ssh_vault_status.rs:32:        before reading or writing secrets.";
+src/mcp/tool_handlers/ssh_vault_status.rs:215:                sudo_password: None,
+src/mcp/tool_handlers/ssh_vault_status.rs:284:            cancel_token: None,
+src/mcp/tool_handlers/ssh_vault_status.rs:286:            progress_token: None,
+src/mcp/tool_handlers/ssh_hyperv_switch_list.rs:226:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_switch_list.rs:288:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_connections.rs:255:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_connections.rs:348:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_remove.rs:240:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_remove.rs:310:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cron_remove.rs:379:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cron_remove.rs:381:            progress_token: None,
+src/mcp/tool_handlers/ssh_alert_set.rs:241:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_check.rs:219:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_check.rs:289:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_check.rs:354:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cert_check.rs:356:            progress_token: None,
+src/mcp/tool_handlers/ssh_network_capture.rs:236:            sudo_password: None,
+src/mcp/tool_handlers/ssh_network_capture.rs:320:                sudo_password: None,
+src/mcp/tool_handlers/ssh_network_capture.rs:385:            cancel_token: None,
+src/mcp/tool_handlers/ssh_network_capture.rs:387:            progress_token: None,
+src/mcp/tool_handlers/ssh_env_drift.rs:23:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_env_drift.rs:26:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_env_drift.rs:90:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_env_drift.rs:92:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_env_drift.rs:134:            sudo_password: None,
+src/mcp/tool_handlers/ssh_env_drift.rs:213:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_inventory_sync.rs:205:            sudo_password: None,
+src/mcp/tool_handlers/ssh_inventory_sync.rs:257:                sudo_password: None,
+src/mcp/tool_handlers/ssh_inventory_sync.rs:326:            cancel_token: None,
+src/mcp/tool_handlers/ssh_inventory_sync.rs:328:            progress_token: None,
+src/mcp/tool_handlers/ssh_file_stat.rs:197:            sudo_password: None,
+src/mcp/tool_handlers/ssh_helm_history.rs:315:            sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_job_follow.rs:163:            &awx.token,
+src/mcp/tool_handlers/ssh_awx_job_follow.rs:200:                &awx.token,
+src/mcp/tool_handlers/ssh_awx_job_follow.rs:210:                &awx.token,
+src/mcp/tool_handlers/ssh_schtask_enable.rs:183:            sudo_password: None,
+src/mcp/tool_handlers/ssh_schtask_enable.rs:236:                sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_apply.rs:139:            sudo_password: None,
+src/mcp/tool_handlers/ssh_file_template.rs:127:            sudo_password: None,
+src/mcp/tool_handlers/ssh_diagnose.rs:33:    /// Cap on the LLM summary length, in tokens. Only meaningful when
+src/mcp/tool_handlers/ssh_diagnose.rs:36:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_diagnose.rs:80:            "summary_max_tokens": {
+src/mcp/tool_handlers/ssh_diagnose.rs:82:                "description": "Maximum tokens for the LLM summary (default: 512). Only meaningful with summarize=true.",
+src/mcp/tool_handlers/ssh_diagnose.rs:108:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_diagnose.rs:114:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_diagnose.rs:212:            sudo_password: None,
+src/mcp/tool_handlers/ssh_diagnose.rs:237:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_key_generate.rs:47:        created at /tmp/mcp_generated_key with an empty passphrase. Supports ed25519 (default), \
+src/mcp/tool_handlers/ssh_key_generate.rs:208:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_add.rs:184:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_add.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_user_add.rs:340:            cancel_token: None,
+src/mcp/tool_handlers/ssh_user_add.rs:342:            progress_token: None,
+src/mcp/tool_handlers/ssh_iis_stop.rs:177:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_stop.rs:230:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_expiry.rs:219:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_expiry.rs:288:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_expiry.rs:353:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cert_expiry.rs:355:            progress_token: None,
+src/mcp/tool_handlers/ssh_apache_vhosts.rs:179:            sudo_password: None,
+src/mcp/tool_handlers/ssh_apache_vhosts.rs:232:                sudo_password: None,
+src/mcp/tool_handlers/ssh_apache_vhosts.rs:297:            cancel_token: None,
+src/mcp/tool_handlers/ssh_apache_vhosts.rs:299:            progress_token: None,
+src/mcp/tool_handlers/ssh_backup_snapshot.rs:212:            sudo_password: None,
+src/mcp/tool_handlers/ssh_file_chmod.rs:220:            sudo_password: None,
+src/mcp/tool_handlers/ssh_multicloud_sync.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_multicloud_sync.rs:289:            cancel_token: None,
+src/mcp/tool_handlers/ssh_multicloud_sync.rs:291:            progress_token: None,
+src/mcp/tool_handlers/ssh_iis_list_pools.rs:206:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_list_pools.rs:268:                sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_cpu.rs:168:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_perf_cpu.rs:220:                sudo_password: None,
+src/mcp/tool_handlers/ssh_postgresql_status.rs:216:            sudo_password: None,
+src/mcp/tool_handlers/ssh_postgresql_status.rs:269:                sudo_password: None,
+src/mcp/tool_handlers/ssh_postgresql_status.rs:338:            cancel_token: None,
+src/mcp/tool_handlers/ssh_postgresql_status.rs:340:            progress_token: None,
+src/mcp/tool_handlers/ssh_hyperv_host_info.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_hyperv_host_info.rs:237:                sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_exec.rs:270:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_restart.rs:181:            sudo_password: None,
+src/mcp/tool_handlers/ssh_iis_restart.rs:234:                sudo_password: None,
+src/mcp/tool_handlers/ssh_git_diff.rs:220:            sudo_password: None,
+src/mcp/tool_handlers/ssh_git_diff.rs:275:                sudo_password: None,
+src/mcp/tool_handlers/ssh_git_diff.rs:344:            cancel_token: None,
+src/mcp/tool_handlers/ssh_git_diff.rs:346:            progress_token: None,
+src/mcp/tool_handlers/ssh_firewall_list.rs:219:            sudo_password: None,
+src/mcp/tool_handlers/ssh_firewall_list.rs:286:                sudo_password: None,
+src/mcp/tool_handlers/ssh_file_diff.rs:115:            sudo_password: None,
+src/mcp/tool_handlers/ssh_template_show.rs:220:            sudo_password: None,
+src/mcp/tool_handlers/ssh_multicloud_compare.rs:259:                sudo_password: None,
+src/mcp/tool_handlers/ssh_multicloud_compare.rs:328:            cancel_token: None,
+src/mcp/tool_handlers/ssh_multicloud_compare.rs:330:            progress_token: None,
+src/mcp/tool_handlers/ssh_git_status.rs:202:            sudo_password: None,
+src/mcp/tool_handlers/ssh_git_status.rs:257:                sudo_password: None,
+src/mcp/tool_handlers/ssh_git_status.rs:326:            cancel_token: None,
+src/mcp/tool_handlers/ssh_git_status.rs:328:            progress_token: None,
+src/mcp/tool_handlers/ssh_win_net_ip.rs:167:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_ip.rs:219:                sudo_password: None,
+src/mcp/tool_handlers/ssh_capacity_predict.rs:207:            sudo_password: None,
+src/mcp/tool_handlers/ssh_helm_upgrade.rs:450:            sudo_password: None,
+src/mcp/tool_handlers/ssh_stig_check.rs:205:            sudo_password: None,
+src/mcp/tool_handlers/ssh_stig_check.rs:269:                sudo_password: None,
+src/mcp/tool_handlers/ssh_stig_check.rs:334:            cancel_token: None,
+src/mcp/tool_handlers/ssh_stig_check.rs:336:            progress_token: None,
+src/mcp/tool_handlers/ssh_db_restore.rs:27:    db_password: Option<String>,
+src/mcp/tool_handlers/ssh_db_restore.rs:81:            "db_password": {
+src/mcp/tool_handlers/ssh_db_restore.rs:83:                "description": "Database password"
+src/mcp/tool_handlers/ssh_db_restore.rs:108:            args.db_password.as_deref(),
+src/mcp/tool_handlers/ssh_db_restore.rs:222:        assert!(properties.contains_key("db_password"));
+src/mcp/tool_handlers/ssh_db_restore.rs:236:            "db_password": "secret",
+src/mcp/tool_handlers/ssh_db_restore.rs:248:        assert_eq!(args.db_password, Some("secret".to_string()));
+src/mcp/tool_handlers/ssh_db_restore.rs:267:        assert!(args.db_password.is_none());
+src/mcp/tool_handlers/ssh_docker_volume_ls.rs:263:            sudo_password: None,
+src/mcp/tool_handlers/ssh_docker_volume_ls.rs:348:        // Exhaust the single token for server1
+src/mcp/tool_handlers/ssh_docker_volume_ls.rs:396:                sudo_password: None,
+src/mcp/tool_handlers/ssh_compare_state.rs:24:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_compare_state.rs:27:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_compare_state.rs:96:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_compare_state.rs:98:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_compare_state.rs:188:            sudo_password: None,
+src/mcp/tool_handlers/ssh_compare_state.rs:213:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_vault_list.rs:35:    const DESCRIPTION: &'static str = "List secrets at a path in HashiCorp Vault on a remote host. Shows available secret \
+src/mcp/tool_handlers/ssh_vault_list.rs:36:        keys under the specified path. Use this to discover secrets before reading with \
+src/mcp/tool_handlers/ssh_vault_list.rs:157:                Some(json!({"host": "nonexistent", "path": "secret/data/"})),
+src/mcp/tool_handlers/ssh_vault_list.rs:185:            "path": "secret/data/",
+src/mcp/tool_handlers/ssh_vault_list.rs:187:            "mount": "secret",
+src/mcp/tool_handlers/ssh_vault_list.rs:195:        assert_eq!(args.path, "secret/data/");
+src/mcp/tool_handlers/ssh_vault_list.rs:200:        assert_eq!(args.mount.as_deref(), Some("secret"));
+src/mcp/tool_handlers/ssh_vault_list.rs:209:        let json = json!({"host": "myhost", "path": "secret/data/"});
+src/mcp/tool_handlers/ssh_vault_list.rs:212:        assert_eq!(args.path, "secret/data/");
+src/mcp/tool_handlers/ssh_vault_list.rs:237:        let json = json!({"host": "myhost", "path": "secret/data/"});
+src/mcp/tool_handlers/ssh_vault_list.rs:280:                sudo_password: None,
+src/mcp/tool_handlers/ssh_vault_list.rs:349:            cancel_token: None,
+src/mcp/tool_handlers/ssh_vault_list.rs:351:            progress_token: None,
+src/mcp/tool_handlers/ssh_vault_list.rs:365:                Some(json!({"host": "server1", "path": "secret/data/"})),
+src/mcp/tool_handlers/ssh_helm_rollback.rs:355:            sudo_password: None,
+src/mcp/tool_handlers/ssh_runbook_list.rs:64:        // TSV format for token efficiency (Category B)
+src/mcp/tool_handlers/ssh_win_net_adapters.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_net_adapters.rs:271:                sudo_password: None,
+src/mcp/tool_handlers/ssh_session_exec.rs:134:            let sudo_password = session_host_config.and_then(|h| h.sudo_password.clone());
+src/mcp/tool_handlers/ssh_session_exec.rs:136:            if let Some(ref password) = sudo_password {
+src/mcp/tool_handlers/ssh_session_exec.rs:138:                    "Using sudo with password via stdin. \
+src/mcp/tool_handlers/ssh_session_exec.rs:141:                // Use printf in a subshell to reduce password visibility in process list
+src/mcp/tool_handlers/ssh_session_exec.rs:144:                    shell_escape(password),
+src/mcp/tool_handlers/ssh_session_exec.rs:277:            cancel_token: None,
+src/mcp/tool_handlers/ssh_session_exec.rs:279:            progress_token: None,
+src/mcp/tool_handlers/ssh_k8s_describe.rs:293:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_list.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_user_list.rs:296:                sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_group_list.rs:227:            sudo_password: None,
+src/mcp/tool_handlers/ssh_ad_group_list.rs:289:                sudo_password: None,
+src/mcp/tool_handlers/ssh_log_tail_multi.rs:209:            sudo_password: None,
+src/mcp/tool_handlers/ssh_k8s_top.rs:184:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_top.rs:219:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_process_top.rs:281:                sudo_password: None,
+src/mcp/tool_handlers/ssh_vuln_scan.rs:24:    /// Maximum tokens for the LLM summary (default: 512). Only
+src/mcp/tool_handlers/ssh_vuln_scan.rs:27:    summary_max_tokens: Option<u32>,
+src/mcp/tool_handlers/ssh_vuln_scan.rs:95:        let max_tokens = args.summary_max_tokens.unwrap_or(512);
+src/mcp/tool_handlers/ssh_vuln_scan.rs:97:        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
+src/mcp/tool_handlers/ssh_vuln_scan.rs:139:            sudo_password: None,
+src/mcp/tool_handlers/ssh_vuln_scan.rs:218:            summary_max_tokens: None,
+src/mcp/tool_handlers/ssh_cert_info.rs:197:            sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_info.rs:251:                sudo_password: None,
+src/mcp/tool_handlers/ssh_cert_info.rs:316:            cancel_token: None,
+src/mcp/tool_handlers/ssh_cert_info.rs:318:            progress_token: None,
+src/mcp/tool_handlers/ssh_selinux_booleans.rs:190:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_config.rs:185:            sudo_password: None,
+src/mcp/tool_handlers/ssh_win_service_config.rs:238:                sudo_password: None,
+src/mcp/tool_handlers/ssh_journal_boots.rs:213:            sudo_password: None,
+src/mcp/tool_handlers/ssh_journal_boots.rs:287:                sudo_password: None,
+src/mcp/tool_handlers/ssh_capacity_trend.rs:217:            sudo_password: None,
+src/mcp/tool_handlers/ssh_terraform_apply.rs:329:            sudo_password: None,
+src/mcp/tool_handlers/ssh_awx_templates.rs:114:            &awx.token,
+src/mcp/tool_handlers/ssh_postgresql_query.rs:270:                sudo_password: None,
+src/mcp/tool_handlers/ssh_postgresql_query.rs:339:            cancel_token: None,
+src/mcp/tool_handlers/ssh_postgresql_query.rs:341:            progress_token: None,
+src/mcp/tool_handlers/ssh_service_start.rs:208:                    passphrase: None,
+src/mcp/tool_handlers/ssh_service_start.rs:214:                sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_keys.rs:278:                sudo_password: None,
+src/mcp/tool_handlers/ssh_redis_keys.rs:347:            cancel_token: None,
+src/mcp/tool_handlers/ssh_redis_keys.rs:349:            progress_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_vlans.rs:140:            sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_vlans.rs:192:                sudo_password: None,
+src/mcp/tool_handlers/ssh_net_equip_show_vlans.rs:261:            cancel_token: None,
+src/mcp/tool_handlers/ssh_net_equip_show_vlans.rs:263:            progress_token: None,
+src/mcp/tool_handlers/ssh_storage_umount.rs:238:            sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_umount.rs:324:                sudo_password: None,
+src/mcp/tool_handlers/ssh_storage_umount.rs:389:            cancel_token: None,
+src/mcp/tool_handlers/ssh_storage_umount.rs:391:            progress_token: None,
+src/mcp/resources/metrics_resource.rs:178:                    passphrase: None,
+src/mcp/resources/metrics_resource.rs:184:                sudo_password: None,
+src/mcp/resources/metrics_resource.rs:208:                    passphrase: None,
+src/mcp/resources/metrics_resource.rs:214:                sudo_password: None,
+src/mcp/resources/metrics_resource.rs:272:            cancel_token: None,
+src/mcp/resources/metrics_resource.rs:274:            progress_token: None,
+src/mcp/resources/services_resource.rs:134:                    passphrase: None,
+src/mcp/resources/services_resource.rs:140:                sudo_password: None,
+src/mcp/resources/services_resource.rs:198:            cancel_token: None,
+src/mcp/resources/services_resource.rs:200:            progress_token: None,
+src/mcp/server.rs:80:    /// Application metrics for token consumption analytics.
+src/mcp/server.rs:86:    /// a request by ID and calls `token.cancel()` to honor MCP 2025-11-25
+src/mcp/server.rs:112:        // log used to leak MYSQL_PWD/PGPASSWORD/Bearer tokens/webhook URLs.
+src/mcp/server.rs:246:        let token = tokio_util::sync::CancellationToken::new();
+src/mcp/server.rs:248:            map.insert(request_id, token.clone());
+src/mcp/server.rs:250:        token
+src/mcp/server.rs:273:        let token = match self.active_requests.lock() {
+src/mcp/server.rs:277:        if let Some(token) = token {
+src/mcp/server.rs:278:            token.cancel();
+src/mcp/server.rs:291:    /// Pass `cancel_token = Some(token)` to allow long-running tools to race
+src/mcp/server.rs:392:        cancel_token: Option<tokio_util::sync::CancellationToken>,
+src/mcp/server.rs:394:        progress_token: Option<Value>,
+src/mcp/server.rs:425:        ctx.cancel_token = cancel_token;
+src/mcp/server.rs:427:        ctx.progress_token = progress_token;
+src/mcp/server.rs:718:                    let cancel_token = request_id
+src/mcp/server.rs:740:                                    cancel_token,
+src/mcp/server.rs:982:    /// `cancel_token = None`, meaning cancellation is not wired for this
+src/mcp/server.rs:996:    /// Dispatch a JSON-RPC request with an optional cancellation token
+src/mcp/server.rs:999:    /// The token is propagated to `handle_tools_call` (synchronous path),
+src/mcp/server.rs:1001:    /// their SSH work against `token.cancelled()`.
+src/mcp/server.rs:1009:    /// Other methods ignore the token either because they are fast
+src/mcp/server.rs:1015:        cancel_token: Option<tokio_util::sync::CancellationToken>,
+src/mcp/server.rs:1032:                    cancel_token,
+src/mcp/server.rs:1286:        cancel_token: Option<tokio_util::sync::CancellationToken>,
+src/mcp/server.rs:1327:            .and_then(|m| m.progress_token.clone())
+src/mcp/server.rs:1328:            .and_then(|token| {
+src/mcp/server.rs:1333:                Some(ProgressReporter::new(token, tx, Some(3)))
+src/mcp/server.rs:1355:        // propagate the request-level `cancel_token` here because the task
+src/mcp/server.rs:1368:                        .and_then(|m| m.progress_token.clone()),
+src/mcp/server.rs:1382:                cancel_token,
+src/mcp/server.rs:1387:                    .and_then(|m| m.progress_token.clone()),
+src/mcp/server.rs:1505:        progress_token: Option<Value>,
+src/mcp/server.rs:1517:        let Some((task_id, cancel_token)) = self.task_store.create_task(task_request.ttl).await
+src/mcp/server.rs:1556:        // Propagate the task's cancel_token into the ToolContext so the
+src/mcp/server.rs:1561:                Some(cancel_token.clone()),
+src/mcp/server.rs:1563:                progress_token,
+src/mcp/server.rs:1573:                () = cancel_token.cancelled() => {
+src/mcp/server.rs:1796:    /// fired token and bail out cleanly via their `tokio::select!` branch
+src/mcp/server.rs:4052:    fn test_register_request_stores_token_in_map() {
+src/mcp/server.rs:4054:        let token = server.register_request("req-1".to_string());
+src/mcp/server.rs:4056:        assert!(!token.is_cancelled(), "fresh token must not be cancelled");
+src/mcp/server.rs:4079:    fn test_cancel_request_fires_token_and_returns_true() {
+src/mcp/server.rs:4081:        let token = server.register_request("req-3".to_string());
+src/mcp/server.rs:4087:            token.is_cancelled(),
+src/mcp/server.rs:4088:            "token must be cancelled after cancel_request"
+src/mcp/server.rs:4113:    /// the token into the `ToolContext` so that `tools/call` sees a
+src/mcp/server.rs:4119:    async fn test_handle_request_with_cancel_tools_call_routes_token() {
+src/mcp/server.rs:4121:        let token = tokio_util::sync::CancellationToken::new();
+src/mcp/server.rs:4125:            id: Some(json!("req-with-token")),
+src/mcp/server.rs:4138:            .handle_request_with_cancel(request, Some(token), None, None, None)
+src/mcp/server.rs:4144:    /// without a cancel token — required for HTTP transport and tests.
+src/mcp/server.rs:4146:    async fn test_handle_request_wrapper_passes_none_cancel_token() {
+src/mcp/server.rs:4161:    fn test_handle_cancellation_notification_fires_token_for_known_id() {
+src/mcp/server.rs:4163:        let token = server.register_request("req-42".to_string());
+src/mcp/server.rs:4164:        assert!(!token.is_cancelled());
+src/mcp/server.rs:4169:        assert!(token.is_cancelled(), "token must fire after notification");
+src/mcp/server.rs:4197:        let token = server.register_request("7".to_string());
+src/mcp/server.rs:4202:        assert!(token.is_cancelled());
+src/mcp/protocol.rs:333:    pub progress_token: Option<Value>,
+src/mcp/protocol.rs:623:    pub max_tokens: u32,
+src/mcp/protocol.rs:848:        token: &Value,
+src/mcp/protocol.rs:854:            "progressToken": token,
+src/mcp/elicitation.rs:7://! - Password/passphrase input (encrypted SSH key)
+src/mcp/instructions.rs:121:         output_format=tsv for list-shaped results (60-80% fewer tokens than pretty JSON). \
+src/mcp/instructions.rs:170:            sudo_password: None,
+src/mcp/registry.rs:228:                    before returning to reduce token consumption. Always extract only the fields \
+src/mcp/registry.rs:232:                    For minimal token usage, return arrays and combine with output_format='tsv': \
+src/mcp/registry.rs:248:                    Combine with output_format='tsv' for minimal tokens: \
+src/mcp/registry.rs:261:                    reduce token consumption. Case-insensitive header match. Always specify \
+src/mcp/registry.rs:277:                    Use this to reduce token consumption when you only need the top N results. \
+src/mcp/registry.rs:292:                    maximum token efficiency. To use TSV, your filter MUST produce arrays \
+src/mcp/registry.rs:352:/// default 25K-token persist threshold (up to 500K chars).
+src/mcp/progress.rs:15:    token: Value,
+src/mcp/progress.rs:23:    /// - `token`: the `progressToken` from the client's `_meta`
+src/mcp/progress.rs:27:    pub fn new(token: Value, tx: mpsc::Sender<WriterMessage>, total: Option<u64>) -> Self {
+src/mcp/progress.rs:28:        Self { token, tx, total }
+src/mcp/progress.rs:37:            JsonRpcNotification::progress(&self.token, progress, self.total, message);
+src/mcp/progress.rs:96:    fn test_integer_token() {
+src/domain/output_kind.rs:88:                 output_format='tsv' for 60-80% token savings on list-shaped data. \
+src/config/loader.rs:23:    // Reject config file with overly permissive permissions (may contain secrets)
+src/config/loader.rs:142:        // Warn about Basic auth over plain HTTP (credentials exposed)
+src/config/loader.rs:150:                "WinRM Basic auth over plain HTTP exposes credentials in cleartext; \
+src/config/loader.rs:240:                     use password, ntlm, certificate, or kerberos auth instead"
+src/config/loader.rs:246:                     use password, ntlm, certificate, or kerberos auth instead"
+src/config/loader.rs:492:    fn test_valid_config_with_password_auth() {
+src/config/loader.rs:499:      type: password
+src/config/loader.rs:500:      password: "secret123"
+src/config/loader.rs:528:    - "password=\\S+"
+src/config/loader.rs:721:      - pattern: "my_secret_\\w+"
+src/config/loader.rs:723:        description: "Custom secret pattern"
+src/domain/jq_filter.rs:5://! This can reduce token consumption by up to 99% on large JSON outputs.
+src/domain/jq_filter.rs:107:/// This is a token-efficient alternative to JSON output for tabular data:
+src/domain/jq_filter.rs:446:    fn test_tsv_token_efficiency() {
+src/domain/jq_filter.rs:447:        // Demonstrate the actual token saving on a realistic AWX-like input
+src/config/ssh_config.rs:152:                    passphrase: None,
+src/config/ssh_config.rs:180:            sudo_password: None,
+src/config/ssh_config.rs:385:Host secret-server
+src/config/ssh_config.rs:393:        let exclude = vec!["secret-server".to_string()];
+src/config/ssh_config.rs:398:        assert!(!hosts.contains_key("secret-server"));
+src/mcp/sampling.rs:57:        max_tokens: u32,
+src/mcp/sampling.rs:59:        self.analyze_with_tools(prompt, content, Vec::new(), max_tokens)
+src/mcp/sampling.rs:73:        max_tokens: u32,
+src/mcp/sampling.rs:89:            max_tokens,
+src/domain/use_cases/awx.rs:40:    /// The token is included in the Authorization header but masked in
+src/domain/use_cases/awx.rs:46:    /// * `token` - AWX API `OAuth2` token
+src/domain/use_cases/awx.rs:57:        token: &str,
+src/domain/use_cases/awx.rs:79:        let _ = write!(cmd, " -H 'Authorization: Bearer {}'", shell_escape(token));
+src/domain/use_cases/awx.rs:154:            "mytoken123",
+src/domain/use_cases/awx.rs:165:        assert!(cmd.contains("mytoken123"));
+src/domain/use_cases/awx.rs:242:    fn test_token_is_shell_escaped() {
+src/mcp/standard_tool.rs:344:        // against `token.cancelled()`.
+src/mcp/standard_tool.rs:357:        let cancel_token = ctx.cancel_token.clone();
+src/mcp/standard_tool.rs:367:                let result = if let Some(token) = &cancel_token {
+src/mcp/standard_tool.rs:370:                        () = token.cancelled() => {
+src/mcp/standard_tool.rs:449:        // Record pipeline stats for token consumption analytics
+src/mcp/standard_tool.rs:576:/// values instead of JSON for maximum token efficiency.
+src/mcp/standard_tool.rs:856:        // Exhaust the single token
+src/mcp/standard_tool.rs:890:                sudo_password: None,
+src/mcp/standard_tool.rs:1232:                sudo_password: None,
+src/mcp/standard_tool.rs:1373:    /// `ToolContext.cancel_token` races ahead of a blocking `conn.exec()`
+src/mcp/standard_tool.rs:1379:    async fn test_cancel_token_interrupts_in_flight_exec() {
+src/mcp/standard_tool.rs:1390:        let token = CancellationToken::new();
+src/mcp/standard_tool.rs:1391:        ctx.cancel_token = Some(token.clone());
+src/mcp/standard_tool.rs:1395:            let token = token.clone();
+src/mcp/standard_tool.rs:1398:                token.cancel();
+src/mcp/standard_tool.rs:1417:    /// When no cancel token is present (legacy path), the handler must
+src/mcp/standard_tool.rs:1420:    async fn test_no_cancel_token_runs_to_completion() {
+src/mcp/standard_tool.rs:1424:        // ctx.cancel_token stays None.
+src/mcp/standard_tool.rs:1434:            .expect("execute should succeed without cancel token");
+src/mcp/standard_tool.rs:1442:    /// When the cancel token is present but never fires, the handler must
+src/mcp/standard_tool.rs:1445:    async fn test_cancel_token_never_fired_completes_normally() {
+src/mcp/standard_tool.rs:1455:        ctx.cancel_token = Some(CancellationToken::new());
+src/domain/use_cases/security_modules.rs:50:        "echo '=== Users without password ===' && \
+src/mcp/prompts/security_audit.rs:95:grep "Failed password" /var/log/auth.log 2>/dev/null | tail -20 || journalctl -u sshd --since "24 hours ago" 2>/dev/null | grep -i "failed" | tail -20
+src/mcp/prompts/security_audit.rs:222:        assert!(text.contains("Failed password"));
+src/domain/use_cases/vault.rs:179:        assert!(validate_vault_path("secret/myapp").is_ok());
+src/domain/use_cases/vault.rs:180:        assert!(validate_vault_path("secret/my-app/config").is_ok());
+src/domain/use_cases/vault.rs:187:        assert!(validate_vault_path("secret/$(whoami)").is_err());
+src/domain/use_cases/vault.rs:188:        assert!(validate_vault_path("secret; rm -rf /").is_err());
+src/domain/use_cases/vault.rs:213:        let cmd = VaultCommandBuilder::build_read_command("secret/myapp", None, None, None, None)
+src/domain/use_cases/vault.rs:215:        assert!(cmd.contains("vault kv get 'secret/myapp'"));
+src/domain/use_cases/vault.rs:223:            Some("secret"),
+src/domain/use_cases/vault.rs:228:        assert!(cmd.contains("-mount='secret'"));
+src/domain/use_cases/vault.rs:235:            "secret/myapp",
+src/domain/use_cases/vault.rs:238:            Some("password"),
+src/domain/use_cases/vault.rs:242:        assert!(cmd.contains("-field='password'"));
+src/domain/use_cases/vault.rs:247:        let cmd = VaultCommandBuilder::build_list_command("secret/", None, None, None).unwrap();
+src/domain/use_cases/vault.rs:248:        assert!(cmd.contains("vault kv list 'secret/'"));
+src/domain/use_cases/vault.rs:254:            VaultCommandBuilder::build_list_command("secret/", None, None, Some("json")).unwrap();
+src/domain/use_cases/vault.rs:260:        let data = vec!["username=admin".to_string(), "password=secret".to_string()];
+src/domain/use_cases/vault.rs:262:            VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
+src/domain/use_cases/vault.rs:263:        assert!(cmd.contains("vault kv put 'secret/myapp'"));
+src/domain/use_cases/vault.rs:265:        assert!(cmd.contains("'password=secret'"));
+src/domain/use_cases/vault.rs:287:        let data = vec!["password=s3cr3t; rm -rf /".to_string()];
+src/domain/use_cases/vault.rs:289:            VaultCommandBuilder::build_write_command("secret/app", &data, None, None).unwrap();
+src/domain/use_cases/vault.rs:290:        assert!(cmd.contains("'password=s3cr3t; rm -rf /'"));
+src/domain/use_cases/vault.rs:296:            "secret/app",
+src/domain/use_cases/vault.rs:311:            "secret/myapp",
+src/domain/use_cases/vault.rs:314:            Some("password"),
+src/domain/use_cases/vault.rs:321:        assert!(cmd.contains("-field='password'"));
+src/domain/use_cases/vault.rs:322:        assert!(cmd.contains("'secret/myapp'"));
+src/domain/use_cases/vault.rs:328:            "secret/apps/",
+src/domain/use_cases/vault.rs:337:        assert!(cmd.contains("'secret/apps/'"));
+src/domain/use_cases/vault.rs:342:        let data = vec!["user=admin".to_string(), "pass=secret".to_string()];
+src/domain/use_cases/vault.rs:344:            "secret/myapp",
+src/domain/use_cases/vault.rs:352:        assert!(cmd.contains("'secret/myapp'"));
+src/domain/use_cases/vault.rs:354:        assert!(cmd.contains("'pass=secret'"));
+src/domain/use_cases/vault.rs:371:            VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
+src/domain/use_cases/vault.rs:372:        assert!(cmd.contains("vault kv put 'secret/myapp'"));
+src/domain/use_cases/vault.rs:379:            VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
+src/domain/use_cases/vault.rs:380:        assert!(cmd.contains("'secret/myapp' 'key=val'"));
+src/domain/use_cases/vault.rs:385:        let data = vec!["msg=it's secret".to_string()];
+src/domain/use_cases/vault.rs:387:            VaultCommandBuilder::build_write_command("secret/app", &data, None, None).unwrap();
+src/domain/use_cases/vault.rs:388:        assert!(cmd.contains("it'\\''s secret"));
+src/domain/use_cases/vault.rs:393:        let cmd = VaultCommandBuilder::build_read_command("secret/myapp", None, None, None, None)
+src/domain/use_cases/vault.rs:395:        assert_eq!(cmd, "vault kv get 'secret/myapp'");
+src/domain/use_cases/vault.rs:400:        let cmd = VaultCommandBuilder::build_list_command("secret/", None, None, None).unwrap();
+src/domain/use_cases/vault.rs:401:        assert_eq!(cmd, "vault kv list 'secret/'");
+src/domain/use_cases/vault.rs:408:        assert!(validate_vault_path("secret/v1.0/config").is_ok());
+src/domain/use_cases/vault.rs:418:        assert!(validate_vault_path("secret/my app").is_err());
+src/domain/use_cases/vault.rs:423:        assert!(validate_vault_path("secret/app|cmd").is_err());
+src/domain/use_cases/vault.rs:428:        assert!(validate_vault_path("secret/app&data").is_err());
+src/domain/use_cases/vault.rs:433:        assert!(validate_vault_path("secret/`whoami`").is_err());
+src/domain/use_cases/vault.rs:438:        assert!(validate_vault_path("secret/../etc/shadow").is_err());
+src/domain/use_cases/vault.rs:439:        assert!(validate_vault_path("../secret/data").is_err());
+src/domain/use_cases/vault.rs:440:        assert!(validate_vault_path("secret/data/..").is_err());
+src/domain/use_cases/vault.rs:445:        assert!(validate_vault_path("secret/v1.0/config").is_ok());
+src/domain/use_cases/vault.rs:446:        assert!(validate_vault_path("secret/my.app").is_ok());
+src/ports/connector.rs:379:                sudo_password: None,
+src/domain/use_cases/terraform.rs:612:        assert!(validate_terraform_dir("/opt/infra/../secrets").is_err());
+src/domain/use_cases/templates.rs:360:    /// Helper for tests: extract the heredoc terminator (the token between
+src/domain/use_cases/templates.rs:411:        // Extract the terminator: the token after `<< '` and before the next `'`.
+src/domain/use_cases/windows_event.rs:156:        assert!(validate_log_name("System | Get-Content C:\\secret.txt").is_err());
+src/domain/use_cases/redis.rs:21:    /// Constructs: `redis-cli [-h {host}] [-p {port}] [-a {password}] INFO [{section}]`
+src/domain/use_cases/execute_command.rs:58:    /// Build a compact JSON string optimized for AI token consumption.
+src/domain/use_cases/execute_command.rs:61:    /// skips empty fields (stdout, stderr) to minimize token usage.
+src/domain/use_cases/execute_command.rs:85:    /// Format output optimized for LLM token consumption.
+src/domain/use_cases/execute_command.rs:551:            stdout: "password=secret123".to_string(),
+src/domain/use_cases/execute_command.rs:560:        assert!(!response.output.contains("secret123"));
+src/domain/use_cases/execute_command.rs:571:        let token = "ghp_1234567890abcdefGHIJKLmnopqrstuvwxyz";
+src/domain/use_cases/execute_command.rs:573:            stdout: format!("GITHUB_TOKEN={token}"),
+src/domain/use_cases/execute_command.rs:581:        // GitHub token should be sanitized
+src/domain/use_cases/execute_command.rs:582:        assert!(!response.output.contains(token));
+src/domain/use_cases/compliance.rs:166:        if category.is_none() || category == Some("password") {
+src/domain/use_cases/compliance.rs:260:             'SSH password auth disabled'; \
+src/domain/use_cases/compliance.rs:262:             'SSH empty passwords disabled'; \
+src/domain/use_cases/compliance.rs:270:             check 'test -f /etc/security/pwquality.conf -o -f /etc/pam.d/common-password' \
+src/domain/use_cases/compliance.rs:389:        assert!(validate_category("password").is_ok());
+src/domain/use_cases/key_management.rs:139:    /// Generates the key at `/tmp/mcp_generated_key` with an empty passphrase.
+src/domain/use_cases/database.rs:86:/// Helper to write the password environment variable prefix.
+src/domain/use_cases/database.rs:90:/// passwords as command-line arguments (visible in `ps`), but for maximum security
+src/domain/use_cases/database.rs:92:fn write_password_env(cmd: &mut String, env_var: &str, password: &str) {
+src/domain/use_cases/database.rs:93:    let escaped_pw = password.replace('\'', "'\\''");
+src/domain/use_cases/database.rs:122:    /// For `MySQL`: `MYSQL_PWD='password' mysql -h host -P port -u user database -e "query"`
+src/domain/use_cases/database.rs:123:    /// For `PostgreSQL`: `PGPASSWORD='password' psql -h host -p port -U user -d database -c "query"`
+src/domain/use_cases/database.rs:131:        db_password: Option<&str>,
+src/domain/use_cases/database.rs:144:                if let Some(password) = db_password {
+src/domain/use_cases/database.rs:145:                    write_password_env(&mut cmd, "MYSQL_PWD", password);
+src/domain/use_cases/database.rs:158:                if let Some(password) = db_password {
+src/domain/use_cases/database.rs:159:                    write_password_env(&mut cmd, "PGPASSWORD", password);
+src/domain/use_cases/database.rs:178:    /// For `MySQL`: `MYSQL_PWD='password' mysqldump -h host -P port -u user database`
+src/domain/use_cases/database.rs:179:    /// For `PostgreSQL`: `PGPASSWORD='password' pg_dump -h host -p port -U user database`
+src/domain/use_cases/database.rs:187:        db_password: Option<&str>,
+src/domain/use_cases/database.rs:200:                if let Some(password) = db_password {
+src/domain/use_cases/database.rs:201:                    write_password_env(&mut cmd, "MYSQL_PWD", password);
+src/domain/use_cases/database.rs:216:                if let Some(password) = db_password {
+src/domain/use_cases/database.rs:217:                    write_password_env(&mut cmd, "PGPASSWORD", password);
+src/domain/use_cases/database.rs:240:    /// For `MySQL`: `MYSQL_PWD='password' mysql -h host -P port -u user database < input_file`
+src/domain/use_cases/database.rs:241:    /// For `PostgreSQL`: `PGPASSWORD='password' psql -h host -p port -U user -d database < input_file`
+src/domain/use_cases/database.rs:248:        db_password: Option<&str>,
+src/domain/use_cases/database.rs:260:                if let Some(password) = db_password {
+src/domain/use_cases/database.rs:261:                    write_password_env(&mut cmd, "MYSQL_PWD", password);
+src/domain/use_cases/database.rs:270:                if let Some(password) = db_password {
+src/domain/use_cases/database.rs:271:                    write_password_env(&mut cmd, "PGPASSWORD", password);
+src/domain/use_cases/database.rs:397:            Some("secret"),
+src/domain/use_cases/database.rs:402:        assert!(cmd.starts_with("MYSQL_PWD='secret' "));
+src/domain/use_cases/database.rs:409:    fn test_build_query_mysql_no_password() {
+src/domain/use_cases/database.rs:477:    fn test_build_query_postgresql_no_password() {
+src/domain/use_cases/database.rs:525:    fn test_build_query_escapes_single_quotes_in_password() {
+src/domain/use_cases/database.rs:678:    fn test_build_dump_no_password() {
+src/domain/use_cases/database.rs:728:    fn test_build_restore_no_password() {
