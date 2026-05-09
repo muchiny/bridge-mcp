@@ -34,6 +34,93 @@ fn sanitize_ssh_error(error: &impl std::fmt::Display) -> String {
     }
 }
 
+/// Hardened algorithm allowlist for the SSH transport layer (FIND-008).
+///
+/// Russh 0.60.1's `negotiation::Preferred::DEFAULT` includes legacy MAC
+/// algorithms (`hmac-sha1`, `hmac-sha1-etm@openssh.com`) in `HMAC_ORDER`
+/// (see `russh-0.60.1/src/negotiation.rs:134`). The KEX list `SAFE_KEX_ORDER`
+/// (line 103) and cipher list `CIPHER_ORDER` (line 126) are already free of
+/// SHA-1 / DH-Group1 / 3DES / blowfish, but we mirror the full allowlist
+/// here so the policy is explicit at the call site rather than implicit in a
+/// transitive default.
+///
+/// Allowlist (per `audit/2026-05-09/surface/context7/russh.md`):
+/// - **kex**:    `mlkem768x25519-sha256`, `curve25519-sha256`,
+///   `curve25519-sha256@libssh.org`, plus the `kex-strict-*-v00@openssh.com`
+///   anti-Terrapin extensions (required, otherwise russh refuses to advertise
+///   strict-KEX).
+/// - **cipher**: `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`
+/// - **mac**:    `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256-etm@openssh.com`
+///   (encrypt-then-MAC only; the AEAD ciphers above carry their own MAC, but
+///   russh still negotiates a separate MAC name for non-AEAD interop).
+/// - **key**:    `ssh-ed25519` (matches the host-key policy enforced by
+///   `known_hosts::verify_host_key`).
+fn hardened_preferred() -> russh::Preferred {
+    use std::borrow::Cow;
+
+    use russh::keys::ssh_key::Algorithm;
+
+    // KEX: include the OpenSSH strict-kex extension markers so russh advertises
+    // them and enables the Terrapin (CVE-2023-48795) mitigation. They are
+    // pseudo-algorithms in russh's negotiation layer, not real KEX methods.
+    const HARDENED_KEX: &[russh::kex::Name] = &[
+        russh::kex::MLKEM768X25519_SHA256,
+        russh::kex::CURVE25519,
+        russh::kex::CURVE25519_PRE_RFC_8731,
+        russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+        russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    ];
+
+    const HARDENED_CIPHER: &[russh::cipher::Name] = &[
+        russh::cipher::CHACHA20_POLY1305,
+        russh::cipher::AES_256_GCM,
+    ];
+
+    const HARDENED_MAC: &[russh::mac::Name] = &[
+        russh::mac::HMAC_SHA512_ETM,
+        russh::mac::HMAC_SHA256_ETM,
+    ];
+
+    russh::Preferred {
+        kex: Cow::Borrowed(HARDENED_KEX),
+        // `Algorithm::Ed25519` is not a `const` value (it's an enum variant in
+        // ssh-key), so we allocate the slice at call time. This is a one-shot
+        // cost per connection.
+        key: Cow::Owned(vec![Algorithm::Ed25519]),
+        cipher: Cow::Borrowed(HARDENED_CIPHER),
+        mac: Cow::Borrowed(HARDENED_MAC),
+        // Compression: keep upstream default (russh ships `none` only without
+        // the `flate2` feature, which we don't enable).
+        compression: russh::Preferred::DEFAULT.compression,
+    }
+}
+
+/// Build a russh client `Config` with a hardened algorithm allowlist and
+/// explicit rekey limits (FIND-008).
+///
+/// Replaces `russh::client::Config { ..Default::default() }` at the two
+/// connect call sites (direct + jump-host). Without this helper:
+/// - `Preferred::default()` would silently include `hmac-sha1` and
+///   `hmac-sha1-etm@openssh.com` (per russh 0.60.1 `HMAC_ORDER`).
+/// - `Limits::default()` already pins 1 GiB / 1 h thresholds, but we set
+///   them explicitly via `Limits::new` so a future russh default change
+///   cannot weaken the policy without a build break (the constructor
+///   asserts the bounds).
+///
+/// The pool keeps sessions for up to 1 h (`pool.rs::max_age_seconds`), so
+/// the rekey time limit acts as a defence-in-depth against long-lived
+/// sessions accumulating ciphertext under one key.
+pub fn build_russh_client_config(limits: &LimitsConfig) -> Config {
+    Config {
+        inactivity_timeout: Some(Duration::from_secs(limits.keepalive_interval_seconds)),
+        keepalive_interval: Some(Duration::from_secs(limits.keepalive_interval_seconds)),
+        keepalive_max: 3,
+        preferred: hardened_preferred(),
+        limits: russh::Limits::new(1 << 30, 1 << 30, Duration::from_secs(3600)),
+        ..Default::default()
+    }
+}
+
 /// A wrapper around a russh Channel that implements `AsyncRead` and `AsyncWrite`
 /// for use as a transport stream for tunneled SSH connections.
 struct ChannelStream {
@@ -282,13 +369,8 @@ impl SshClient {
         let stream = ChannelStream::new(channel);
 
         // 4. Establish SSH connection through the tunnel
-        let config = Config {
-            inactivity_timeout: Some(Duration::from_secs(limits.keepalive_interval_seconds)),
-            keepalive_interval: Some(Duration::from_secs(limits.keepalive_interval_seconds)),
-            keepalive_max: 3,
-            ..Default::default()
-        };
-        let config = Arc::new(config);
+        // FIND-008: hardened algo allowlist + rekey limits via shared helper.
+        let config = Arc::new(build_russh_client_config(limits));
 
         let handler =
             ClientHandler::new(host.hostname.clone(), host.port, host.host_key_verification);
@@ -336,14 +418,8 @@ impl SshClient {
         host: &HostConfig,
         limits: &LimitsConfig,
     ) -> Result<Handle<ClientHandler>> {
-        let config = Config {
-            inactivity_timeout: Some(Duration::from_secs(limits.keepalive_interval_seconds)),
-            keepalive_interval: Some(Duration::from_secs(limits.keepalive_interval_seconds)),
-            keepalive_max: 3,
-            ..Default::default()
-        };
-
-        let config = Arc::new(config);
+        // FIND-008: hardened algo allowlist + rekey limits via shared helper.
+        let config = Arc::new(build_russh_client_config(limits));
         let target_host = &host.hostname;
         let port = host.port;
         let handler = ClientHandler::new(target_host.clone(), port, host.host_key_verification);

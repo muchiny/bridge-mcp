@@ -6,7 +6,7 @@ mod retry;
 pub mod session;
 mod sftp;
 
-pub use client::{CommandOutput, SshClient};
+pub use client::{CommandOutput, SshClient, build_russh_client_config};
 pub use connector::RealSshConnector;
 pub use known_hosts::{VerifyResult, verify_host_key};
 pub use pool::{ConnectionPool, PoolConfig, PoolStats, PooledConnectionGuard};
