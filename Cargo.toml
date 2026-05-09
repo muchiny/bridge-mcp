@@ -225,3 +225,12 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+
+# =============================================================================
+# Patch overrides (FIND-018 / audit 2026-05-09)
+# =============================================================================
+# winrm-rs 1.0 on crates.io declares an obsolete reqwest feature
+# (`webpki-roots`) that blocks `cargo outdated` resolution. Local fork
+# carries the fix; pin to it until winrm-rs > 1.0 is published.
+[patch.crates-io]
+winrm-rs = { path = "../winrm-rs" }
