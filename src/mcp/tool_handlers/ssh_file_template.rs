@@ -95,11 +95,11 @@ impl StandardTool for FileTemplateTool {
             .as_ref()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
-        Ok(FileAdvancedCommandBuilder::build_template_command(
+        FileAdvancedCommandBuilder::build_template_command(
             &args.template_path,
             &args.output_path,
             &vars_vec,
-        ))
+        )
     }
 }
 

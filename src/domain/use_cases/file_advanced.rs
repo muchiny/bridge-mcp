@@ -3,9 +3,23 @@
 //! Builds commands for file diff, patch, and template operations.
 
 use crate::config::ShellType;
+use crate::error::{BridgeError, Result};
 
 fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
+}
+
+fn validate_env_var_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if first_ok && rest_ok && !name.is_empty() {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!("Invalid env var name '{name}'. Must match [A-Za-z_][A-Za-z0-9_]*"),
+        })
+    }
 }
 
 /// Builds advanced file operation commands.
@@ -30,23 +44,24 @@ impl FileAdvancedCommandBuilder {
     }
 
     /// Build a template rendering command using envsubst.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] if a variable key is not a valid POSIX env-var name.
     pub fn build_template_command(
         template_path: &str,
         output_path: &str,
         variables: &[(String, String)],
-    ) -> String {
+    ) -> Result<String> {
         let escaped_template = shell_escape(template_path);
         let escaped_output = shell_escape(output_path);
 
-        // Build env var exports
-        let exports: Vec<String> = variables
-            .iter()
-            .map(|(k, v)| {
-                let escaped_v = shell_escape(v);
-                format!("export {k}={escaped_v}")
-            })
-            .collect();
+        let mut exports: Vec<String> = Vec::with_capacity(variables.len());
+        for (k, v) in variables {
+            validate_env_var_name(k)?;
+            let escaped_v = shell_escape(v);
+            exports.push(format!("export {k}={escaped_v}"));
+        }
 
         let export_str = if exports.is_empty() {
             String::new()
@@ -54,9 +69,9 @@ impl FileAdvancedCommandBuilder {
             format!("{} && ", exports.join(" && "))
         };
 
-        format!(
+        Ok(format!(
             "{export_str}envsubst < {escaped_template} > {escaped_output} && echo 'Template rendered to {output_path}'"
-        )
+        ))
     }
 }
 
@@ -100,7 +115,8 @@ mod tests {
             "/etc/nginx/template.conf",
             "/etc/nginx/site.conf",
             &vars,
-        );
+        )
+        .unwrap();
         assert!(cmd.contains("envsubst"));
         assert!(cmd.contains("SERVER_NAME"));
         assert!(cmd.contains("export"));
@@ -108,9 +124,50 @@ mod tests {
 
     #[test]
     fn test_template_command_no_vars() {
-        let cmd =
-            FileAdvancedCommandBuilder::build_template_command("/etc/template", "/etc/output", &[]);
+        let cmd = FileAdvancedCommandBuilder::build_template_command(
+            "/etc/template",
+            "/etc/output",
+            &[],
+        )
+        .unwrap();
         assert!(cmd.contains("envsubst"));
         assert!(!cmd.contains("export"));
+    }
+
+    #[test]
+    fn test_template_command_rejects_injected_var_name() {
+        let vars = vec![("FOO; bash -c 'evil' #".to_string(), "x".to_string())];
+        let r = FileAdvancedCommandBuilder::build_template_command(
+            "/etc/template.conf",
+            "/tmp/out",
+            &vars,
+        );
+        assert!(r.is_err(), "must reject keys with shell metacharacters");
+    }
+
+    #[test]
+    fn test_template_command_rejects_lowercase_or_digit_first() {
+        for bad in ["1FOO", "foo bar", "BAD-NAME", "WITH$DOLLAR", ""] {
+            let vars = vec![(bad.to_string(), "x".to_string())];
+            let r = FileAdvancedCommandBuilder::build_template_command(
+                "/etc/t",
+                "/tmp/o",
+                &vars,
+            );
+            assert!(r.is_err(), "key {bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn test_template_command_accepts_posix_names() {
+        for ok in ["FOO", "FOO_BAR", "_LEADING", "X1", "A_B_C_123", "lowercase_ok"] {
+            let vars = vec![(ok.to_string(), "x".to_string())];
+            let r = FileAdvancedCommandBuilder::build_template_command(
+                "/etc/t",
+                "/tmp/o",
+                &vars,
+            );
+            assert!(r.is_ok(), "key {ok} must be accepted");
+        }
     }
 }
