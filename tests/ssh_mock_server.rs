@@ -103,6 +103,9 @@ pub struct MockServerHandle {
 
 impl MockServerHandle {
     /// Trigger a graceful shutdown of the server. Idempotent.
+    ///
+    /// Cancels the accept loop and signals the per-connection drivers to send
+    /// an SSH `Disconnect` to the client before tearing down the transport.
     pub fn shutdown(&self) {
         self.cancel.cancel();
     }
@@ -113,6 +116,10 @@ impl Drop for MockServerHandle {
         self.cancel.cancel();
     }
 }
+
+/// Shared list of live per-connection handles, used by the accept loop to
+/// send a graceful disconnect on shutdown.
+type SessionHandles = Arc<Mutex<Vec<russh::server::Handle>>>;
 
 // ============================================================================
 // Builder + start.
@@ -198,18 +205,54 @@ impl MockSshServerBuilder {
             };
 
             // Manual accept loop — gives us a clean shutdown path without
-            // depending on `RunningServerHandle`.
+            // depending on `RunningServerHandle`. Per-connection drivers are
+            // tracked in a `JoinSet` and their session `Handle`s are kept
+            // in a shared `Vec` so `shutdown()` can send an SSH disconnect
+            // to each live client, not just stop accepting new ones.
+            //
+            // `russh::server::run_stream` spawns the actual session loop in
+            // an internal `tokio::task` and returns a `RunningSession` whose
+            // `JoinHandle` *detaches* on drop. Aborting the wrapper here is
+            // therefore insufficient to kill an established session — we
+            // must talk to the session via its `Handle::disconnect`.
+            let session_handles: SessionHandles = Arc::new(Mutex::new(Vec::new()));
+            let mut conns: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
-                    _ = cancel_inner.cancelled() => break,
+                    _ = cancel_inner.cancelled() => {
+                        // Drain live session handles and tell each peer to
+                        // disconnect. After that, abort the connection drivers
+                        // and break out of the accept loop.
+                        let handles = {
+                            let mut guard = session_handles.lock().await;
+                            std::mem::take(&mut *guard)
+                        };
+                        for h in handles {
+                            let _ = h
+                                .disconnect(
+                                    russh::Disconnect::ByApplication,
+                                    String::new(),
+                                    String::new(),
+                                )
+                                .await;
+                        }
+                        conns.abort_all();
+                        break;
+                    }
                     accept = listener.accept() => {
                         let Ok((sock, peer)) = accept else { break };
                         let cfg = config.clone();
                         let handler = server.new_client(Some(peer));
-                        tokio::spawn(async move {
+                        let session_handles = session_handles.clone();
+                        conns.spawn(async move {
                             // Best-effort: ignore connection-level errors;
                             // tests assert from the client side.
-                            let _ = russh::server::run_stream(cfg, sock, handler).await;
+                            if let Ok(running) =
+                                russh::server::run_stream(cfg, sock, handler).await
+                            {
+                                session_handles.lock().await.push(running.handle());
+                                let _ = running.await;
+                            }
                         });
                     }
                 }

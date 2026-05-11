@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn test_post_process_unparseable_input_returns_input() {
+    fn test_post_process_unparsable_input_returns_input() {
         // Single-line input cannot form a table — branch returns input as-is.
         let dr = crate::domain::data_reduction::DataReductionArgs::default();
         let args = SshEsxiDatastoreListArgs {

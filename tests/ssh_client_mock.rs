@@ -143,13 +143,12 @@ async fn is_connected_is_true_on_live_connection() {
     client.close().await.expect("close");
 }
 
-// Cancelling the mock server's accept loop does not tear down the
-// already-established session — russh keeps the channel open until the
-// transport is actually closed. Real "is_connected=false" semantics
-// require killing the transport, which the mock helper does not expose.
-// Kept around as a documentation harness; not run by default.
+// `MockServerHandle::shutdown` cancels the accept loop *and* aborts every
+// spawned connection task (see `tests/ssh_mock_server.rs` — child tasks live
+// in a `JoinSet`, `abort_all` runs on cancel). That drops the server side of
+// the transport, so the client's next `channel_open_session()` fails and
+// `is_connected()` returns false.
 #[tokio::test]
-#[ignore = "mock shutdown does not drop live sessions; racy by design"]
 async fn is_connected_returns_false_after_server_shutdown() {
     let (addr, server, _root) = MockSshServerBuilder::new().start().await;
 
