@@ -13,7 +13,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mcp_ssh_bridge::config::{AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, OsType};
+use mcp_ssh_bridge::config::{
+    AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, OsType, RedactedSecret,
+};
 use mcp_ssh_bridge::ssh::{SshClient, TransferMode, TransferOptions, TransferProgress};
 use serde::Deserialize;
 use tempfile::NamedTempFile;
@@ -69,14 +71,11 @@ fn to_host_config(config: &SshTestConfig) -> HostConfig {
     let auth = if let Some(ref key) = config.auth.key {
         AuthConfig::Key {
             path: key.path.clone(),
-            passphrase: key
-                .passphrase
-                .clone()
-                .map(mcp_ssh_bridge::config::RedactedSecret::from),
+            passphrase: key.passphrase.clone().map(RedactedSecret::from),
         }
     } else if let Some(ref password) = config.auth.password {
         AuthConfig::Password {
-            password: mcp_ssh_bridge::config::RedactedSecret::from(password.clone()),
+            password: RedactedSecret::from(password.clone()),
         }
     } else if config.auth.agent.unwrap_or(false) {
         AuthConfig::Agent

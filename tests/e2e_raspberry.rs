@@ -19,7 +19,8 @@ use std::sync::Arc;
 use mcp_ssh_bridge::ExecutorRouter;
 use mcp_ssh_bridge::config::{
     AuditConfig, AuthConfig, Config, HostConfig, HostKeyVerification, HttpTransportConfig,
-    LimitsConfig, OsType, SecurityConfig, SessionConfig, SshConfigDiscovery, ToolGroupsConfig,
+    LimitsConfig, OsType, RedactedSecret, SecurityConfig, SessionConfig, SshConfigDiscovery,
+    ToolGroupsConfig,
 };
 use mcp_ssh_bridge::domain::history::HistoryConfig;
 use mcp_ssh_bridge::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
@@ -90,14 +91,11 @@ mod rpi {
         let auth = if let Some(ref key) = config.auth.key {
             AuthConfig::Key {
                 path: key.path.clone(),
-                passphrase: key
-                    .passphrase
-                    .clone()
-                    .map(mcp_ssh_bridge::config::RedactedSecret::from),
+                passphrase: key.passphrase.clone().map(RedactedSecret::from),
             }
         } else if let Some(ref password) = config.auth.password {
             AuthConfig::Password {
-                password: mcp_ssh_bridge::config::RedactedSecret::from(password.clone()),
+                password: RedactedSecret::from(password.clone()),
             }
         } else if config.auth.agent.unwrap_or(false) {
             AuthConfig::Agent

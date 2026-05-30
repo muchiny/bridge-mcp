@@ -25,8 +25,8 @@ use std::sync::Arc;
 use mcp_ssh_bridge::ExecutorRouter;
 use mcp_ssh_bridge::config::{
     AuditConfig, AuthConfig, Config, HostConfig, HostKeyVerification, HttpTransportConfig,
-    LimitsConfig, OsType, SecurityConfig, SecurityMode, SessionConfig, SshConfigDiscovery,
-    ToolGroupsConfig,
+    LimitsConfig, OsType, RedactedSecret, SecurityConfig, SecurityMode, SessionConfig,
+    SshConfigDiscovery, ToolGroupsConfig,
 };
 use mcp_ssh_bridge::domain::history::HistoryConfig;
 use mcp_ssh_bridge::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
@@ -55,13 +55,13 @@ fn build_docker_ctx() -> ToolContext {
             port: 2222,
             user: "testuser".to_string(),
             auth: AuthConfig::Password {
-                password: mcp_ssh_bridge::config::RedactedSecret::from("testpass123"),
+                password: RedactedSecret::from("testpass123"),
             },
             description: Some("Docker test SSH server".to_string()),
             host_key_verification: HostKeyVerification::Off,
             proxy_jump: None,
             socks_proxy: None,
-            sudo_password: Some(mcp_ssh_bridge::config::RedactedSecret::from("testpass123")),
+            sudo_password: Some(RedactedSecret::from("testpass123")),
             tags: Vec::new(),
             os_type: OsType::Linux,
             shell: None,
