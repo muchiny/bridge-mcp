@@ -1269,6 +1269,19 @@ Done";
     }
 
     #[test]
+    fn test_jwt_bearer_takes_jwt_precedence_over_generic_bearer() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123XYZ456";
+        let out = sanitizer.sanitize(input);
+        assert!(out.contains("[JWT_TOKEN_REDACTED]"), "JWT should win: {out}");
+        assert!(
+            !out.contains("[BEARER_TOKEN_REDACTED]"),
+            "generic Bearer pattern must not steal a JWT match: {out}"
+        );
+        assert!(!out.contains("eyJhbGci"), "JWT not redacted: {out}");
+    }
+
+    #[test]
     fn test_openai_key() {
         let sanitizer = Sanitizer::with_defaults();
 
