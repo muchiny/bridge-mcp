@@ -4,9 +4,8 @@
 //! Supports `MySQL` and `PostgreSQL` using their respective CLI clients.
 
 use serde::Deserialize;
-use zeroize::Zeroizing;
 
-use crate::config::HostConfig;
+use crate::config::{HostConfig, RedactedSecret};
 use crate::domain::{DatabaseCommandBuilder, DatabaseType};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -25,13 +24,13 @@ pub struct SshDbQueryArgs {
     #[serde(default)]
     db_user: Option<String>,
     /// DB password from MCP JSON-RPC request body. Wrapped in
-    /// `Zeroizing<String>` so the heap allocation is wiped on drop
-    /// (FIND-029). Production read sites pass it to the builder as
-    /// `Option<&str>` via `.as_deref().map(String::as_str)` — `as_deref()`
-    /// peels `Zeroizing<String>` -> `&String`, then `String::as_str`
-    /// gives the final `&str`.
+    /// `RedactedSecret` (FIND-029, F1-equivalent): the heap allocation is
+    /// wiped on drop and `Debug`/`Display`/`Serialize` emit `[REDACTED]`,
+    /// so the secret cannot leak through `format!("{args:?}")`. Production
+    /// read sites pass it to the builder as `Option<&str>` via `as_deref()`
+    /// (the single audited plaintext boundary, `Deref<Target = str>`).
     #[serde(default)]
-    db_password: Option<Zeroizing<String>>,
+    db_password: Option<RedactedSecret>,
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
@@ -133,7 +132,7 @@ impl StandardTool for DbQueryTool {
             db_host,
             db_port,
             db_user,
-            args.db_password.as_deref().map(String::as_str),
+            args.db_password.as_deref(),
             &args.database,
             &args.query,
             args.format.as_deref(),
@@ -335,10 +334,7 @@ mod tests {
         assert_eq!(args.db_host, Some("dbhost".to_string()));
         assert_eq!(args.db_port, Some(3307));
         assert_eq!(args.db_user, Some("admin".to_string()));
-        assert_eq!(
-            args.db_password.as_deref().map(String::as_str),
-            Some("secret")
-        );
+        assert_eq!(args.db_password.as_deref(), Some("secret"));
         assert_eq!(args.format, Some("csv".to_string()));
         assert_eq!(args.timeout_seconds, Some(120));
         assert_eq!(args.max_output, Some(5000));
@@ -376,6 +372,34 @@ mod tests {
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshDbQueryArgs"));
         assert!(debug_str.contains("test-host"));
+    }
+
+    /// FIND-029 (F1-equivalent): the `db_password` field must not leak its
+    /// plaintext through `Debug`. `RedactedSecret`'s hand-written `Debug`
+    /// emits `[REDACTED]`, so the secret value must be absent from the
+    /// rendered struct.
+    #[test]
+    fn args_debug_does_not_leak_db_password() {
+        let args = SshDbQueryArgs {
+            host: "test-host".to_string(),
+            db_type: "mysql".to_string(),
+            query: "SELECT 1".to_string(),
+            database: "testdb".to_string(),
+            db_host: None,
+            db_port: None,
+            db_user: None,
+            db_password: Some(RedactedSecret::from("s3cr3t-pw")),
+            format: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let rendered = format!("{args:?}");
+        assert!(
+            !rendered.contains("s3cr3t-pw"),
+            "db_password leaked in Debug: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -489,7 +513,7 @@ mod tests {
             db_host: Some("dbhost".to_string()),
             db_port: Some(5433),
             db_user: Some("admin".to_string()),
-            db_password: Some(Zeroizing::new("secret".to_string())),
+            db_password: Some(RedactedSecret::from("secret")),
             format: None,
             timeout_seconds: None,
             max_output: None,
@@ -528,12 +552,13 @@ mod tests {
         assert!(cmd.contains("-B"));
     }
 
-    /// Regression: FIND-029. The `db_password` field MUST be wrapped in
-    /// `Zeroizing<String>` so the heap allocation is wiped on drop.
+    /// Regression: FIND-029 (F1-equivalent). The `db_password` field MUST be
+    /// a `RedactedSecret` so the heap allocation is wiped on drop AND the
+    /// secret is structurally incapable of leaking through `Debug`.
     /// This test is load-bearing at the type level: only
-    /// `Option<Zeroizing<String>>` compiles below.
+    /// `Option<RedactedSecret>` compiles below.
     #[test]
-    fn test_db_password_field_is_zeroizing() {
+    fn test_db_password_field_is_redacted_secret() {
         let args: SshDbQueryArgs = serde_json::from_value(json!({
             "host": "h",
             "db_type": "mysql",
@@ -543,14 +568,13 @@ mod tests {
         }))
         .expect("deserialize");
 
-        // Type proof: `Option<Zeroizing<String>>::as_deref()` yields
-        // `Option<&String>` (one level of deref through `Zeroizing<T>`).
-        // We bridge to `Option<&str>` via `.map(String::as_str)`.
-        let pw: Option<&str> = args.db_password.as_deref().map(String::as_str);
+        // Audited plaintext boundary: `Option<RedactedSecret>::as_deref()`
+        // yields `Option<&str>` directly via `Deref<Target = str>`.
+        let pw: Option<&str> = args.db_password.as_deref();
         assert_eq!(pw, Some("secret"));
         // Final type-pinning assertion: this line only compiles when the
-        // field is exactly `Option<Zeroizing<String>>`.
-        let _typed: &Option<Zeroizing<String>> = &args.db_password;
+        // field is exactly `Option<RedactedSecret>`.
+        let _typed: &Option<RedactedSecret> = &args.db_password;
     }
 
     #[test]

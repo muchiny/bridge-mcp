@@ -5,7 +5,7 @@
 
 use std::fmt::Write;
 
-use crate::config::ShellType;
+use crate::config::{RedactedSecret, ShellType};
 use crate::error::{BridgeError, Result};
 
 fn shell_escape(s: &str) -> String {
@@ -155,16 +155,19 @@ impl VaultCommandBuilder {
     /// heredoc early. Same pattern as `template_apply` (commit 2da5d55).
     ///
     /// `data` carries `key=value` pairs; values are typically secrets, so the
-    /// caller is expected to pass `Zeroizing<String>` (FIND-030) to avoid
-    /// gratuitous heap residency. The slice is borrowed immutably here; the
-    /// owner controls when the secret bytes are wiped.
+    /// caller is expected to pass [`RedactedSecret`] (FIND-030) to avoid
+    /// gratuitous heap residency and to make the pairs leak-proof under
+    /// `Debug`/`Display`/`Serialize`. The slice is borrowed immutably here;
+    /// the owner controls when the secret bytes are wiped. Each element is
+    /// read here through its `Deref<Target = str>` (the audited plaintext
+    /// boundary) only to assemble the shell-literal heredoc body.
     ///
     /// # Errors
     ///
     /// Returns [`BridgeError::CommandDenied`] if `path` contains unsafe characters.
     pub fn build_write_command(
         path: &str,
-        data: &[zeroize::Zeroizing<String>],
+        data: &[RedactedSecret],
         vault_addr: Option<&str>,
         mount: Option<&str>,
     ) -> Result<String> {
@@ -296,8 +299,8 @@ mod tests {
     #[test]
     fn test_write_simple() {
         let data = vec![
-            zeroize::Zeroizing::new("username=admin".to_string()),
-            zeroize::Zeroizing::new("password=secret".to_string()),
+            RedactedSecret::from("username=admin"),
+            RedactedSecret::from("password=secret"),
         ];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
@@ -311,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_write_with_mount() {
-        let data = vec![zeroize::Zeroizing::new("key=value".to_string())];
+        let data = vec![RedactedSecret::from("key=value")];
         let cmd = VaultCommandBuilder::build_write_command("myapp/config", &data, None, Some("kv"))
             .unwrap();
         assert!(cmd.contains("-mount='kv'"));
@@ -328,9 +331,7 @@ mod tests {
 
     #[test]
     fn test_write_injection_in_data_value() {
-        let data = vec![zeroize::Zeroizing::new(
-            "password=s3cr3t; rm -rf /".to_string(),
-        )];
+        let data = vec![RedactedSecret::from("password=s3cr3t; rm -rf /")];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/app", &data, None, None).unwrap();
         // FIND-031: value is a heredoc body line (single-quoted terminator
@@ -389,8 +390,8 @@ mod tests {
     #[test]
     fn test_write_all_options() {
         let data = vec![
-            zeroize::Zeroizing::new("user=admin".to_string()),
-            zeroize::Zeroizing::new("pass=secret".to_string()),
+            RedactedSecret::from("user=admin"),
+            RedactedSecret::from("pass=secret"),
         ];
         let cmd = VaultCommandBuilder::build_write_command(
             "secret/myapp",
@@ -419,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_write_empty_data() {
-        let data: Vec<zeroize::Zeroizing<String>> = vec![];
+        let data: Vec<RedactedSecret> = vec![];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
         // FIND-031: even with no data, the heredoc structure is still produced
@@ -429,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_write_single_data_item() {
-        let data = vec![zeroize::Zeroizing::new("key=val".to_string())];
+        let data = vec![RedactedSecret::from("key=val")];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/myapp", &data, None, None).unwrap();
         // FIND-031: shape is `... 'secret/myapp' - <<'TERMINATOR'\nkey=val\nTERMINATOR`.
@@ -439,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_write_data_with_single_quotes() {
-        let data = vec![zeroize::Zeroizing::new("msg=it's secret".to_string())];
+        let data = vec![RedactedSecret::from("msg=it's secret")];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/app", &data, None, None).unwrap();
         // FIND-031: heredoc body is shell-literal; the apostrophe is preserved
@@ -515,7 +516,7 @@ mod tests {
     /// and never in argv.
     #[test]
     fn vault_write_excludes_secret_value_from_argv() {
-        let data = vec![zeroize::Zeroizing::new("k=topsecret".to_string())];
+        let data = vec![RedactedSecret::from("k=topsecret")];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/foo", &data, None, None).unwrap();
 
@@ -532,7 +533,7 @@ mod tests {
     /// FIND-031: the builder must use a stdin pipe (`-` argument + heredoc).
     #[test]
     fn vault_write_uses_stdin_heredoc() {
-        let data = vec![zeroize::Zeroizing::new("k=v".to_string())];
+        let data = vec![RedactedSecret::from("k=v")];
         let cmd =
             VaultCommandBuilder::build_write_command("secret/foo", &data, None, None).unwrap();
 
@@ -552,7 +553,7 @@ mod tests {
     /// `template_apply` (commit 2da5d55).
     #[test]
     fn vault_write_heredoc_terminator_is_randomized() {
-        let data = vec![zeroize::Zeroizing::new("k=v".to_string())];
+        let data = vec![RedactedSecret::from("k=v")];
         let cmd1 =
             VaultCommandBuilder::build_write_command("secret/foo", &data, None, None).unwrap();
         let cmd2 =

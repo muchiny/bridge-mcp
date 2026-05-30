@@ -4,9 +4,8 @@
 //! Supports `MySQL` and `PostgreSQL`.
 
 use serde::Deserialize;
-use zeroize::Zeroizing;
 
-use crate::config::HostConfig;
+use crate::config::{HostConfig, RedactedSecret};
 use crate::domain::{DatabaseCommandBuilder, DatabaseType};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -25,13 +24,13 @@ pub struct SshDbRestoreArgs {
     #[serde(default)]
     db_user: Option<String>,
     /// DB password from MCP JSON-RPC request body. Wrapped in
-    /// `Zeroizing<String>` so the heap allocation is wiped on drop
-    /// (FIND-029). Production read sites pass it to the builder as
-    /// `Option<&str>` via `.as_deref().map(String::as_str)` — `as_deref()`
-    /// peels `Zeroizing<String>` -> `&String`, then `String::as_str`
-    /// gives the final `&str`.
+    /// `RedactedSecret` (FIND-029, F1-equivalent): the heap allocation is
+    /// wiped on drop and `Debug`/`Display`/`Serialize` emit `[REDACTED]`,
+    /// so the secret cannot leak through `format!("{args:?}")`. Production
+    /// read sites pass it to the builder as `Option<&str>` via `as_deref()`
+    /// (the single audited plaintext boundary, `Deref<Target = str>`).
     #[serde(default)]
-    db_password: Option<Zeroizing<String>>,
+    db_password: Option<RedactedSecret>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     max_output: Option<u64>,
@@ -112,7 +111,7 @@ impl StandardTool for DbRestoreTool {
             db_host,
             db_port,
             db_user,
-            args.db_password.as_deref().map(String::as_str),
+            args.db_password.as_deref(),
             &args.database,
             &args.input_file,
         ))
@@ -252,10 +251,7 @@ mod tests {
         assert_eq!(args.db_host, Some("dbhost".to_string()));
         assert_eq!(args.db_port, Some(3307));
         assert_eq!(args.db_user, Some("admin".to_string()));
-        assert_eq!(
-            args.db_password.as_deref().map(String::as_str),
-            Some("secret")
-        );
+        assert_eq!(args.db_password.as_deref(), Some("secret"));
         assert_eq!(args.timeout_seconds, Some(600));
     }
 
@@ -291,6 +287,26 @@ mod tests {
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshDbRestoreArgs"));
         assert!(debug_str.contains("test-host"));
+    }
+
+    /// FIND-029 (F1-equivalent): the `db_password` field must not leak its
+    /// plaintext through `Debug`.
+    #[test]
+    fn args_debug_does_not_leak_db_password() {
+        let args: SshDbRestoreArgs = serde_json::from_value(json!({
+            "host": "test-host",
+            "db_type": "mysql",
+            "database": "testdb",
+            "input_file": "/tmp/dump.sql",
+            "db_password": "s3cr3t-pw",
+        }))
+        .expect("deserialize");
+        let rendered = format!("{args:?}");
+        assert!(
+            !rendered.contains("s3cr3t-pw"),
+            "db_password leaked in Debug: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -336,12 +352,12 @@ mod tests {
         }
     }
 
-    /// Regression: FIND-029. The `db_password` field MUST be wrapped in
-    /// `Zeroizing<String>` so the heap allocation is wiped on drop.
-    /// This test is load-bearing at the type level: only
-    /// `Option<Zeroizing<String>>` compiles below.
+    /// Regression: FIND-029 (F1-equivalent). The `db_password` field MUST be
+    /// a `RedactedSecret` so the heap allocation is wiped on drop AND the
+    /// secret cannot leak through `Debug`. This test is load-bearing at the
+    /// type level: only `Option<RedactedSecret>` compiles below.
     #[test]
-    fn test_db_password_field_is_zeroizing() {
+    fn test_db_password_field_is_redacted_secret() {
         let args: SshDbRestoreArgs = serde_json::from_value(json!({
             "host": "h",
             "db_type": "postgresql",
@@ -351,12 +367,12 @@ mod tests {
         }))
         .expect("deserialize");
 
-        // Type proof: `Option<Zeroizing<String>>::as_deref()` yields
-        // `Option<&String>`; bridge to `&str` via `.map(String::as_str)`.
-        let pw: Option<&str> = args.db_password.as_deref().map(String::as_str);
+        // Audited plaintext boundary: `Option<RedactedSecret>::as_deref()`
+        // yields `Option<&str>` directly via `Deref<Target = str>`.
+        let pw: Option<&str> = args.db_password.as_deref();
         assert_eq!(pw, Some("secret"));
         // Final type-pinning assertion: only compiles when the field is
-        // exactly `Option<Zeroizing<String>>`.
-        let _typed: &Option<Zeroizing<String>> = &args.db_password;
+        // exactly `Option<RedactedSecret>`.
+        let _typed: &Option<RedactedSecret> = &args.db_password;
     }
 }

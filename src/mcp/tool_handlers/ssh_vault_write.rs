@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::config::HostConfig;
+use crate::config::{HostConfig, RedactedSecret};
 use crate::domain::use_cases::vault::VaultCommandBuilder;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -10,11 +10,12 @@ use crate::mcp_standard_tool;
 pub struct SshVaultWriteArgs {
     host: String,
     path: String,
-    /// FIND-030: each `key=value` pair is wrapped in `Zeroizing<String>` so
-    /// the heap allocation is wiped when this `Args` instance is dropped.
-    /// Local heap residency was gratuitous — the secret only needs to live
-    /// long enough to build the remote `vault kv put` command.
-    data: Vec<zeroize::Zeroizing<String>>,
+    /// FIND-030 (F1-equivalent): each `key=value` pair is a `RedactedSecret`
+    /// so the heap allocation is wiped when this `Args` instance is dropped
+    /// AND the whole pair (a value may itself be a secret) is structurally
+    /// incapable of leaking through `format!("{args:?}")`. The pair only
+    /// needs to live long enough to build the remote `vault kv put` command.
+    data: Vec<RedactedSecret>,
     vault_addr: Option<String>,
     mount: Option<String>,
     timeout_seconds: Option<u64>,
@@ -155,8 +156,9 @@ mod tests {
         let args: SshVaultWriteArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
         assert_eq!(args.path, "secret/data/myapp");
-        // FIND-030: data is Vec<Zeroizing<String>>; deref to compare as &str.
-        let data_strs: Vec<&str> = args.data.iter().map(|s| s.as_str()).collect();
+        // FIND-030: data is Vec<RedactedSecret>; read via the audited
+        // `as_str()` boundary to compare as &str.
+        let data_strs: Vec<&str> = args.data.iter().map(RedactedSecret::as_str).collect();
         assert_eq!(data_strs, vec!["username=admin", "password=secret123"]);
         assert_eq!(
             args.vault_addr.as_deref(),
@@ -174,7 +176,7 @@ mod tests {
         let args: SshVaultWriteArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
         assert_eq!(args.path, "secret/data/myapp");
-        let data_strs: Vec<&str> = args.data.iter().map(|s| s.as_str()).collect();
+        let data_strs: Vec<&str> = args.data.iter().map(RedactedSecret::as_str).collect();
         assert_eq!(data_strs, vec!["key=value"]);
         assert!(args.vault_addr.is_none());
         assert!(args.mount.is_none());
@@ -202,6 +204,29 @@ mod tests {
         let args: SshVaultWriteArgs = serde_json::from_value(json).unwrap();
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshVaultWriteArgs"));
+    }
+
+    /// FIND-030 (F1-equivalent): each `key=value` pair in `data` must not
+    /// leak its (possibly-secret) value through `Debug`. `RedactedSecret`'s
+    /// hand-written `Debug` emits `[REDACTED]`, so the secret value is absent.
+    #[test]
+    fn args_debug_does_not_leak_data() {
+        let args = SshVaultWriteArgs {
+            host: "myhost".to_string(),
+            path: "secret/data/myapp".to_string(),
+            data: vec![RedactedSecret::from("api_key=s3cr3t")],
+            vault_addr: None,
+            mount: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let rendered = format!("{args:?}");
+        assert!(
+            !rendered.contains("s3cr3t"),
+            "vault data leaked in Debug: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     #[tokio::test]
