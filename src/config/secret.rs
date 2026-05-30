@@ -14,6 +14,21 @@ use zeroize::Zeroizing;
 ///
 /// Access the underlying value explicitly with [`RedactedSecret::as_str`] or
 /// via `Deref<Target = str>` (so `&secret` coerces to `&str` at call sites).
+///
+/// # Escape hatch (the audited boundary)
+///
+/// [`RedactedSecret::as_str`] and `Deref` deliberately expose the plaintext: they
+/// are THE single audited boundary where redaction stops applying. Treat every
+/// `secret.as_str()` / `&*secret` as that boundary — pass it directly into an
+/// auth/transport call only, and never into a logging or formatting macro (e.g.
+/// `println!`, `tracing::info!`, `format!`), which would defeat the redaction.
+///
+/// # Intentionally not comparable
+///
+/// This type intentionally does NOT implement `PartialEq`, `Eq`, `Hash`, or `Ord`:
+/// a derived comparison would be non-constant-time and leak secret bytes through a
+/// timing side-channel. Do not add `#[derive(PartialEq)]` (etc.). If equality is
+/// ever needed, compare via a constant-time primitive at the auth boundary.
 #[derive(Clone)]
 pub struct RedactedSecret(Zeroizing<String>);
 
