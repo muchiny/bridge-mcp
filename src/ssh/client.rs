@@ -455,7 +455,7 @@ impl SshClient {
                                 proxy_addr.as_str(),
                                 target_addr,
                                 user,
-                                pass,
+                                pass.as_str(),
                             )
                             .await
                             .map_err(map_err)?
@@ -537,14 +537,7 @@ impl SshClient {
     ) -> Result<Self> {
         match &host.auth {
             AuthConfig::Key { path, passphrase } => {
-                Self::auth_with_key(
-                    handle,
-                    host_name,
-                    host,
-                    path,
-                    passphrase.as_ref().map(|s| s.as_str()),
-                )
-                .await
+                Self::auth_with_key(handle, host_name, host, path, passphrase.as_deref()).await
             }
             AuthConfig::Password { password } => {
                 Self::auth_with_password(handle, host_name, host, password).await

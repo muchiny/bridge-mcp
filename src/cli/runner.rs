@@ -1369,7 +1369,8 @@ mod tests {
     use super::*;
     use crate::config::{
         AuditConfig, AuthConfig, HostConfig, HostKeyVerification, HttpTransportConfig,
-        LimitsConfig, OsType, SecurityConfig, SessionConfig, SshConfigDiscovery, ToolGroupsConfig,
+        LimitsConfig, OsType, RedactedSecret, SecurityConfig, SessionConfig, SshConfigDiscovery,
+        ToolGroupsConfig,
     };
     use crate::mcp::tool_handlers::utils::shell_escape;
     use std::collections::HashMap;
@@ -1567,7 +1568,7 @@ mod tests {
     fn test_auth_type_name_key_with_passphrase() {
         let auth = AuthConfig::Key {
             path: "~/.ssh/id_rsa".to_string(),
-            passphrase: Some(zeroize::Zeroizing::new("secret".to_string())),
+            passphrase: Some(RedactedSecret::from("secret")),
         };
         assert_eq!(auth_type_name(&auth), "SSH Key");
     }
@@ -1581,7 +1582,7 @@ mod tests {
     #[test]
     fn test_auth_type_name_password() {
         let auth = AuthConfig::Password {
-            password: zeroize::Zeroizing::new("secret".to_string()),
+            password: RedactedSecret::from("secret"),
         };
         assert_eq!(auth_type_name(&auth), "Password");
     }
@@ -2571,11 +2572,11 @@ mod tests {
     fn test_host_config_with_all_auth_types() {
         let key_auth = AuthConfig::Key {
             path: "~/.ssh/id_ed25519".to_string(),
-            passphrase: Some(zeroize::Zeroizing::new("secret".to_string())),
+            passphrase: Some(RedactedSecret::from("secret")),
         };
         let agent_auth = AuthConfig::Agent;
         let password_auth = AuthConfig::Password {
-            password: zeroize::Zeroizing::new("pass123".to_string()),
+            password: RedactedSecret::from("pass123"),
         };
 
         assert_eq!(auth_type_name(&key_auth), "SSH Key");

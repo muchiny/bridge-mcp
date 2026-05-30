@@ -244,7 +244,7 @@ mod tests {
                 port: 2222,
                 user: "user3".to_string(),
                 auth: AuthConfig::Password {
-                    password: zeroize::Zeroizing::new("secret".to_string()),
+                    password: crate::config::RedactedSecret::from("secret"),
                 },
                 description: None,
                 host_key_verification: HostKeyVerification::default(),

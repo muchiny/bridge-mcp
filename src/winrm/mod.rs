@@ -213,7 +213,7 @@ mod tests {
             port: 5986,
             user: "admin".to_string(),
             auth: crate::config::AuthConfig::Password {
-                password: zeroize::Zeroizing::new("pass".to_string()),
+                password: crate::config::RedactedSecret::from("pass"),
             },
             description: None,
             host_key_verification: crate::config::HostKeyVerification::default(),
@@ -249,7 +249,7 @@ mod tests {
     fn test_build_winrm_config_ntlm() {
         let mut host = test_host_config();
         host.auth = crate::config::AuthConfig::Ntlm {
-            password: zeroize::Zeroizing::new("secret".to_string()),
+            password: crate::config::RedactedSecret::from("secret"),
             domain: Some("CORP".to_string()),
         };
         let (cfg, creds) = build_winrm_config(&host).unwrap();

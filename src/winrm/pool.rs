@@ -167,7 +167,7 @@ mod tests {
             port: 5986,
             user: "admin".to_string(),
             auth: AuthConfig::Password {
-                password: zeroize::Zeroizing::new("pass".to_string()),
+                password: crate::config::RedactedSecret::from("pass"),
             },
             description: None,
             host_key_verification: HostKeyVerification::default(),

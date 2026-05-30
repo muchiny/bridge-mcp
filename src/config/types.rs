@@ -1,7 +1,7 @@
+use crate::config::secret::RedactedSecret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -248,12 +248,13 @@ pub struct HostConfig {
 
     /// Optional sudo password for this host (used with sudo commands).
     ///
-    /// Wrapped in [`Zeroizing<String>`] so the byte buffer is overwritten when
-    /// the value is dropped (FIND-028). Hot-reload via `config/watcher.rs`
-    /// drops the old `HostConfig`, which now wipes the prior password
-    /// instead of leaving it resident on the heap for the process lifetime.
+    /// Wrapped in [`RedactedSecret`] so the byte buffer is zeroized when
+    /// the value is dropped (FIND-028) and never leaks via `Debug`/`Display`/
+    /// `Serialize` (F1/F2). Hot-reload via `config/watcher.rs` drops the old
+    /// `HostConfig`, which now wipes the prior password instead of leaving it
+    /// resident on the heap for the process lifetime.
     #[serde(default)]
-    pub sudo_password: Option<Zeroizing<String>>,
+    pub sudo_password: Option<RedactedSecret>,
 
     /// Tags for grouping hosts (e.g., "production", "staging", "database")
     #[serde(default)]
@@ -457,12 +458,12 @@ pub struct SocksProxyConfig {
 
     /// Optional password for SOCKS5 authentication.
     ///
-    /// Wrapped in `Zeroizing<String>` so the byte buffer is overwritten
-    /// when the value is dropped (FIND-014). `SocksProxyConfig` lives for
-    /// the entire process; without `Zeroizing` the password sits in heap
-    /// from start to exit.
+    /// Wrapped in [`RedactedSecret`] so the byte buffer is zeroized when the
+    /// value is dropped (FIND-014) and never leaks via `Debug`/`Display`/
+    /// `Serialize` (F1/F2). `SocksProxyConfig` lives for the entire process;
+    /// without zeroization the password sits in heap from start to exit.
     #[serde(default)]
-    pub password: Option<Zeroizing<String>>,
+    pub password: Option<RedactedSecret>,
 }
 
 /// SOCKS protocol version
@@ -485,25 +486,26 @@ const fn default_socks_port() -> u16 {
 /// SSH variants (`Key`, `Agent`, `Password`) are always available.
 /// `WinRM` variants (`Ntlm`, `Certificate`, `Kerberos`) are feature-gated.
 ///
-/// Sensitive fields (`password`, `passphrase`) are wrapped in [`Zeroizing`]
+/// Sensitive fields (`password`, `passphrase`) are wrapped in [`RedactedSecret`]
 /// so they are securely erased from memory when the config is dropped
-/// (e.g. on hot-reload or process exit).
+/// (e.g. on hot-reload or process exit) and never leak through `Debug`,
+/// `Display`, or `Serialize`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AuthConfig {
     Key {
         path: String,
         #[serde(default)]
-        passphrase: Option<Zeroizing<String>>,
+        passphrase: Option<RedactedSecret>,
     },
     Agent,
     Password {
-        password: Zeroizing<String>,
+        password: RedactedSecret,
     },
     /// `NTLMv2` authentication for `WinRM` (default `WinRM` auth method).
     #[cfg(feature = "winrm")]
     Ntlm {
-        password: Zeroizing<String>,
+        password: RedactedSecret,
         /// Windows domain (e.g., "CORP"). Optional — omit for local accounts.
         #[serde(default)]
         domain: Option<String>,
@@ -1456,10 +1458,22 @@ mod tests {
     // ============== AuthConfig Tests ==============
 
     #[test]
+    fn host_config_debug_does_not_leak_password() {
+        let auth = AuthConfig::Password {
+            password: RedactedSecret::from("topsecret-pw"),
+        };
+        let rendered = format!("{auth:?}");
+        assert!(
+            !rendered.contains("topsecret-pw"),
+            "AuthConfig Debug leaked the password: {rendered}"
+        );
+    }
+
+    #[test]
     fn test_auth_config_key_serialization() {
         let auth = AuthConfig::Key {
             path: "/path/to/key".to_string(),
-            passphrase: Some(Zeroizing::new("secret".to_string())),
+            passphrase: Some(RedactedSecret::from("secret")),
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"type\":\"key\""));
@@ -1476,11 +1490,15 @@ mod tests {
     #[test]
     fn test_auth_config_password_serialization() {
         let auth = AuthConfig::Password {
-            password: Zeroizing::new("secret123".to_string()),
+            password: RedactedSecret::from("secret123"),
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"type\":\"password\""));
-        assert!(json.contains("\"secret123\""));
+        assert!(
+            !json.contains("secret123"),
+            "password leaked in serialization"
+        );
+        assert!(json.contains("[REDACTED]"));
     }
 
     #[test]
@@ -1495,7 +1513,9 @@ mod tests {
 
         assert!(matches!(key, AuthConfig::Key { path, .. } if path == "/path/to/key"));
         assert!(matches!(agent, AuthConfig::Agent));
-        assert!(matches!(password, AuthConfig::Password { password } if *password == "secret"));
+        assert!(
+            matches!(password, AuthConfig::Password { password } if password.as_str() == "secret")
+        );
     }
 
     // ============== LimitsConfig Tests ==============
@@ -1655,7 +1675,7 @@ mod tests {
         assert_eq!(config.port, 9050);
         assert_eq!(config.version, SocksVersion::Socks4);
         assert_eq!(config.username, Some("user".to_string()));
-        assert_eq!(config.password.as_deref().map(String::as_str), Some("pass"));
+        assert_eq!(config.password.as_deref(), Some("pass"));
     }
 
     #[test]
