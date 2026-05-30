@@ -510,6 +510,18 @@ impl Sanitizer {
                 description: "Generic JWT token",
                 category: "jwt",
             },
+            // Opaque (non-JWT) Authorization: Bearer tokens.
+            // MUST come AFTER the JWT pattern above: the engine applies matched
+            // patterns in definition order, so a `Bearer eyJ...` JWT is already
+            // replaced by [JWT_TOKEN_REDACTED] before this generic rule is reached
+            // (and `[JWT_TOKEN_REDACTED]` no longer matches this token charset).
+            // This closes the leak when `entropy_detection: false` is configured.
+            PatternDef {
+                pattern: r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}",
+                replacement: "Bearer [BEARER_TOKEN_REDACTED]",
+                description: "Opaque Authorization Bearer token",
+                category: "generic",
+            },
             // Anthropic API keys (specific prefix sk-ant-*)
             PatternDef {
                 pattern: r"sk-ant-api\d{2}-[A-Za-z0-9_-]{80,}",
@@ -1242,6 +1254,18 @@ Done";
             output.contains("[JWT_TOKEN_REDACTED]"),
             "JWT should be redacted"
         );
+    }
+
+    #[test]
+    fn test_bearer_opaque_token_redacted() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = "curl -H 'Authorization: Bearer A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6'";
+        let out = sanitizer.sanitize(input);
+        assert!(
+            !out.contains("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"),
+            "opaque bearer token leaked: {out}"
+        );
+        assert!(out.contains("[BEARER_TOKEN_REDACTED]"));
     }
 
     #[test]
