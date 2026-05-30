@@ -65,7 +65,7 @@ all-protocols = ["winrm", "psrp", "telnet", "k8s-exec", "serial", "ssm", "azure"
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "net", "process", "time", "fs", "io-std", "macros", "sync", "signal"] }
 
 # SSH
-russh = "0.60"
+russh = "0.61"
 russh-sftp = "2.1"
 
 # Serialization
