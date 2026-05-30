@@ -90,11 +90,14 @@ mod rpi {
         let auth = if let Some(ref key) = config.auth.key {
             AuthConfig::Key {
                 path: key.path.clone(),
-                passphrase: key.passphrase.clone().map(zeroize::Zeroizing::new),
+                passphrase: key
+                    .passphrase
+                    .clone()
+                    .map(mcp_ssh_bridge::config::RedactedSecret::from),
             }
         } else if let Some(ref password) = config.auth.password {
             AuthConfig::Password {
-                password: zeroize::Zeroizing::new(password.clone()),
+                password: mcp_ssh_bridge::config::RedactedSecret::from(password.clone()),
             }
         } else if config.auth.agent.unwrap_or(false) {
             AuthConfig::Agent

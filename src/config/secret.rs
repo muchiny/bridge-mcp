@@ -100,7 +100,10 @@ mod tests {
     fn debug_does_not_leak() {
         let s = RedactedSecret::from(SECRET);
         let rendered = format!("{s:?}");
-        assert!(!rendered.contains(SECRET), "Debug leaked the secret: {rendered}");
+        assert!(
+            !rendered.contains(SECRET),
+            "Debug leaked the secret: {rendered}"
+        );
         assert_eq!(rendered, "[REDACTED]");
     }
 
@@ -108,7 +111,10 @@ mod tests {
     fn serialize_does_not_leak() {
         let s = RedactedSecret::from(SECRET);
         let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains(SECRET), "Serialize leaked the secret: {json}");
+        assert!(
+            !json.contains(SECRET),
+            "Serialize leaked the secret: {json}"
+        );
         assert_eq!(json, "\"[REDACTED]\"");
     }
 

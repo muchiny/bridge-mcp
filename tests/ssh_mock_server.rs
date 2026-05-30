@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mcp_ssh_bridge::config::{
-    AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, OsType, Protocol,
+    AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, OsType, Protocol, RedactedSecret,
 };
 use russh::keys::PrivateKey;
 use russh::keys::ssh_key::private::{Ed25519Keypair, KeypairData};
@@ -284,7 +284,7 @@ pub fn mock_host_config(addr: SocketAddr, user: &str, password: &str) -> HostCon
         port: addr.port(),
         user: user.to_string(),
         auth: AuthConfig::Password {
-            password: zeroize::Zeroizing::new(password.to_string()),
+            password: RedactedSecret::from(password),
         },
         description: Some("mock SSH server".into()),
         // `Off` so we don't touch ~/.ssh/known_hosts during tests.
