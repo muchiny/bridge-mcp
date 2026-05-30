@@ -36,6 +36,7 @@ The AWX call sites (`&awx.token` in ~16 handlers) compile unchanged: the use-cas
 ### Task 1: `RedactedSecret` newtype
 
 **Files:**
+
 - Create: `src/config/secret.rs`
 - Modify: `src/config/mod.rs`
 
@@ -218,6 +219,7 @@ git commit -m "feat(config): add RedactedSecret newtype (leak-proof zeroizing se
 ### Task 2: Swap config credential fields to `RedactedSecret`
 
 **Files:**
+
 - Modify: `src/config/types.rs` (field declarations: `AuthConfig::Password.password`, `AuthConfig::Key.passphrase`, `AuthConfig::Ntlm.password`, `HostConfig.sudo_password`, `SocksProxyConfig.password`; the import; the secret-bearing tests)
 - Modify: `src/ssh/client.rs:452` (SOCKS password call site)
 
@@ -287,22 +289,31 @@ use crate::config::secret::RedactedSecret;
 Then change each secret field declaration:
 
 - `HostConfig::sudo_password` (≈line 256):
+
   ```rust
   pub sudo_password: Option<RedactedSecret>,
   ```
+
 - `SocksProxyConfig::password` (≈line 465):
+
   ```rust
   pub password: Option<RedactedSecret>,
   ```
+
 - `AuthConfig::Key::passphrase` (≈line 497):
+
   ```rust
   passphrase: Option<RedactedSecret>,
   ```
+
 - `AuthConfig::Password::password` (≈line 501):
+
   ```rust
   password: RedactedSecret,
   ```
+
 - `AuthConfig::Ntlm::password` (≈line 506, under `#[cfg(feature = "winrm")]`):
+
   ```rust
   password: RedactedSecret,
   ```
@@ -355,6 +366,7 @@ git commit -m "refactor(config): use RedactedSecret for SSH/SOCKS/sudo credentia
 ### Task 3: Protect the AWX OAuth token (F3)
 
 **Files:**
+
 - Modify: `src/config/types.rs` (`AwxConfig::token`, ≈line 59)
 
 - [ ] **Step 1: Write the failing test**
@@ -422,6 +434,7 @@ git commit -m "fix(config): wrap AwxConfig token in RedactedSecret (fixes F3 —
 ### Task 4: Add `Bearer` sanitizer pattern (F4, independent)
 
 **Files:**
+
 - Modify: `src/security/sanitizer.rs` (pattern definitions + a test)
 
 - [ ] **Step 1: Write the failing test**
@@ -462,7 +475,7 @@ In `src/security/sanitizer.rs`, locate the TIER 1 "Highly Specific Patterns" blo
         },
 ```
 
-Use the exact field names of the local `PatternDef` struct (check the surrounding entries — they may be `name` / `pattern` / `replacement` or a tuple; match what is already there). The replacement keeps the literal `Bearer ` prefix and redacts only the token so the line stays readable.
+Use the exact field names of the local `PatternDef` struct (check the surrounding entries — they may be `name` / `pattern` / `replacement` or a tuple; match what is already there). The replacement keeps the literal `Bearer` prefix and redacts only the token so the line stays readable.
 
 If the sanitizer keeps a "keyword pre-filter" list (Aho-Corasick literals, around line 290), confirm `"bearer"` is already present (it is, at `sanitizer.rs:297`) so the pattern is reached.
 
@@ -514,6 +527,7 @@ git diff --quiet || git commit -am "style: rustfmt after RedactedSecret migratio
 ## Self-Review
 
 **Spec coverage:**
+
 - F1 (Debug leak) → Task 1 (`debug_does_not_leak`) + Task 2 (`host_config_debug_does_not_leak_password`). ✓
 - F2 (Serialize leak) → Task 1 (`serialize_does_not_leak`) + Task 2 (updated `test_auth_config_password_serialization`). ✓
 - F3 (AWX token) → Task 3. ✓
@@ -525,5 +539,6 @@ git diff --quiet || git commit -am "style: rustfmt after RedactedSecret migratio
 **Placeholder scan:** all code steps contain concrete code; line numbers are marked `≈` because they drift, with an anchoring symbol name for each. The only deliberately conditional step is the `PatternDef` field-name match in Task 4 Step 3 (the local struct shape must be read from the file) — anchored to the GitHub-pattern block.
 
 **Risk notes for the executor:**
+
 - Deserialization is unchanged in behavior (still reads a plain YAML/JSON string), so existing config files and round-trip *deserialize* tests keep working. Only *serialize* output changes (now redacted) — that is the intended fix.
 - Build with `--all-features` at least once (Task 2 Step 5) to compile the `winrm` (`Ntlm`) and `socks` `#[cfg]` paths.
