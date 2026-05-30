@@ -117,7 +117,7 @@ tokio-stream = { version = "0.1", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # WinRM adapter (optional) — wraps winrm-rs for WS-Man/SOAP over HTTPS
-winrm-rs = { version = "1.0", optional = true }
+winrm-rs = { version = "1.1", optional = true }
 # PSRP adapter (optional) — PowerShell Remoting Protocol via psrp-rs
 psrp-rs = { version = "1.0", optional = true, default-features = false }
 
@@ -226,11 +226,3 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 
-# =============================================================================
-# Patch overrides (FIND-018 / audit 2026-05-09)
-# =============================================================================
-# winrm-rs 1.0 on crates.io declares an obsolete reqwest feature
-# (`webpki-roots`) that blocks `cargo outdated` resolution. Local fork
-# carries the fix; pin to it until winrm-rs > 1.0 is published.
-[patch.crates-io]
-winrm-rs = { git = "https://github.com/muchiny/winrm-rs.git", rev = "573dadf5abcaed681f65999f216164c9f33a6250" }
