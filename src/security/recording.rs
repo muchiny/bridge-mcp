@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use const_hex::encode as hex_encode;
 use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 
@@ -400,7 +401,7 @@ impl SessionRecorder {
         hasher.update(key);
         hasher.update(previous_hash.as_bytes());
         hasher.update(data.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex_encode(hasher.finalize().as_slice())
     }
 
     /// Read recording info from a .cast file header
