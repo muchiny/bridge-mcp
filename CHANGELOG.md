@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-05-31
+
+### Added
+
+- **`RedactedSecret` newtype** (`src/config/secret.rs`) — a leak-proof,
+  zeroize-on-drop string secret whose `Debug`, `Display`, and `Serialize`
+  impls emit `"[REDACTED]"` by construction, with transparent `Deserialize`
+  and a `Deref<Target = str>` / `as_str()` audited escape hatch. Intentionally
+  omits `PartialEq`/`Hash` (timing-side-channel rationale documented).
+
+### Security
+
+- Migrated **every in-memory secret** to `RedactedSecret`: SSH password, key
+  passphrase, NTLM password, `sudo_password`, SOCKS proxy password, AWX OAuth
+  token, the three DB-handler `db_password` args, and vault `data` pairs.
+  - **F1** — closes a `Debug` cleartext leak (`zeroize::Zeroizing` forwards
+    `Debug`, so any `{:?}` on a credential-bearing struct printed the secret).
+  - **F2** — closes the matching `Serialize` cleartext leak.
+  - **F3** — the AWX OAuth token (previously a bare `String`) is now zeroized
+    and redacted.
+- **F4** — added an `Authorization: Bearer` sanitizer pattern that redacts
+  opaque (non-JWT) bearer tokens from command output/audit even when the
+  entropy detector is disabled; ordered after the JWT pattern so JWTs keep
+  their `[JWT_TOKEN_REDACTED]` marker.
+
+### Changed
+
+- Dependency bumps: `russh` 0.60 → 0.61, `serde-saphyr` 0.0.21 → 0.0.27,
+  `jsonwebtoken` 9 → 10, `sha2` 0.10 → 0.11, `similar` 2 → 3, OpenTelemetry
+  stack 0.31 → 0.32, `winrm-rs` 1.0 → 1.1.2 (drops the git-fork patch).
+
 ## [1.17.0] - 2026-05-10
 
 ### Summary
