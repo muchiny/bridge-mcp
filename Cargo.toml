@@ -141,10 +141,10 @@ jaq-std = { version = "3", optional = true }
 jaq-json = { version = "2", features = ["serde"], optional = true }
 
 # OpenTelemetry tracing/metrics (optional, feature = "otel")
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 similar = "2.6"
 inventory = "0.3"
 mcp-ssh-bridge-macros = { version = "0.1.0", path = "crates/mcp-ssh-bridge-macros" }
