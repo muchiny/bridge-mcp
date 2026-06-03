@@ -181,7 +181,7 @@ impl ToolRegistry {
                     execution: Some(ToolExecution {
                         task_support: "optional".to_string(),
                     }),
-                    output_schema: None,
+                    output_schema: handler.output_schema(),
                     icons: None,
                     meta: tool_meta(schema.name),
                 }
@@ -2899,5 +2899,73 @@ mod tests {
     fn test_tool_meta_value_format() {
         let meta = tool_meta("ssh_exec").unwrap();
         assert_eq!(meta["anthropic/maxResultSizeChars"], 200_000);
+    }
+
+    /// A handler that overrides `output_schema()` to return a concrete
+    /// JSON Schema. Proves `list_tools` serializes the handler's schema
+    /// into `Tool.output_schema` instead of the previous hard-coded None.
+    struct SchemaHandler;
+
+    #[async_trait]
+    impl ToolHandler for SchemaHandler {
+        fn name(&self) -> &'static str {
+            "schema_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "A tool with an output schema"
+        }
+
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "schema_tool",
+                description: "A tool with an output schema",
+                input_schema: r#"{"type":"object","properties":{}}"#,
+            }
+        }
+
+        fn output_schema(&self) -> Option<serde_json::Value> {
+            Some(json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": { "items": { "type": "array" } }
+            }))
+        }
+
+        async fn execute(
+            &self,
+            _args: Option<serde_json::Value>,
+            _ctx: &ToolContext,
+        ) -> Result<ToolCallResult> {
+            Ok(ToolCallResult::text("ok"))
+        }
+    }
+
+    #[test]
+    fn test_default_output_schema_is_none() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(TestHandler));
+        let tools = registry.list_tools();
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].output_schema.is_none());
+    }
+
+    #[test]
+    fn test_list_tools_serializes_output_schema() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(SchemaHandler));
+        let tools = registry.list_tools();
+        assert_eq!(tools.len(), 1);
+        let schema = tools[0]
+            .output_schema
+            .as_ref()
+            .expect("output_schema must be populated from handler.output_schema()");
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert_eq!(schema["type"], "object");
+        let wire = serde_json::to_value(&tools[0]).unwrap();
+        assert!(wire.get("outputSchema").is_some());
     }
 }

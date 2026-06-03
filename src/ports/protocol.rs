@@ -239,17 +239,11 @@ impl ToolCallResult {
     /// the MCP-spec types (`text`, `image`, `audio`, `resource`).
     #[must_use]
     pub fn without_apps(mut self) -> Self {
-        let had_apps = self
-            .content
-            .iter()
-            .any(|c| matches!(c, ToolContent::App { .. }));
+        // Drop interactive App content for spec-only clients. Typed
+        // `structured_content` is now produced independently of Apps
+        // (GAP #2 decoupling), so it MUST be preserved here.
         self.content
             .retain(|c| !matches!(c, ToolContent::App { .. }));
-        // If Apps were present, structured_content is a clone of App data —
-        // clear it to avoid sending duplicate JSON alongside the TSV text.
-        if had_apps {
-            self.structured_content = None;
-        }
         self
     }
 
@@ -563,6 +557,32 @@ mod tests {
         result.structured_content = Some(json!({"count": 42}));
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["structuredContent"]["count"], 42);
+    }
+
+    #[test]
+    fn test_without_apps_preserves_structured_content() {
+        use super::AppContent;
+        let app = AppContent {
+            app_type: "table".to_string(),
+            title: Some("t".to_string()),
+            data: json!({"rows": []}),
+            actions: None,
+        };
+        let mut result = ToolCallResult::text("tsv").with_app(app);
+        result.structured_content = Some(json!({"items": [{"name": "nginx"}]}));
+        let stripped = result.without_apps();
+        assert!(
+            !stripped
+                .content
+                .iter()
+                .any(|c| matches!(c, ToolContent::App { .. })),
+            "App content must be stripped"
+        );
+        assert_eq!(
+            stripped.structured_content,
+            Some(json!({"items": [{"name": "nginx"}]})),
+            "structured_content must NOT be cleared by without_apps"
+        );
     }
 
     // ========================================================================
