@@ -174,7 +174,7 @@ impl ElicitationService {
 
     /// Ask the client to confirm a destructive tool call.
     ///
-    /// Delegates to [`confirm_destructive_with_plan`] with `plan = None`,
+    /// Delegates to [`Self::confirm_destructive_with_plan`] with `plan = None`,
     /// preserving the original behavior for all existing callers.
     ///
     /// # Errors
