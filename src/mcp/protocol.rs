@@ -895,6 +895,10 @@ pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
 pub const SERVER_NAME: &str = "bridge-mcp";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// URL of the server icon advertised in `ServerInfo` (SEP-973). Points at the
+/// committed `dxt/icon.svg`, served raw from GitHub `main`.
+pub const SERVER_ICON_URL: &str =
+    "https://raw.githubusercontent.com/muchini/bridge-mcp/main/dxt/icon.svg";
 
 #[cfg(test)]
 mod tests {
@@ -1284,6 +1288,20 @@ mod tests {
         assert_eq!(
             json["icons"][0]["src"],
             "https://example.com/server-icon.png"
+        );
+    }
+
+    #[test]
+    fn test_server_icon_url_is_https_svg() {
+        assert!(
+            SERVER_ICON_URL.starts_with("https://"),
+            "server icon must be an https URL: {SERVER_ICON_URL}"
+        );
+        assert!(
+            std::path::Path::new(SERVER_ICON_URL)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")),
+            "server icon should be an SVG: {SERVER_ICON_URL}"
         );
     }
 
