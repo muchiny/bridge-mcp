@@ -79,6 +79,13 @@ pub trait StandardTool: Send + Sync + 'static {
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::RawText;
 
+    /// Optional JSON Schema (2020-12) string describing this tool's
+    /// `structuredContent` return value. `None` (default) = no contract.
+    ///
+    /// When `Some`, [`StandardToolHandler::output_schema`] parses and
+    /// advertises it in `tools/list` under `outputSchema`.
+    const OUTPUT_SCHEMA: Option<&'static str> = None;
+
     /// Build the shell command from parsed arguments.
     ///
     /// This is the only method that MUST be implemented per tool.
@@ -115,6 +122,24 @@ pub trait StandardTool: Send + Sync + 'static {
         _dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
         result
+    }
+
+    /// Produce machine-readable `structuredContent` from the raw command
+    /// output, INDEPENDENT of any MCP App component (GAP #2 decoupling).
+    ///
+    /// `output` is the raw (unsanitized) command stdout; `dr` carries the
+    /// data-reduction params so the structured rows can be reduced to match
+    /// the text view. Return `None` (default) to emit no structured content.
+    ///
+    /// The returned `Value` SHOULD conform to the tool's
+    /// [`Self::OUTPUT_SCHEMA`] and MUST be a JSON object (MCP requires
+    /// `structuredContent` to be an object, not a bare array).
+    fn structured(
+        _args: &Self::Args,
+        _output: &str,
+        _dr: &crate::domain::data_reduction::DataReductionArgs,
+    ) -> Option<Value> {
+        None
     }
 
     /// Async hook invoked AFTER args parsing/validation but BEFORE the
@@ -211,6 +236,10 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 
     fn output_kind(&self) -> crate::domain::output_kind::OutputKind {
         T::OUTPUT_KIND
+    }
+
+    fn output_schema(&self) -> Option<Value> {
+        T::OUTPUT_SCHEMA.and_then(|s| serde_json::from_str(s).ok())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -457,20 +486,29 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             );
         }
 
-        // Step 18: Post-process + auto-populate structuredContent from AppContent
+        // Step 18: Post-process + structured content (GAP #2 decoupling).
         // Skip post_process when jq already filtered the output — post_process
         // would try to parse the raw output as columnar text, overwriting jq's work.
         let result = ToolCallResult::text(output_text);
-        let result = if jq_was_applied {
+        let mut result = if jq_was_applied {
             result
         } else {
             T::post_process(result, &args, &raw_output, &dr)
         };
 
+        // Step 18a: Fill structured_content from structured() BEFORE enrich,
+        // independent of App content (GAP #2 decoupling). Only on success.
+        if result.structured_content.is_none()
+            && response.exit_code == 0
+            && let Some(data) = T::structured(&args, &raw_output, &dr)
+        {
+            result.structured_content = Some(data);
+        }
+
         // Step 18b: Optional async enrichment hook with `ToolContext` access.
         // Used by diagnostic tools that opt into LLM-side analysis via
         // `ctx.sample()` (e.g. `ssh_diagnose summarize=true`).
-        let result = T::enrich(result, &args, &raw_output, ctx).await?;
+        let mut result = T::enrich(result, &args, &raw_output, ctx).await?;
 
         // Record telemetry fields for this successful execution.
         let span = tracing::Span::current();
@@ -478,7 +516,13 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         #[allow(clippy::cast_possible_truncation)]
         span.record("bytes_out", post_reduction_chars as u64);
 
-        Ok(auto_populate_structured_content(result))
+        // Step 18c: Fallback — populate structured_content from App data if
+        // structured() returned None (backward-compat with App-based tools).
+        if result.structured_content.is_none() {
+            result = auto_populate_structured_content(result);
+        }
+
+        Ok(result)
     }
 }
 
@@ -1818,6 +1862,84 @@ mod tests {
             handler.output_kind(),
             OutputKind::Json,
             "must dispatch to T::OUTPUT_KIND, not Default::default() (=RawText)"
+        );
+    }
+
+    #[test]
+    fn test_standard_handler_output_schema_default_none() {
+        use crate::ports::ToolHandler;
+        let handler = StandardToolHandler::<MockTool>::new();
+        assert!(handler.output_schema().is_none());
+    }
+
+    #[test]
+    fn test_standard_handler_output_schema_parses_const() {
+        use crate::ports::ToolHandler;
+        struct MockSchemaTool;
+        impl StandardTool for MockSchemaTool {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_schema_tool";
+            const DESCRIPTION: &'static str = "schema probe";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            const OUTPUT_SCHEMA: Option<&'static str> = Some(
+                r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}"#,
+            );
+            fn build_command(_a: &MockArgs, _h: &HostConfig) -> Result<String> {
+                Ok("echo".to_string())
+            }
+        }
+        let handler = StandardToolHandler::<MockSchemaTool>::new();
+        let schema = handler
+            .output_schema()
+            .expect("OUTPUT_SCHEMA Some must surface");
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert_eq!(schema["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn test_standard_handler_populates_structured_without_app() {
+        struct MockStructuredTool;
+        impl StandardTool for MockStructuredTool {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_structured_tool";
+            const DESCRIPTION: &'static str = "structured probe";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            fn build_command(_a: &MockArgs, _h: &HostConfig) -> Result<String> {
+                Ok("echo".to_string())
+            }
+            fn structured(
+                _args: &MockArgs,
+                _output: &str,
+                _dr: &crate::domain::data_reduction::DataReductionArgs,
+            ) -> Option<Value> {
+                Some(json!({"items": [{"name": "nginx"}]}))
+            }
+        }
+        let handler = StandardToolHandler::<MockStructuredTool>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("raw text output"),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            !result
+                .content
+                .iter()
+                .any(|c| matches!(c, crate::ports::protocol::ToolContent::App { .. })),
+            "this tool emits no App content"
+        );
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"items": [{"name": "nginx"}]})),
+            "structured() output must populate structured_content independent of Apps"
         );
     }
 
