@@ -34,15 +34,15 @@ test-daemon:
 # Start a local daemon for interactive development.
 # Use `make daemon-stop` or Ctrl+C to terminate.
 daemon-start:
-	./target/release/mcp-ssh-bridge daemon start
+	./target/release/bridge-mcp daemon start
 
 # Gracefully stop the local daemon.
 daemon-stop:
-	./target/release/mcp-ssh-bridge daemon stop
+	./target/release/bridge-mcp daemon stop
 
 # Report daemon status.
 daemon-status:
-	./target/release/mcp-ssh-bridge daemon status
+	./target/release/bridge-mcp daemon status
 
 # Run clippy linter
 lint:
@@ -73,7 +73,7 @@ clean:
 # jq filtering is available.
 install: release
 	@mkdir -p ~/.local/bin
-	cp target/release/mcp-ssh-bridge ~/.local/bin/
+	cp target/release/bridge-mcp ~/.local/bin/
 
 # Development mode with auto-reload
 dev:
@@ -196,20 +196,20 @@ release-all:
 	@command -v cross >/dev/null 2>&1 && cross build --release --target aarch64-apple-darwin || echo "cross not installed, skipping macos-arm64"
 	@command -v cross >/dev/null 2>&1 && cross build --release --target x86_64-pc-windows-gnu || echo "cross not installed, skipping windows"
 	@echo "Packaging..."
-	@test -f target/x86_64-unknown-linux-gnu/release/mcp-ssh-bridge && cd target/x86_64-unknown-linux-gnu/release && tar czf ../../../releases/mcp-ssh-bridge-linux-x86_64.tar.gz mcp-ssh-bridge && cd ../../../releases && sha256sum mcp-ssh-bridge-linux-x86_64.tar.gz > mcp-ssh-bridge-linux-x86_64.tar.gz.sha256 || true
-	@test -f target/aarch64-unknown-linux-gnu/release/mcp-ssh-bridge && cd target/aarch64-unknown-linux-gnu/release && tar czf ../../../releases/mcp-ssh-bridge-linux-arm64.tar.gz mcp-ssh-bridge && cd ../../../releases && sha256sum mcp-ssh-bridge-linux-arm64.tar.gz > mcp-ssh-bridge-linux-arm64.tar.gz.sha256 || true
-	@test -f target/x86_64-apple-darwin/release/mcp-ssh-bridge && cd target/x86_64-apple-darwin/release && tar czf ../../../releases/mcp-ssh-bridge-macos-x86_64.tar.gz mcp-ssh-bridge && cd ../../../releases && sha256sum mcp-ssh-bridge-macos-x86_64.tar.gz > mcp-ssh-bridge-macos-x86_64.tar.gz.sha256 || true
-	@test -f target/aarch64-apple-darwin/release/mcp-ssh-bridge && cd target/aarch64-apple-darwin/release && tar czf ../../../releases/mcp-ssh-bridge-macos-arm64.tar.gz mcp-ssh-bridge && cd ../../../releases && sha256sum mcp-ssh-bridge-macos-arm64.tar.gz > mcp-ssh-bridge-macos-arm64.tar.gz.sha256 || true
-	@test -f target/x86_64-pc-windows-gnu/release/mcp-ssh-bridge.exe && cd target/x86_64-pc-windows-gnu/release && zip -j ../../../releases/mcp-ssh-bridge-windows-x86_64.zip mcp-ssh-bridge.exe && cd ../../../releases && sha256sum mcp-ssh-bridge-windows-x86_64.zip > mcp-ssh-bridge-windows-x86_64.zip.sha256 || true
+	@test -f target/x86_64-unknown-linux-gnu/release/bridge-mcp && cd target/x86_64-unknown-linux-gnu/release && tar czf ../../../releases/bridge-mcp-linux-x86_64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-linux-x86_64.tar.gz > bridge-mcp-linux-x86_64.tar.gz.sha256 || true
+	@test -f target/aarch64-unknown-linux-gnu/release/bridge-mcp && cd target/aarch64-unknown-linux-gnu/release && tar czf ../../../releases/bridge-mcp-linux-arm64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-linux-arm64.tar.gz > bridge-mcp-linux-arm64.tar.gz.sha256 || true
+	@test -f target/x86_64-apple-darwin/release/bridge-mcp && cd target/x86_64-apple-darwin/release && tar czf ../../../releases/bridge-mcp-macos-x86_64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-macos-x86_64.tar.gz > bridge-mcp-macos-x86_64.tar.gz.sha256 || true
+	@test -f target/aarch64-apple-darwin/release/bridge-mcp && cd target/aarch64-apple-darwin/release && tar czf ../../../releases/bridge-mcp-macos-arm64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-macos-arm64.tar.gz > bridge-mcp-macos-arm64.tar.gz.sha256 || true
+	@test -f target/x86_64-pc-windows-gnu/release/bridge-mcp.exe && cd target/x86_64-pc-windows-gnu/release && zip -j ../../../releases/bridge-mcp-windows-x86_64.zip bridge-mcp.exe && cd ../../../releases && sha256sum bridge-mcp-windows-x86_64.zip > bridge-mcp-windows-x86_64.zip.sha256 || true
 	@echo "Release artifacts in releases/"
 
 # Build Docker image locally
 docker-build:
-	docker build -t mcp-ssh-bridge:local .
+	docker build -t bridge-mcp:local .
 
 # Build and scan Docker image with Trivy
 docker-scan: docker-build
-	@command -v trivy >/dev/null 2>&1 && trivy image --severity CRITICAL,HIGH mcp-ssh-bridge:local || echo "trivy not installed, skipping scan"
+	@command -v trivy >/dev/null 2>&1 && trivy image --severity CRITICAL,HIGH bridge-mcp:local || echo "trivy not installed, skipping scan"
 
 # Check for outdated and unused dependencies (replaces Dependabot)
 deps-check: outdated machete
@@ -246,20 +246,20 @@ release-pipeline: ci-full release-all docker-scan
 # Build DXT package (Desktop Extension for Claude Desktop)
 dxt: release
 	@mkdir -p dist/dxt
-	cp target/release/mcp-ssh-bridge dist/dxt/
+	cp target/release/bridge-mcp dist/dxt/
 	cp dxt/manifest.json dxt/icon.svg dist/dxt/
-	cd dist && zip -r mcp-ssh-bridge.dxt dxt/
-	@echo "DXT package: dist/mcp-ssh-bridge.dxt"
+	cd dist && zip -r bridge-mcp.dxt dxt/
+	@echo "DXT package: dist/bridge-mcp.dxt"
 
 # Build MCPB package (MCP Bundle for official registry)
 mcpb: release
 	@mkdir -p dist/mcpb
-	cp target/release/mcp-ssh-bridge dist/mcpb/
+	cp target/release/bridge-mcp dist/mcpb/
 	cp dxt/manifest.json dxt/icon.svg server.json dist/mcpb/
-	cd dist && zip -r mcp-ssh-bridge.mcpb mcpb/
-	@cd dist && sha256sum mcp-ssh-bridge.mcpb > mcp-ssh-bridge.mcpb.sha256
-	@echo "MCPB package: dist/mcp-ssh-bridge.mcpb"
-	@echo "SHA256: $$(cat dist/mcp-ssh-bridge.mcpb.sha256)"
+	cd dist && zip -r bridge-mcp.mcpb mcpb/
+	@cd dist && sha256sum bridge-mcp.mcpb > bridge-mcp.mcpb.sha256
+	@echo "MCPB package: dist/bridge-mcp.mcpb"
+	@echo "SHA256: $$(cat dist/bridge-mcp.mcpb.sha256)"
 
 # Show help
 help:

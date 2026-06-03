@@ -1,5 +1,5 @@
 # MCP SSH Bridge Configuration
-# Copy this file to ~/.config/mcp-ssh-bridge/config.yaml and adjust to your needs
+# Copy this file to ~/.config/bridge-mcp/config.yaml and adjust to your needs
 
 # =============================================================================
 # HOST DEFINITIONS
@@ -323,7 +323,7 @@ limits:
 
 audit:
   enabled: true
-  path: ~/.local/share/mcp-ssh-bridge/audit.log
+  path: ~/.local/share/bridge-mcp/audit.log
   max_size_mb: 100
   retain_days: 30
 
@@ -337,8 +337,8 @@ audit:
 #   # Enable/disable session recording (default: false)
 #   enabled: false
 #
-#   # Directory to store recordings (default: ~/.local/share/mcp-ssh-bridge/recordings/)
-#   path: ~/.local/share/mcp-ssh-bridge/recordings/
+#   # Directory to store recordings (default: ~/.local/share/bridge-mcp/recordings/)
+#   path: ~/.local/share/bridge-mcp/recordings/
 #
 #   # Recording format: "asciinema" (v2) or "json" (structured)
 #   format: asciinema
@@ -626,7 +626,7 @@ tool_groups:
 #   OTEL_EXPORTER_OTLP_ENDPOINT   OTLP/gRPC endpoint (e.g. http://localhost:4317)
 #                                 When unset, OTLP export is disabled even if
 #                                 the `otel` feature is compiled in.
-#   OTEL_SERVICE_NAME             Service name in spans (default: mcp-ssh-bridge)
+#   OTEL_SERVICE_NAME             Service name in spans (default: bridge-mcp)
 #   RUST_LOG                      tracing-subscriber filter (default: info)
 #
 # Build with:
@@ -636,13 +636,13 @@ tool_groups:
 #   docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 #     -e COLLECTOR_OTLP_ENABLED=true jaegertracing/all-in-one:latest
 #   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-#     ./target/release/mcp-ssh-bridge tool ssh_status
-#   # → open http://localhost:16686 and search service "mcp-ssh-bridge"
+#     ./target/release/bridge-mcp tool ssh_status
+#   # → open http://localhost:16686 and search service "bridge-mcp"
 
 # =============================================================================
 # HTTP TRANSPORT (Streamable HTTP, MCP 2025-11-25)
 # =============================================================================
-# Optional. Enables `mcp-ssh-bridge serve-http`. Required only when running
+# Optional. Enables `bridge-mcp serve-http`. Required only when running
 # the bridge as a remote MCP server; stdio mode does not need this section.
 #
 # OAuth: when oauth.enabled = true, EITHER static_keys OR jwks_uri MUST be
@@ -660,8 +660,8 @@ tool_groups:
 #   oauth:
 #     enabled: true
 #     issuer: "https://auth.example.com"
-#     audience: "mcp-ssh-bridge"
-#     clientId: "mcp-ssh-bridge"
+#     audience: "bridge-mcp"
+#     clientId: "bridge-mcp"
 #     requiredScopes: ["mcp:tools:execute"]
 #     # Static keys are loaded once at boot and addressed by JWT `kid`.
 #     # Use this when your IdP exposes long-lived signing keys you can copy

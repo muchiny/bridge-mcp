@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mcp_ssh_bridge::config::{
+use bridge_mcp::config::{
     AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, OsType, Protocol, RedactedSecret,
 };
 use russh::keys::PrivateKey;

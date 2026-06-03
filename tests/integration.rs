@@ -6,16 +6,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mcp_ssh_bridge::config::{
+use bridge_mcp::config::{
     AuditConfig, AuthConfig, Config, HostConfig, HostKeyVerification, HttpTransportConfig,
     LimitsConfig, OsType, SanitizeConfig, SecurityConfig, SecurityMode, SessionConfig,
     SshConfigDiscovery, ToolGroupsConfig,
 };
-use mcp_ssh_bridge::domain::ExecuteCommandUseCase;
-use mcp_ssh_bridge::mcp::CommandHistory;
-use mcp_ssh_bridge::mcp::history::HistoryConfig;
-use mcp_ssh_bridge::ports::CommandOutput;
-use mcp_ssh_bridge::security::{AuditLogger, CommandValidator, Sanitizer};
+use bridge_mcp::domain::ExecuteCommandUseCase;
+use bridge_mcp::mcp::CommandHistory;
+use bridge_mcp::mcp::history::HistoryConfig;
+use bridge_mcp::ports::CommandOutput;
+use bridge_mcp::security::{AuditLogger, CommandValidator, Sanitizer};
 
 /// Helper to create a test config with hosts
 fn create_test_config() -> Config {
@@ -39,7 +39,7 @@ fn create_test_config() -> Config {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -71,7 +71,7 @@ fn create_test_config() -> Config {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -110,7 +110,7 @@ fn create_test_config() -> Config {
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     }
 }
@@ -497,7 +497,7 @@ fn test_proxy_jump_config() {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -533,7 +533,7 @@ fn test_proxy_jump_config() {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -558,7 +558,7 @@ fn test_proxy_jump_config() {
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     };
 
@@ -592,7 +592,7 @@ fn test_proxy_jump_resolution() {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -624,7 +624,7 @@ fn test_proxy_jump_resolution() {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -649,7 +649,7 @@ fn test_proxy_jump_resolution() {
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     };
 
@@ -679,7 +679,7 @@ fn test_proxy_jump_chain_detection() {
         os_type: OsType::Linux,
         shell: None,
         retry: None,
-        protocol: mcp_ssh_bridge::config::Protocol::default(),
+        protocol: bridge_mcp::config::Protocol::default(),
 
         #[cfg(feature = "winrm")]
         winrm_use_tls: None,
@@ -708,7 +708,7 @@ fn test_proxy_jump_chain_detection() {
         os_type: OsType::Linux,
         shell: None,
         retry: None,
-        protocol: mcp_ssh_bridge::config::Protocol::default(),
+        protocol: bridge_mcp::config::Protocol::default(),
 
         #[cfg(feature = "winrm")]
         winrm_use_tls: None,

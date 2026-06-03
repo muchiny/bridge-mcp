@@ -1,7 +1,7 @@
 //! Audit-log secret redaction tests (Vuln 3 / 2026-05-09).
 
-use mcp_ssh_bridge::config::{AuditConfig, SanitizeConfig};
-use mcp_ssh_bridge::security::{AuditEvent, AuditLogger, CommandResult, Sanitizer};
+use bridge_mcp::config::{AuditConfig, SanitizeConfig};
+use bridge_mcp::security::{AuditEvent, AuditLogger, CommandResult, Sanitizer};
 
 #[tokio::test]
 async fn audit_log_redacts_password_in_command() {

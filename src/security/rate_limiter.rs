@@ -53,7 +53,7 @@ impl TokenBucket {
 /// # Examples
 ///
 /// ```
-/// use mcp_ssh_bridge::security::RateLimiter;
+/// use bridge_mcp::security::RateLimiter;
 ///
 /// // Allow 5 requests per second per host
 /// let limiter = RateLimiter::new(5);

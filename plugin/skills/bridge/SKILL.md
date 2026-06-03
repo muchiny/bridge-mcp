@@ -15,14 +15,14 @@ Execute MCP tools on remote hosts or manage bridge configuration via CLI.
 ## Current state
 
 Host status:
-!`mcp-ssh-bridge status 2>/dev/null || echo "mcp-ssh-bridge not found -- install with: cargo install mcp-ssh-bridge"`
+!`bridge-mcp status 2>/dev/null || echo "bridge-mcp not found -- install with: cargo install bridge-mcp"`
 
 ## Instructions
 
 ### No arguments or status
 
 Show host status (above) and available tool groups:
-!`mcp-ssh-bridge list-tools --groups-only`
+!`bridge-mcp list-tools --groups-only`
 
 Then ask the user what they want to do.
 
@@ -30,9 +30,9 @@ Then ask the user what they want to do.
 
 Help the user configure the bridge:
 
-1. Config file: `~/.config/mcp-ssh-bridge/config.yaml`
-2. Validate: `mcp-ssh-bridge validate`
-3. Example config: see https://github.com/muchiny/mcp-ssh-bridge/blob/main/config/config.example.yaml
+1. Config file: `~/.config/bridge-mcp/config.yaml`
+2. Validate: `bridge-mcp validate`
+3. Example config: see https://github.com/muchini/bridge-mcp/blob/main/config/config.example.yaml
 
 **Adding a host:**
 
@@ -58,17 +58,17 @@ security:
 ### Tool group name (e.g., docker, kubernetes, systemd)
 
 List tools in that group:
-!`mcp-ssh-bridge list-tools --group $ARGUMENTS`
+!`bridge-mcp list-tools --group $ARGUMENTS`
 
 ### Search query
 
 Search tools by keyword:
-!`mcp-ssh-bridge list-tools --search $ARGUMENTS`
+!`bridge-mcp list-tools --search $ARGUMENTS`
 
 ### Tool name with key=value pairs
 
 Execute the tool:
-!`mcp-ssh-bridge --json tool $ARGUMENTS`
+!`bridge-mcp --json tool $ARGUMENTS`
 
 ### Workflow reminders
 

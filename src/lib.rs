@@ -3,10 +3,10 @@
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
 
 // Alias the current crate under its own name so the `#[mcp_tool]`
-// proc macro (defined in `mcp-ssh-bridge-macros`) can emit fully-
-// qualified paths like `::mcp_ssh_bridge::mcp::registry::…` that
+// proc macro (defined in `bridge-mcp-macros`) can emit fully-
+// qualified paths like `::bridge_mcp::mcp::registry::…` that
 // resolve both from within this crate AND from downstream crates.
-extern crate self as mcp_ssh_bridge;
+extern crate self as bridge_mcp;
 
 // Use mimalloc allocator when the feature is enabled (recommended for musl builds)
 #[cfg(feature = "mimalloc")]
@@ -15,14 +15,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Re-export the `inventory` crate so code produced by the
 /// `#[mcp_tool]` proc macro can reference it via a fully-qualified
-/// path (`::mcp_ssh_bridge::inventory::submit!`) without requiring
+/// path (`::bridge_mcp::inventory::submit!`) without requiring
 /// callers to add `inventory` to their own `Cargo.toml`.
 pub use ::inventory;
 
 /// Re-export the `#[mcp_tool]` and `#[mcp_standard_tool]` attribute
 /// macros so handler files only need
-/// `use mcp_ssh_bridge::{mcp_tool, mcp_standard_tool};`.
-pub use mcp_ssh_bridge_macros::{mcp_standard_tool, mcp_tool};
+/// `use bridge_mcp::{mcp_tool, mcp_standard_tool};`.
+pub use bridge_mcp_macros::{mcp_standard_tool, mcp_tool};
 
 #[cfg(feature = "cli")]
 pub mod cli;

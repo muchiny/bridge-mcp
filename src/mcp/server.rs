@@ -1243,7 +1243,7 @@ impl McpServer {
                 description: Some(
                     "Secure SSH bridge for remote server management via MCP".to_string(),
                 ),
-                website_url: Some("https://github.com/petermachini/mcp-ssh-bridge".to_string()),
+                website_url: Some("https://github.com/muchini/bridge-mcp".to_string()),
                 icons: None,
             },
             instructions: Some(instructions),
@@ -1478,7 +1478,7 @@ impl McpServer {
                 if let Some(logger) = self.mcp_logger.read().await.as_ref() {
                     logger.log(
                         super::protocol::LogLevel::Debug,
-                        "mcp-ssh-bridge",
+                        "bridge-mcp",
                         json!({
                             "event": "tool_complete",
                             "tool": tool_name,
@@ -1504,7 +1504,7 @@ impl McpServer {
                 if let Some(logger) = self.mcp_logger.read().await.as_ref() {
                     logger.log(
                         super::protocol::LogLevel::Error,
-                        "mcp-ssh-bridge",
+                        "bridge-mcp",
                         json!({
                             "event": "tool_failed",
                             "tool": tool_name,
@@ -2299,7 +2299,7 @@ mod tests {
             "tasks extension should be present"
         );
         assert!(
-            exts["com.mcp-ssh-bridge/output-pagination"].is_object(),
+            exts["com.bridge-mcp/output-pagination"].is_object(),
             "output-pagination extension should be present"
         );
     }
@@ -4137,7 +4137,7 @@ mod tests {
     async fn test_build_server_extensions_includes_output_pagination() {
         let server = create_test_server();
         let exts = server.build_server_extensions().await.unwrap();
-        assert!(exts.contains_key("com.mcp-ssh-bridge/output-pagination"));
+        assert!(exts.contains_key("com.bridge-mcp/output-pagination"));
     }
 
     #[tokio::test]
@@ -4145,7 +4145,7 @@ mod tests {
         let server = create_test_server();
         let exts = server.build_server_extensions().await.unwrap();
         // Zero hosts -> no multi-host extension
-        assert!(!exts.contains_key("com.mcp-ssh-bridge/multi-host"));
+        assert!(!exts.contains_key("com.bridge-mcp/multi-host"));
     }
 
     // ============== Request Cancellation (MCP 2025-11-25) ==============

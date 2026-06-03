@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::SecurityConfig;
+use bridge_mcp::SecurityConfig;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz security configuration parsing

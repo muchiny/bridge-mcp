@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::AnsibleCommandBuilder;
+use bridge_mcp::AnsibleCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // Fuzz the 2 validation methods on AnsibleCommandBuilder.

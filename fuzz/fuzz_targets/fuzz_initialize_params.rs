@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::InitializeParams;
+use bridge_mcp::InitializeParams;
 
 fuzz_target!(|data: &[u8]| {
     let _: Result<InitializeParams, _> = serde_json::from_slice(data);

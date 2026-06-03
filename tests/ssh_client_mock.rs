@@ -11,10 +11,10 @@
 #[path = "ssh_mock_server.rs"]
 mod helpers;
 
+use bridge_mcp::config::{AuthConfig, HostKeyVerification};
+use bridge_mcp::error::BridgeError;
+use bridge_mcp::ssh::SshClient;
 use helpers::{ExecResponse, MockSshServerBuilder, mock_host_config, mock_limits};
-use mcp_ssh_bridge::config::{AuthConfig, HostKeyVerification};
-use mcp_ssh_bridge::error::BridgeError;
-use mcp_ssh_bridge::ssh::SshClient;
 
 #[tokio::test]
 async fn connect_with_correct_password_succeeds() {

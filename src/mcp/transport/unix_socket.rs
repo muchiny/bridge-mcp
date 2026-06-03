@@ -3,7 +3,7 @@
 //! Multi-session transport backed by a `tokio::net::UnixListener`. Each
 //! `accept()` call returns the next client connection as a fresh
 //! [`Session`]. This is the transport used by the daemon mode
-//! (`mcp-ssh-bridge daemon start`) to serve many clients on a shared
+//! (`bridge-mcp daemon start`) to serve many clients on a shared
 //! socket without paying SSH pool cold-start costs per request.
 //!
 //! The transport owns a `CancellationToken` that callers can trigger

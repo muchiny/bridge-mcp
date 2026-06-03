@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::tunnel::{TunnelDirection, TunnelInfo, TunnelManager};
+use bridge_mcp::domain::use_cases::tunnel::{TunnelDirection, TunnelInfo, TunnelManager};
 use std::time::Instant;
 
 fuzz_target!(|data: (u8, u16, u16, &str)| {

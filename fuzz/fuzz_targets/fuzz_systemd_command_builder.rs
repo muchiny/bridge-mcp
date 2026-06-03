@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::systemd::{validate_service_name, SystemdCommandBuilder};
+use bridge_mcp::domain::use_cases::systemd::{validate_service_name, SystemdCommandBuilder};
 
 fuzz_target!(|data: &str| {
     // validators

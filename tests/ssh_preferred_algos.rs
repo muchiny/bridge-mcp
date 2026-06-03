@@ -9,8 +9,8 @@
 //! exclude SHA-1, MD5, 3DES, blowfish, and DH-Group1, and whose `limits`
 //! pin rekey thresholds to 1 GiB / 1 hour per RFC 4253 §9.
 
-use mcp_ssh_bridge::config::LimitsConfig;
-use mcp_ssh_bridge::ssh::build_russh_client_config;
+use bridge_mcp::config::LimitsConfig;
+use bridge_mcp::ssh::build_russh_client_config;
 
 #[test]
 fn pinned_preferred_excludes_legacy_kex() {

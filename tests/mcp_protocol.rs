@@ -3,7 +3,7 @@
 //! These tests verify that the protocol types serialize/deserialize correctly
 //! and that the response builders produce valid JSON-RPC responses.
 
-use mcp_ssh_bridge::mcp::protocol::{
+use bridge_mcp::mcp::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ToolCallResult, ToolContent,
 };
 use serde_json::{Value, json};

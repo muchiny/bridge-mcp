@@ -17,8 +17,8 @@
 //! `test_cancel_does_not_cross_sessions` in `src/mcp/server.rs` covers
 //! the same property at the module-private level.
 
-use mcp_ssh_bridge::config::Config;
-use mcp_ssh_bridge::mcp::McpServer;
+use bridge_mcp::config::Config;
+use bridge_mcp::mcp::McpServer;
 
 #[tokio::test]
 async fn active_requests_are_isolated_across_sessions() {

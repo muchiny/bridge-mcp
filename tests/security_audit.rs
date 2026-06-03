@@ -3,8 +3,8 @@
 //! Adversarial tests validating that security controls work correctly.
 //! Covers: command injection, path traversal, credential leakage, rate limiting.
 
-use mcp_ssh_bridge::mcp::tool_handlers::utils::{save_output_to_file, shell_escape, validate_path};
-use mcp_ssh_bridge::security::{CommandValidator, Sanitizer};
+use bridge_mcp::mcp::tool_handlers::utils::{save_output_to_file, shell_escape, validate_path};
+use bridge_mcp::security::{CommandValidator, Sanitizer};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // COMMAND INJECTION TESTS
@@ -379,7 +379,7 @@ mod credential_leakage {
 
 mod command_validator {
     use super::*;
-    use mcp_ssh_bridge::config::{SecurityConfig, SecurityMode};
+    use bridge_mcp::config::{SecurityConfig, SecurityMode};
 
     fn permissive_validator() -> CommandValidator {
         CommandValidator::new(&SecurityConfig {
@@ -547,7 +547,7 @@ mod command_validator {
 // ══════════════════════════════════════════════════════════════════════════════
 
 mod rate_limiter {
-    use mcp_ssh_bridge::security::RateLimiter;
+    use bridge_mcp::security::RateLimiter;
 
     #[test]
     fn rate_limit_exceeded_after_burst() {
@@ -595,7 +595,7 @@ mod rate_limiter {
 // ══════════════════════════════════════════════════════════════════════════════
 
 mod audit_security {
-    use mcp_ssh_bridge::security::{AuditEvent, CommandResult};
+    use bridge_mcp::security::{AuditEvent, CommandResult};
 
     #[test]
     fn audit_event_does_not_leak_password() {

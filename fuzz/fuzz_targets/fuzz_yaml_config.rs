@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::Config;
+use bridge_mcp::Config;
 
 fuzz_target!(|data: &[u8]| {
     // Try to parse arbitrary bytes as YAML config

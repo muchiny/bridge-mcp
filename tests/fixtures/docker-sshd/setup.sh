@@ -16,7 +16,7 @@ apk add --no-cache \
     bash
 
 # Create test directory for E2E tests
-mkdir -p /tmp/mcp-ssh-bridge-tests
-chown 1000:1000 /tmp/mcp-ssh-bridge-tests
+mkdir -p /tmp/bridge-mcp-tests
+chown 1000:1000 /tmp/bridge-mcp-tests
 
 echo "E2E test environment ready."

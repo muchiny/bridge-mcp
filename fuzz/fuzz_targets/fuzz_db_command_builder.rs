@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::database::{DatabaseCommandBuilder, DatabaseType};
+use bridge_mcp::domain::use_cases::database::{DatabaseCommandBuilder, DatabaseType};
 
 fuzz_target!(|data: &str| {
     // Fuzz the database command builder with arbitrary input as queries,

@@ -246,7 +246,7 @@ testable surface across 27 hot files.
 
 ### Summary
 
-**Stdio transport silent-exit regression fix** — `mcp-ssh-bridge serve` now actually responds to JSON-RPC requests. Affects every client that spawns the binary in stdio mode (Claude Desktop, DXT, Claude Code via `.mcp.json`).
+**Stdio transport silent-exit regression fix** — `bridge-mcp serve` now actually responds to JSON-RPC requests. Affects every client that spawns the binary in stdio mode (Claude Desktop, DXT, Claude Code via `.mcp.json`).
 
 ### Fixed
 
@@ -381,9 +381,9 @@ testable surface across 27 hot files.
 - **`McpServer::handle_request_with_cancel`** signature gains a `notification_tx` parameter propagated through `handle_tools_call` and `create_tool_context` so the per-session sender reaches every handler.
 - **`ExecutorRouter`** stores `WinRmPool` + `K8sExecPool` (feature-gated) and delegates `Protocol::WinRm` / `Protocol::K8sExec` routing to them instead of constructing a fresh connection on every call. `cleanup()` and `close_all()` forward to every pool so the shared cleanup tasks clear stale entries.
 
-- **`crates/mcp-ssh-bridge-macros/`** — new proc-macro crate providing `#[mcp_tool(name, group, annotation)]` and `#[mcp_standard_tool(...)]` attributes. Both emit an `inventory::submit!` that populates a static `ToolRegistryEntry` table at compile time; the main crate walks that table to build the registry, map names to groups, and map names to annotation kinds.
+- **`crates/bridge-mcp-macros/`** — new proc-macro crate providing `#[mcp_tool(name, group, annotation)]` and `#[mcp_standard_tool(...)]` attributes. Both emit an `inventory::submit!` that populates a static `ToolRegistryEntry` table at compile time; the main crate walks that table to build the registry, map names to groups, and map names to annotation kinds.
 - **`ToolRegistryEntry`, `ToolAnnotationKind`** public types in `src/mcp/registry.rs` backing the inventory entries. Two `OnceLock<HashMap>` caches (`inventory_group_map` / `inventory_annotation_map`) are built on first call and reused for the life of the process.
-- **`Cargo.toml`** is now a workspace (`[workspace] members = [".", "crates/mcp-ssh-bridge-macros"]`) and depends on `inventory = "0.3"` + the local macro crate + `similar = "2.6"` (multi-host diff).
+- **`Cargo.toml`** is now a workspace (`[workspace] members = [".", "crates/bridge-mcp-macros"]`) and depends on `inventory = "0.3"` + the local macro crate + `similar = "2.6"` (multi-host diff).
 - **`src/lib.rs`** adds `extern crate self as mcp_ssh_bridge;` so the proc-macro-generated fully-qualified paths (`::mcp_ssh_bridge::mcp::registry::…`) resolve both when building the main crate and from downstream consumers.
 - **All 357 tool handlers migrated to `#[mcp_tool]` / `#[mcp_standard_tool]`.** Each handler file gained a single-line attribute (329 `#[mcp_standard_tool]` markers + 28 `#[mcp_tool]` direct-impl structs). Migration done by a dedicated Python tooling suite (`scripts/extract_tool_metadata.py`, `scripts/migrate_handler.py`, `scripts/validate_baseline.py`) in 18 group-at-a-time waves, each with its own atomic commit and a full `cargo test --lib` + `cargo clippy -D warnings` + baseline-count gate.
 - **`src/mcp/registry.rs`: 4312 → ~2700 lines (-37 %).** The legacy `all_handlers: Vec<Arc<dyn ToolHandler>>` (309 entries + 309 `use` imports), the 340-arm `tool_group()` match table, and the 340-arm `tool_annotations()` match table all collapse into ~4-line inventory lookups. The function that used to require `#[allow(clippy::too_many_lines, clippy::large_stack_arrays)]` annotations is now a trivial 5-line for-loop.
@@ -1286,35 +1286,35 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[1.15.0]: https://github.com/muchiny/mcp-ssh-bridge/compare/v1.14.0...v1.15.0
-[1.14.0]: https://github.com/muchiny/mcp-ssh-bridge/compare/v1.13.0...v1.14.0
-[1.13.0]: https://github.com/muchiny/mcp-ssh-bridge/compare/v1.12.0...v1.13.0
-[1.12.0]: https://github.com/muchiny/mcp-ssh-bridge/compare/v1.11.0...v1.12.0
-[1.11.0]: https://github.com/muchiny/mcp-ssh-bridge/compare/v1.10.0...v1.11.0
-[1.10.0]: https://github.com/muchiny/mcp-ssh-bridge/compare/v1.9.1...v1.10.0
-[1.9.1]: https://github.com/muchiny/mcp-ssh-bridge/compare/v1.9.0...v1.9.1
-[1.1.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.0.0...v1.1.0
-[2.0.1]: https://github.com/muchini/mcp-ssh-bridge/compare/v2.0.0...v2.0.1
-[2.0.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.9.0...v2.0.0
-[1.9.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.8.3...v1.9.0
-[1.8.3]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.8.2...v1.8.3
-[1.8.2]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.8.1...v1.8.2
-[1.8.1]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.8.0...v1.8.1
-[1.8.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.7.0...v1.8.0
-[1.7.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.6.0...v1.7.0
-[1.6.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.5.0...v1.6.0
-[1.5.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.4.0...v1.5.0
-[1.4.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.2.0...v1.3.0
-[1.2.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.1.0-dev...v1.2.0
-[1.1.0-dev]: https://github.com/muchini/mcp-ssh-bridge/compare/v1.0.0...v1.1.0-dev
-[1.0.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.9.0...v1.0.0
-[0.9.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/muchini/mcp-ssh-bridge/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/muchini/mcp-ssh-bridge/releases/tag/v0.1.0
+[1.15.0]: https://github.com/muchini/bridge-mcp/compare/v1.14.0...v1.15.0
+[1.14.0]: https://github.com/muchini/bridge-mcp/compare/v1.13.0...v1.14.0
+[1.13.0]: https://github.com/muchini/bridge-mcp/compare/v1.12.0...v1.13.0
+[1.12.0]: https://github.com/muchini/bridge-mcp/compare/v1.11.0...v1.12.0
+[1.11.0]: https://github.com/muchini/bridge-mcp/compare/v1.10.0...v1.11.0
+[1.10.0]: https://github.com/muchini/bridge-mcp/compare/v1.9.1...v1.10.0
+[1.9.1]: https://github.com/muchini/bridge-mcp/compare/v1.9.0...v1.9.1
+[1.1.0]: https://github.com/muchini/bridge-mcp/compare/v1.0.0...v1.1.0
+[2.0.1]: https://github.com/muchini/bridge-mcp/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/muchini/bridge-mcp/compare/v1.9.0...v2.0.0
+[1.9.0]: https://github.com/muchini/bridge-mcp/compare/v1.8.3...v1.9.0
+[1.8.3]: https://github.com/muchini/bridge-mcp/compare/v1.8.2...v1.8.3
+[1.8.2]: https://github.com/muchini/bridge-mcp/compare/v1.8.1...v1.8.2
+[1.8.1]: https://github.com/muchini/bridge-mcp/compare/v1.8.0...v1.8.1
+[1.8.0]: https://github.com/muchini/bridge-mcp/compare/v1.7.0...v1.8.0
+[1.7.0]: https://github.com/muchini/bridge-mcp/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/muchini/bridge-mcp/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/muchini/bridge-mcp/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/muchini/bridge-mcp/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/muchini/bridge-mcp/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/muchini/bridge-mcp/compare/v1.1.0-dev...v1.2.0
+[1.1.0-dev]: https://github.com/muchini/bridge-mcp/compare/v1.0.0...v1.1.0-dev
+[1.0.0]: https://github.com/muchini/bridge-mcp/compare/v0.9.0...v1.0.0
+[0.9.0]: https://github.com/muchini/bridge-mcp/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/muchini/bridge-mcp/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/muchini/bridge-mcp/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/muchini/bridge-mcp/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/muchini/bridge-mcp/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/muchini/bridge-mcp/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/muchini/bridge-mcp/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/muchini/bridge-mcp/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/muchini/bridge-mcp/releases/tag/v0.1.0

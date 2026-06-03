@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::{CommandValidator, SecurityConfig};
+use bridge_mcp::{CommandValidator, SecurityConfig};
 
 fuzz_target!(|pattern: &str| {
     // Test regex pattern compilation and matching

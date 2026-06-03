@@ -5,7 +5,7 @@
 //! `JoinHandle` was discarded and `serve()` returned immediately after
 //! the (single-session) `accept()` returned `None`. The runtime then
 //! killed the still-warming-up session task before it had read a single
-//! byte from stdin, and `mcp-ssh-bridge serve` would exit silently
+//! byte from stdin, and `bridge-mcp serve` would exit silently
 //! without ever responding to an `initialize` request.
 //!
 //! This test spawns the real binary, pipes a JSON-RPC `initialize`
@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-const BINARY: &str = env!("CARGO_BIN_EXE_mcp-ssh-bridge");
+const BINARY: &str = env!("CARGO_BIN_EXE_bridge-mcp");
 
 /// Minimal config that exposes no hosts and uses default security so the
 /// server can boot without any SSH credentials. The config loader
@@ -52,7 +52,7 @@ async fn stdio_serve_responds_to_initialize() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn mcp-ssh-bridge serve");
+        .expect("spawn bridge-mcp serve");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -81,8 +81,8 @@ async fn stdio_serve_responds_to_initialize() {
     assert!(
         response["result"]["serverInfo"]["name"]
             .as_str()
-            .is_some_and(|n| n == "mcp-ssh-bridge"),
-        "expected serverInfo.name = mcp-ssh-bridge, got: {response}"
+            .is_some_and(|n| n == "bridge-mcp"),
+        "expected serverInfo.name = bridge-mcp, got: {response}"
     );
 
     // Closing stdin signals EOF, which lets the session's reader loop

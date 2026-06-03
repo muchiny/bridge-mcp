@@ -5,8 +5,8 @@
 //! (connection refused, timeout, auth failure) are correctly
 //! classified and propagated.
 
-use mcp_ssh_bridge::error::BridgeError;
-use mcp_ssh_bridge::ssh::RetryConfig;
+use bridge_mcp::error::BridgeError;
+use bridge_mcp::ssh::RetryConfig;
 use std::sync::Arc;
 
 // ─── Error type classification ─────────────────────────────────────
@@ -64,7 +64,7 @@ fn connection_errors_are_retryable() {
         reason: "Connection reset by peer".to_string(),
     };
     // Connection errors should be considered transient
-    assert!(mcp_ssh_bridge::ssh::is_retryable_error(&err));
+    assert!(bridge_mcp::ssh::is_retryable_error(&err));
 }
 
 #[test]
@@ -74,14 +74,14 @@ fn auth_errors_are_not_retryable() {
         host: "server".to_string(),
     };
     // Auth errors are permanent - retrying won't help
-    assert!(!mcp_ssh_bridge::ssh::is_retryable_error(&err));
+    assert!(!bridge_mcp::ssh::is_retryable_error(&err));
 }
 
 #[test]
 fn timeout_errors_are_retryable() {
     let err = BridgeError::SshTimeout { seconds: 30 };
     // Timeouts may be transient
-    assert!(mcp_ssh_bridge::ssh::is_retryable_error(&err));
+    assert!(bridge_mcp::ssh::is_retryable_error(&err));
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn command_denied_is_not_retryable() {
     let err = BridgeError::CommandDenied {
         reason: "Blacklisted".to_string(),
     };
-    assert!(!mcp_ssh_bridge::ssh::is_retryable_error(&err));
+    assert!(!bridge_mcp::ssh::is_retryable_error(&err));
 }
 
 // ─── Retry configuration ──────────────────────────────────────────
@@ -126,7 +126,7 @@ fn retry_config_zero_attempts_means_no_retry() {
 
 #[tokio::test]
 async fn retry_succeeds_on_first_attempt() {
-    let result = mcp_ssh_bridge::ssh::with_retry(&RetryConfig::default(), "test-op", || async {
+    let result = bridge_mcp::ssh::with_retry(&RetryConfig::default(), "test-op", || async {
         Ok::<&str, BridgeError>("success")
     })
     .await;
@@ -147,7 +147,7 @@ async fn retry_fails_after_max_attempts_with_permanent_error() {
         jitter: 0.0,
     };
 
-    let result = mcp_ssh_bridge::ssh::with_retry(&config, "test-op", || {
+    let result = bridge_mcp::ssh::with_retry(&config, "test-op", || {
         let c = Arc::clone(&count);
         async move {
             c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -180,7 +180,7 @@ async fn retry_stops_immediately_on_non_retryable_error() {
         jitter: 0.0,
     };
 
-    let result = mcp_ssh_bridge::ssh::with_retry_if(
+    let result = bridge_mcp::ssh::with_retry_if(
         &config,
         "test-op",
         || {
@@ -193,7 +193,7 @@ async fn retry_stops_immediately_on_non_retryable_error() {
                 })
             }
         },
-        mcp_ssh_bridge::ssh::is_retryable_error,
+        bridge_mcp::ssh::is_retryable_error,
     )
     .await;
 
@@ -218,7 +218,7 @@ async fn retry_recovers_on_second_attempt() {
         jitter: 0.0,
     };
 
-    let result = mcp_ssh_bridge::ssh::with_retry(&config, "test-op", || {
+    let result = bridge_mcp::ssh::with_retry(&config, "test-op", || {
         let c = Arc::clone(&count);
         async move {
             let attempt = c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -256,7 +256,7 @@ async fn retry_with_conditional_predicate() {
     };
 
     // with_retry_if lets us control which errors are retryable
-    let result = mcp_ssh_bridge::ssh::with_retry_if(
+    let result = bridge_mcp::ssh::with_retry_if(
         &config,
         "test-op",
         || {
@@ -300,7 +300,7 @@ async fn concurrent_retries_are_independent() {
             let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
             let c = Arc::clone(&count);
 
-            let result = mcp_ssh_bridge::ssh::with_retry(&cfg, "concurrent-op", || {
+            let result = bridge_mcp::ssh::with_retry(&cfg, "concurrent-op", || {
                 let c = Arc::clone(&c);
                 async move {
                     let attempt = c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

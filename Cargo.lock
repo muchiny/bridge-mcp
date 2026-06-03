@@ -822,6 +822,78 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge-mcp"
+version = "1.18.0"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-ssm",
+ "axum",
+ "base64",
+ "bridge-mcp-macros",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "const-hex",
+ "criterion",
+ "dirs",
+ "filetime",
+ "hyper-util",
+ "insta",
+ "inventory",
+ "jaq-core",
+ "jaq-json",
+ "jaq-std",
+ "jsonwebtoken",
+ "k8s-openapi",
+ "kube",
+ "mimalloc",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "proptest",
+ "psrp-rs",
+ "rayon",
+ "regex",
+ "reqwest",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar 3.1.1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-serial",
+ "tokio-socks",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "tracing-test",
+ "uuid",
+ "winrm-rs",
+ "zeroize",
+]
+
+[[package]]
+name = "bridge-mcp-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2954,78 +3026,6 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
-
-[[package]]
-name = "mcp-ssh-bridge"
-version = "1.18.0"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "async-trait",
- "aws-config",
- "aws-sdk-ssm",
- "axum",
- "base64",
- "chrono",
- "clap",
- "clap_complete",
- "const-hex",
- "criterion",
- "dirs",
- "filetime",
- "hyper-util",
- "insta",
- "inventory",
- "jaq-core",
- "jaq-json",
- "jaq-std",
- "jsonwebtoken",
- "k8s-openapi",
- "kube",
- "mcp-ssh-bridge-macros",
- "mimalloc",
- "notify",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "proptest",
- "psrp-rs",
- "rayon",
- "regex",
- "reqwest",
- "russh",
- "russh-sftp",
- "serde",
- "serde-saphyr",
- "serde_json",
- "sha2 0.11.0",
- "similar 3.1.1",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-serial",
- "tokio-socks",
- "tokio-stream",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "tracing-test",
- "uuid",
- "winrm-rs",
- "zeroize",
-]
-
-[[package]]
-name = "mcp-ssh-bridge-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "md-5"

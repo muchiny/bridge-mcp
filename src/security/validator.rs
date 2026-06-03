@@ -69,8 +69,8 @@ fn normalize_for_blacklist_match(input: &str) -> String {
 /// # Examples
 ///
 /// ```
-/// use mcp_ssh_bridge::config::{SecurityConfig, SecurityMode, SanitizeConfig};
-/// use mcp_ssh_bridge::security::CommandValidator;
+/// use bridge_mcp::config::{SecurityConfig, SecurityMode, SanitizeConfig};
+/// use bridge_mcp::security::CommandValidator;
 ///
 /// // Permissive mode: allow everything except blacklisted patterns
 /// let config = SecurityConfig {

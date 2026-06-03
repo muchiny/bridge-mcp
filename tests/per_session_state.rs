@@ -20,9 +20,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mcp_ssh_bridge::config::Config;
-use mcp_ssh_bridge::mcp::McpServer;
-use mcp_ssh_bridge::mcp::protocol::{RootEntry, WriterMessage};
+use bridge_mcp::config::Config;
+use bridge_mcp::mcp::McpServer;
+use bridge_mcp::mcp::protocol::{RootEntry, WriterMessage};
 use tokio::sync::{RwLock, mpsc};
 
 /// `FIND-033` — `runtime_max_output_chars` was a server-wide
@@ -83,7 +83,7 @@ async fn notification_tx_does_not_cross_sessions() {
 
     // Send a sentinel notification to A only.
     tx_a.send(WriterMessage::Notification(
-        mcp_ssh_bridge::mcp::protocol::JsonRpcNotification {
+        bridge_mcp::mcp::protocol::JsonRpcNotification {
             jsonrpc: "2.0".to_string(),
             method: "notifications/test".to_string(),
             params: Some(serde_json::json!({"who": "A"})),
@@ -114,7 +114,7 @@ async fn notification_tx_does_not_cross_sessions() {
     assert!(rx_a.try_recv().is_err()); // channel closed/empty
     // B remains usable.
     tx_b.send(WriterMessage::Notification(
-        mcp_ssh_bridge::mcp::protocol::JsonRpcNotification {
+        bridge_mcp::mcp::protocol::JsonRpcNotification {
             jsonrpc: "2.0".to_string(),
             method: "notifications/test".to_string(),
             params: Some(serde_json::json!({"who": "B"})),

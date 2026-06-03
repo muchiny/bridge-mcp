@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::ResourcesReadParams;
+use bridge_mcp::ResourcesReadParams;
 
 fuzz_target!(|data: &[u8]| {
     let _: Result<ResourcesReadParams, _> = serde_json::from_slice(data);

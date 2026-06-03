@@ -1084,7 +1084,7 @@ const fn default_audit_enabled() -> bool {
 fn default_audit_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("mcp-ssh-bridge")
+        .join("bridge-mcp")
         .join("audit.log")
 }
 

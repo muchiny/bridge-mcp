@@ -14,8 +14,8 @@ use crate::config::ShellType;
 /// # Examples
 ///
 /// ```
-/// use mcp_ssh_bridge::config::ShellType;
-/// use mcp_ssh_bridge::domain::use_cases::shell;
+/// use bridge_mcp::config::ShellType;
+/// use bridge_mcp::domain::use_cases::shell;
 ///
 /// assert_eq!(shell::escape("hello", ShellType::Posix), "'hello'");
 /// assert_eq!(shell::escape("it's", ShellType::Posix), "'it'\\''s'");
@@ -50,8 +50,8 @@ pub fn escape(s: &str, shell: ShellType) -> String {
 /// # Examples
 ///
 /// ```
-/// use mcp_ssh_bridge::config::ShellType;
-/// use mcp_ssh_bridge::domain::use_cases::shell;
+/// use bridge_mcp::config::ShellType;
+/// use bridge_mcp::domain::use_cases::shell;
 ///
 /// assert_eq!(
 ///     shell::cd_and_run("/var/log", "ls", ShellType::Posix),

@@ -6,8 +6,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use mcp_ssh_bridge::config::{Config, HostKeyVerification, OsType};
-use mcp_ssh_bridge::error::BridgeError;
+use bridge_mcp::config::{Config, HostKeyVerification, OsType};
+use bridge_mcp::error::BridgeError;
 
 /// Load config from a YAML string via a temp file with secure permissions
 fn load_yaml(yaml: &str) -> Result<Config, BridgeError> {
@@ -19,14 +19,14 @@ fn load_yaml(yaml: &str) -> Result<Config, BridgeError> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    mcp_ssh_bridge::config::load_config(file.path())
+    bridge_mcp::config::load_config(file.path())
 }
 
 // ============== File Handling ==============
 
 #[test]
 fn test_load_config_missing_file() {
-    let result = mcp_ssh_bridge::config::load_config(Path::new("/nonexistent/path/config.yaml"));
+    let result = bridge_mcp::config::load_config(Path::new("/nonexistent/path/config.yaml"));
     assert!(matches!(result, Err(BridgeError::ConfigNotFound { .. })));
 }
 

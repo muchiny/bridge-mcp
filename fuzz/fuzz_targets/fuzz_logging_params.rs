@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::LoggingSetLevelParams;
+use bridge_mcp::LoggingSetLevelParams;
 
 fuzz_target!(|data: &[u8]| {
     let _: Result<LoggingSetLevelParams, _> = serde_json::from_slice(data);

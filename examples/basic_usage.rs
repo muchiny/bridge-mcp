@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use mcp_ssh_bridge::config::{default_config_path, load_config};
-use mcp_ssh_bridge::security::CommandValidator;
+use bridge_mcp::config::{default_config_path, load_config};
+use bridge_mcp::security::CommandValidator;
 
 fn main() {
     // Get the default config path

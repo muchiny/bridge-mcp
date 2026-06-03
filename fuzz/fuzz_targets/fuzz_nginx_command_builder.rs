@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::nginx::NginxCommandBuilder;
+use bridge_mcp::domain::use_cases::nginx::NginxCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // All 4 methods — just verify no panic

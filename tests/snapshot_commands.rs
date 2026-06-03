@@ -6,7 +6,7 @@
 
 use insta::assert_snapshot;
 
-use mcp_ssh_bridge::domain::use_cases::{
+use bridge_mcp::domain::use_cases::{
     docker::DockerCommandBuilder,
     kubernetes::{HelmCommandBuilder, KubernetesCommandBuilder},
     systemd::SystemdCommandBuilder,
@@ -229,8 +229,8 @@ fn snapshot_helm_status() {
 
 #[test]
 fn snapshot_shell_escape_special_chars() {
-    use mcp_ssh_bridge::config::ShellType;
-    use mcp_ssh_bridge::domain::use_cases::shell;
+    use bridge_mcp::config::ShellType;
+    use bridge_mcp::domain::use_cases::shell;
 
     let input = "it's a \"test\" with $var & pipe | redirect > file";
 
@@ -244,8 +244,8 @@ fn snapshot_shell_escape_special_chars() {
 
 #[test]
 fn snapshot_cd_and_run_all_shells() {
-    use mcp_ssh_bridge::config::ShellType;
-    use mcp_ssh_bridge::domain::use_cases::shell;
+    use bridge_mcp::config::ShellType;
+    use bridge_mcp::domain::use_cases::shell;
 
     assert_snapshot!(
         "cd_posix",

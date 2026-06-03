@@ -19,17 +19,17 @@ The `manifest.json` file describes the extension to Claude Desktop:
 ```json
 {
   "dxt_version": "0.1",
-  "name": "mcp-ssh-bridge",
+  "name": "bridge-mcp",
   "display_name": "MCP SSH Bridge",
   "version": "1.4.0",
   "description": "Execute commands securely on remote servers via SSH. 337 tools for Linux, Windows, Docker, Kubernetes, and more.",
   "author": {
-    "name": "muchiny"
+    "name": "muchini"
   },
   "mcp": {
     "command": {
       "type": "binary",
-      "path": "mcp-ssh-bridge"
+      "path": "bridge-mcp"
     },
     "transport": "stdio"
   },
@@ -69,12 +69,12 @@ This runs the following steps:
 1. Builds an optimized release binary (`make release`)
 2. Creates `dist/dxt/` directory
 3. Copies the release binary, `manifest.json`, and `icon.svg` into it
-4. Zips the directory into `dist/mcp-ssh-bridge.dxt`
+4. Zips the directory into `dist/bridge-mcp.dxt`
 
 The output package is at:
 
 ```
-dist/mcp-ssh-bridge.dxt
+dist/bridge-mcp.dxt
 ```
 
 ---
@@ -88,11 +88,11 @@ dist/mcp-ssh-bridge.dxt
    ```
 
 2. **Open the `.dxt` file** in Claude Desktop:
-   - Double-click `dist/mcp-ssh-bridge.dxt`, or
+   - Double-click `dist/bridge-mcp.dxt`, or
    - Drag and drop it into the Claude Desktop window, or
    - Use Claude Desktop's extension installer: **Settings → Extensions → Install from file**
 
-3. **Configure your SSH hosts** in `~/.config/mcp-ssh-bridge/config.yaml` (see `config/config.example.yaml` for the full schema)
+3. **Configure your SSH hosts** in `~/.config/bridge-mcp/config.yaml` (see `config/config.example.yaml` for the full schema)
 
 4. **Start using SSH tools** — all 337 tools are now available in Claude Desktop conversations
 
@@ -104,14 +104,14 @@ The `.dxt` archive contains:
 
 ```
 dxt/
-├── mcp-ssh-bridge          # Compiled release binary (with LTO optimization)
+├── bridge-mcp          # Compiled release binary (with LTO optimization)
 ├── manifest.json           # DXT manifest describing the extension
 └── icon.svg                # Extension icon displayed in Claude Desktop
 ```
 
 | File | Source | Purpose |
 |------|--------|---------|
-| `mcp-ssh-bridge` | `target/release/mcp-ssh-bridge` | The MCP server binary |
+| `bridge-mcp` | `target/release/bridge-mcp` | The MCP server binary |
 | `manifest.json` | `dxt/manifest.json` | Extension metadata and MCP configuration |
 | `icon.svg` | `dxt/icon.svg` | Visual identity in Claude Desktop UI |
 

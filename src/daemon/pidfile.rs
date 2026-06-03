@@ -1,7 +1,7 @@
 //! PID file management for the daemon lifecycle.
 //!
 //! Each daemon instance writes its PID to a file next to its Unix socket
-//! (e.g. `$XDG_RUNTIME_DIR/mcp-ssh-bridge.sock.pid`). The file serves two
+//! (e.g. `$XDG_RUNTIME_DIR/bridge-mcp.sock.pid`). The file serves two
 //! purposes:
 //!
 //! 1. **Double-start prevention** — [`PidFile::acquire`] fails if the
@@ -77,7 +77,7 @@ impl PidFile {
             {
                 return Err(BridgeError::Config(format!(
                     "Another daemon is already running (PID {pid}). \
-                     Use `mcp-ssh-bridge daemon stop` to stop it, or pass \
+                     Use `bridge-mcp daemon stop` to stop it, or pass \
                      a different --socket-path."
                 )));
             }

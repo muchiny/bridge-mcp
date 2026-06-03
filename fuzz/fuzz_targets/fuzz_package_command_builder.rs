@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::package::{
+use bridge_mcp::domain::use_cases::package::{
     validate_package_name, validate_search_query, PackageCommandBuilder,
 };
 

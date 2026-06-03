@@ -7,11 +7,11 @@ compatibility: "2.1+"
 
 # Remote Infrastructure Operations
 
-**338 tools** are available via the `mcp-ssh-bridge` CLI for managing remote servers over SSH.
+**338 tools** are available via the `bridge-mcp` CLI for managing remote servers over SSH.
 
 ## Golden Rule
 
-**ALWAYS use the CLI** (`mcp-ssh-bridge tool ...` via Bash) instead of MCP tools.
+**ALWAYS use the CLI** (`bridge-mcp tool ...` via Bash) instead of MCP tools.
 CLI saves 10-32x tokens compared to MCP by loading schemas on-demand.
 
 ## Progressive Discovery Workflow
@@ -21,47 +21,47 @@ To find the right tool, follow these steps:
 ### Step 1 — Browse groups (~2K tokens)
 
 ```bash
-mcp-ssh-bridge list-tools --groups-only
+bridge-mcp list-tools --groups-only
 ```
 
 ### Step 2 — Explore a group (~500 tokens)
 
 ```bash
-mcp-ssh-bridge list-tools --group docker
+bridge-mcp list-tools --group docker
 ```
 
 ### Step 3 — Get tool schema (~200 tokens)
 
 ```bash
-mcp-ssh-bridge describe-tool ssh_docker_ps
+bridge-mcp describe-tool ssh_docker_ps
 ```
 
 ### Step 4 — Invoke the tool
 
 ```bash
-mcp-ssh-bridge tool ssh_docker_ps host=myserver --json
+bridge-mcp tool ssh_docker_ps host=myserver --json
 ```
 
-Search by keyword: `mcp-ssh-bridge list-tools --search kubernetes`
+Search by keyword: `bridge-mcp list-tools --search kubernetes`
 
 ## Syntax Reference
 
 ```bash
 # key=value arguments (auto type-coerced)
-mcp-ssh-bridge tool ssh_exec host=prod command="df -h"
+bridge-mcp tool ssh_exec host=prod command="df -h"
 
 # Complex/nested args via JSON
-mcp-ssh-bridge tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
+bridge-mcp tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
 
 # Multi-file write (inline content + local file upload in one call)
-mcp-ssh-bridge tool ssh_files_write --json-args '{"host":"prod","files":[{"remote_path":"/tmp/a.conf","content":"key=val"},{"remote_path":"/opt/b.bin","local_path":"/local/b.bin"}]}'
+bridge-mcp tool ssh_files_write --json-args '{"host":"prod","files":[{"remote_path":"/tmp/a.conf","content":"key=val"},{"remote_path":"/opt/b.bin","local_path":"/local/b.bin"}]}'
 
 # JSON output for reliable parsing
-mcp-ssh-bridge tool ssh_docker_ps host=prod --json
+bridge-mcp tool ssh_docker_ps host=prod --json
 
 # Aliases: t = tool, dt = describe-tool
-mcp-ssh-bridge t ssh_exec host=prod command="whoami"
-mcp-ssh-bridge dt ssh_docker_ps
+bridge-mcp t ssh_exec host=prod command="whoami"
+bridge-mcp dt ssh_docker_ps
 ```
 
 ## Exit Codes
@@ -98,34 +98,34 @@ mcp-ssh-bridge dt ssh_docker_ps
 
 ```bash
 # Execute arbitrary command
-mcp-ssh-bridge t ssh_exec host=HOST command="COMMAND"
+bridge-mcp t ssh_exec host=HOST command="COMMAND"
 
 # System health overview (single call, collects everything)
-mcp-ssh-bridge t ssh_diagnose host=HOST
+bridge-mcp t ssh_diagnose host=HOST
 
 # Docker containers
-mcp-ssh-bridge t ssh_docker_ps host=HOST all=true
+bridge-mcp t ssh_docker_ps host=HOST all=true
 
 # Service status
-mcp-ssh-bridge t ssh_service_status host=HOST service=nginx
+bridge-mcp t ssh_service_status host=HOST service=nginx
 
 # Read a remote file
-mcp-ssh-bridge t ssh_file_read host=HOST path=/etc/nginx/nginx.conf
+bridge-mcp t ssh_file_read host=HOST path=/etc/nginx/nginx.conf
 
 # Write a file (any size — large content auto-streams via SFTP)
-mcp-ssh-bridge t ssh_file_write host=HOST path=/tmp/config.yaml content="key: value"
+bridge-mcp t ssh_file_write host=HOST path=/tmp/config.yaml content="key: value"
 
 # Check disk usage
-mcp-ssh-bridge t ssh_disk_usage host=HOST
+bridge-mcp t ssh_disk_usage host=HOST
 
 # Recent logs
-mcp-ssh-bridge t ssh_service_logs host=HOST service=myapp lines=50
+bridge-mcp t ssh_service_logs host=HOST service=myapp lines=50
 
 # Process list (top consumers)
-mcp-ssh-bridge t ssh_process_top host=HOST
+bridge-mcp t ssh_process_top host=HOST
 
 # Network connections
-mcp-ssh-bridge t ssh_net_connections host=HOST
+bridge-mcp t ssh_net_connections host=HOST
 ```
 
 ## Best Practices

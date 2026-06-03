@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::task_store::TaskStore;
+use bridge_mcp::domain::task_store::TaskStore;
 
 fuzz_target!(|data: (u8, u8, &str)| {
     let (max_raw, ttl_raw, id_data) = data;

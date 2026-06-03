@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use mcp_ssh_bridge::domain::OutputCache;
+use bridge_mcp::domain::OutputCache;
 
 // ============== Store and Fetch Flow ==============
 

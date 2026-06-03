@@ -210,8 +210,8 @@ graph TB
 
 #[test]
 fn test_my_integration() {
-    use mcp_ssh_bridge::config::SecurityConfig;
-    use mcp_ssh_bridge::security::CommandValidator;
+    use bridge_mcp::config::SecurityConfig;
+    use bridge_mcp::security::CommandValidator;
 
     let config = SecurityConfig::default();
     let validator = CommandValidator::new(&config);

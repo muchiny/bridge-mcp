@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::TransferMode;
+use bridge_mcp::TransferMode;
 
 fuzz_target!(|data: &str| {
     // Fuzz TransferMode parsing

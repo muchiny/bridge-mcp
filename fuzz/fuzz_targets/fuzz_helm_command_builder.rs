@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::HelmCommandBuilder;
+use bridge_mcp::HelmCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // Fuzz all 7 HelmCommandBuilder methods with arbitrary strings.

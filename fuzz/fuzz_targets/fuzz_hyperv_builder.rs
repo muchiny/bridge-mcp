@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::hyperv::{
+use bridge_mcp::domain::use_cases::hyperv::{
     validate_snapshot_name, validate_vm_name, HyperVCommandBuilder,
 };
 

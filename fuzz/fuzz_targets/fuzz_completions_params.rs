@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::CompletionsCompleteParams;
+use bridge_mcp::CompletionsCompleteParams;
 
 fuzz_target!(|data: &[u8]| {
     let _: Result<CompletionsCompleteParams, _> = serde_json::from_slice(data);

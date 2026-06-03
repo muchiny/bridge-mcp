@@ -1,9 +1,9 @@
 [package]
-name = "mcp-ssh-bridge-macros"
+name = "bridge-mcp-macros"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-description = "Proc-macro helpers for the mcp-ssh-bridge crate (tool auto-registration)"
+description = "Proc-macro helpers for the bridge-mcp crate (tool auto-registration)"
 license = "MIT"
 publish = false
 

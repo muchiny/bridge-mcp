@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::{
+use bridge_mcp::{
     TaskCancelParams, TaskGetParams, TaskListParams, TaskRequest, TaskResultParams,
 };
 

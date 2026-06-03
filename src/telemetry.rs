@@ -18,7 +18,7 @@
 //! - `OTEL_EXPORTER_OTLP_ENDPOINT` — OTLP/gRPC endpoint (e.g.
 //!   `http://localhost:4317`). If unset, OTLP export is disabled.
 //! - `OTEL_SERVICE_NAME` — service name exposed in spans (default:
-//!   `mcp-ssh-bridge`).
+//!   `bridge-mcp`).
 //! - `RUST_LOG` — standard `tracing-subscriber` filter (default: `info`).
 
 use tracing_subscriber::EnvFilter;
@@ -48,7 +48,7 @@ impl TelemetryConfig {
         Self {
             otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
             service_name: std::env::var("OTEL_SERVICE_NAME")
-                .unwrap_or_else(|_| "mcp-ssh-bridge".to_string()),
+                .unwrap_or_else(|_| "bridge-mcp".to_string()),
             colored_output: !is_mcp_mode,
         }
     }
@@ -203,7 +203,7 @@ mod otel {
             .with_batch_exporter(exporter)
             .build();
 
-        let tracer = provider.tracer("mcp-ssh-bridge");
+        let tracer = provider.tracer("bridge-mcp");
 
         // Register globally so OpenTelemetry context propagation works, and
         // keep a handle for graceful shutdown.
@@ -234,11 +234,11 @@ mod tests {
         // We intentionally don't mutate the env here.
         let config = TelemetryConfig {
             otlp_endpoint: None,
-            service_name: "mcp-ssh-bridge".to_string(),
+            service_name: "bridge-mcp".to_string(),
             colored_output: true,
         };
         assert!(config.otlp_endpoint.is_none());
-        assert_eq!(config.service_name, "mcp-ssh-bridge");
+        assert_eq!(config.service_name, "bridge-mcp");
     }
 
     #[test]

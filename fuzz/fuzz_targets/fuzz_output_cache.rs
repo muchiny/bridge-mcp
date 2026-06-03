@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::output_cache::OutputCache;
+use bridge_mcp::domain::output_cache::OutputCache;
 
 fuzz_target!(|data: (u16, u16, &str)| {
     let (offset_raw, limit_raw, content) = data;

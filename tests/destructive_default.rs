@@ -6,7 +6,7 @@
 //! want the legacy permissive behaviour must opt out explicitly via
 //! `security.require_elicitation_on_destructive: false` in config.
 
-use mcp_ssh_bridge::config::types::SecurityConfig;
+use bridge_mcp::config::types::SecurityConfig;
 
 #[test]
 fn destructive_elicitation_default_is_true() {

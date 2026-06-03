@@ -2,34 +2,34 @@
 name: discover
 description: |
   Use when the user wants to explore available tools, find tools by category,
-  or learn what mcp-ssh-bridge can do. Progressive discovery workflow.
+  or learn what bridge-mcp can do. Progressive discovery workflow.
 user-invocable: true
 argument-hint: "[group-name|search-term]"
 ---
 
 # Tool Discovery -- Progressive Exploration
 
-Explore the 338 tools across 74 groups available in mcp-ssh-bridge.
+Explore the 338 tools across 74 groups available in bridge-mcp.
 
 ## No arguments -- show all groups
 
-!`mcp-ssh-bridge list-tools --groups-only`
+!`bridge-mcp list-tools --groups-only`
 
 Ask which group interests the user, or suggest searching by keyword.
 
 ## Group name provided
 
-!`mcp-ssh-bridge list-tools --group $ARGUMENTS`
+!`bridge-mcp list-tools --group $ARGUMENTS`
 
 For each tool shown, the user can ask for details:
-!`mcp-ssh-bridge describe-tool <tool_name>`
+!`bridge-mcp describe-tool <tool_name>`
 
 The `describe-tool` output includes a **Reduction Strategy** line at the top
 telling you which params (jq_filter, columns, limit, etc.) apply for token-efficient output.
 
 ## Search term provided
 
-!`mcp-ssh-bridge list-tools --search $ARGUMENTS`
+!`bridge-mcp list-tools --search $ARGUMENTS`
 
 ## Tips for the user
 

@@ -1771,7 +1771,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp-ssh-bridge"
+name = "bridge-mcp"
 version = "1.1.0"
 dependencies = [
  "aho-corasick",
@@ -1802,12 +1802,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp-ssh-bridge-fuzz"
+name = "bridge-mcp-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
- "mcp-ssh-bridge",
+ "bridge-mcp",
  "serde-saphyr 0.0.18",
  "serde_json",
  "tokio",

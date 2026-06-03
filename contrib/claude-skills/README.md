@@ -1,10 +1,10 @@
-# Claude Code Skills for mcp-ssh-bridge
+# Claude Code Skills for bridge-mcp
 
 Pre-built Skills that teach Claude Code to manage remote infrastructure
-via the mcp-ssh-bridge CLI. Token-efficient progressive discovery of
+via the bridge-mcp CLI. Token-efficient progressive discovery of
 338 tools across 74 groups.
 
-> Run `mcp-ssh-bridge list-tools --groups-only` to get the current tool/group count.
+> Run `bridge-mcp list-tools --groups-only` to get the current tool/group count.
 
 ## Quick Install
 
@@ -24,8 +24,8 @@ That's it. Claude Code auto-discovers the skills on next session start.
 
 ## Prerequisites
 
-- **mcp-ssh-bridge** installed and in PATH (`mcp-ssh-bridge --version`)
-- SSH config at `~/.config/mcp-ssh-bridge/config.yaml`
+- **bridge-mcp** installed and in PATH (`bridge-mcp --version`)
+- SSH config at `~/.config/bridge-mcp/config.yaml`
 - Claude Code v2.1+
 
 ## Skills Overview

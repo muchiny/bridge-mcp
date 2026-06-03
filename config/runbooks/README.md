@@ -118,7 +118,7 @@ Check TLS certificate expiry dates and attempt renewal via certbot if certificat
 Place your custom runbook YAML files in:
 
 ```
-~/.config/mcp-ssh-bridge/runbooks/
+~/.config/bridge-mcp/runbooks/
 ```
 
 Any `.yaml` or `.yml` file in this directory is automatically discovered and merged with the built-in runbooks. Custom runbooks appear alongside built-in ones in `ssh_runbook_list`.
@@ -241,7 +241,7 @@ flowchart TD
 | Location | Purpose |
 |----------|---------|
 | `config/runbooks/*.yaml` | Built-in runbook source files (embedded at compile time) |
-| `~/.config/mcp-ssh-bridge/runbooks/` | User-defined custom runbooks (runtime discovery) |
+| `~/.config/bridge-mcp/runbooks/` | User-defined custom runbooks (runtime discovery) |
 | `src/domain/runbook.rs` | Runbook domain model, validation, and template engine |
 | `src/mcp/tool_handlers/ssh_runbook_list.rs` | `ssh_runbook_list` tool handler |
 | `src/mcp/tool_handlers/ssh_runbook_execute.rs` | `ssh_runbook_execute` tool handler |

@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo bench
 
+use bridge_mcp::config::{SanitizeConfig, SecurityConfig, SecurityMode};
+use bridge_mcp::security::CommandValidator;
 use criterion::{Criterion, criterion_group, criterion_main};
-use mcp_ssh_bridge::config::{SanitizeConfig, SecurityConfig, SecurityMode};
-use mcp_ssh_bridge::security::CommandValidator;
 use std::hint::black_box;
 
 fn create_test_config() -> SecurityConfig {

@@ -16,20 +16,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mcp_ssh_bridge::ExecutorRouter;
-use mcp_ssh_bridge::config::{
+use bridge_mcp::ExecutorRouter;
+use bridge_mcp::config::{
     AuditConfig, AuthConfig, Config, HostConfig, HostKeyVerification, HttpTransportConfig,
     LimitsConfig, OsType, SecurityConfig, SecurityMode, SessionConfig, SshConfigDiscovery,
     ToolGroupsConfig,
 };
-use mcp_ssh_bridge::domain::history::HistoryConfig;
-use mcp_ssh_bridge::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
-use mcp_ssh_bridge::ports::protocol::ToolContent;
-use mcp_ssh_bridge::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
-use mcp_ssh_bridge::ssh::SessionManager;
-use mcp_ssh_bridge::{BridgeError, ToolContext, ToolHandler};
+use bridge_mcp::domain::history::HistoryConfig;
+use bridge_mcp::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
+use bridge_mcp::ports::protocol::ToolContent;
+use bridge_mcp::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
+use bridge_mcp::ssh::SessionManager;
+use bridge_mcp::{BridgeError, ToolContext, ToolHandler};
 
-use mcp_ssh_bridge::mcp::tool_handlers::*;
+use bridge_mcp::mcp::tool_handlers::*;
 
 use serde_json::json;
 
@@ -79,7 +79,7 @@ fn build_ctx_with_mode(
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -113,7 +113,7 @@ fn build_ctx_with_mode(
             os_type: OsType::Windows,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -155,7 +155,7 @@ fn build_ctx_with_mode(
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     };
 
@@ -650,7 +650,7 @@ async fn test_injection_backticks() {
 async fn test_sanitizer_redacts_passwords() {
     let ctx = build_permissive_ctx();
     // Test the sanitizer directly via the use case
-    let output = mcp_ssh_bridge::ports::CommandOutput {
+    let output = bridge_mcp::ports::CommandOutput {
         stdout: "DB_PASSWORD=supersecret123\nuser=admin".to_string(),
         stderr: String::new(),
         exit_code: 0,
@@ -669,7 +669,7 @@ async fn test_sanitizer_redacts_passwords() {
 #[tokio::test]
 async fn test_sanitizer_redacts_aws_keys() {
     let ctx = build_permissive_ctx();
-    let output = mcp_ssh_bridge::ports::CommandOutput {
+    let output = bridge_mcp::ports::CommandOutput {
         stdout: "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nregion=us-east-1"
             .to_string(),
         stderr: String::new(),
@@ -689,7 +689,7 @@ async fn test_sanitizer_redacts_aws_keys() {
 #[tokio::test]
 async fn test_sanitizer_preserves_normal_output() {
     let ctx = build_permissive_ctx();
-    let output = mcp_ssh_bridge::ports::CommandOutput {
+    let output = bridge_mcp::ports::CommandOutput {
         stdout: "total 42\ndrwxr-xr-x 2 user user 4096 Jan 1 00:00 dir\n".to_string(),
         stderr: String::new(),
         exit_code: 0,
@@ -708,7 +708,7 @@ async fn test_sanitizer_preserves_normal_output() {
 #[tokio::test]
 async fn test_process_success_nonzero_exit() {
     let ctx = build_permissive_ctx();
-    let output = mcp_ssh_bridge::ports::CommandOutput {
+    let output = bridge_mcp::ports::CommandOutput {
         stdout: String::new(),
         stderr: "command not found".to_string(),
         exit_code: 127,
@@ -790,7 +790,7 @@ fn test_all_major_tool_schemas_are_valid_json() {
 #[tokio::test]
 async fn test_history_records_success() {
     let ctx = build_permissive_ctx();
-    let output = mcp_ssh_bridge::ports::CommandOutput {
+    let output = bridge_mcp::ports::CommandOutput {
         stdout: "hello".to_string(),
         stderr: String::new(),
         exit_code: 0,

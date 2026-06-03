@@ -5,7 +5,7 @@
 //! depth, nodes, input bytes) cannot be forgotten at any individual call
 //! site.
 
-use mcp_ssh_bridge::domain::yaml::parse_yaml;
+use bridge_mcp::domain::yaml::parse_yaml;
 use serde_json::Value;
 
 const BILLION_LAUGHS: &str = r#"

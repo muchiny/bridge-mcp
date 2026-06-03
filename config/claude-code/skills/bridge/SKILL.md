@@ -13,14 +13,14 @@ Execute MCP tools on remote hosts or manage bridge configuration via the token-e
 ## Current state
 
 Host status:
-!`mcp-ssh-bridge status 2>/dev/null || echo "CLI binary not found — run 'make build' or 'cargo install --path .'"`
+!`bridge-mcp status 2>/dev/null || echo "CLI binary not found — run 'make build' or 'cargo install --path .'"`
 
 ## Instructions
 
 ### No arguments or status
 
 Show host status (above) and available tool groups:
-!`mcp-ssh-bridge list-tools --groups-only`
+!`bridge-mcp list-tools --groups-only`
 
 Then ask the user what they want to do.
 
@@ -28,11 +28,11 @@ Then ask the user what they want to do.
 
 Help the user configure the bridge. Show current config state:
 
-1. Config file location: `~/.config/mcp-ssh-bridge/config.yaml`
+1. Config file location: `~/.config/bridge-mcp/config.yaml`
 2. Validate current config:
-   !`mcp-ssh-bridge validate 2>&1`
+   !`bridge-mcp validate 2>&1`
 3. Show diff vs defaults:
-   !`mcp-ssh-bridge config-diff 2>&1`
+   !`bridge-mcp config-diff 2>&1`
 
 Then guide the user through configuration. The config file has these sections:
 
@@ -88,27 +88,27 @@ Reference: `config/config.example.yaml` has the full documented example.
 ### Config validate
 
 Validate the configuration:
-!`mcp-ssh-bridge validate 2>&1`
+!`bridge-mcp validate 2>&1`
 
 ### Config diff
 
 Compare current config with defaults:
-!`mcp-ssh-bridge config-diff 2>&1`
+!`bridge-mcp config-diff 2>&1`
 
 ### Tool group name (e.g., docker, kubernetes, systemd)
 
 List tools in that group:
-!`mcp-ssh-bridge list-tools --group $ARGUMENTS`
+!`bridge-mcp list-tools --group $ARGUMENTS`
 
 ### Search query (no "=" in args, not a known subcommand)
 
 Search tools by keyword:
-!`mcp-ssh-bridge list-tools --search $ARGUMENTS`
+!`bridge-mcp list-tools --search $ARGUMENTS`
 
 ### Tool name with key=value pairs
 
 Execute the tool directly:
-!`mcp-ssh-bridge --json tool $ARGUMENTS`
+!`bridge-mcp --json tool $ARGUMENTS`
 
 ### Token-efficient invocation
 
@@ -117,7 +117,7 @@ its schema (with `RECOMMENDED:` hints) lists which reduction params apply
 and costs ~200 tokens:
 
 ```bash
-mcp-ssh-bridge describe-tool <tool_name>
+bridge-mcp describe-tool <tool_name>
 ```
 
 Apply the right reduction strategy based on the tool's **Reduction
@@ -134,14 +134,14 @@ Strategy** line (shown at the top of describe-tool output):
 **Ergonomic global flags** (alternatives to `jq_filter=`, `columns=`, `limit=`):
 
 ```bash
-mcp-ssh-bridge --jq '.items[] | {name, phase}' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
-mcp-ssh-bridge --columns name,status --limit 10 tool ssh_docker_ps host=prod
+bridge-mcp --jq '.items[] | {name, phase}' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
+bridge-mcp --columns name,status --limit 10 tool ssh_docker_ps host=prod
 ```
 
 **Pagination cycle** for truncated output:
 
 1. A truncated result prints `[output_id: abc123]`
-2. Fetch the rest: `mcp-ssh-bridge tool ssh_output_fetch output_id=abc123 offset=N`
+2. Fetch the rest: `bridge-mcp tool ssh_output_fetch output_id=abc123 offset=N`
 
 **Common params on every tool**: `host`, `timeout_seconds`, `max_output`, `save_output`.
 

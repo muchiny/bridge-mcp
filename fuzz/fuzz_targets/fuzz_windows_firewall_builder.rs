@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::windows_firewall::{
+use bridge_mcp::domain::use_cases::windows_firewall::{
     validate_firewall_rule_name, WindowsFirewallCommandBuilder,
 };
 

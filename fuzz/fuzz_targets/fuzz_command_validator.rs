@@ -3,8 +3,8 @@
 use std::sync::LazyLock;
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::config::SecurityConfig;
-use mcp_ssh_bridge::CommandValidator;
+use bridge_mcp::config::SecurityConfig;
+use bridge_mcp::CommandValidator;
 
 // Create validator ONCE at startup, reuse for all fuzz inputs
 static CONFIG: LazyLock<SecurityConfig> = LazyLock::new(SecurityConfig::default);

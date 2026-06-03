@@ -1,7 +1,7 @@
 //! End-to-End Integration Tests on Raspberry Pi
 //!
 //! Tests **50 out of 111 tools** using a stock Raspberry Pi (no extra software).
-//! All writes go to `/tmp/mcp-ssh-bridge-tests/` and are cleaned up.
+//! All writes go to `/tmp/bridge-mcp-tests/` and are cleaned up.
 //!
 //! ## Connection
 //! Configured via `tests/ssh_test_config.yaml` (gitignored).
@@ -16,19 +16,19 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use mcp_ssh_bridge::ExecutorRouter;
-use mcp_ssh_bridge::config::{
+use bridge_mcp::ExecutorRouter;
+use bridge_mcp::config::{
     AuditConfig, AuthConfig, Config, HostConfig, HostKeyVerification, HttpTransportConfig,
     LimitsConfig, OsType, RedactedSecret, SecurityConfig, SessionConfig, SshConfigDiscovery,
     ToolGroupsConfig,
 };
-use mcp_ssh_bridge::domain::history::HistoryConfig;
-use mcp_ssh_bridge::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
-use mcp_ssh_bridge::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
-use mcp_ssh_bridge::ssh::SessionManager;
-use mcp_ssh_bridge::{ToolContext, ToolHandler};
+use bridge_mcp::domain::history::HistoryConfig;
+use bridge_mcp::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
+use bridge_mcp::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
+use bridge_mcp::ssh::SessionManager;
+use bridge_mcp::{ToolContext, ToolHandler};
 
-use mcp_ssh_bridge::mcp::tool_handlers::*;
+use bridge_mcp::mcp::tool_handlers::*;
 
 use serde::Deserialize;
 use serde_json::json;
@@ -45,7 +45,7 @@ mod rpi {
     // Test Configuration (reuses ssh_test_config.yaml)
     // =============================================================================
 
-    const TEST_DIR: &str = "/tmp/mcp-ssh-bridge-tests";
+    const TEST_DIR: &str = "/tmp/bridge-mcp-tests";
 
     #[derive(Debug, Deserialize)]
     struct TestConfig {
@@ -123,7 +123,7 @@ mod rpi {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -146,7 +146,7 @@ mod rpi {
 
         // Use permissive mode with empty blacklist for E2E tests
         let security = SecurityConfig {
-            mode: mcp_ssh_bridge::config::SecurityMode::Permissive,
+            mode: bridge_mcp::config::SecurityMode::Permissive,
             whitelist: vec![],
             blacklist: vec![],
             ..SecurityConfig::default()
@@ -171,7 +171,7 @@ mod rpi {
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
             http: HttpTransportConfig::default(),
-            rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+            rbac: bridge_mcp::security::rbac::RbacConfig::default(),
             awx: None,
         };
 
@@ -229,7 +229,7 @@ mod rpi {
             result.content
         );
         match &result.content[0] {
-            mcp_ssh_bridge::ports::protocol::ToolContent::Text { text } => text.clone(),
+            bridge_mcp::ports::protocol::ToolContent::Text { text } => text.clone(),
             _ => panic!("Expected Text content"),
         }
     }
@@ -244,7 +244,7 @@ mod rpi {
         match handler.execute(Some(args), ctx).await {
             Ok(result) => {
                 let text = match &result.content[0] {
-                    mcp_ssh_bridge::ports::protocol::ToolContent::Text { text } => text.clone(),
+                    bridge_mcp::ports::protocol::ToolContent::Text { text } => text.clone(),
                     _ => panic!("Expected Text content"),
                 };
                 (text, result.is_error == Some(true))
@@ -1013,7 +1013,7 @@ mod rpi {
         hosts.insert("raspberry".to_string(), host_config);
 
         let security = SecurityConfig {
-            mode: mcp_ssh_bridge::config::SecurityMode::Strict,
+            mode: bridge_mcp::config::SecurityMode::Strict,
             whitelist: vec!["uname".to_string(), "ls".to_string(), "echo".to_string()],
             ..SecurityConfig::default()
         };
@@ -1027,7 +1027,7 @@ mod rpi {
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
             http: HttpTransportConfig::default(),
-            rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+            rbac: bridge_mcp::security::rbac::RbacConfig::default(),
             awx: None,
         };
 

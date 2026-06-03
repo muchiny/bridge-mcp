@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::AnsibleCommandBuilder;
+use bridge_mcp::AnsibleCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // Fuzz all 3 AnsibleCommandBuilder methods with arbitrary strings.

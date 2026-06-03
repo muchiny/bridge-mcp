@@ -4,9 +4,9 @@
 //! They don't require actual SSH connections - they test the internal
 //! components like validators, sanitizers, pools, and sessions.
 
-use mcp_ssh_bridge::config::{SecurityConfig, SecurityMode, SessionConfig};
-use mcp_ssh_bridge::security::{CommandValidator, RateLimiter, Sanitizer};
-use mcp_ssh_bridge::ssh::{ConnectionPool, PoolConfig, SessionManager};
+use bridge_mcp::config::{SecurityConfig, SecurityMode, SessionConfig};
+use bridge_mcp::security::{CommandValidator, RateLimiter, Sanitizer};
+use bridge_mcp::ssh::{ConnectionPool, PoolConfig, SessionManager};
 use std::sync::Arc;
 use std::time::Instant;
 

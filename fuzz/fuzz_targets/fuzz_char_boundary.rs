@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::{ceil_char_boundary, floor_char_boundary};
+use bridge_mcp::{ceil_char_boundary, floor_char_boundary};
 
 fuzz_target!(|data: (&str, u16)| {
     let (s, idx_raw) = data;

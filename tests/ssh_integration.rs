@@ -12,10 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mcp_ssh_bridge::config::{
+use bridge_mcp::config::{
     AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, OsType, RedactedSecret,
 };
-use mcp_ssh_bridge::ssh::{ConnectionPool, PoolConfig, SshClient};
+use bridge_mcp::ssh::{ConnectionPool, PoolConfig, SshClient};
 use serde::Deserialize;
 
 /// Test configuration loaded from YAML
@@ -102,7 +102,7 @@ fn to_host_config(config: &SshTestConfig) -> HostConfig {
         os_type: OsType::Linux,
         shell: None,
         retry: None,
-        protocol: mcp_ssh_bridge::config::Protocol::default(),
+        protocol: bridge_mcp::config::Protocol::default(),
 
         #[cfg(feature = "winrm")]
         winrm_use_tls: None,

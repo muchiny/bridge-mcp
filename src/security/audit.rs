@@ -435,12 +435,12 @@ mod tests {
     fn test_valid_audit_path() {
         let config = AuditConfig {
             enabled: true,
-            path: PathBuf::from("/var/log/mcp-ssh-bridge/audit.log"),
+            path: PathBuf::from("/var/log/bridge-mcp/audit.log"),
             max_size_mb: 10,
             retain_days: 30,
         };
 
-        let valid = PathBuf::from("/var/log/mcp-ssh-bridge/audit.log.20240101");
+        let valid = PathBuf::from("/var/log/bridge-mcp/audit.log.20240101");
         let invalid = PathBuf::from("/tmp/audit.log");
 
         assert!(is_valid_audit_path(&valid, &config));

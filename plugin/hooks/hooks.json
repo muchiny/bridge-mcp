@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'MCP SSH Bridge plugin loaded. Use /mcp-ssh-bridge:bridge to manage remote hosts, or /mcp-ssh-bridge:discover to explore 338 tools.'"
+            "command": "echo 'MCP SSH Bridge plugin loaded. Use /bridge-mcp:bridge to manage remote hosts, or /bridge-mcp:discover to explore 338 tools.'"
           }
         ]
       }
