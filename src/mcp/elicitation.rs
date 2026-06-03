@@ -7,6 +7,7 @@
 //! - Password/passphrase input (encrypted SSH key)
 //! - Confirmation of destructive operations
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,9 +26,6 @@ use super::protocol::{ElicitationCreateParams, ElicitationCreateResult};
 ///
 /// These are property *fragments*: callers wrap them in
 /// `{ "type": "object", "properties": { ... }, "required": [...] }`.
-// Schema builders will be consumed by confirm_destructive_with_plan (Task 2).
-// The allow is removed once that method is added.
-#[allow(dead_code)]
 mod schema {
     use serde_json::{Value, json};
 
@@ -43,6 +41,7 @@ mod schema {
 
     /// A single-select string enum (SEP-1034 `default` when `default` is `Some`).
     #[must_use]
+    #[allow(dead_code)]
     pub fn string_enum(
         _name: &str,
         description: &str,
@@ -65,6 +64,7 @@ mod schema {
     /// Emits `{"type":"array","items":{"type":"string","enum":[...]},
     /// "uniqueItems":true}` plus an optional `default` pre-selection.
     #[must_use]
+    #[allow(dead_code)]
     pub fn multi_select_enum(
         _name: &str,
         description: &str,
@@ -91,6 +91,22 @@ mod schema {
 pub struct ElicitationService {
     requester: Arc<ClientRequester>,
     client_supports: AtomicBool,
+}
+
+/// A concrete, operator-reviewable plan attached to a destructive
+/// confirmation prompt.
+///
+/// Both fields are optional. `command` is the exact shell command the
+/// tool will run; `diff` is a unified diff of the change (e.g. produced
+/// by `ssh_file_diff`). When both are `None`, the confirmation degrades
+/// to the legacy free-text summary prompt.
+#[derive(Debug, Clone, Default)]
+pub struct ElicitationPlan {
+    /// The exact command to be executed, rendered in a fenced `sh` block.
+    pub command: Option<String>,
+    /// A unified diff of the intended change, rendered in a fenced `diff`
+    /// block. Truncated to 4000 chars in the prompt.
+    pub diff: Option<String>,
 }
 
 impl ElicitationService {
@@ -158,11 +174,8 @@ impl ElicitationService {
 
     /// Ask the client to confirm a destructive tool call.
     ///
-    /// Sends an `elicitation/create` request with a boolean `confirm` schema
-    /// and returns `Ok(true)` if the user accepted, `Ok(false)` if the result
-    /// was accepted but `confirm` was `false` or absent. `Err(Declined)` and
-    /// `Err(Cancelled)` propagate unchanged so callers can distinguish
-    /// explicit refusal from cancellation.
+    /// Delegates to [`confirm_destructive_with_plan`] with `plan = None`,
+    /// preserving the original behavior for all existing callers.
     ///
     /// # Errors
     ///
@@ -173,15 +186,60 @@ impl ElicitationService {
         tool_name: &str,
         summary: &str,
     ) -> Result<bool, ClientRequestError> {
-        let message =
-            format!("Confirm destructive operation: `{tool_name}`\n\n{summary}\n\nProceed?");
+        self.confirm_destructive_with_plan(tool_name, summary, None)
+            .await
+    }
+
+    /// Ask the client to confirm a destructive tool call, optionally
+    /// embedding a concrete [`ElicitationPlan`] (command + unified diff)
+    /// so the operator approves a specific change rather than a free-text
+    /// summary.
+    ///
+    /// The plan is rendered into the prompt `message` as fenced markdown
+    /// blocks (```` ```sh ```` for the command, ```` ```diff ```` for the
+    /// diff). The confirm schema carries a SEP-1034 `default: false` so a
+    /// client that auto-fills defaults never silently proceeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientRequestError::NotSupported` if the client does not
+    /// advertise the elicitation capability; propagates `Declined` /
+    /// `Cancelled` unchanged.
+    pub async fn confirm_destructive_with_plan(
+        &self,
+        tool_name: &str,
+        summary: &str,
+        plan: Option<ElicitationPlan>,
+    ) -> Result<bool, ClientRequestError> {
+        let mut message = format!("Confirm destructive operation: `{tool_name}`\n\n{summary}\n");
+        if let Some(p) = plan {
+            if let Some(cmd) = p.command {
+                let _ = write!(message, "\n**Command:**\n```sh\n{cmd}\n```\n");
+            }
+            if let Some(diff) = p.diff {
+                const MAX_DIFF: usize = 4000;
+                let rendered = if diff.len() > MAX_DIFF {
+                    let mut end = MAX_DIFF;
+                    while !diff.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}\n… (diff truncated)", &diff[..end])
+                } else {
+                    diff
+                };
+                let _ = write!(message, "\n**Diff:**\n```diff\n{rendered}\n```\n");
+            }
+        }
+        message.push_str("\nProceed?");
+
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "confirm": {
-                    "type": "boolean",
-                    "description": "Set to true to execute the destructive operation"
-                }
+                "confirm": schema::bool_default(
+                    "confirm",
+                    "Set to true to execute the destructive operation",
+                    false
+                )
             },
             "required": ["confirm"]
         });
@@ -760,5 +818,132 @@ mod tests {
             super::schema::multi_select_enum("hosts", "Pick hosts", &["web1".to_string()], None);
         assert!(s.get("default").is_none(), "no default key when None");
         assert_eq!(s["type"], "array");
+    }
+
+    #[tokio::test]
+    async fn test_confirm_with_plan_embeds_command_and_diff_in_message() {
+        let (service, mut rx) = create_test_service();
+        service.set_supported(true);
+        let plan = super::ElicitationPlan {
+            command: Some("systemctl restart nginx".to_string()),
+            diff: Some("--- a/nginx.conf\n+++ b/nginx.conf\n-worker 1\n+worker 4".to_string()),
+        };
+        let handle = tokio::spawn(async move {
+            service
+                .confirm_destructive_with_plan("ssh_service_restart", "restart nginx", Some(plan))
+                .await
+        });
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("channel open");
+        match msg {
+            super::super::protocol::WriterMessage::Request(req) => {
+                assert_eq!(req.method, "elicitation/create");
+                let params = req.params.expect("params");
+                let message = params["message"].as_str().expect("message is a string");
+                assert!(
+                    message.contains("systemctl restart nginx"),
+                    "plan command must appear: {message}"
+                );
+                assert!(message.contains("```sh"), "command fenced as sh");
+                assert!(
+                    message.contains("+worker 4"),
+                    "plan diff must appear: {message}"
+                );
+                assert!(message.contains("```diff"), "diff fenced as diff");
+                let schema = &params["requestedSchema"];
+                assert_eq!(schema["properties"]["confirm"]["type"], "boolean");
+                assert_eq!(schema["properties"]["confirm"]["default"], false);
+                assert_eq!(schema["required"][0], "confirm");
+            }
+            _ => panic!("expected Request"),
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_confirm_with_plan_none_matches_legacy_message() {
+        let (service, mut rx) = create_test_service();
+        service.set_supported(true);
+        let handle = tokio::spawn(async move {
+            service
+                .confirm_destructive_with_plan("ssh_terraform_apply", "apply infra", None)
+                .await
+        });
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("channel open");
+        match msg {
+            super::super::protocol::WriterMessage::Request(req) => {
+                let params = req.params.expect("params");
+                let message = params["message"].as_str().expect("string");
+                assert!(
+                    !message.contains("```sh"),
+                    "no command block when plan None"
+                );
+                assert!(message.contains("apply infra"), "summary still present");
+            }
+            _ => panic!("expected Request"),
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_confirm_with_plan_truncates_large_diff() {
+        let (service, mut rx) = create_test_service();
+        service.set_supported(true);
+        let big_diff = "+".repeat(5000);
+        let plan = super::ElicitationPlan {
+            command: None,
+            diff: Some(big_diff),
+        };
+        let handle = tokio::spawn(async move {
+            service
+                .confirm_destructive_with_plan("ssh_file_patch", "patch file", Some(plan))
+                .await
+        });
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("channel open");
+        match msg {
+            super::super::protocol::WriterMessage::Request(req) => {
+                let params = req.params.expect("params");
+                let message = params["message"].as_str().expect("string");
+                assert!(
+                    message.contains("(diff truncated)"),
+                    "oversize diff must be truncated"
+                );
+            }
+            _ => panic!("expected Request"),
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_confirm_destructive_legacy_still_sends_bool_schema() {
+        let (service, mut rx) = create_test_service();
+        service.set_supported(true);
+        let handle = tokio::spawn(async move {
+            service
+                .confirm_destructive("ssh_win_update_reboot", "reboot host prod-01")
+                .await
+        });
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("channel open");
+        match msg {
+            super::super::protocol::WriterMessage::Request(req) => {
+                let params = req.params.expect("params");
+                let schema = &params["requestedSchema"];
+                assert_eq!(schema["properties"]["confirm"]["type"], "boolean");
+                assert_eq!(schema["required"][0], "confirm");
+            }
+            _ => panic!("expected Request"),
+        }
+        handle.abort();
     }
 }
