@@ -172,6 +172,15 @@ impl ActiveRequests {
     }
 }
 
+/// Extract the `command` field from tool arguments for the destructive
+/// confirmation plan, if present and a string. Returns `None` otherwise.
+fn plan_command_from_args(arguments: Option<&Value>) -> Option<String> {
+    arguments
+        .and_then(|v| v.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 impl McpServer {
     /// Create a new MCP server with the given configuration
     ///
@@ -441,7 +450,14 @@ impl McpServer {
         let elicitation = super::elicitation::ElicitationService::new(requester);
         elicitation.set_supported(true);
 
-        match elicitation.confirm_destructive(tool_name, &summary).await {
+        let plan = super::elicitation::ElicitationPlan {
+            command: plan_command_from_args(arguments),
+            diff: None,
+        };
+        match elicitation
+            .confirm_destructive_with_plan(tool_name, &summary, Some(plan))
+            .await
+        {
             Ok(true) => Ok(()),
             Ok(false) | Err(super::client_requester::ClientRequestError::Declined) => Err(format!(
                 "User declined execution of destructive tool `{tool_name}`."
@@ -4337,5 +4353,19 @@ mod tests {
         McpServer::handle_cancellation_notification(&active, Some(&params));
 
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_plan_command_from_args_extracts_command_field() {
+        let args = serde_json::json!({ "host": "prod", "command": "rm -rf /tmp/x" });
+        let cmd = super::plan_command_from_args(Some(&args));
+        assert_eq!(cmd.as_deref(), Some("rm -rf /tmp/x"));
+    }
+
+    #[test]
+    fn test_plan_command_from_args_none_when_absent() {
+        let args = serde_json::json!({ "host": "prod" });
+        assert!(super::plan_command_from_args(Some(&args)).is_none());
+        assert!(super::plan_command_from_args(None).is_none());
     }
 }
