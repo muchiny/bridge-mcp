@@ -15,6 +15,78 @@ use serde_json::Value;
 use super::client_requester::{ClientRequestError, ClientRequester};
 use super::protocol::{ElicitationCreateParams, ElicitationCreateResult};
 
+/// Pure JSON-Schema builders for elicitation `requested_schema` fields.
+///
+/// All builders emit draft-2020-12-compatible property fragments:
+/// - [`bool_default`] — a boolean with a SEP-1034 `default`.
+/// - [`string_enum`] — a single-select enum with an optional SEP-1034 `default`.
+/// - [`multi_select_enum`] — an array-of-enum (SEP-1330) for fleet selection,
+///   with an optional `default` pre-selection.
+///
+/// These are property *fragments*: callers wrap them in
+/// `{ "type": "object", "properties": { ... }, "required": [...] }`.
+// Schema builders will be consumed by confirm_destructive_with_plan (Task 2).
+// The allow is removed once that method is added.
+#[allow(dead_code)]
+mod schema {
+    use serde_json::{Value, json};
+
+    /// A boolean property carrying a SEP-1034 `default`.
+    #[must_use]
+    pub fn bool_default(_name: &str, description: &str, default: bool) -> Value {
+        json!({
+            "type": "boolean",
+            "description": description,
+            "default": default
+        })
+    }
+
+    /// A single-select string enum (SEP-1034 `default` when `default` is `Some`).
+    #[must_use]
+    pub fn string_enum(
+        _name: &str,
+        description: &str,
+        choices: &[String],
+        default: Option<String>,
+    ) -> Value {
+        let mut obj = json!({
+            "type": "string",
+            "description": description,
+            "enum": choices
+        });
+        if let Some(d) = default {
+            obj["default"] = Value::String(d);
+        }
+        obj
+    }
+
+    /// A multi-select array-of-enum (SEP-1330) for fleet actions.
+    ///
+    /// Emits `{"type":"array","items":{"type":"string","enum":[...]},
+    /// "uniqueItems":true}` plus an optional `default` pre-selection.
+    #[must_use]
+    pub fn multi_select_enum(
+        _name: &str,
+        description: &str,
+        choices: &[String],
+        default: Option<Vec<String>>,
+    ) -> Value {
+        let mut obj = json!({
+            "type": "array",
+            "description": description,
+            "uniqueItems": true,
+            "items": {
+                "type": "string",
+                "enum": choices
+            }
+        });
+        if let Some(d) = default {
+            obj["default"] = Value::Array(d.into_iter().map(Value::String).collect());
+        }
+        obj
+    }
+}
+
 /// MCP Elicitation service (server asks client for user input).
 pub struct ElicitationService {
     requester: Arc<ClientRequester>,
@@ -635,5 +707,58 @@ mod tests {
             }
             other => panic!("expected RemoteError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_schema_bool_default_emits_default_field() {
+        let s = super::schema::bool_default("confirm", "Set true to proceed", true);
+        assert_eq!(s["type"], "boolean");
+        assert_eq!(s["description"], "Set true to proceed");
+        assert_eq!(s["default"], true, "SEP-1034 default must be present");
+    }
+
+    #[test]
+    fn test_schema_string_enum_single_select() {
+        let s = super::schema::string_enum(
+            "service",
+            "Pick the service",
+            &["nginx".to_string(), "redis".to_string()],
+            Some("nginx".to_string()),
+        );
+        assert_eq!(s["type"], "string");
+        assert_eq!(s["enum"][0], "nginx");
+        assert_eq!(s["enum"][1], "redis");
+        assert_eq!(s["default"], "nginx", "SEP-1034 default on single enum");
+    }
+
+    #[test]
+    fn test_schema_string_enum_omits_default_when_none() {
+        let s =
+            super::schema::string_enum("service", "Pick the service", &["nginx".to_string()], None);
+        assert!(s.get("default").is_none(), "no default key when None");
+    }
+
+    #[test]
+    fn test_schema_multi_select_enum_array_of_enum() {
+        let s = super::schema::multi_select_enum(
+            "hosts",
+            "Pick hosts for the fleet action",
+            &["web1".to_string(), "web2".to_string(), "db1".to_string()],
+            Some(vec!["web1".to_string(), "web2".to_string()]),
+        );
+        assert_eq!(s["type"], "array");
+        assert_eq!(s["items"]["type"], "string");
+        assert_eq!(s["items"]["enum"][2], "db1");
+        assert_eq!(s["uniqueItems"], true);
+        assert_eq!(s["default"][0], "web1");
+        assert_eq!(s["default"][1], "web2");
+    }
+
+    #[test]
+    fn test_schema_multi_select_omits_default_when_none() {
+        let s =
+            super::schema::multi_select_enum("hosts", "Pick hosts", &["web1".to_string()], None);
+        assert!(s.get("default").is_none(), "no default key when None");
+        assert_eq!(s["type"], "array");
     }
 }
