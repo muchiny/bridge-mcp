@@ -109,6 +109,12 @@ jobs:
           cargo cyclonedx --format json
           find . -maxdepth 1 -name '*.cdx.json' -o -name 'bom.json' | head -1 | xargs -I{} cp {} artifacts/${{ env.BINARY_NAME }}-sbom.cdx.json
 
+      - name: Verify discovery manifest versions
+        run: |
+          make sync-server-json
+          git diff --exit-code server.json .well-known/mcp/server-card.json dxt/manifest.json \
+            || { echo "::error::Discovery manifest version drift — run 'make sync-server-json' and commit"; exit 1; }
+
       - name: Build DXT packages
         run: |
           for arch in linux-x86_64 linux-arm64 macos-x86_64 macos-arm64; do

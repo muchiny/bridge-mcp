@@ -1,7 +1,7 @@
 {
   "$schema": "https://registry.modelcontextprotocol.io/schemas/server.json",
   "name": "io.github.muchini/bridge-mcp",
-  "version": "1.14.0",
+  "version": "1.18.0",
   "description": "Secure SSH bridge for AI-powered remote server management. 357 tools across 75 groups for Linux, Windows, Docker, Kubernetes, and more.",
   "repository": {
     "url": "https://github.com/muchini/bridge-mcp",
@@ -9,7 +9,10 @@
   },
   "license": "MIT",
   "runtime": "binary",
-  "transport": ["stdio", "streamable-http"],
+  "transport": [
+    "stdio",
+    "streamable-http"
+  ],
   "mcpVersion": "2025-11-25",
   "capabilities": {
     "tools": true,
@@ -22,7 +25,7 @@
     {
       "registryType": "mcpb",
       "name": "bridge-mcp",
-      "version": "1.14.0",
+      "version": "1.18.0",
       "url": "https://github.com/muchini/bridge-mcp/releases/latest",
       "platforms": [
         "linux-x64",
@@ -35,7 +38,7 @@
     {
       "registryType": "oci",
       "name": "ghcr.io/muchini/bridge-mcp",
-      "version": "1.14.0"
+      "version": "1.18.0"
     }
   ],
   "keywords": [

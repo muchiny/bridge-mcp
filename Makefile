@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json
 
 # Default target
 all: check lint test
@@ -251,6 +251,11 @@ dxt: release
 	cd dist && zip -r bridge-mcp.dxt dxt/
 	@echo "DXT package: dist/bridge-mcp.dxt"
 
+# Sync all discovery-manifest versions to Cargo.toml (single source of truth)
+sync-server-json:
+	python3 scripts/sync-server-json.py
+	@echo "Discovery manifests synced to crate version."
+
 # Build MCPB package (MCP Bundle for official registry)
 mcpb: release
 	@mkdir -p dist/mcpb
@@ -320,6 +325,7 @@ help:
 	@echo "Packaging:"
 	@echo "  dxt              - Build DXT package for Claude Desktop"
 	@echo "  mcpb             - Build MCPB package for MCP Registry"
+	@echo "  sync-server-json - Sync server.json / server-card / dxt manifest versions to Cargo.toml"
 	@echo ""
 	@echo "Pipelines:"
 	@echo "  ci               - Quick CI (fmt+lint+test+audit+typos)"
