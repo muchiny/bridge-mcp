@@ -1,0 +1,54 @@
+# Opt-in MCP Registry publish. Triggered manually only (workflow_dispatch),
+# gated behind the `registry` environment for human approval. Publishes the
+# root server.json (kept in sync by `make sync-server-json`) to the official
+# registry at registry.modelcontextprotocol.io.
+name: Publish to MCP Registry
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "publish" to confirm pushing server.json to the official registry'
+        required: true
+        default: ''
+
+permissions:
+  id-token: write   # for mcp-publisher github-oidc login
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: registry   # protection rule -> manual approval gate
+    steps:
+      - name: Guard confirmation input
+        if: ${{ github.event.inputs.confirm != 'publish' }}
+        run: |
+          echo "::error::confirmation input was not 'publish' — aborting"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Verify server.json is in sync with Cargo.toml
+        run: |
+          python3 scripts/sync-server-json.py
+          git diff --exit-code server.json \
+            || { echo "::error::server.json drifted — run 'make sync-server-json' and commit"; exit 1; }
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          sudo install -m 0755 mcp-publisher /usr/local/bin/mcp-publisher
+          mcp-publisher --version
+
+      - name: Authenticate to the registry (GitHub OIDC)
+        run: mcp-publisher login github-oidc
+
+      - name: Publish
+        run: mcp-publisher publish

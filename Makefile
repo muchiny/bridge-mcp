@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
 
 # Default target
 all: check lint test
@@ -266,6 +266,18 @@ mcpb: release
 	@echo "MCPB package: dist/bridge-mcp.mcpb"
 	@echo "SHA256: $$(cat dist/bridge-mcp.mcpb.sha256)"
 
+# Publish server.json to the official MCP registry (registry.modelcontextprotocol.io).
+# OPT-IN / MANUAL: not part of release-pipeline. Requires `mcp-publisher` on PATH
+# and a prior `mcp-publisher login` (github-oidc or token). Fails fast on version
+# drift so a stale manifest is never published.
+registry-publish: sync-server-json
+	@git diff --exit-code server.json \
+		|| { echo "ERROR: server.json drifted — commit the sync first"; exit 1; }
+	@command -v mcp-publisher >/dev/null 2>&1 \
+		|| { echo "ERROR: mcp-publisher not found. Install from github.com/modelcontextprotocol/registry"; exit 1; }
+	mcp-publisher publish
+	@echo "Published server.json to registry.modelcontextprotocol.io"
+
 # Show help
 help:
 	@echo "MCP SSH Bridge - Available targets:"
@@ -326,6 +338,7 @@ help:
 	@echo "  dxt              - Build DXT package for Claude Desktop"
 	@echo "  mcpb             - Build MCPB package for MCP Registry"
 	@echo "  sync-server-json - Sync server.json / server-card / dxt manifest versions to Cargo.toml"
+	@echo "  registry-publish - [MANUAL] Publish server.json to the official MCP registry"
 	@echo ""
 	@echo "Pipelines:"
 	@echo "  ci               - Quick CI (fmt+lint+test+audit+typos)"
