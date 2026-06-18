@@ -5,7 +5,7 @@
   "version": "1.18.0",
   "description": "Execute commands securely on remote servers via SSH. 357 tools for Linux, Windows, Docker, Kubernetes, and more, with progress / elicitation / sampling / logger MCP integration.",
   "author": {
-    "name": "muchini"
+    "name": "muchiny"
   },
   "mcp": {
     "command": {

@@ -15,7 +15,7 @@ Execute MCP tools on remote hosts or manage bridge configuration via CLI.
 ## Current state
 
 Host status:
-!`bridge-mcp status 2>/dev/null || echo "bridge-mcp not found -- install with: cargo install --git https://github.com/muchini/bridge-mcp --features full"`
+!`bridge-mcp status 2>/dev/null || echo "bridge-mcp not found -- install with: cargo install --git https://github.com/muchiny/bridge-mcp --features full"`
 
 ## Instructions
 
@@ -32,7 +32,7 @@ Help the user configure the bridge:
 
 1. Config file: `~/.config/bridge-mcp/config.yaml`
 2. Validate: `bridge-mcp validate`
-3. Example config: see https://github.com/muchini/bridge-mcp/blob/main/config/config.example.yaml
+3. Example config: see https://github.com/muchiny/bridge-mcp/blob/main/config/config.example.yaml
 
 **Adding a host:**
 

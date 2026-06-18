@@ -1243,7 +1243,7 @@ impl McpServer {
                 description: Some(
                     "Secure SSH bridge for remote server management via MCP".to_string(),
                 ),
-                website_url: Some("https://github.com/muchini/bridge-mcp".to_string()),
+                website_url: Some("https://github.com/muchiny/bridge-mcp".to_string()),
                 icons: None,
             },
             instructions: Some(instructions),

@@ -1,10 +1,10 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
-  "name": "muchini",
-  "description": "muchini's Claude Code plugins — secure infra & remote-host tooling.",
+  "name": "muchiny",
+  "description": "muchiny's Claude Code plugins — secure infra & remote-host tooling.",
   "owner": {
-    "name": "muchini",
-    "url": "https://github.com/muchini"
+    "name": "muchiny",
+    "url": "https://github.com/muchiny"
   },
   "plugins": [
     {
@@ -14,8 +14,8 @@
       "version": "1.18.0",
       "category": "devops",
       "author": {
-        "name": "muchini",
-        "url": "https://github.com/muchini"
+        "name": "muchiny",
+        "url": "https://github.com/muchiny"
       }
     }
   ]

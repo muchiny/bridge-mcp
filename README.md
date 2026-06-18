@@ -5,7 +5,7 @@
 
 <img src="dxt/icon.svg" alt="MCP SSH Bridge" width="96" height="96">
 
-[![CI](https://github.com/muchini/bridge-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/muchini/bridge-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/bridge-mcp?style=flat-square&logo=rust)](https://crates.io/crates/bridge-mcp)
 [![docs.rs](https://img.shields.io/docsrs/bridge-mcp?style=flat-square)](https://docs.rs/bridge-mcp)
 [![Downloads](https://img.shields.io/crates/d/bridge-mcp?style=flat-square)](https://crates.io/crates/bridge-mcp)
@@ -124,7 +124,7 @@ The dispatcher distinguishes `read_only` vs `mutating` vs `mutating_idempotent` 
 
 ```bash
 # Linux x86_64 (recommended)
-curl -fsSL https://github.com/muchini/bridge-mcp/releases/latest/download/bridge-mcp-linux-x86_64.tar.gz | tar xz
+curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-x86_64.tar.gz | tar xz
 sudo mv bridge-mcp /usr/local/bin/
 ```
 
@@ -133,21 +133,21 @@ sudo mv bridge-mcp /usr/local/bin/
 
 ```bash
 # Linux aarch64 (Raspberry Pi, ARM servers)
-curl -fsSL https://github.com/muchini/bridge-mcp/releases/latest/download/bridge-mcp-linux-arm64.tar.gz | tar xz
+curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-arm64.tar.gz | tar xz
 sudo mv bridge-mcp /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -fsSL https://github.com/muchini/bridge-mcp/releases/latest/download/bridge-mcp-macos-arm64.tar.gz | tar xz
+curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-macos-arm64.tar.gz | tar xz
 sudo mv bridge-mcp /usr/local/bin/
 
 # Docker
-docker pull ghcr.io/muchini/bridge-mcp:latest
+docker pull ghcr.io/muchiny/bridge-mcp:latest
 
 # From source
-git clone https://github.com/muchini/bridge-mcp && cd bridge-mcp && make release
+git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp && make release
 ```
 
-**Claude Desktop (DXT):** download the `.dxt` file from [Releases](https://github.com/muchini/bridge-mcp/releases/latest) and drag-and-drop into Claude Desktop.
+**Claude Desktop (DXT):** download the `.dxt` file from [Releases](https://github.com/muchiny/bridge-mcp/releases/latest) and drag-and-drop into Claude Desktop.
 
 </details>
 

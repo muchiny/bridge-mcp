@@ -3,11 +3,11 @@
   "version": "1.18.0",
   "description": "357-tool SSH bridge for secure remote server management. Execute commands on air-gapped Linux, Windows, Docker, Kubernetes hosts via SSH from Claude Code.",
   "author": {
-    "name": "muchini",
-    "url": "https://github.com/muchini"
+    "name": "muchiny",
+    "url": "https://github.com/muchiny"
   },
-  "homepage": "https://github.com/muchini/bridge-mcp",
-  "repository": "https://github.com/muchini/bridge-mcp",
+  "homepage": "https://github.com/muchiny/bridge-mcp",
+  "repository": "https://github.com/muchiny/bridge-mcp",
   "license": "MIT",
   "keywords": ["ssh", "remote", "devops", "docker", "kubernetes", "linux", "windows"],
   "skills": "./skills/",

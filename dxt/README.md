@@ -24,7 +24,7 @@ The `manifest.json` file describes the extension to Claude Desktop:
   "version": "1.4.0",
   "description": "Execute commands securely on remote servers via SSH. 337 tools for Linux, Windows, Docker, Kubernetes, and more.",
   "author": {
-    "name": "muchini"
+    "name": "muchiny"
   },
   "mcp": {
     "command": {

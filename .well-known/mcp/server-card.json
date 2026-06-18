@@ -18,8 +18,8 @@
   "authentication": ["oauth2", "jwt"],
   "tool_count": 357,
   "tool_groups": 75,
-  "homepage": "https://github.com/muchini/bridge-mcp",
-  "repository": "https://github.com/muchini/bridge-mcp",
+  "homepage": "https://github.com/muchiny/bridge-mcp",
+  "repository": "https://github.com/muchiny/bridge-mcp",
   "license": "MIT",
   "mcp_version": "2025-11-25",
   "extensions": {

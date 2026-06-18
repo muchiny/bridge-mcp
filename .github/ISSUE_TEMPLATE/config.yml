@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/muchini/bridge-mcp/blob/main/SECURITY.md
+    url: https://github.com/muchiny/bridge-mcp/blob/main/SECURITY.md
     about: Please report security vulnerabilities privately via SECURITY.md

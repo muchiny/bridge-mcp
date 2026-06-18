@@ -7,12 +7,12 @@ version = "1.18.0"
 edition = "2024"
 rust-version = "1.94"
 description = "MCP server that bridges Claude Code to air-gapped environments via SSH"
-authors = ["muchini"]
+authors = ["muchiny"]
 license = "MIT"
-repository = "https://github.com/muchini/bridge-mcp"
+repository = "https://github.com/muchiny/bridge-mcp"
 keywords = ["mcp", "ssh", "model-context-protocol", "devops", "automation"]
 categories = ["command-line-utilities", "network-programming"]
-homepage = "https://github.com/muchini/bridge-mcp"
+homepage = "https://github.com/muchiny/bridge-mcp"
 readme = "README.md"
 documentation = "https://docs.rs/bridge-mcp"
 
