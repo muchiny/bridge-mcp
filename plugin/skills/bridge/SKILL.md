@@ -1,5 +1,6 @@
 ---
 name: bridge
+version: 1.19.1
 description: |
   Use when the user wants to run a command on or manage a remote host over SSH —
   a server, Raspberry Pi, VM, NAS, network switch, or air-gapped machine.

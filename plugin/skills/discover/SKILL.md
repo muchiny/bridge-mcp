@@ -1,5 +1,6 @@
 ---
 name: discover
+version: 1.19.1
 description: |
   Use when the user wants to explore, search, or learn what bridge-mcp can do:
   "what tools are available", "list bridge tools", "find a tool for X", "show
