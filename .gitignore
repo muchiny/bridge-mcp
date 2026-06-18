@@ -7,6 +7,7 @@
 *.dylib
 *.dll
 *.pdb
+*.dxt
 
 # IDE
 .idea/
@@ -110,6 +111,7 @@ docker-compose.override.yml
 
 # Migration scripts (one-off)
 migrate_handlers.py
+bump-psrp-1.1.sh
 
 # Snapshot testing (insta) - only ignore pending reviews
 *.snap.new
@@ -128,3 +130,10 @@ bench-history.json
 scripts/tool_metadata.json
 .gitnexus
 .serena/
+
+# Python (helper scripts generate these)
+__pycache__/
+*.pyc
+
+# Planning scratch (superpowers plan output — not shipped project docs)
+docs/superpowers/
