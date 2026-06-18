@@ -1,4 +1,4 @@
-//! Stress and concurrency tests for MCP SSH Bridge
+//! Stress and concurrency tests for Bridge MCP
 //!
 //! These tests verify the system behaves correctly under concurrent load.
 //! They don't require actual SSH connections - they test the internal

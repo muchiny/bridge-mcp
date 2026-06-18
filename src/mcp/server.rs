@@ -577,7 +577,7 @@ impl McpServer {
         // (single session) and A.3 will make it per-session aware.
         let _config_watcher = config_path.and_then(|path| self.spawn_config_watcher(path));
 
-        info!("MCP SSH Bridge server starting...");
+        info!("Bridge MCP server starting...");
 
         // Accept loop: one session at a time, spawn into a JoinSet so we
         // can drain in-flight sessions before tearing down shared state.

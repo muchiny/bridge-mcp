@@ -14,7 +14,7 @@ pub use runner::{
     run_list_tools, run_status, run_tool, run_upload, run_validate,
 };
 
-/// MCP SSH Bridge - Secure SSH access to air-gapped environments
+/// Bridge MCP - Secure SSH access to air-gapped environments
 #[derive(Parser)]
 #[command(name = "bridge-mcp")]
 #[command(about = "MCP server for SSH access to air-gapped environments")]

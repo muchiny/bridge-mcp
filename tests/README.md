@@ -1,6 +1,6 @@
 # 🧪 Integration Tests
 
-Integration tests for MCP SSH Bridge.
+Integration tests for Bridge MCP.
 
 ## 📁 Structure
 

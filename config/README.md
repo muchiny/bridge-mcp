@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration files for MCP SSH Bridge.
+Configuration files for Bridge MCP.
 
 ## Location
 

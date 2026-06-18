@@ -1,6 +1,6 @@
 # Examples
 
-Usage examples for the MCP SSH Bridge library.
+Usage examples for the Bridge MCP library.
 
 ## Contents
 

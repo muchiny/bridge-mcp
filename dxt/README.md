@@ -1,4 +1,4 @@
-# 📦 MCP SSH Bridge — DXT Package
+# 📦 Bridge MCP — DXT Package
 
 ## 🤔 What Is DXT?
 
@@ -20,7 +20,7 @@ The `manifest.json` file describes the extension to Claude Desktop:
 {
   "dxt_version": "0.1",
   "name": "bridge-mcp",
-  "display_name": "MCP SSH Bridge",
+  "display_name": "Bridge MCP",
   "version": "1.4.0",
   "description": "Execute commands securely on remote servers via SSH. 337 tools for Linux, Windows, Docker, Kubernetes, and more.",
   "author": {

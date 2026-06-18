@@ -1,4 +1,4 @@
-//! Integration tests for MCP SSH Bridge
+//! Integration tests for Bridge MCP
 //!
 //! These tests verify the integration between different components
 //! without requiring actual SSH connections.

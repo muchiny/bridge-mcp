@@ -1,8 +1,8 @@
-# 📒 MCP SSH Bridge — Runbook System
+# 📒 Bridge MCP — Runbook System
 
 ## 📖 What Are Runbooks?
 
-Runbooks are **YAML-defined multi-step operational procedures** that codify common sysadmin tasks into repeatable, auditable workflows. Instead of remembering a sequence of diagnostic and remediation commands, you define them once in a YAML file and execute them through MCP SSH Bridge.
+Runbooks are **YAML-defined multi-step operational procedures** that codify common sysadmin tasks into repeatable, auditable workflows. Instead of remembering a sequence of diagnostic and remediation commands, you define them once in a YAML file and execute them through Bridge MCP.
 
 Each runbook consists of:
 
@@ -55,7 +55,7 @@ steps:                              # Ordered list of steps (at least one requir
 
 ## 📦 Built-in Runbooks
 
-MCP SSH Bridge ships with **5 built-in runbooks** embedded directly in the binary. They are always available without any file installation.
+Bridge MCP ships with **5 built-in runbooks** embedded directly in the binary. They are always available without any file installation.
 
 ### 1. 💾 `disk_full_recovery`
 
