@@ -101,7 +101,38 @@ impl StandardTool for NetConnectionsTool {
         output: &str,
         dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
-        let Some(parsed) = super::utils::parse_columnar_output(output) else {
+        // Parse the `ss` output positionally: its real header packs `Process`
+        // directly onto `Peer Address:Port` (no gap) and right-aligns the data,
+        // so the space-gutter parser sliced header names mid-word and produced
+        // garbled column keys ("send-q loca", "address:portp"). The `Process`
+        // column (greedy last) keeps its embedded spaces, e.g. users:(("...")).
+        //
+        // Only the default `ss -tunap` (both protocols) emits a leading `Netid`
+        // column; every single-protocol or listening variant (`-tlnp`, `-tnap`,
+        // `-ulnp`, `-unap`) drops it. `build_connections_command` picks the
+        // variant from exactly these two args, so mirror that here.
+        let has_netid = args.protocol.is_none() && !args.listening.unwrap_or(false);
+        let cols: &[&str] = if has_netid {
+            &[
+                "netid",
+                "state",
+                "recv-q",
+                "send-q",
+                "local_address",
+                "peer_address",
+                "process",
+            ]
+        } else {
+            &[
+                "state",
+                "recv-q",
+                "send-q",
+                "local_address",
+                "peer_address",
+                "process",
+            ]
+        };
+        let Some(parsed) = super::utils::parse_fixed_columns(output, cols, true, false) else {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
@@ -370,7 +401,8 @@ mod tests {
         let ctx = crate::ports::mock::create_test_context_with_mock_executor(
             server1_hosts(),
             mock_output(
-                "STATE   LOCAL              PEER\nESTAB   127.0.0.1:22       192.168.1.1:54321\nLISTEN  0.0.0.0:80         *:*\n",
+                // Real `ss` layout: header present, `Process` glued onto Peer.
+                "Netid State  Recv-Q Send-Q   Local Address:Port  Peer Address:PortProcess\ntcp   LISTEN 0      128          0.0.0.0:22         0.0.0.0:*    users:((\"sshd\",pid=753,fd=3))\n",
             ),
         );
         let result = handler
@@ -380,6 +412,103 @@ mod tests {
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         // post_process adds App content
         assert!(result.content.len() >= 2);
-        assert!(result.structured_content.is_some());
+        let sc = result.structured_content.expect("structured_content");
+        let rows = sc
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .expect("rows array");
+        assert_eq!(rows.len(), 1, "rows: {sc}");
+        assert_eq!(rows[0].get("netid").and_then(|v| v.as_str()), Some("tcp"));
+        assert_eq!(
+            rows[0].get("local_address").and_then(|v| v.as_str()),
+            Some("0.0.0.0:22")
+        );
+    }
+
+    #[test]
+    fn test_post_process_real_ss_clean_columns() {
+        // Regression: the real `ss -tunlp` header packs `Process` directly onto
+        // `Peer Address:Port` and right-aligns data, so the space-gutter parser
+        // sliced header names mid-word and produced garbled column keys
+        // ("send-q loca", "address:portp"). The fixed schema keeps clean keys
+        // and the greedy `process` column keeps its embedded spaces.
+        let output = "Netid State  Recv-Q Send-Q               Local Address:Port  Peer Address:PortProcess\n\
+udp   UNCONN 0      0                          0.0.0.0:53         0.0.0.0:*    \n\
+tcp   LISTEN 0      128                        0.0.0.0:22         0.0.0.0:*    users:((\"sshd\",pid=753,fd=3))\n";
+        let args: SshNetConnectionsArgs =
+            serde_json::from_value(serde_json::json!({"host": "s"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = NetConnectionsTool::post_process(
+            crate::ports::protocol::ToolCallResult::text("raw"),
+            &args,
+            output,
+            &dr,
+        );
+        let s = serde_json::to_string(&result).unwrap();
+        // Clean positional column keys present...
+        assert!(s.contains("local_address"), "missing clean key: {s}");
+        assert!(s.contains("peer_address"));
+        // ...garbled gutter-sliced keys gone.
+        assert!(!s.contains("send-q loca"), "garbled key leaked: {s}");
+        assert!(!s.contains("address:portp"), "garbled key leaked: {s}");
+        // Greedy process column captured with its embedded spaces/quotes.
+        assert!(
+            s.contains("sshd") && s.contains("pid=753"),
+            "process lost: {s}"
+        );
+    }
+
+    #[test]
+    fn test_post_process_listening_variant_has_no_netid() {
+        // `ss -tlnp` (listening / single-protocol) drops the leading `Netid`
+        // column. The schema must shift accordingly or every value lands one
+        // column off (state read as netid, process split across peer/process).
+        let output = "State  Recv-Q Send-Q  Local Address:Port  Peer Address:PortProcess\n\
+LISTEN 0      128         0.0.0.0:22          0.0.0.0:*    users:((\"sshd\",pid=753,fd=3))\n";
+        let args: SshNetConnectionsArgs =
+            serde_json::from_value(serde_json::json!({"host": "s", "listening": true})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = NetConnectionsTool::post_process(
+            crate::ports::protocol::ToolCallResult::text("raw"),
+            &args,
+            output,
+            &dr,
+        );
+        // post_process sets the App (structured_content is filled later by the
+        // pipeline); read the App data directly.
+        let sc = result
+            .content
+            .iter()
+            .find_map(|c| match c {
+                crate::mcp::protocol::ToolContent::App { app } => Some(app.data.clone()),
+                _ => None,
+            })
+            .expect("app content");
+        // No netid column in this variant.
+        assert!(
+            !sc.to_string().contains("netid"),
+            "netid leaked into listening variant: {sc}"
+        );
+        let rows = sc.get("rows").and_then(|r| r.as_array()).expect("rows");
+        assert_eq!(
+            rows[0].get("state").and_then(|v| v.as_str()),
+            Some("LISTEN")
+        );
+        assert_eq!(
+            rows[0].get("local_address").and_then(|v| v.as_str()),
+            Some("0.0.0.0:22")
+        );
+        // Process not split off into peer_address.
+        assert_eq!(
+            rows[0].get("peer_address").and_then(|v| v.as_str()),
+            Some("0.0.0.0:*")
+        );
+        assert!(
+            rows[0]
+                .get("process")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .contains("sshd")
+        );
     }
 }

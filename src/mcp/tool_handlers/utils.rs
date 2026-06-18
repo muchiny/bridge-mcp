@@ -379,6 +379,71 @@ pub fn parse_columnar_output(output: &str) -> Option<ParsedTable> {
     Some(ParsedTable { headers, rows })
 }
 
+/// Parse output with a KNOWN, fixed column schema by splitting on whitespace.
+///
+/// Robust alternative to [`parse_columnar_output`] for commands whose column
+/// order is fixed and known ahead of time (`ps aux`, `systemctl list-units
+/// --no-legend`). Unlike the space-gutter heuristic, this never merges columns
+/// on tight 1-space spacing and never depends on recovering header *names* from
+/// aligned text — the headers are supplied by the caller.
+///
+/// - `headers`: the synthesized column names (lowercased on the way out). The
+///   LAST column is greedy: it absorbs the remainder of each line verbatim,
+///   preserving internal spaces (a process `COMMAND`, a unit `DESCRIPTION`).
+/// - `has_header_line`: discard the command's own header row (e.g. `ps aux`,
+///   `ps -o ...`). Pass `false` for header-less output (`--no-legend`).
+/// - `strip_glyph`: drop a leading single-character status glyph (`●`/`*`/`×`)
+///   that `systemctl` prepends to non-running units. Unit names always contain
+///   a `.`, so real first columns are never mistaken for a glyph.
+///
+/// Returns `None` when no data rows remain.
+#[must_use]
+pub fn parse_fixed_columns(
+    output: &str,
+    headers: &[&str],
+    has_header_line: bool,
+    strip_glyph: bool,
+) -> Option<ParsedTable> {
+    let n_scalar = headers.len().saturating_sub(1);
+    let rows: Vec<Vec<String>> = output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .skip(usize::from(has_header_line))
+        .map(|line| {
+            let mut rest = line.trim_start();
+            if strip_glyph
+                && let Some(tok) = rest.split_whitespace().next()
+                && tok.chars().count() == 1
+                && tok.chars().all(|c| !c.is_alphanumeric())
+            {
+                rest = rest[tok.len()..].trim_start();
+            }
+            let mut cols: Vec<String> = Vec::with_capacity(headers.len());
+            for _ in 0..n_scalar {
+                if let Some((tok, tail)) = rest.split_once(char::is_whitespace) {
+                    cols.push(tok.to_string());
+                    rest = tail.trim_start();
+                } else {
+                    cols.push(rest.to_string());
+                    rest = "";
+                }
+            }
+            cols.push(rest.trim_end().to_string());
+            cols.resize(headers.len(), String::new());
+            cols
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    Some(ParsedTable {
+        headers: headers.iter().map(|h| h.to_lowercase()).collect(),
+        rows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -969,5 +1034,93 @@ ssh.service                   loaded active running OpenBSD Secure Shell server"
     async fn test_save_output_path_traversal_rejected() {
         let result = save_output_to_file("../../../etc/passwd", "evil").await;
         assert!(result.is_err());
+    }
+
+    // ============== parse_fixed_columns Tests ==============
+
+    const PS_COLS: &[&str] = &[
+        "user", "pid", "%cpu", "%mem", "vsz", "rss", "tty", "stat", "start", "time", "command",
+    ];
+
+    #[test]
+    fn test_fixed_ps_aux_real() {
+        // Real `ps aux`: 8-char user (`message+`) AND 7-digit PID (`2411977`) —
+        // the exact pair that collapsed parse_columnar_output to 3 merged cols.
+        let out = "USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\n\
+root           1  0.0  0.1  26336 16336 ?        Ss   May25  15:49 /usr/lib/systemd/systemd --system --deserialize=46\n\
+message+     564  0.0  0.0   9232  6016 ?        Ss   May25   6:50 /usr/bin/dbus-daemon --system --address=systemd:\n\
+muchini  2411977  0.0  0.0   2772  1664 ?        S    22:06   0:00 [kworker]\n";
+        let p = parse_fixed_columns(out, PS_COLS, true, false).expect("parse");
+        assert_eq!(p.headers.len(), 11);
+        assert_eq!(p.headers[0], "user");
+        assert_eq!(p.headers[10], "command");
+        assert_eq!(p.rows.len(), 3);
+        // Row 0: user/pid extracted, command keeps its internal spaces verbatim.
+        assert_eq!(p.rows[0][0], "root");
+        assert_eq!(p.rows[0][1], "1");
+        assert_eq!(p.rows[0][2], "0.0");
+        assert_eq!(
+            p.rows[0][10],
+            "/usr/lib/systemd/systemd --system --deserialize=46"
+        );
+        // Row 1: 8-char username stays whole, not merged with PID.
+        assert_eq!(p.rows[1][0], "message+");
+        assert_eq!(p.rows[1][1], "564");
+        // Row 2: 7-digit PID with shorter username — still cleanly split.
+        assert_eq!(p.rows[2][0], "muchini");
+        assert_eq!(p.rows[2][1], "2411977");
+    }
+
+    #[test]
+    fn test_fixed_ps_user_filtered_schema() {
+        // `ps -u U -o pid,ppid,...` — no USER column, leads with pid/ppid.
+        let cols = &["pid", "ppid", "%cpu", "%mem", "command"];
+        let out = "    PID    PPID %CPU %MEM COMMAND\n\
+    774       1  0.0  0.1 /usr/lib/systemd/systemd --user\n";
+        let p = parse_fixed_columns(out, cols, true, false).expect("parse");
+        assert_eq!(p.rows.len(), 1);
+        assert_eq!(p.rows[0][0], "774");
+        assert_eq!(p.rows[0][1], "1");
+        assert_eq!(p.rows[0][4], "/usr/lib/systemd/systemd --user");
+    }
+
+    const SVC_COLS: &[&str] = &["unit", "load", "active", "sub", "description"];
+
+    #[test]
+    fn test_fixed_systemctl_no_legend_real() {
+        // Real `systemctl list-units --type=service --no-pager --no-legend`:
+        // NO header line, a leading glyph on non-running units, multi-word desc.
+        let out = "  alsa-restore.service                loaded active     exited       Save/Restore Sound Card State\n\
+* cloudflared.service                 loaded activating auto-restart cloudflared DNS over HTTPS proxy\n\
+  ssh.service                         loaded active     running      OpenBSD Secure Shell server\n";
+        let p = parse_fixed_columns(out, SVC_COLS, false, true).expect("parse");
+        assert_eq!(p.rows.len(), 3);
+        // No header eaten — first service is a real data row.
+        assert_eq!(p.rows[0][0], "alsa-restore.service");
+        assert_eq!(p.rows[0][1], "loaded");
+        assert_eq!(p.rows[0][2], "active");
+        assert_eq!(p.rows[0][3], "exited");
+        assert_eq!(p.rows[0][4], "Save/Restore Sound Card State");
+        // Glyph `*` stripped; unit name intact.
+        assert_eq!(p.rows[1][0], "cloudflared.service");
+        assert_eq!(p.rows[1][2], "activating");
+        assert_eq!(p.rows[1][3], "auto-restart");
+        assert_eq!(p.rows[1][4], "cloudflared DNS over HTTPS proxy");
+        assert_eq!(p.rows[2][0], "ssh.service");
+    }
+
+    #[test]
+    fn test_fixed_columns_empty_and_header_only() {
+        assert!(parse_fixed_columns("", SVC_COLS, false, true).is_none());
+        // header line present but no data rows
+        assert!(parse_fixed_columns("USER PID COMMAND\n", PS_COLS, true, false).is_none());
+    }
+
+    #[test]
+    fn test_fixed_columns_pads_short_rows() {
+        // A row with fewer tokens than the schema pads the tail with empties.
+        let cols = &["a", "b", "c", "d"];
+        let p = parse_fixed_columns("x y\n", cols, false, false).expect("parse");
+        assert_eq!(p.rows[0], vec!["x", "y", "", ""]);
     }
 }

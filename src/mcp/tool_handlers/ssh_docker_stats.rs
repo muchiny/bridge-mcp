@@ -129,7 +129,13 @@ impl StandardTool for DockerStatsTool {
 
         for row in &parsed.rows {
             let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            let name = get(name_idx);
+            // `docker stats` emits NAME as the second column (after CONTAINER
+            // ID). Recover it positionally if the header lookup missed, rather
+            // than dropping every row.
+            let name = match name_idx {
+                Some(i) => row.get(i).map_or("", String::as_str),
+                None => row.get(1).map_or("", String::as_str),
+            };
             if !name.is_empty() {
                 tbl = tbl
                     .row(json!({
