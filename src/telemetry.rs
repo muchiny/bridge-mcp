@@ -319,4 +319,84 @@ mod tests {
         // Dropping records duration_ms — must not panic even with elapsed > 0.
         drop(guard);
     }
+
+    #[test]
+    fn test_from_env_endpoint_matches_environment() {
+        // We cannot mutate env vars in tests because the crate is
+        // `#![forbid(unsafe_code)]` and `std::env::set_var` now requires
+        // `unsafe`. Instead assert `from_env` mirrors whatever the process
+        // env currently holds (deterministic relative to the live env).
+        let expected = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        let config = TelemetryConfig::from_env(false);
+        assert_eq!(config.otlp_endpoint, expected);
+    }
+
+    #[test]
+    fn test_from_env_service_name_matches_environment() {
+        // Same forbid(unsafe_code) constraint: read-only assertion against
+        // the live env, applying the same default fallback as `from_env`.
+        let expected =
+            std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "bridge-mcp".to_string());
+        let config = TelemetryConfig::from_env(true);
+        assert_eq!(config.service_name, expected);
+    }
+
+    #[test]
+    fn test_from_env_is_consistent_across_calls() {
+        // Two calls in the same process must agree (pure function of env).
+        let a = TelemetryConfig::from_env(false);
+        let b = TelemetryConfig::from_env(false);
+        assert_eq!(a.service_name, b.service_name);
+        assert_eq!(a.otlp_endpoint, b.otlp_endpoint);
+        assert_eq!(a.colored_output, b.colored_output);
+    }
+
+    #[test]
+    fn test_from_env_color_flag_inverts_mcp_mode() {
+        // colored_output is exactly the negation of is_mcp_mode, independent
+        // of any env var state.
+        let mcp = TelemetryConfig::from_env(true);
+        let non_mcp = TelemetryConfig::from_env(false);
+        assert_eq!(mcp.colored_output, !non_mcp.colored_output);
+        assert!(!mcp.colored_output);
+        assert!(non_mcp.colored_output);
+    }
+
+    #[test]
+    fn test_multiple_guards_drop_independently() {
+        // Nested guards must each drop without panicking, even without a span.
+        let outer = SpanDurationGuard::start();
+        {
+            let inner = SpanDurationGuard::start();
+            drop(inner);
+        }
+        drop(outer);
+    }
+
+    #[test]
+    fn test_shutdown_idempotent() {
+        // Calling shutdown repeatedly must remain a safe no-op (otel disabled).
+        shutdown_telemetry();
+        shutdown_telemetry();
+    }
+
+    #[test]
+    fn test_config_with_endpoint_keeps_colored_output() {
+        // colored_output is independent of otlp_endpoint when built directly.
+        let config = TelemetryConfig {
+            otlp_endpoint: Some("http://localhost:4317".to_string()),
+            service_name: "svc".to_string(),
+            colored_output: true,
+        };
+        assert!(config.colored_output);
+        assert!(config.otlp_endpoint.is_some());
+    }
+
+    #[test]
+    fn test_guard_explicit_drop_via_scope() {
+        // Drop at end of scope (implicit) must also be panic-free.
+        {
+            let _timer = SpanDurationGuard::start();
+        }
+    }
 }

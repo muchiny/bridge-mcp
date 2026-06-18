@@ -324,4 +324,175 @@ mod tests {
         let cmd = LogAggregateTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("/var/log/nginx/access.log"));
     }
+
+    /// Build an args struct with all optionals set to `None` except those provided.
+    fn minimal_args() -> SshLogAggregateArgs {
+        SshLogAggregateArgs {
+            host: "s".to_string(),
+            log_files: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        }
+    }
+
+    #[test]
+    fn test_full_args_deserialization() {
+        let json = json!({
+            "host": "server1",
+            "log_files": "/var/log/app.log",
+            "timeout_seconds": 30,
+            "max_output": 5000,
+            "save_output": "/tmp/out.txt",
+            "summarize": true,
+            "summary_max_tokens": 1024
+        });
+        let args: SshLogAggregateArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(args.summarize, Some(true));
+        assert_eq!(args.summary_max_tokens, Some(1024));
+        assert_eq!(args.max_output, Some(5000));
+        assert_eq!(args.save_output.as_deref(), Some("/tmp/out.txt"));
+    }
+
+    #[test]
+    fn test_schema_summarize_fields() {
+        let handler = SshLogAggregateHandler::new();
+        let schema = handler.schema();
+        let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
+        let props = schema_json["properties"].as_object().unwrap();
+        assert!(props.contains_key("summarize"));
+        assert!(props.contains_key("summary_max_tokens"));
+        // summary_max_tokens advertises explicit bounds.
+        assert_eq!(props["summary_max_tokens"]["minimum"], json!(32));
+        assert_eq!(props["summary_max_tokens"]["maximum"], json!(4096));
+    }
+
+    #[test]
+    fn test_output_kind_is_tabular() {
+        use crate::domain::output_kind::OutputKind;
+        assert_eq!(LogAggregateTool::OUTPUT_KIND, OutputKind::Tabular);
+    }
+
+    #[test]
+    fn test_os_guard_is_linux() {
+        assert_eq!(LogAggregateTool::OS_GUARD, Some(OsType::Linux));
+    }
+
+    #[test]
+    fn test_post_process_parses_tsv_table() {
+        let args = minimal_args();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let raw = "FILE\tTOTAL\tERRORS\tWARNINGS\n\
+                   /var/log/syslog\t100\t5\t2\n\
+                   /var/log/auth.log\t50\t1\t0";
+        let result = ToolCallResult::text("placeholder");
+        let processed = LogAggregateTool::post_process(result, &args, raw, &dr);
+        let ToolContent::Text { text } = &processed.content[0] else {
+            panic!("expected text content");
+        };
+        // Headers are uppercased by to_tsv.
+        assert!(text.starts_with("FILE\tTOTAL\tERRORS\tWARNINGS"));
+        assert!(text.contains("/var/log/syslog\t100\t5\t2"));
+        assert!(text.contains("/var/log/auth.log\t50\t1\t0"));
+    }
+
+    #[test]
+    fn test_post_process_unparseable_returns_original() {
+        let args = minimal_args();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        // A single line cannot be parsed as a table (needs >= 2 non-empty lines).
+        let result = ToolCallResult::text("ORIGINAL_UNCHANGED");
+        let processed = LogAggregateTool::post_process(result, &args, "only one line", &dr);
+        let ToolContent::Text { text } = &processed.content[0] else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "ORIGINAL_UNCHANGED");
+    }
+
+    #[test]
+    fn test_post_process_column_filter() {
+        let args = minimal_args();
+        let dr = crate::domain::data_reduction::DataReductionArgs {
+            columns: Some(vec!["FILE".to_string(), "ERRORS".to_string()]),
+            ..Default::default()
+        };
+        let raw = "FILE\tTOTAL\tERRORS\tWARNINGS\n/var/log/syslog\t100\t5\t2";
+        let result = ToolCallResult::text("placeholder");
+        let processed = LogAggregateTool::post_process(result, &args, raw, &dr);
+        let ToolContent::Text { text } = &processed.content[0] else {
+            panic!("expected text content");
+        };
+        assert!(text.starts_with("FILE\tERRORS"));
+        assert!(!text.contains("TOTAL"));
+        assert!(!text.contains("WARNINGS"));
+        assert!(text.contains("/var/log/syslog\t5"));
+    }
+
+    #[test]
+    fn test_post_process_row_limit() {
+        let args = minimal_args();
+        let dr = crate::domain::data_reduction::DataReductionArgs {
+            limit: Some(1),
+            ..Default::default()
+        };
+        let raw = "FILE\tTOTAL\tERRORS\tWARNINGS\n\
+                   /var/log/a\t1\t0\t0\n\
+                   /var/log/b\t2\t0\t0";
+        let result = ToolCallResult::text("placeholder");
+        let processed = LogAggregateTool::post_process(result, &args, raw, &dr);
+        let ToolContent::Text { text } = &processed.content[0] else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("/var/log/a"));
+        assert!(!text.contains("/var/log/b"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_noop_when_summarize_disabled() {
+        let args = minimal_args(); // summarize = None
+        let ctx = create_test_context();
+        let result = ToolCallResult::text("RAW_AGGREGATION");
+        let enriched = LogAggregateTool::enrich(result, &args, "RAW_AGGREGATION", &ctx)
+            .await
+            .unwrap();
+        let ToolContent::Text { text } = &enriched.content[0] else {
+            panic!("expected text content");
+        };
+        // No sampling attempted; raw result is returned unchanged.
+        assert_eq!(text, "RAW_AGGREGATION");
+        assert!(!text.contains("LLM SUMMARY"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_falls_back_when_sampling_unavailable() {
+        // summarize=true but the test context has no notification channel /
+        // sampling capability, so ctx.sample(...) yields Ok(None) and enrich
+        // must fall back to the raw result without an LLM summary.
+        let mut args = minimal_args();
+        args.summarize = Some(true);
+        args.summary_max_tokens = Some(256);
+        let ctx = create_test_context();
+        let result = ToolCallResult::text("RAW_AGGREGATION");
+        let enriched = LogAggregateTool::enrich(result, &args, "RAW_AGGREGATION", &ctx)
+            .await
+            .unwrap();
+        let ToolContent::Text { text } = &enriched.content[0] else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "RAW_AGGREGATION");
+        assert!(!text.contains("LLM SUMMARY"));
+    }
+
+    #[test]
+    fn test_build_command_empty_log_files_string() {
+        let mut args = minimal_args();
+        args.log_files = Some(String::new());
+        // An empty override is passed through verbatim (not replaced by defaults),
+        // so the default log paths must NOT appear in the generated command.
+        let cmd = LogAggregateTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("FILE"));
+        assert!(!cmd.contains("/var/log/syslog"));
+    }
 }
