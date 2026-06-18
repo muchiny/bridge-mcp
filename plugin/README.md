@@ -1,13 +1,13 @@
-# MCP SSH Bridge -- Claude Code Plugin
+# Bridge MCP -- Claude Code Plugin
 
 This plugin integrates [bridge-mcp](https://github.com/muchini/bridge-mcp) into Claude Code, giving you access to **357 tools** for managing remote servers via SSH.
 
 ## Prerequisites
 
-Install the bridge-mcp binary:
+Install the bridge-mcp binary (not published on crates.io — install from git):
 
 ```bash
-cargo install bridge-mcp
+cargo install --git https://github.com/muchini/bridge-mcp --features full
 ```
 
 Then configure at least one host in `~/.config/bridge-mcp/config.yaml`:

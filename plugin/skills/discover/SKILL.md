@@ -9,7 +9,7 @@ argument-hint: "[group-name|search-term]"
 
 # Tool Discovery -- Progressive Exploration
 
-Explore the 338 tools across 74 groups available in bridge-mcp.
+Explore the 357 tools across 75 groups available in bridge-mcp.
 
 ## No arguments -- show all groups
 

@@ -1,7 +1,7 @@
 {
   "name": "bridge-mcp",
-  "version": "1.14.0",
-  "description": "338-tool SSH bridge for secure remote server management. Execute commands on air-gapped Linux, Windows, Docker, Kubernetes hosts via SSH from Claude Code.",
+  "version": "1.18.0",
+  "description": "357-tool SSH bridge for secure remote server management. Execute commands on air-gapped Linux, Windows, Docker, Kubernetes hosts via SSH from Claude Code.",
   "author": {
     "name": "muchini",
     "url": "https://github.com/muchini"
@@ -15,6 +15,8 @@
   "hooks": "./hooks/hooks.json",
   "userConfig": {
     "config_path": {
+      "type": "file",
+      "title": "Config path",
       "description": "Path to your bridge-mcp config.yaml (default: ~/.config/bridge-mcp/config.yaml)",
       "sensitive": false
     }

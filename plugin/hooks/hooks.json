@@ -1,12 +1,12 @@
 {
-  "description": "MCP SSH Bridge plugin hooks",
+  "description": "Bridge MCP plugin hooks",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'MCP SSH Bridge plugin loaded. Use /bridge-mcp:bridge to manage remote hosts, or /bridge-mcp:discover to explore 338 tools.'"
+            "command": "command -v bridge-mcp >/dev/null 2>&1 && echo 'Bridge MCP ready. Use /bridge-mcp:bridge to manage remote hosts, or /bridge-mcp:discover to explore 357 tools.' || echo '⚠️  Bridge MCP plugin loaded, but the bridge-mcp binary was not found on PATH. Install it: cargo install --git https://github.com/muchini/bridge-mcp --features full'"
           }
         ]
       }

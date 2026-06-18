@@ -15,7 +15,7 @@ Execute MCP tools on remote hosts or manage bridge configuration via CLI.
 ## Current state
 
 Host status:
-!`bridge-mcp status 2>/dev/null || echo "bridge-mcp not found -- install with: cargo install bridge-mcp"`
+!`bridge-mcp status 2>/dev/null || echo "bridge-mcp not found -- install with: cargo install --git https://github.com/muchini/bridge-mcp --features full"`
 
 ## Instructions
 
