@@ -5,10 +5,10 @@
 
 <img src="dxt/icon.svg" alt="MCP SSH Bridge" width="96" height="96">
 
-[![CI](https://github.com/muchiny/mcp-ssh-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/muchiny/mcp-ssh-bridge/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/mcp-ssh-bridge?style=flat-square&logo=rust)](https://crates.io/crates/mcp-ssh-bridge)
-[![docs.rs](https://img.shields.io/docsrs/mcp-ssh-bridge?style=flat-square)](https://docs.rs/mcp-ssh-bridge)
-[![Downloads](https://img.shields.io/crates/d/mcp-ssh-bridge?style=flat-square)](https://crates.io/crates/mcp-ssh-bridge)
+[![CI](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/bridge-mcp?style=flat-square&logo=rust)](https://crates.io/crates/bridge-mcp)
+[![docs.rs](https://img.shields.io/docsrs/bridge-mcp?style=flat-square)](https://docs.rs/bridge-mcp)
+[![Downloads](https://img.shields.io/crates/d/bridge-mcp?style=flat-square)](https://crates.io/crates/bridge-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
 
@@ -61,10 +61,10 @@ Four end-to-end recipes that show why this exists. Every command runs through on
 ### 1. Diagnose a Linux service in 4 commands
 
 ```bash
-mcp-ssh-bridge status                                       # check host reachability
-mcp-ssh-bridge tool ssh_service_status host=web1 service=nginx
-mcp-ssh-bridge tool ssh_service_logs   host=web1 service=nginx lines=200
-mcp-ssh-bridge tool ssh_journal_query  host=web1 unit=nginx priority=err since="-1h"
+bridge-mcp status                                       # check host reachability
+bridge-mcp tool ssh_service_status host=web1 service=nginx
+bridge-mcp tool ssh_service_logs   host=web1 service=nginx lines=200
+bridge-mcp tool ssh_journal_query  host=web1 unit=nginx priority=err since="-1h"
 ```
 
 Built-in validation rejects unknown hosts before any SSH bytes leave your machine; outputs are sanitized through 62 secret-redaction patterns + entropy detection.
@@ -73,12 +73,12 @@ Built-in validation rejects unknown hosts before any SSH bytes leave your machin
 
 ```bash
 # Dump all pods → 50 KB JSON. Pipe through server-side jq → ~6 KB TSV.
-mcp-ssh-bridge --jq '.items[] | [.metadata.name, .status.phase, .spec.nodeName]' \
+bridge-mcp --jq '.items[] | [.metadata.name, .status.phase, .spec.nodeName]' \
   --output-format=tsv \
   tool ssh_k8s_get host=k8s resource=pods namespace=default
 
-mcp-ssh-bridge tool ssh_k8s_describe host=k8s resource=pod name=api-7d-xyz namespace=default
-mcp-ssh-bridge tool ssh_k8s_logs     host=k8s pod=api-7d-xyz container=app tail=100
+bridge-mcp tool ssh_k8s_describe host=k8s resource=pod name=api-7d-xyz namespace=default
+bridge-mcp tool ssh_k8s_logs     host=k8s pod=api-7d-xyz container=app tail=100
 ```
 
 Filtering happens **server-side, before truncation** — you never lose data to the output cap. Same pattern works for `ssh_docker_inspect`, `ssh_helm_status`, `ssh_awx_*`, etc.
@@ -87,11 +87,11 @@ Filtering happens **server-side, before truncation** — you never lose data to 
 
 ```bash
 # Linux host
-mcp-ssh-bridge tool ssh_service_status   host=web1 service=postgres
+bridge-mcp tool ssh_service_status   host=web1 service=postgres
 # Windows host (WinRM/PSRP under the hood — no agent install on the target)
-mcp-ssh-bridge tool ssh_win_service_status host=appsrv service=W3SVC
-mcp-ssh-bridge tool ssh_iis_restart        host=appsrv name=DefaultAppPool
-mcp-ssh-bridge tool ssh_win_event_query    host=appsrv log=System level=Error since="-1h"
+bridge-mcp tool ssh_win_service_status host=appsrv service=W3SVC
+bridge-mcp tool ssh_iis_restart        host=appsrv name=DefaultAppPool
+bridge-mcp tool ssh_win_event_query    host=appsrv log=System level=Error since="-1h"
 ```
 
 13 Windows tool groups (services, events, AD, IIS, scheduled tasks, registry, Hyper-V, …) map cleanly onto the same `ssh_*` namespace, no protocol switch in your prompts.
@@ -105,11 +105,11 @@ security:
   recording:
     enabled: true                            # tamper-proof asciinema recordings
 audit:
-  log_path: /var/log/mcp-ssh-bridge/audit.jsonl
+  log_path: /var/log/bridge-mcp/audit.jsonl
 ```
 
 ```bash
-mcp-ssh-bridge tool ssh_helm_rollback host=k8s release=api revision=7
+bridge-mcp tool ssh_helm_rollback host=k8s release=api revision=7
 # → MCP client (Claude Code etc.) shows a confirmation dialog before the call leaves the bridge.
 # → Audit log records the prompt, args, sanitized stdout, exit code, duration.
 ```
@@ -124,8 +124,8 @@ The dispatcher distinguishes `read_only` vs `mutating` vs `mutating_idempotent` 
 
 ```bash
 # Linux x86_64 (recommended)
-curl -fsSL https://github.com/muchiny/mcp-ssh-bridge/releases/latest/download/mcp-ssh-bridge-linux-x86_64.tar.gz | tar xz
-sudo mv mcp-ssh-bridge /usr/local/bin/
+curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-x86_64.tar.gz | tar xz
+sudo mv bridge-mcp /usr/local/bin/
 ```
 
 <details>
@@ -133,32 +133,32 @@ sudo mv mcp-ssh-bridge /usr/local/bin/
 
 ```bash
 # Linux aarch64 (Raspberry Pi, ARM servers)
-curl -fsSL https://github.com/muchiny/mcp-ssh-bridge/releases/latest/download/mcp-ssh-bridge-linux-arm64.tar.gz | tar xz
-sudo mv mcp-ssh-bridge /usr/local/bin/
+curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-arm64.tar.gz | tar xz
+sudo mv bridge-mcp /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -fsSL https://github.com/muchiny/mcp-ssh-bridge/releases/latest/download/mcp-ssh-bridge-macos-arm64.tar.gz | tar xz
-sudo mv mcp-ssh-bridge /usr/local/bin/
+curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-macos-arm64.tar.gz | tar xz
+sudo mv bridge-mcp /usr/local/bin/
 
 # Docker
-docker pull ghcr.io/muchiny/mcp-ssh-bridge:latest
+docker pull ghcr.io/muchiny/bridge-mcp:latest
 
 # From source
-git clone https://github.com/muchiny/mcp-ssh-bridge && cd mcp-ssh-bridge && make release
+git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp && make release
 ```
 
-**Claude Desktop (DXT):** download the `.dxt` file from [Releases](https://github.com/muchiny/mcp-ssh-bridge/releases/latest) and drag-and-drop into Claude Desktop.
+**Claude Desktop (DXT):** download the `.dxt` file from [Releases](https://github.com/muchiny/bridge-mcp/releases/latest) and drag-and-drop into Claude Desktop.
 
 </details>
 
 ### 2. Configure
 
 ```bash
-mkdir -p ~/.config/mcp-ssh-bridge
-cp config/config.example.yaml ~/.config/mcp-ssh-bridge/config.yaml
+mkdir -p ~/.config/bridge-mcp
+cp config/config.example.yaml ~/.config/bridge-mcp/config.yaml
 ```
 
-Edit `~/.config/mcp-ssh-bridge/config.yaml` with your hosts:
+Edit `~/.config/bridge-mcp/config.yaml` with your hosts:
 
 ```yaml
 hosts:
@@ -182,7 +182,7 @@ Add to `~/.claude/settings.json`:
 {
   "mcpServers": {
     "ssh-bridge": {
-      "command": "mcp-ssh-bridge"
+      "command": "bridge-mcp"
     }
   }
 }
@@ -193,7 +193,7 @@ Add to `~/.claude/settings.json`:
 Restart Claude Code, then ask: *"Check the health of my-server"* — or run:
 
 ```bash
-mcp-ssh-bridge status
+bridge-mcp status
 ```
 
 ---
@@ -230,7 +230,7 @@ graph LR
 
 ## Configuration
 
-Config file: `~/.config/mcp-ssh-bridge/config.yaml` — see [config.example.yaml](config/config.example.yaml) for full reference.
+Config file: `~/.config/bridge-mcp/config.yaml` — see [config.example.yaml](config/config.example.yaml) for full reference.
 
 <details>
 <summary><strong>Authentication methods</strong></summary>
@@ -387,7 +387,7 @@ security:
 ```yaml
 audit:
   enabled: true
-  path: ~/.local/share/mcp-ssh-bridge/audit.log
+  path: ~/.local/share/bridge-mcp/audit.log
   max_size_mb: 100
   retain_days: 30
 ```
@@ -397,7 +397,7 @@ audit:
 ```yaml
 recording:
   enabled: true
-  path: ~/.local/share/mcp-ssh-bridge/recordings/
+  path: ~/.local/share/bridge-mcp/recordings/
   hash_chain: true
   hash_key_env: MCP_RECORDING_KEY
 ```
@@ -559,27 +559,27 @@ The binary works standalone (outside MCP mode) with **10-32x token savings** for
 ### Basic commands
 
 ```bash
-mcp-ssh-bridge status                       # Show configured hosts & security
-mcp-ssh-bridge exec <host> "<command>"      # Execute a command directly
-mcp-ssh-bridge history [--limit 20]         # Show command history
-mcp-ssh-bridge upload <host> <local> <remote>   # SFTP upload
-mcp-ssh-bridge download <host> <remote> <local> # SFTP download
-mcp-ssh-bridge validate                     # Validate config file
-mcp-ssh-bridge config-diff                  # Compare config vs defaults
+bridge-mcp status                       # Show configured hosts & security
+bridge-mcp exec <host> "<command>"      # Execute a command directly
+bridge-mcp history [--limit 20]         # Show command history
+bridge-mcp upload <host> <local> <remote>   # SFTP upload
+bridge-mcp download <host> <remote> <local> # SFTP download
+bridge-mcp validate                     # Validate config file
+bridge-mcp config-diff                  # Compare config vs defaults
 ```
 
 ### Tool invocation (all 357 MCP tools)
 
 ```bash
 # Invoke any tool with key=value pairs
-mcp-ssh-bridge tool ssh_docker_ps host=prod
-mcp-ssh-bridge tool ssh_exec host=prod command="df -h"
+bridge-mcp tool ssh_docker_ps host=prod
+bridge-mcp tool ssh_exec host=prod command="df -h"
 
 # Or with JSON arguments
-mcp-ssh-bridge tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
+bridge-mcp tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
 
 # JSON output (for scripting/parsing)
-mcp-ssh-bridge --json tool ssh_docker_ps host=prod
+bridge-mcp --json tool ssh_docker_ps host=prod
 ```
 
 ### Progressive discovery
@@ -587,10 +587,10 @@ mcp-ssh-bridge --json tool ssh_docker_ps host=prod
 From the CLI:
 
 ```bash
-mcp-ssh-bridge list-tools --groups-only       # 75 groups (~2K tokens)
-mcp-ssh-bridge list-tools --group docker      # Tools in a group (~500 tokens)
-mcp-ssh-bridge list-tools --search kubernetes # Keyword search
-mcp-ssh-bridge describe-tool ssh_docker_ps    # Full schema for 1 tool (~200 tokens)
+bridge-mcp list-tools --groups-only       # 75 groups (~2K tokens)
+bridge-mcp list-tools --group docker      # Tools in a group (~500 tokens)
+bridge-mcp list-tools --search kubernetes # Keyword search
+bridge-mcp describe-tool ssh_docker_ps    # Full schema for 1 tool (~200 tokens)
 ```
 
 From an MCP client (Claude Desktop / Claude Code), the same progressive-discovery pattern is available as three top-level tools so the model can walk the registry without loading all 357 schemas up front:
@@ -617,24 +617,24 @@ Every tool automatically exposes reduction parameters based on its output type. 
 
 ```bash
 # Filter JSON with jq + TSV output (60-80% token savings on list data)
-mcp-ssh-bridge tool ssh_k8s_get host=k8s resource=pods \
+bridge-mcp tool ssh_k8s_get host=k8s resource=pods \
   jq_filter='.items[] | [.metadata.name, .status.phase]' output_format=tsv
 
 # Pick columns from tabular output
-mcp-ssh-bridge tool ssh_docker_ps host=prod columns='["NAMES","STATUS","IMAGE"]' limit=20
+bridge-mcp tool ssh_docker_ps host=prod columns='["NAMES","STATUS","IMAGE"]' limit=20
 
 # Or use the ergonomic global flags (equivalent)
-mcp-ssh-bridge --jq '.items[] | {name, phase}' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
-mcp-ssh-bridge --columns NAMES,STATUS,IMAGE --limit 20 tool ssh_docker_ps host=prod
+bridge-mcp --jq '.items[] | {name, phase}' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
+bridge-mcp --columns NAMES,STATUS,IMAGE --limit 20 tool ssh_docker_ps host=prod
 
 # Persist full untruncated output to a file
-mcp-ssh-bridge tool ssh_docker_logs host=prod container=nginx save_output=/tmp/nginx.log
+bridge-mcp tool ssh_docker_logs host=prod container=nginx save_output=/tmp/nginx.log
 ```
 
 **Pagination.** Truncated results print `[output_id: abc123]`. Fetch the rest with:
 
 ```bash
-mcp-ssh-bridge tool ssh_output_fetch output_id=abc123 offset=40000
+bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 ```
 
 ### Global flags
@@ -659,9 +659,9 @@ mcp-ssh-bridge tool ssh_output_fetch output_id=abc123 offset=40000
 ### Shell completions
 
 ```bash
-mcp-ssh-bridge completions bash > ~/.bash_completion.d/mcp-ssh-bridge
-mcp-ssh-bridge completions zsh > ~/.zfunc/_mcp-ssh-bridge
-mcp-ssh-bridge completions fish > ~/.config/fish/completions/mcp-ssh-bridge.fish
+bridge-mcp completions bash > ~/.bash_completion.d/bridge-mcp
+bridge-mcp completions zsh > ~/.zfunc/_bridge-mcp
+bridge-mcp completions fish > ~/.config/fish/completions/bridge-mcp.fish
 ```
 
 ### Claude Code integration (optional)
@@ -693,7 +693,7 @@ In addition to the default stdio transport, the bridge can run as a long-lived d
 
 ```bash
 # Start the daemon (foreground)
-mcp-ssh-bridge --daemon /tmp/mcp-ssh-bridge.sock
+bridge-mcp --daemon /tmp/bridge-mcp.sock
 
 # Connect a client to the socket via the standard MCP `--transport unix` flag,
 # or any tool that speaks JSON-RPC over a Unix socket.
@@ -715,7 +715,7 @@ Both pools clean up idle entries automatically; nothing is required to enable th
 <details>
 <summary><strong>Common issues</strong></summary>
 
-**"Unknown host: xxx"** — The host alias is not in your config. Run `ssh_status` or `mcp-ssh-bridge status` to see configured hosts.
+**"Unknown host: xxx"** — The host alias is not in your config. Run `ssh_status` or `bridge-mcp status` to see configured hosts.
 
 **"Command denied"** — The command doesn't match a whitelist pattern (strict/standard mode) or matches a blacklist pattern. Check your `security` config.
 

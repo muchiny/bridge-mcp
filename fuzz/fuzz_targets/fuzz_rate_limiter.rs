@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::RateLimiter;
+use bridge_mcp::RateLimiter;
 
 fuzz_target!(|data: (u32, &str)| {
     let (tokens_per_sec, host) = data;

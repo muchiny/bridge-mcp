@@ -22,24 +22,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mcp_ssh_bridge::ExecutorRouter;
-use mcp_ssh_bridge::config::{
+use bridge_mcp::ExecutorRouter;
+use bridge_mcp::config::{
     AuditConfig, AuthConfig, Config, HostConfig, HostKeyVerification, HttpTransportConfig,
     LimitsConfig, OsType, RedactedSecret, SecurityConfig, SecurityMode, SessionConfig,
     SshConfigDiscovery, ToolGroupsConfig,
 };
-use mcp_ssh_bridge::domain::history::HistoryConfig;
-use mcp_ssh_bridge::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
-use mcp_ssh_bridge::ports::protocol::ToolContent;
-use mcp_ssh_bridge::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
-use mcp_ssh_bridge::ssh::SessionManager;
-use mcp_ssh_bridge::{BridgeError, ToolContext, ToolHandler};
+use bridge_mcp::domain::history::HistoryConfig;
+use bridge_mcp::domain::{CommandHistory, ExecuteCommandUseCase, TunnelManager};
+use bridge_mcp::ports::protocol::ToolContent;
+use bridge_mcp::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
+use bridge_mcp::ssh::SessionManager;
+use bridge_mcp::{BridgeError, ToolContext, ToolHandler};
 
-use mcp_ssh_bridge::mcp::tool_handlers::*;
+use bridge_mcp::mcp::tool_handlers::*;
 
 use serde_json::json;
 
-const TEST_DIR: &str = "/tmp/mcp-ssh-bridge-tests";
+const TEST_DIR: &str = "/tmp/bridge-mcp-tests";
 
 // =============================================================================
 // Context Builder
@@ -66,7 +66,7 @@ fn build_docker_ctx() -> ToolContext {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -108,7 +108,7 @@ fn build_docker_ctx() -> ToolContext {
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     };
 

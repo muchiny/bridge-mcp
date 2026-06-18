@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::redis::RedisCommandBuilder;
+use bridge_mcp::domain::use_cases::redis::RedisCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // validate_redis_command

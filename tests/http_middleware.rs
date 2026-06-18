@@ -20,9 +20,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use mcp_ssh_bridge::config::Config;
-use mcp_ssh_bridge::mcp::McpServer;
-use mcp_ssh_bridge::mcp::transport::http::{HttpTransportConfig, build_router};
+use bridge_mcp::config::Config;
+use bridge_mcp::mcp::McpServer;
+use bridge_mcp::mcp::transport::http::{HttpTransportConfig, build_router};
 
 /// Build a working router pinned to localhost defaults. Reuses production
 /// `build_router` so we exercise the actual middleware stack.

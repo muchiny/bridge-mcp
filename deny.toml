@@ -22,13 +22,19 @@ yanked = "deny"
 # Safe for local use, timing attack requires network observation
 ignore = [
     "RUSTSEC-2023-0071",   # Marvin Attack on RSA — transitive from russh, no upstream fix
+    # Re-triggered by the v1.19.0 dep bumps: the kube 4.0 / AWS stack re-introduced
+    # rustls 0.21 -> rustls-webpki 0.101.7 via aws-smithy-http-client. ONLY reachable
+    # under the optional `ssm`/`cloud` AWS feature (default + air-gapped builds are
+    # clean). The patched webpki (>=0.103.12) requires rustls 0.23, which the pinned
+    # aws-smithy stack cannot reach via cargo update. AWS endpoints present trusted
+    # certs; these are reachable only after certificate misissuance.
+    "RUSTSEC-2026-0098",   # webpki URI name constraints — transitive via aws-smithy rustls 0.21
+    "RUSTSEC-2026-0099",   # webpki wildcard name constraint — transitive via aws-smithy rustls 0.21
+    "RUSTSEC-2026-0104",   # webpki CRL IssuingDistributionPoint panic — transitive via aws-smithy rustls 0.21
     # Verified no longer matched (kept here as historical context):
     # - RUSTSEC-2025-0134 (rustls-pemfile unmaintained)
     # - RUSTSEC-2026-0049 (rustls-webpki CRL matching)
     # - RUSTSEC-2026-0074 (libcrux-ml-kem SHAKE API — patched upstream in russh)
-    # - RUSTSEC-2026-0098 (webpki URI name constraints — resolved by dep-updates-2026-05-30)
-    # - RUSTSEC-2026-0099 (webpki wildcard name constraint bypass — resolved by dep-updates-2026-05-30)
-    # - RUSTSEC-2026-0104 (webpki CRL IssuingDistributionPoint panic — resolved by dep-updates-2026-05-30)
 ]
 
 # =============================================================================

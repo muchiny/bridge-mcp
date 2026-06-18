@@ -7,18 +7,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mcp_ssh_bridge::ExecutorRouter;
-use mcp_ssh_bridge::config::{
+use bridge_mcp::ExecutorRouter;
+use bridge_mcp::config::{
     AuditConfig, AuthConfig, Config, HostConfig, HostKeyVerification, HttpTransportConfig,
     LimitsConfig, OsType, SecurityConfig, SecurityMode, SessionConfig, SshConfigDiscovery,
     ToolGroupsConfig,
 };
-use mcp_ssh_bridge::domain::history::HistoryConfig;
-use mcp_ssh_bridge::domain::{ExecuteCommandUseCase, TunnelManager};
-use mcp_ssh_bridge::mcp::registry::create_filtered_registry;
-use mcp_ssh_bridge::ports::ToolContext;
-use mcp_ssh_bridge::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
-use mcp_ssh_bridge::ssh::SessionManager;
+use bridge_mcp::domain::history::HistoryConfig;
+use bridge_mcp::domain::{ExecuteCommandUseCase, TunnelManager};
+use bridge_mcp::mcp::registry::create_filtered_registry;
+use bridge_mcp::ports::ToolContext;
+use bridge_mcp::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
+use bridge_mcp::ssh::SessionManager;
 
 use serde_json::json;
 
@@ -42,7 +42,7 @@ fn create_config_with_host() -> Config {
             os_type: OsType::Linux,
             shell: None,
             retry: None,
-            protocol: mcp_ssh_bridge::config::Protocol::default(),
+            protocol: bridge_mcp::config::Protocol::default(),
 
             #[cfg(feature = "winrm")]
             winrm_use_tls: None,
@@ -66,7 +66,7 @@ fn create_config_with_host() -> Config {
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     }
 }
@@ -82,7 +82,7 @@ fn create_tool_context(config: &Config) -> ToolContext {
     let validator = Arc::new(CommandValidator::new(&config.security));
     let sanitizer = Arc::new(Sanitizer::with_defaults());
     let audit_logger = Arc::new(AuditLogger::disabled());
-    let history = Arc::new(mcp_ssh_bridge::domain::CommandHistory::new(
+    let history = Arc::new(bridge_mcp::domain::CommandHistory::new(
         &HistoryConfig::default(),
     ));
 
@@ -352,7 +352,7 @@ async fn test_ssh_status_with_no_hosts_returns_content() {
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     };
     let registry = create_filtered_registry(&config.tool_groups);

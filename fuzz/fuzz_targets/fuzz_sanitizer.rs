@@ -3,7 +3,7 @@
 use std::sync::LazyLock;
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::Sanitizer;
+use bridge_mcp::Sanitizer;
 
 // Create sanitizer ONCE at startup, reuse for all fuzz inputs
 static SANITIZER: LazyLock<Sanitizer> = LazyLock::new(Sanitizer::with_defaults);

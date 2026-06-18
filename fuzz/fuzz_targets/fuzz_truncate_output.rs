@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::truncate_output;
+use bridge_mcp::truncate_output;
 
 fuzz_target!(|data: (&str, u16)| {
     let (input, max_chars_raw) = data;

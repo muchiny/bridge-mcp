@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::KubernetesCommandBuilder;
+use bridge_mcp::KubernetesCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // Fuzz all 9 KubernetesCommandBuilder methods with arbitrary strings.

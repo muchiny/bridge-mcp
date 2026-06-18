@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::mcp::validate_path;
+use bridge_mcp::mcp::validate_path;
 
 fuzz_target!(|data: &str| {
     // Fuzz the validate_path function

@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::scheduled_task::{
+use bridge_mcp::domain::use_cases::scheduled_task::{
     validate_task_name, ScheduledTaskCommandBuilder,
 };
 

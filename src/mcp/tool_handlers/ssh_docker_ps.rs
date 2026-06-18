@@ -125,7 +125,14 @@ impl StandardTool for DockerPsTool {
 
         for row in &parsed.rows {
             let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            let name = get(name_idx);
+            // `docker ps` always emits NAMES as the final column. If the header
+            // lookup missed (e.g. a wide image/name merged columns in the
+            // space-gutter parser), recover the name positionally rather than
+            // dropping every row.
+            let name = match name_idx {
+                Some(i) => row.get(i).map_or("", String::as_str),
+                None => row.last().map_or("", String::as_str),
+            };
             let image = get(image_idx);
             let status = get(status_idx);
             let ports = get(ports_idx);

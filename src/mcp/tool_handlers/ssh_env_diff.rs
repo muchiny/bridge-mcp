@@ -220,4 +220,152 @@ mod tests {
         assert!(cmd.contains("ssh_env_snapshot"));
         assert!(cmd.contains("diff"));
     }
+
+    #[test]
+    fn test_args_minimal_deserialization() {
+        let json = json!({"host": "server1"});
+        let args: SshEnvDiffArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(args.host, "server1");
+        assert!(args.summarize.is_none());
+        assert!(args.summary_max_tokens.is_none());
+        assert!(args.timeout_seconds.is_none());
+        assert!(args.max_output.is_none());
+        assert!(args.save_output.is_none());
+    }
+
+    #[test]
+    fn test_schema_optional_fields() {
+        let handler = SshEnvDiffHandler::new();
+        let schema = handler.schema();
+        let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
+        let properties = schema_json["properties"].as_object().unwrap();
+        assert!(properties.contains_key("timeout_seconds"));
+        assert!(properties.contains_key("max_output"));
+        assert!(properties.contains_key("save_output"));
+    }
+
+    #[test]
+    fn test_args_debug() {
+        let json = json!({"host": "server1"});
+        let args: SshEnvDiffArgs = serde_json::from_value(json).unwrap();
+        let debug_str = format!("{args:?}");
+        assert!(debug_str.contains("SshEnvDiffArgs"));
+        assert!(debug_str.contains("server1"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_json_type() {
+        let handler = SshEnvDiffHandler::new();
+        let ctx = create_test_context();
+        // Pass integer where string is expected for host.
+        let result = handler.execute(Some(json!({"host": 123})), &ctx).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BridgeError::McpInvalidRequest(_) => {}
+            e => panic!("Expected McpInvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_args_summarize_deserialization() {
+        let json = json!({
+            "host": "server1",
+            "summarize": true,
+            "summary_max_tokens": 256
+        });
+        let args: SshEnvDiffArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(args.summarize, Some(true));
+        assert_eq!(args.summary_max_tokens, Some(256));
+    }
+
+    #[test]
+    fn test_build_command_wraps_diff_instruction() {
+        let args = SshEnvDiffArgs {
+            host: "server1".to_string(),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        };
+        let cmd = EnvDiffTool::build_command(&args, &test_host_config()).unwrap();
+        // build_command echoes the static diff instruction, quoted.
+        assert!(cmd.starts_with("echo '"));
+        assert!(cmd.ends_with('\''));
+        assert!(cmd.contains("save outputs to local files"));
+        assert!(cmd.contains("local diff"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_skips_when_summarize_false() {
+        let ctx = create_test_context();
+        let args = SshEnvDiffArgs {
+            host: "server1".to_string(),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: Some(false),
+            summary_max_tokens: None,
+        };
+        let original = ToolCallResult::text("raw diff output");
+        let enriched = EnvDiffTool::enrich(original, &args, "raw diff output", &ctx)
+            .await
+            .unwrap();
+        // No LLM summary appended; the single text content is unchanged.
+        match &enriched.content[0] {
+            ToolContent::Text { text } => {
+                assert_eq!(text, "raw diff output");
+                assert!(!text.contains("LLM SUMMARY"));
+            }
+            other => panic!("Expected text content, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enrich_skips_when_summarize_unset() {
+        let ctx = create_test_context();
+        let args = SshEnvDiffArgs {
+            host: "server1".to_string(),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        };
+        let original = ToolCallResult::text("snapshot delta");
+        let enriched = EnvDiffTool::enrich(original, &args, "snapshot delta", &ctx)
+            .await
+            .unwrap();
+        match &enriched.content[0] {
+            ToolContent::Text { text } => assert_eq!(text, "snapshot delta"),
+            other => panic!("Expected text content, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enrich_falls_back_when_sampling_unsupported() {
+        // The mock context advertises no sampling capability, so ctx.sample
+        // returns None and enrich must return the raw result untouched even
+        // though summarize=true.
+        let ctx = create_test_context();
+        let args = SshEnvDiffArgs {
+            host: "server1".to_string(),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: Some(true),
+            summary_max_tokens: Some(128),
+        };
+        let original = ToolCallResult::text("env differences");
+        let enriched = EnvDiffTool::enrich(original, &args, "env differences", &ctx)
+            .await
+            .unwrap();
+        match &enriched.content[0] {
+            ToolContent::Text { text } => {
+                assert_eq!(text, "env differences");
+                assert!(!text.contains("LLM SUMMARY"));
+            }
+            other => panic!("Expected text content, got: {other:?}"),
+        }
+    }
 }

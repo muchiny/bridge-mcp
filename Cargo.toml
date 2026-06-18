@@ -1,20 +1,20 @@
 [workspace]
-members = [".", "crates/mcp-ssh-bridge-macros"]
+members = [".", "crates/bridge-mcp-macros"]
 
 [package]
-name = "mcp-ssh-bridge"
-version = "1.18.0"
+name = "bridge-mcp"
+version = "1.19.0"
 edition = "2024"
 rust-version = "1.94"
 description = "MCP server that bridges Claude Code to air-gapped environments via SSH"
-authors = ["muchini"]
+authors = ["muchiny"]
 license = "MIT"
-repository = "https://github.com/muchini/mcp-ssh-bridge"
+repository = "https://github.com/muchiny/bridge-mcp"
 keywords = ["mcp", "ssh", "model-context-protocol", "devops", "automation"]
 categories = ["command-line-utilities", "network-programming"]
-homepage = "https://github.com/muchini/mcp-ssh-bridge"
+homepage = "https://github.com/muchiny/bridge-mcp"
 readme = "README.md"
-documentation = "https://docs.rs/mcp-ssh-bridge"
+documentation = "https://docs.rs/bridge-mcp"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -109,7 +109,7 @@ rayon = "1"
 # HTTP transport (optional, for Streamable HTTP + OAuth)
 axum = { version = "0.8", features = ["json"], optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", features = ["cors", "limit", "timeout", "request-id", "sensitive-headers"], optional = true }
+tower-http = { version = "0.7", features = ["cors", "limit", "timeout", "request-id", "sensitive-headers"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 tokio-stream = { version = "0.1", optional = true }
 
@@ -125,8 +125,8 @@ psrp-rs = { version = "1.0", optional = true, default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
 
 # Kubernetes Exec adapter (optional) — direct pod exec via K8s API
-kube = { version = "3.1", default-features = false, features = ["client", "rustls-tls", "ws"], optional = true }
-k8s-openapi = { version = "0.27", features = ["v1_32"], optional = true }
+kube = { version = "4.0", default-features = false, features = ["client", "rustls-tls", "ws"], optional = true }
+k8s-openapi = { version = "0.28", features = ["v1_32"], optional = true }
 
 # Serial adapter (optional) — serial port communication (PLCs, embedded, console)
 tokio-serial = { version = "5.4", optional = true }
@@ -147,7 +147,7 @@ opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"], optional = t
 tracing-opentelemetry = { version = "0.33", optional = true }
 similar = "3"
 inventory = "0.3"
-mcp-ssh-bridge-macros = { version = "0.1.0", path = "crates/mcp-ssh-bridge-macros" }
+bridge-mcp-macros = { version = "0.1.0", path = "crates/bridge-mcp-macros" }
 jsonwebtoken = { version = "10", features = ["rust_crypto", "use_pem"] }
 
 [dev-dependencies]
@@ -176,7 +176,7 @@ name = "protocol_bench"
 harness = false
 
 [[bin]]
-name = "mcp-ssh-bridge"
+name = "bridge-mcp"
 path = "src/main.rs"
 required-features = ["cli"]
 

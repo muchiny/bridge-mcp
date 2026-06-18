@@ -26,7 +26,7 @@ cargo build --all-features
 
 ## Configure a WinRM host
 
-Add to `~/.config/mcp-ssh-bridge/config.yaml`:
+Add to `~/.config/bridge-mcp/config.yaml`:
 
 ```yaml
 hosts:
@@ -48,13 +48,13 @@ hosts:
 
 ```bash
 # Check host reachability
-mcp-ssh-bridge status
+bridge-mcp status
 
 # Execute a simple command
-mcp-ssh-bridge tool ssh_exec host=win-server command="hostname"
+bridge-mcp tool ssh_exec host=win-server command="hostname"
 
 # Test a Windows-specific tool
-mcp-ssh-bridge tool ssh_win_service_status host=win-server name=WinRM
+bridge-mcp tool ssh_win_service_status host=win-server name=WinRM
 ```
 
 ## Configure a PSRP host
@@ -77,10 +77,10 @@ hosts:
 
 ```bash
 # PSRP execution (same tools, different transport)
-mcp-ssh-bridge tool ssh_exec host=win-psrp command="Get-Process | Select-Object -First 5"
+bridge-mcp tool ssh_exec host=win-psrp command="Get-Process | Select-Object -First 5"
 
 # JSON output for structured data
-mcp-ssh-bridge --json tool ssh_win_service_status host=win-psrp name=WinRM
+bridge-mcp --json tool ssh_win_service_status host=win-psrp name=WinRM
 ```
 
 ## Run tests

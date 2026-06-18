@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use mcp_ssh_bridge::mcp::protocol::{LogLevel, WriterMessage};
-use mcp_ssh_bridge::mcp::session_context::SessionContext;
+use bridge_mcp::mcp::protocol::{LogLevel, WriterMessage};
+use bridge_mcp::mcp::session_context::SessionContext;
 use tokio::sync::mpsc;
 
 fn fresh_session() -> SessionContext {

@@ -215,61 +215,61 @@ impl Metrics {
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_uptime_seconds Server uptime in seconds\n\
-             # TYPE mcp_ssh_bridge_uptime_seconds gauge\n\
-             mcp_ssh_bridge_uptime_seconds {uptime}\n\n"
+            "# HELP bridge_mcp_uptime_seconds Server uptime in seconds\n\
+             # TYPE bridge_mcp_uptime_seconds gauge\n\
+             bridge_mcp_uptime_seconds {uptime}\n\n"
         );
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_requests_total Total requests processed\n\
-             # TYPE mcp_ssh_bridge_requests_total counter\n\
-             mcp_ssh_bridge_requests_total {}\n\n",
+            "# HELP bridge_mcp_requests_total Total requests processed\n\
+             # TYPE bridge_mcp_requests_total counter\n\
+             bridge_mcp_requests_total {}\n\n",
             self.requests_total.load(Ordering::Relaxed)
         );
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_tool_calls_total Total tool calls\n\
-             # TYPE mcp_ssh_bridge_tool_calls_total counter\n\
-             mcp_ssh_bridge_tool_calls_total {}\n\n",
+            "# HELP bridge_mcp_tool_calls_total Total tool calls\n\
+             # TYPE bridge_mcp_tool_calls_total counter\n\
+             bridge_mcp_tool_calls_total {}\n\n",
             self.tool_calls_total.load(Ordering::Relaxed)
         );
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_tool_errors_total Total tool errors\n\
-             # TYPE mcp_ssh_bridge_tool_errors_total counter\n\
-             mcp_ssh_bridge_tool_errors_total {}\n\n",
+            "# HELP bridge_mcp_tool_errors_total Total tool errors\n\
+             # TYPE bridge_mcp_tool_errors_total counter\n\
+             bridge_mcp_tool_errors_total {}\n\n",
             self.tool_errors_total.load(Ordering::Relaxed)
         );
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_ssh_connections_active Active SSH connections\n\
-             # TYPE mcp_ssh_bridge_ssh_connections_active gauge\n\
-             mcp_ssh_bridge_ssh_connections_active {}\n\n",
+            "# HELP bridge_mcp_ssh_connections_active Active SSH connections\n\
+             # TYPE bridge_mcp_ssh_connections_active gauge\n\
+             bridge_mcp_ssh_connections_active {}\n\n",
             self.ssh_connections_active.load(Ordering::Relaxed)
         );
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_ssh_connections_total Total SSH connection attempts\n\
-             # TYPE mcp_ssh_bridge_ssh_connections_total counter\n\
-             mcp_ssh_bridge_ssh_connections_total {}\n\n",
+            "# HELP bridge_mcp_ssh_connections_total Total SSH connection attempts\n\
+             # TYPE bridge_mcp_ssh_connections_total counter\n\
+             bridge_mcp_ssh_connections_total {}\n\n",
             self.ssh_connections_total.load(Ordering::Relaxed)
         );
 
         // Per-tool counts
         if let Ok(counts) = self.tool_counts.read() {
             output.push_str(
-                "# HELP mcp_ssh_bridge_tool_calls_by_name Tool calls by tool name\n\
-                 # TYPE mcp_ssh_bridge_tool_calls_by_name counter\n",
+                "# HELP bridge_mcp_tool_calls_by_name Tool calls by tool name\n\
+                 # TYPE bridge_mcp_tool_calls_by_name counter\n",
             );
             for (tool, count) in counts.iter() {
                 let _ = writeln!(
                     output,
-                    "mcp_ssh_bridge_tool_calls_by_name{{tool=\"{tool}\"}} {count}"
+                    "bridge_mcp_tool_calls_by_name{{tool=\"{tool}\"}} {count}"
                 );
             }
             output.push('\n');
@@ -278,38 +278,38 @@ impl Metrics {
         // Token consumption
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_output_chars_total Total output characters\n\
-             # TYPE mcp_ssh_bridge_output_chars_total counter\n\
-             mcp_ssh_bridge_output_chars_total {}\n\n",
+            "# HELP bridge_mcp_output_chars_total Total output characters\n\
+             # TYPE bridge_mcp_output_chars_total counter\n\
+             bridge_mcp_output_chars_total {}\n\n",
             self.output_chars_total.load(Ordering::Relaxed)
         );
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_estimated_tokens_total Estimated tokens (~3.5 chars/token)\n\
-             # TYPE mcp_ssh_bridge_estimated_tokens_total counter\n\
-             mcp_ssh_bridge_estimated_tokens_total {}\n\n",
+            "# HELP bridge_mcp_estimated_tokens_total Estimated tokens (~3.5 chars/token)\n\
+             # TYPE bridge_mcp_estimated_tokens_total counter\n\
+             bridge_mcp_estimated_tokens_total {}\n\n",
             self.estimated_tokens_total.load(Ordering::Relaxed)
         );
 
         let _ = write!(
             output,
-            "# HELP mcp_ssh_bridge_truncation_events_total Times output was truncated\n\
-             # TYPE mcp_ssh_bridge_truncation_events_total counter\n\
-             mcp_ssh_bridge_truncation_events_total {}\n\n",
+            "# HELP bridge_mcp_truncation_events_total Times output was truncated\n\
+             # TYPE bridge_mcp_truncation_events_total counter\n\
+             bridge_mcp_truncation_events_total {}\n\n",
             self.truncation_events.load(Ordering::Relaxed)
         );
 
         // Per-host counts
         if let Ok(counts) = self.host_counts.read() {
             output.push_str(
-                "# HELP mcp_ssh_bridge_tool_calls_by_host Tool calls by host\n\
-                 # TYPE mcp_ssh_bridge_tool_calls_by_host counter\n",
+                "# HELP bridge_mcp_tool_calls_by_host Tool calls by host\n\
+                 # TYPE bridge_mcp_tool_calls_by_host counter\n",
             );
             for (host, count) in counts.iter() {
                 let _ = writeln!(
                     output,
-                    "mcp_ssh_bridge_tool_calls_by_host{{host=\"{host}\"}} {count}"
+                    "bridge_mcp_tool_calls_by_host{{host=\"{host}\"}} {count}"
                 );
             }
             output.push('\n');
@@ -404,9 +404,9 @@ mod tests {
         m.ssh_connections_active.fetch_add(2, Ordering::Relaxed);
         m.requests_total.fetch_add(50, Ordering::Relaxed);
         let output = m.render_prometheus();
-        assert!(output.contains("mcp_ssh_bridge_ssh_connections_total 10"));
-        assert!(output.contains("mcp_ssh_bridge_ssh_connections_active 2"));
-        assert!(output.contains("mcp_ssh_bridge_requests_total 50"));
+        assert!(output.contains("bridge_mcp_ssh_connections_total 10"));
+        assert!(output.contains("bridge_mcp_ssh_connections_active 2"));
+        assert!(output.contains("bridge_mcp_requests_total 50"));
     }
 
     #[test]
@@ -415,8 +415,8 @@ mod tests {
         m.record_tool_call("ssh_exec", "prod-1");
         m.record_tool_error();
         let output = m.render_prometheus();
-        assert!(output.contains("mcp_ssh_bridge_tool_calls_total 1"));
-        assert!(output.contains("mcp_ssh_bridge_tool_errors_total 1"));
+        assert!(output.contains("bridge_mcp_tool_calls_total 1"));
+        assert!(output.contains("bridge_mcp_tool_errors_total 1"));
         assert!(output.contains("ssh_exec"));
         assert!(output.contains("prod-1"));
     }
@@ -587,8 +587,8 @@ mod tests {
         m.record_pipeline_stats(2000, 1500, true, "Json");
 
         let output = m.render_prometheus();
-        assert!(output.contains("mcp_ssh_bridge_output_chars_total 1000"));
-        assert!(output.contains("mcp_ssh_bridge_estimated_tokens_total"));
-        assert!(output.contains("mcp_ssh_bridge_truncation_events_total 1"));
+        assert!(output.contains("bridge_mcp_output_chars_total 1000"));
+        assert!(output.contains("bridge_mcp_estimated_tokens_total"));
+        assert!(output.contains("bridge_mcp_truncation_events_total 1"));
     }
 }

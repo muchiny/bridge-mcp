@@ -19,14 +19,14 @@ impl ResourceHandler for HealthResourceHandler {
     }
 
     fn description(&self) -> &'static str {
-        "MCP SSH Bridge server health and status"
+        "Bridge MCP server health and status"
     }
 
     async fn list(&self, _ctx: &ToolContext) -> Result<Vec<ResourceDefinition>> {
         Ok(vec![ResourceDefinition {
             uri: "health://server".to_string(),
             name: "Server Health".to_string(),
-            description: Some("MCP SSH Bridge server health and status".to_string()),
+            description: Some("Bridge MCP server health and status".to_string()),
             mime_type: Some("application/json".to_string()),
         }])
     }

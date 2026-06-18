@@ -1,4 +1,4 @@
-# mcp-ssh-bridge Constitution
+# bridge-mcp Constitution
 
 ## Core Principles
 
@@ -111,6 +111,6 @@ est deja haute. Chaque ajout doit etre chirurgical.
 ## Governance
 
 Cette constitution est le document de reference pour toutes les
-decisions de developpement sur mcp-ssh-bridge.
+decisions de developpement sur bridge-mcp.
 
 **Version**: 1.0.0 | **Ratified**: 2026-04-12 | **Last Amended**: 2026-04-12

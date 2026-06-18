@@ -12,20 +12,20 @@ All 357 MCP tools are accessible directly via CLI, enabling **10-32x token savin
 
 ```bash
 # Invoke any tool directly (same as MCP, but via CLI)
-mcp-ssh-bridge tool ssh_docker_ps host=prod
-mcp-ssh-bridge tool ssh_exec host=prod command="df -h" --json
-mcp-ssh-bridge tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
+bridge-mcp tool ssh_docker_ps host=prod
+bridge-mcp tool ssh_exec host=prod command="df -h" --json
+bridge-mcp tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
 
 # Progressive discovery (token-efficient for AI agents)
-mcp-ssh-bridge list-tools --groups-only          # 75 groups (~2K tokens)
-mcp-ssh-bridge list-tools --group docker          # tools in group (~500 tokens)
-mcp-ssh-bridge list-tools --search kubernetes     # keyword search
-mcp-ssh-bridge describe-tool ssh_docker_ps        # full schema + Reduction Strategy (~200 tokens)
-mcp-ssh-bridge describe-tool ssh_exec --json      # schema as JSON
+bridge-mcp list-tools --groups-only          # 75 groups (~2K tokens)
+bridge-mcp list-tools --group docker          # tools in group (~500 tokens)
+bridge-mcp list-tools --search kubernetes     # keyword search
+bridge-mcp describe-tool ssh_docker_ps        # full schema + Reduction Strategy (~200 tokens)
+bridge-mcp describe-tool ssh_exec --json      # schema as JSON
 
 # Global --json flag works on all commands
-mcp-ssh-bridge --json status
-mcp-ssh-bridge --json tool ssh_service_status host=web1 service=nginx
+bridge-mcp --json status
+bridge-mcp --json tool ssh_service_status host=web1 service=nginx
 ```
 
 ### Token-efficient patterns (IMPORTANT for AI agents)
@@ -45,11 +45,11 @@ runs BEFORE truncation, so you never lose data to the output cap.
 Ergonomic global flags (equivalent to `jq_filter=`, `columns=`, `limit=`, `output_format=`):
 
 ```bash
-mcp-ssh-bridge --jq '.items[] | {name, phase}' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
-mcp-ssh-bridge --columns name,status --limit 10 tool ssh_docker_ps host=prod
+bridge-mcp --jq '.items[] | {name, phase}' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
+bridge-mcp --columns name,status --limit 10 tool ssh_docker_ps host=prod
 ```
 
-Pagination cycle for truncated output: `[output_id: abc123]` → `mcp-ssh-bridge tool ssh_output_fetch output_id=abc123 offset=N`.
+Pagination cycle for truncated output: `[output_id: abc123]` → `bridge-mcp tool ssh_output_fetch output_id=abc123 offset=N`.
 
 Common params on every tool: `host`, `timeout_seconds`, `max_output`, `save_output`.
 
@@ -136,7 +136,7 @@ dxt/                              # DXT packaging (Claude Desktop extension)
 
 ## Tool Groups Reference
 
-75 groups, 357 tools (60 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `mcp-ssh-bridge list-tools --groups-only`.
+75 groups, 357 tools (60 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `bridge-mcp list-tools --groups-only`.
 
 ## Feature Flags
 
@@ -165,7 +165,7 @@ dxt/                              # DXT packaging (Claude Desktop extension)
 
 ## Configuration
 
-YAML config at `~/.config/mcp-ssh-bridge/config.yaml`. See `config/config.example.yaml`.
+YAML config at `~/.config/bridge-mcp/config.yaml`. See `config/config.example.yaml`.
 Key sections: `hosts`, `security`, `limits`, `audit`, `tool_groups`, `recording`.
 
 ## Known Advisories

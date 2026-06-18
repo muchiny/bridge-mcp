@@ -394,4 +394,134 @@ mod tests {
         let debug = format!("{:?}", HostKeyVerification::Off);
         assert!(debug.contains("Off"));
     }
+
+    // ============== Public-key Fixtures & fingerprint() ==============
+    //
+    // Well-formed OpenSSH public keys (valid base64, correct length) so that
+    // `PublicKey::from_openssh` succeeds deterministically. These are public
+    // test vectors — no secret material, no filesystem, no network.
+
+    const ED25519_PUBKEY: &str = "ssh-ed25519 \
+        AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti \
+        user@example.com";
+
+    const RSA_PUBKEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC0WRHtxuxefSJhpIxGq4ibGFgwYnESPm8C3JFM88A1JJLoprenklrd7VJ+VH3Ov/bQwZwLyRU5dRmfR/SWTtIPWs7tToJVayKKDB+/qoXmM5ui/0CU2U4rCdQ6PdaCJdC7yFgpPL8WexjWN06+eSIKYz1AAXbx9rRv1iasslK/KUqtsqzVliagI6jl7FPO2GhRZMcso6LsZGgSxuYf/Lp0D/FcBU8GkeOo1Sx5xEt8H8bJcErtCe4Blb8JxcW6EXO3sReb4z+zcR07gumPgFITZ6hDA8sSNuvo/AlWg0IKTeZSwHHVknWdQqDJ0uczE837caBxyTZllDNIGkBjCIIOFzuTT76HfYc/7CTTGk07uaNkUFXKN79xDiFOX8JQ1ZZMZvGOTwWjuT9CqgdTvQRORbRWwOYv3MH8re9ykw3Ip6lrPifY7s6hOaAKry/nkGPMt40m1TdiW98MTIpooE7W+WXu96ax2l2OJvxX8QR7l+LFlKnkIEEJd/ItF1G22UmOjkVwNASTwza/hlY+8DoVvEmwum/nMgH2TwQT3bTQzF9s9DOJkH4d8p4Mw4gEDjNx0EgUFA91ysCAeUMQQyIvuR8HXXa+VcvhOOO5mmBcVhxJ3qUOJTyDBsT0932Zb4mNtkxdigoVxu+iiwk0vwtvKwGVDYdyMP5EAQeEIP1t0w== user@example.com";
+
+    fn ed25519_key() -> PublicKey {
+        PublicKey::from_openssh(ED25519_PUBKEY).expect("ed25519 fixture should parse")
+    }
+
+    fn rsa_key() -> PublicKey {
+        PublicKey::from_openssh(RSA_PUBKEY).expect("rsa fixture should parse")
+    }
+
+    #[test]
+    fn test_fingerprint_has_sha256_prefix() {
+        let fp = fingerprint(&ed25519_key());
+        assert!(
+            fp.starts_with("SHA256:"),
+            "fingerprint should be SHA256-formatted, got {fp}"
+        );
+    }
+
+    #[test]
+    fn test_fingerprint_is_deterministic() {
+        let key = ed25519_key();
+        assert_eq!(fingerprint(&key), fingerprint(&key));
+    }
+
+    #[test]
+    fn test_fingerprint_matches_sha256_hashalg() {
+        // The helper must use HashAlg::Sha256 — verify it agrees with the
+        // underlying ssh-key computation.
+        let key = ed25519_key();
+        assert_eq!(
+            fingerprint(&key),
+            key.fingerprint(HashAlg::Sha256).to_string()
+        );
+    }
+
+    #[test]
+    fn test_fingerprint_differs_for_different_keys() {
+        // Distinct keys (ed25519 vs rsa) must produce distinct fingerprints.
+        assert_ne!(fingerprint(&ed25519_key()), fingerprint(&rsa_key()));
+    }
+
+    #[test]
+    fn test_fingerprint_rsa_has_sha256_prefix() {
+        let fp = fingerprint(&rsa_key());
+        assert!(fp.starts_with("SHA256:"), "got {fp}");
+    }
+
+    // ============== verify_host_key: Off mode (hermetic) ==============
+    //
+    // `Off` short-circuits before any known_hosts lookup, so these calls never
+    // touch the filesystem and are fully deterministic.
+
+    #[test]
+    fn test_verify_host_key_off_returns_ok() {
+        let key = ed25519_key();
+        let result = verify_host_key("example.com", 22, &key, HostKeyVerification::Off);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_host_key_off_ignores_host_and_port() {
+        // Off mode accepts any host/port combination, including non-standard ones.
+        let key = ed25519_key();
+        assert!(
+            verify_host_key("nonexistent.invalid", 2222, &key, HostKeyVerification::Off).is_ok()
+        );
+        assert!(verify_host_key("10.0.0.1", 65535, &key, HostKeyVerification::Off).is_ok());
+    }
+
+    #[test]
+    fn test_verify_host_key_off_accepts_rsa_key() {
+        let key = rsa_key();
+        assert!(verify_host_key("server", 22, &key, HostKeyVerification::Off).is_ok());
+    }
+
+    // ============== Public-key parse failures ==============
+    //
+    // These exercise the parsing boundary that host-key verification relies on:
+    // malformed lines, blank/comment-only content, and algorithm mismatches must
+    // all fail to parse rather than yielding a bogus key.
+
+    #[test]
+    fn test_from_openssh_rejects_blank_line() {
+        assert!(PublicKey::from_openssh("").is_err());
+        assert!(PublicKey::from_openssh("   ").is_err());
+    }
+
+    #[test]
+    fn test_from_openssh_rejects_comment_only_line() {
+        // A known_hosts comment line is not a valid public key.
+        assert!(PublicKey::from_openssh("# this is a comment").is_err());
+    }
+
+    #[test]
+    fn test_from_openssh_rejects_malformed_base64() {
+        // Right algorithm tag, garbage payload.
+        assert!(PublicKey::from_openssh("ssh-ed25519 not-valid-base64!!!").is_err());
+    }
+
+    #[test]
+    fn test_from_openssh_rejects_unknown_algorithm() {
+        // Algorithm tag that ssh-key does not recognise.
+        assert!(PublicKey::from_openssh("ssh-bogus AAAAC3NzaC1lZDI1NTE5 user@host").is_err());
+    }
+
+    #[test]
+    fn test_from_openssh_rejects_algorithm_payload_mismatch() {
+        // ed25519 tag but the encoded key data is RSA — `from_openssh` verifies
+        // the textual algorithm matches the embedded one and must reject this.
+        let mismatched = RSA_PUBKEY.replacen("ssh-rsa", "ssh-ed25519", 1);
+        assert!(PublicKey::from_openssh(&mismatched).is_err());
+    }
+
+    #[test]
+    fn test_from_openssh_rejects_truncated_key_data() {
+        // Truncating the base64 body corrupts the embedded length-prefixed fields.
+        assert!(PublicKey::from_openssh("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5").is_err());
+    }
 }

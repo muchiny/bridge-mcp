@@ -1,16 +1,16 @@
-# MCP SSH Bridge -- Claude Code Plugin
+# Bridge MCP -- Claude Code Plugin
 
-This plugin integrates [mcp-ssh-bridge](https://github.com/muchiny/mcp-ssh-bridge) into Claude Code, giving you access to **357 tools** for managing remote servers via SSH.
+This plugin integrates [bridge-mcp](https://github.com/muchiny/bridge-mcp) into Claude Code, giving you access to **357 tools** for managing remote servers via SSH.
 
 ## Prerequisites
 
-Install the mcp-ssh-bridge binary:
+Install the bridge-mcp binary (not published on crates.io — install from git):
 
 ```bash
-cargo install mcp-ssh-bridge
+cargo install --git https://github.com/muchiny/bridge-mcp --features full
 ```
 
-Then configure at least one host in `~/.config/mcp-ssh-bridge/config.yaml`:
+Then configure at least one host in `~/.config/bridge-mcp/config.yaml`:
 
 ```yaml
 hosts:
@@ -27,15 +27,15 @@ hosts:
 
 ### MCP Server
 
-The plugin registers `mcp-ssh-bridge` as an MCP server, exposing all 357 tools
+The plugin registers `bridge-mcp` as an MCP server, exposing all 357 tools
 directly to Claude Code for remote server management.
 
 ### Skills
 
 | Skill | Description |
 |-------|-------------|
-| `/mcp-ssh-bridge:bridge` | Manage remote hosts -- status, config, tool execution |
-| `/mcp-ssh-bridge:discover` | Explore 357 tools across 75 groups with progressive discovery |
+| `/bridge-mcp:bridge` | Manage remote hosts -- status, config, tool execution |
+| `/bridge-mcp:discover` | Explore 357 tools across 75 groups with progressive discovery |
 
 ### Capabilities
 
@@ -47,7 +47,7 @@ directly to Claude Code for remote server management.
 
 ## Links
 
-- [GitHub](https://github.com/muchiny/mcp-ssh-bridge)
-- [crates.io](https://crates.io/crates/mcp-ssh-bridge)
-- [docs.rs](https://docs.rs/mcp-ssh-bridge)
-- [Configuration reference](https://github.com/muchiny/mcp-ssh-bridge/blob/main/config/config.example.yaml)
+- [GitHub](https://github.com/muchiny/bridge-mcp)
+- [crates.io](https://crates.io/crates/bridge-mcp)
+- [docs.rs](https://docs.rs/bridge-mcp)
+- [Configuration reference](https://github.com/muchiny/bridge-mcp/blob/main/config/config.example.yaml)

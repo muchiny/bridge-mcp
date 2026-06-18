@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::{AuditEvent, CommandResult};
+use bridge_mcp::{AuditEvent, CommandResult};
 
 fuzz_target!(|data: (&str, &str, u32, u64)| {
     let (host, command, exit_code, duration_ms) = data;

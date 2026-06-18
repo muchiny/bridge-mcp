@@ -13,7 +13,7 @@ As a sysadmin managing Windows hosts in an air-gapped environment, I need WinRM 
 
 **Why this priority**: The current WinRM adapter only supports Basic auth, making it unusable in any enterprise or security-conscious environment. NTLMv2 is the minimum viable auth for Windows Server.
 
-**Independent Test**: Configure a Windows host with `protocol: winrm` and `auth.type: ntlm` in config.yaml, run `mcp-ssh-bridge tool ssh_exec host=winhost command="hostname"`, verify successful execution.
+**Independent Test**: Configure a Windows host with `protocol: winrm` and `auth.type: ntlm` in config.yaml, run `bridge-mcp tool ssh_exec host=winhost command="hostname"`, verify successful execution.
 
 **Acceptance Scenarios**:
 
@@ -30,7 +30,7 @@ As a user invoking Windows tools (services, events, firewall, etc.), I need the 
 
 **Why this priority**: Currently all 44 Windows handlers generate PowerShell commands but the WinRM adapter sends them to `cmd.exe /c`, making WinRM mode fundamentally broken for Windows management.
 
-**Independent Test**: Configure a Windows host with `protocol: winrm`, run `mcp-ssh-bridge tool ssh_win_service_status host=winhost name=WinRM`, verify it returns structured service status (not a cmd.exe parse error).
+**Independent Test**: Configure a Windows host with `protocol: winrm`, run `bridge-mcp tool ssh_win_service_status host=winhost name=WinRM`, verify it returns structured service status (not a cmd.exe parse error).
 
 **Acceptance Scenarios**:
 
@@ -46,7 +46,7 @@ As a power user managing Windows servers, I want to use PSRP (PowerShell Remotin
 
 **Why this priority**: PSRP provides typed `PsValue` objects, session persistence via RunspacePool, and full PS stream access (Output, Error, Warning, Verbose, Debug, Information, Progress) -- a significant upgrade over raw text parsing.
 
-**Independent Test**: Configure a host with `protocol: psrp`, run `mcp-ssh-bridge tool ssh_win_service_status host=psrphost name=WinRM --json`, verify the output contains structured typed data.
+**Independent Test**: Configure a host with `protocol: psrp`, run `bridge-mcp tool ssh_win_service_status host=psrphost name=WinRM --json`, verify the output contains structured typed data.
 
 **Acceptance Scenarios**:
 
@@ -63,7 +63,7 @@ As a user with Windows hosts accessible only via SSH (no WinRM endpoint), I want
 
 **Why this priority**: Many modern Windows deployments use OpenSSH with PowerShell as the default shell. PSRP over SSH provides the benefits of typed output without requiring WinRM configuration.
 
-**Independent Test**: Configure a Windows host with `protocol: ssh` and `shell: psrp`, run `mcp-ssh-bridge tool ssh_win_service_status host=sshwin name=WinRM`, verify execution uses PSRP layer over the SSH transport.
+**Independent Test**: Configure a Windows host with `protocol: ssh` and `shell: psrp`, run `bridge-mcp tool ssh_win_service_status host=sshwin name=WinRM`, verify execution uses PSRP layer over the SSH transport.
 
 **Acceptance Scenarios**:
 

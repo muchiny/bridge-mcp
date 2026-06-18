@@ -8,7 +8,7 @@
 //! `RedactedSecret::from(...)` literal stops type-checking and this file fails
 //! to compile — which is exactly the regression signal we want.
 
-use mcp_ssh_bridge::config::{AuthConfig, HostConfig, HostKeyVerification, OsType, RedactedSecret};
+use bridge_mcp::config::{AuthConfig, HostConfig, HostKeyVerification, OsType, RedactedSecret};
 
 fn host_config_with_sudo(password: Option<RedactedSecret>) -> HostConfig {
     HostConfig {
@@ -25,7 +25,7 @@ fn host_config_with_sudo(password: Option<RedactedSecret>) -> HostConfig {
         os_type: OsType::Linux,
         shell: None,
         retry: None,
-        protocol: mcp_ssh_bridge::config::Protocol::default(),
+        protocol: bridge_mcp::config::Protocol::default(),
 
         #[cfg(feature = "winrm")]
         winrm_use_tls: None,

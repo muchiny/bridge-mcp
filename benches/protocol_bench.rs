@@ -2,8 +2,8 @@
 //!
 //! Run with: `cargo bench --bench protocol_bench`
 
+use bridge_mcp::mcp::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallParams};
 use criterion::{Criterion, criterion_group, criterion_main};
-use mcp_ssh_bridge::mcp::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallParams};
 use serde_json::{Value, json};
 use std::hint::black_box;
 
@@ -99,7 +99,7 @@ fn benchmark_response_serialization(c: &mut Criterion) {
 
     let error_response = JsonRpcResponse::error(
         Some(Value::Number(1.into())),
-        mcp_ssh_bridge::mcp::protocol::JsonRpcError::internal_error("Connection refused"),
+        bridge_mcp::mcp::protocol::JsonRpcError::internal_error("Connection refused"),
     );
 
     c.bench_function("protocol: serialize error response", |b| {

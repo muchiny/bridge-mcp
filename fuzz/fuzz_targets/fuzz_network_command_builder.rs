@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::network::{validate_network_target, NetworkCommandBuilder};
+use bridge_mcp::domain::use_cases::network::{validate_network_target, NetworkCommandBuilder};
 
 fuzz_target!(|data: &str| {
     // validator

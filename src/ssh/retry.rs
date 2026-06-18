@@ -11,7 +11,7 @@ use crate::error::BridgeError;
 /// # Examples
 ///
 /// ```
-/// use mcp_ssh_bridge::ssh::RetryConfig;
+/// use bridge_mcp::ssh::RetryConfig;
 ///
 /// // Default: 3 attempts, 100ms initial delay, exponential backoff
 /// let config = RetryConfig::default();

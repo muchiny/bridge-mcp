@@ -250,13 +250,23 @@ fn validate_protocol_auth_compat(name: &str, host: &super::types::HostConfig) ->
     }
 }
 
-/// Get the default config path
+/// Get the default config path.
+///
+/// Prefers the current `bridge-mcp` config directory. For backward
+/// compatibility, falls back to the legacy `mcp-ssh-bridge` directory when the
+/// new path is absent but the legacy one exists (soft migration after the
+/// rename).
 #[must_use]
 pub fn default_config_path() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("mcp-ssh-bridge")
-        .join("config.yaml")
+    let base = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let current = base.join("bridge-mcp").join("config.yaml");
+    if !current.exists() {
+        let legacy = base.join("mcp-ssh-bridge").join("config.yaml");
+        if legacy.exists() {
+            return legacy;
+        }
+    }
+    current
 }
 
 #[cfg(test)]
@@ -293,7 +303,10 @@ mod tests {
     fn test_default_config_path() {
         let path = default_config_path();
         assert!(path.ends_with("config.yaml"));
-        assert!(path.to_string_lossy().contains("mcp-ssh-bridge"));
+        // Default is the `bridge-mcp` dir; a legacy `mcp-ssh-bridge` config may
+        // be returned by the backward-compat fallback when present.
+        let s = path.to_string_lossy();
+        assert!(s.contains("bridge-mcp") || s.contains("mcp-ssh-bridge"));
     }
 
     #[test]

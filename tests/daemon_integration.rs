@@ -16,12 +16,12 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use mcp_ssh_bridge::Config;
-use mcp_ssh_bridge::config::{
+use bridge_mcp::Config;
+use bridge_mcp::config::{
     AuditConfig, HttpTransportConfig, LimitsConfig, SecurityConfig, SessionConfig,
     SshConfigDiscovery, ToolGroupsConfig,
 };
-use mcp_ssh_bridge::daemon::{self, DaemonStatus, PidFile};
+use bridge_mcp::daemon::{self, DaemonStatus, PidFile};
 
 fn test_config() -> Config {
     Config {
@@ -33,7 +33,7 @@ fn test_config() -> Config {
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
         http: HttpTransportConfig::default(),
-        rbac: mcp_ssh_bridge::security::rbac::RbacConfig::default(),
+        rbac: bridge_mcp::security::rbac::RbacConfig::default(),
         awx: None,
     }
 }

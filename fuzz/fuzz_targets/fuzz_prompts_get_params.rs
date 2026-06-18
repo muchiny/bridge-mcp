@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::PromptsGetParams;
+use bridge_mcp::PromptsGetParams;
 
 fuzz_target!(|data: &[u8]| {
     let _: Result<PromptsGetParams, _> = serde_json::from_slice(data);

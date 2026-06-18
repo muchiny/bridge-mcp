@@ -8,12 +8,12 @@
 //! and `tests/mcp_protocol.rs` (type serialization) by focusing on
 //! specification-level compliance across all 337 tools.
 
-use mcp_ssh_bridge::config::ToolGroupsConfig;
-use mcp_ssh_bridge::mcp::protocol::{
+use bridge_mcp::config::ToolGroupsConfig;
+use bridge_mcp::mcp::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
 };
-use mcp_ssh_bridge::mcp::registry::{create_filtered_registry, tool_annotations};
+use bridge_mcp::mcp::registry::{create_filtered_registry, tool_annotations};
 use serde_json::{Value, json};
 
 // ─── Protocol constants ────────────────────────────────────────────
@@ -160,7 +160,7 @@ fn all_tools_have_valid_json_schema() {
     // FIND-024 (audit 2026-05-09): default profile enables 8 minimal groups.
     // Conformance test exercises the full handler set, so use the all-enabled
     // helper rather than `ToolGroupsConfig::default()`.
-    let registry = mcp_ssh_bridge::mcp::registry::create_all_enabled_registry();
+    let registry = bridge_mcp::mcp::registry::create_all_enabled_registry();
     let tools = registry.list_tools();
 
     assert_eq!(tools.len(), 357, "Expected 357 tools in default registry");
@@ -217,7 +217,7 @@ fn all_tools_have_valid_json_schema() {
 #[test]
 fn all_tools_require_host_parameter() {
     // FIND-024: same all-enabled scope as `all_tools_have_valid_json_schema`.
-    let registry = mcp_ssh_bridge::mcp::registry::create_all_enabled_registry();
+    let registry = bridge_mcp::mcp::registry::create_all_enabled_registry();
     let tools = registry.list_tools();
 
     let mut host_tools = 0;

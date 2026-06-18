@@ -1,7 +1,7 @@
 //! Domain module - Core business logic
 //!
 //! This module contains the use cases and domain entities that
-//! represent the core business logic of the MCP SSH Bridge.
+//! represent the core business logic of the Bridge MCP.
 
 pub mod data_reduction;
 pub mod diff;

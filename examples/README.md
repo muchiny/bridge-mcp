@@ -1,6 +1,6 @@
 # Examples
 
-Usage examples for the MCP SSH Bridge library.
+Usage examples for the Bridge MCP library.
 
 ## Contents
 
@@ -23,8 +23,8 @@ Demonstrates how to:
 3. Use `CommandValidator` to validate commands
 
 ```rust
-use mcp_ssh_bridge::config::{default_config_path, load_config};
-use mcp_ssh_bridge::security::CommandValidator;
+use bridge_mcp::config::{default_config_path, load_config};
+use bridge_mcp::security::CommandValidator;
 
 fn main() {
     let config_path = default_config_path();

@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::{parse_cpu, parse_disk, parse_load, parse_memory};
+use bridge_mcp::{parse_cpu, parse_disk, parse_load, parse_memory};
 
 fuzz_target!(|data: &str| {
     // Fuzz all metrics parsing functions

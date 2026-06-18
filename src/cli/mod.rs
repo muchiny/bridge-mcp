@@ -14,50 +14,50 @@ pub use runner::{
     run_list_tools, run_status, run_tool, run_upload, run_validate,
 };
 
-/// MCP SSH Bridge - Secure SSH access to air-gapped environments
+/// Bridge MCP - Secure SSH access to air-gapped environments
 #[derive(Parser)]
-#[command(name = "mcp-ssh-bridge")]
+#[command(name = "bridge-mcp")]
 #[command(about = "MCP server for SSH access to air-gapped environments")]
 #[command(version)]
 #[command(after_help = "EXAMPLES:
     # Start MCP server (default mode, for Claude Code integration)
-    mcp-ssh-bridge
+    bridge-mcp
 
     # Start MCP server with custom config
-    mcp-ssh-bridge --config /path/to/config.yaml
+    bridge-mcp --config /path/to/config.yaml
 
     # Execute a command on a remote host
-    mcp-ssh-bridge exec prod-server \"docker ps\"
+    bridge-mcp exec prod-server \"docker ps\"
 
     # Invoke any of the 337 MCP tools directly via CLI
-    mcp-ssh-bridge tool ssh_docker_ps host=prod
-    mcp-ssh-bridge tool ssh_exec host=prod command=\"ls -la\" --json
-    mcp-ssh-bridge tool ssh_k8s_get --json-args '{\"host\":\"k8s\",\"resource\":\"pods\"}'
+    bridge-mcp tool ssh_docker_ps host=prod
+    bridge-mcp tool ssh_exec host=prod command=\"ls -la\" --json
+    bridge-mcp tool ssh_k8s_get --json-args '{\"host\":\"k8s\",\"resource\":\"pods\"}'
 
     # Reduce output with jq / columns / limit / output-format (ergonomic flags)
-    mcp-ssh-bridge --json --jq '.containers[].Names' tool ssh_docker_ps host=prod
-    mcp-ssh-bridge --columns name,status --limit 10 tool ssh_docker_ps host=prod
-    mcp-ssh-bridge --jq '.items[] | [.metadata.name, .status.phase]' --output-format=tsv \\
+    bridge-mcp --json --jq '.containers[].Names' tool ssh_docker_ps host=prod
+    bridge-mcp --columns name,status --limit 10 tool ssh_docker_ps host=prod
+    bridge-mcp --jq '.items[] | [.metadata.name, .status.phase]' --output-format=tsv \\
         tool ssh_k8s_get host=k8s resource=pods
-    mcp-ssh-bridge tool ssh_output_fetch output_id=abc123 offset=40000  # paginate truncated output
+    bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000  # paginate truncated output
 
     # Progressive tool discovery (token-efficient for AI agents)
-    mcp-ssh-bridge list-tools --groups-only
-    mcp-ssh-bridge list-tools --group docker
-    mcp-ssh-bridge list-tools --search kubernetes
-    mcp-ssh-bridge describe-tool ssh_docker_ps
+    bridge-mcp list-tools --groups-only
+    bridge-mcp list-tools --group docker
+    bridge-mcp list-tools --search kubernetes
+    bridge-mcp describe-tool ssh_docker_ps
 
     # Show configured hosts and security settings
-    mcp-ssh-bridge status
+    bridge-mcp status
 
     # View command history
-    mcp-ssh-bridge history --limit 20
+    bridge-mcp history --limit 20
 
     # Upload a file
-    mcp-ssh-bridge upload prod-server ./script.sh /tmp/script.sh
+    bridge-mcp upload prod-server ./script.sh /tmp/script.sh
 
     # Download a file
-    mcp-ssh-bridge download prod-server /var/log/app.log ./app.log")]
+    bridge-mcp download prod-server /var/log/app.log ./app.log")]
 pub struct Cli {
     /// Path to configuration file
     #[arg(short, long, global = true)]
@@ -245,7 +245,7 @@ pub enum Commands {
     /// alive across CLI invocations.
     ///
     /// When running, the daemon listens on a Unix socket (default:
-    /// $XDG_RUNTIME_DIR/mcp-ssh-bridge.sock). CLI commands detect the
+    /// $XDG_RUNTIME_DIR/bridge-mcp.sock). CLI commands detect the
     /// socket, forward their tool calls to it, and skip the SSH
     /// handshake on subsequent invocations.
     Daemon {
@@ -292,7 +292,7 @@ pub enum DaemonAction {
     /// Start the daemon in the foreground (blocks until SIGINT).
     Start {
         /// Override the socket path. Defaults to
-        /// `$XDG_RUNTIME_DIR/mcp-ssh-bridge.sock` or `/tmp/mcp-ssh-bridge-$UID.sock`.
+        /// `$XDG_RUNTIME_DIR/bridge-mcp.sock` or `/tmp/bridge-mcp-$UID.sock`.
         #[arg(long)]
         socket_path: Option<PathBuf>,
     },
@@ -326,26 +326,26 @@ mod tests {
 
     #[test]
     fn test_no_args_is_serve_mode() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp"]).unwrap();
         assert!(cli.command.is_none());
         assert!(cli.config.is_none());
     }
 
     #[test]
     fn test_serve_subcommand() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "serve"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "serve"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Serve)));
     }
 
     #[test]
     fn test_status_subcommand() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Status)));
     }
 
     #[test]
     fn test_exec_subcommand() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "exec", "prod", "docker ps"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "exec", "prod", "docker ps"]).unwrap();
         match cli.command {
             Some(Commands::Exec {
                 host,
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_exec_with_timeout() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "exec", "srv", "ls", "-t", "30"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "exec", "srv", "ls", "-t", "30"]).unwrap();
         match cli.command {
             Some(Commands::Exec { timeout, .. }) => assert_eq!(timeout, 30),
             _ => panic!("Expected Exec command"),
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_exec_with_working_dir() {
         let cli =
-            Cli::try_parse_from(["mcp-ssh-bridge", "exec", "srv", "ls", "-w", "/var/log"]).unwrap();
+            Cli::try_parse_from(["bridge-mcp", "exec", "srv", "ls", "-w", "/var/log"]).unwrap();
         match cli.command {
             Some(Commands::Exec { working_dir, .. }) => {
                 assert_eq!(working_dir, Some("/var/log".to_string()));
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_history_defaults() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "history"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "history"]).unwrap();
         match cli.command {
             Some(Commands::History { limit, host }) => {
                 assert_eq!(limit, 10); // default
@@ -397,8 +397,8 @@ mod tests {
 
     #[test]
     fn test_history_with_options() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "history", "-l", "50", "--host", "prod"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["bridge-mcp", "history", "-l", "50", "--host", "prod"]).unwrap();
         match cli.command {
             Some(Commands::History { limit, host }) => {
                 assert_eq!(limit, 50);
@@ -411,22 +411,21 @@ mod tests {
     #[test]
     fn test_global_config_flag() {
         let cli =
-            Cli::try_parse_from(["mcp-ssh-bridge", "--config", "/etc/mcp.yaml", "status"]).unwrap();
+            Cli::try_parse_from(["bridge-mcp", "--config", "/etc/mcp.yaml", "status"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/etc/mcp.yaml")));
         assert!(matches!(cli.command, Some(Commands::Status)));
     }
 
     #[test]
     fn test_config_short_flag() {
-        let cli =
-            Cli::try_parse_from(["mcp-ssh-bridge", "-c", "/tmp/config.yaml", "serve"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "-c", "/tmp/config.yaml", "serve"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/config.yaml")));
     }
 
     #[test]
     fn test_upload_subcommand() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "upload",
             "prod",
             "./script.sh",
@@ -457,7 +456,7 @@ mod tests {
     #[test]
     fn test_download_subcommand() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "download",
             "prod",
             "/var/log/app.log",
@@ -481,20 +480,20 @@ mod tests {
 
     #[test]
     fn test_exec_missing_args_fails() {
-        let result = Cli::try_parse_from(["mcp-ssh-bridge", "exec"]);
+        let result = Cli::try_parse_from(["bridge-mcp", "exec"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_unknown_subcommand_fails() {
-        let result = Cli::try_parse_from(["mcp-ssh-bridge", "unknown"]);
+        let result = Cli::try_parse_from(["bridge-mcp", "unknown"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_upload_with_verify_checksum() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "upload",
             "srv",
             "./f",
@@ -519,7 +518,7 @@ mod tests {
     #[test]
     fn test_tool_subcommand() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "tool",
             "ssh_docker_ps",
             "host=prod",
@@ -543,7 +542,7 @@ mod tests {
     #[test]
     fn test_tool_with_json_args() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "tool",
             "ssh_exec",
             "--json-args",
@@ -565,14 +564,13 @@ mod tests {
 
     #[test]
     fn test_tool_alias() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "t", "ssh_status"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "t", "ssh_status"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Tool { .. })));
     }
 
     #[test]
     fn test_describe_tool_subcommand() {
-        let cli =
-            Cli::try_parse_from(["mcp-ssh-bridge", "describe-tool", "ssh_docker_ps"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "describe-tool", "ssh_docker_ps"]).unwrap();
         match cli.command {
             Some(Commands::DescribeTool { tool_name }) => {
                 assert_eq!(tool_name, "ssh_docker_ps");
@@ -583,13 +581,13 @@ mod tests {
 
     #[test]
     fn test_describe_tool_alias() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "dt", "ssh_exec"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "dt", "ssh_exec"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::DescribeTool { .. })));
     }
 
     #[test]
     fn test_list_tools_groups_only() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "list-tools", "--groups-only"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "list-tools", "--groups-only"]).unwrap();
         match cli.command {
             Some(Commands::ListTools { groups_only, .. }) => {
                 assert!(groups_only);
@@ -600,8 +598,7 @@ mod tests {
 
     #[test]
     fn test_list_tools_search() {
-        let cli =
-            Cli::try_parse_from(["mcp-ssh-bridge", "list-tools", "--search", "docker"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "list-tools", "--search", "docker"]).unwrap();
         match cli.command {
             Some(Commands::ListTools { search, .. }) => {
                 assert_eq!(search, Some("docker".to_string()));
@@ -612,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_global_json_flag() {
-        let cli = Cli::try_parse_from(["mcp-ssh-bridge", "--json", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["bridge-mcp", "--json", "status"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.command, Some(Commands::Status)));
     }
@@ -620,8 +617,7 @@ mod tests {
     #[test]
     fn test_global_json_flag_with_tool() {
         let cli =
-            Cli::try_parse_from(["mcp-ssh-bridge", "--json", "tool", "ssh_exec", "host=prod"])
-                .unwrap();
+            Cli::try_parse_from(["bridge-mcp", "--json", "tool", "ssh_exec", "host=prod"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.command, Some(Commands::Tool { .. })));
     }
@@ -630,7 +626,7 @@ mod tests {
     #[test]
     fn test_global_jq_flag() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "--jq",
             ".containers[].name",
             "tool",
@@ -649,7 +645,7 @@ mod tests {
         // accepted silently — clap should reject it as an unknown argument so
         // the user knows the filter cannot be applied (#2A).
         let result = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "--jq",
             ".x",
             "tool",
@@ -666,7 +662,7 @@ mod tests {
     #[test]
     fn test_global_columns_flag_splits_on_comma() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "--columns",
             "name,status,image",
             "tool",
@@ -681,7 +677,7 @@ mod tests {
     #[test]
     fn test_global_limit_flag() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "--limit",
             "5",
             "tool",
@@ -696,7 +692,7 @@ mod tests {
     #[test]
     fn test_data_reduction_flags_combined() {
         let cli = Cli::try_parse_from([
-            "mcp-ssh-bridge",
+            "bridge-mcp",
             "--json",
             "--jq",
             ".items[].id",

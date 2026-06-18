@@ -736,9 +736,9 @@ pub mod extensions {
     /// Tasks extension (standard MCP).
     pub const TASKS: &str = "io.modelcontextprotocol/tasks";
     /// Output pagination extension (custom).
-    pub const OUTPUT_PAGINATION: &str = "com.mcp-ssh-bridge/output-pagination";
+    pub const OUTPUT_PAGINATION: &str = "com.bridge-mcp/output-pagination";
     /// Multi-host execution extension (custom).
-    pub const MULTI_HOST: &str = "com.mcp-ssh-bridge/multi-host";
+    pub const MULTI_HOST: &str = "com.bridge-mcp/multi-host";
 }
 
 // ============================================================================
@@ -893,7 +893,7 @@ pub struct RootsListResult {
 
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
-pub const SERVER_NAME: &str = "mcp-ssh-bridge";
+pub const SERVER_NAME: &str = "bridge-mcp";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::vault::{validate_vault_path, VaultCommandBuilder};
+use bridge_mcp::domain::use_cases::vault::{validate_vault_path, VaultCommandBuilder};
 
 fuzz_target!(|data: &str| {
     let kv_data = vec![data.to_string()];

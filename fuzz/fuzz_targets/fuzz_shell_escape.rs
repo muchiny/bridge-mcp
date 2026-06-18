@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::mcp::shell_escape;
+use bridge_mcp::mcp::shell_escape;
 
 fuzz_target!(|data: &str| {
     // Fuzz the shell_escape function

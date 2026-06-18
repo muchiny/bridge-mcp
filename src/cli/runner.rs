@@ -651,7 +651,7 @@ pub async fn run_exec(
 /// This function is infallible in practice but returns `Result` for
 /// consistency with other CLI commands.
 pub async fn run_status(config: Arc<Config>) -> Result<()> {
-    println!("MCP SSH Bridge Status");
+    println!("Bridge MCP Status");
     println!("=====================\n");
 
     // Security mode
@@ -1358,7 +1358,7 @@ pub async fn run_describe_tool(
         }
 
         println!("\nUsage:");
-        println!("  mcp-ssh-bridge tool {tool_name} key=value ...",);
+        println!("  bridge-mcp tool {tool_name} key=value ...",);
     }
 
     Ok(())

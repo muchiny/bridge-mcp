@@ -6,8 +6,8 @@
 
 use proptest::prelude::*;
 
-use mcp_ssh_bridge::config::ShellType;
-use mcp_ssh_bridge::domain::use_cases::{
+use bridge_mcp::config::ShellType;
+use bridge_mcp::domain::use_cases::{
     ansible::AnsibleCommandBuilder,
     cron::validate_cron_comment,
     database::DatabaseCommandBuilder,

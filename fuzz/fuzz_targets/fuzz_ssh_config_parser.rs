@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::config::ssh_config::parse_ssh_config_content;
+use bridge_mcp::config::ssh_config::parse_ssh_config_content;
 
 fuzz_target!(|data: &str| {
     // Fuzz the SSH config parser with arbitrary content.

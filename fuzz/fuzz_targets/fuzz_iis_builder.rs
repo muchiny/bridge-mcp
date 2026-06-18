@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::iis::{validate_site_name, IisCommandBuilder};
+use bridge_mcp::domain::use_cases::iis::{validate_site_name, IisCommandBuilder};
 
 fuzz_target!(|data: &str| {
     // validator

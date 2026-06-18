@@ -99,7 +99,24 @@ impl StandardTool for ProcessListTool {
         output: &str,
         dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
-        let Some(parsed) = super::utils::parse_columnar_output(output) else {
+        // `build_list_command` emits a fixed, known column order that depends on
+        // whether a user filter is set. Parse positionally against that schema:
+        // the space-gutter heuristic in `parse_columnar_output` merges columns on
+        // real `ps aux` output (an 8-char user and a 7-digit PID share a single
+        // space, below its ≥2-space boundary threshold), which collapsed the
+        // table to 3 columns and dropped every row. See utils::parse_fixed_columns.
+        let cols: &[&str] = if args.user.is_some() {
+            &[
+                "pid", "ppid", "%cpu", "%mem", "vsz", "rss", "tty", "stat", "start", "time",
+                "command",
+            ]
+        } else {
+            &[
+                "user", "pid", "%cpu", "%mem", "vsz", "rss", "tty", "stat", "start", "time",
+                "command",
+            ]
+        };
+        let Some(parsed) = super::utils::parse_fixed_columns(output, cols, true, false) else {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
@@ -117,17 +134,23 @@ impl StandardTool for ProcessListTool {
         let cmd_idx = parsed.headers.iter().position(|h| h == "command");
 
         for row in &parsed.rows {
-            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            let user = get(user_idx);
-            if !user.is_empty() {
-                tbl = tbl.row(json!({
-                    "user": user,
-                    "pid": get(pid_idx),
-                    "cpu": get(cpu_idx),
-                    "mem": get(mem_idx),
-                    "command": get(cmd_idx),
-                }));
+            if row.iter().all(String::is_empty) {
+                continue;
             }
+            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
+            // The user-filter schema (`ps -u U -o ...`) omits the USER column;
+            // fall back to the requested user, who owns every returned process.
+            let user = match user_idx {
+                Some(i) => row.get(i).map_or("", String::as_str),
+                None => args.user.as_deref().unwrap_or(""),
+            };
+            tbl = tbl.row(json!({
+                "user": user,
+                "pid": get(pid_idx),
+                "cpu": get(cpu_idx),
+                "mem": get(mem_idx),
+                "command": get(cmd_idx),
+            }));
         }
         tbl = tbl.action(
             "refresh",
@@ -345,6 +368,32 @@ mod tests {
         assert!(!result.content.is_empty());
     }
 
+    #[test]
+    fn test_post_process_real_ps_aux_app_rows_populated() {
+        // Regression: real `ps aux` with an 8-char user (`message+`) AND a
+        // 7-digit PID (`2411977`) collapsed the space-gutter parser to 3 merged
+        // columns, so `position("user")` missed and every App row was dropped.
+        let output = "USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\n\
+root           1  0.0  0.1  26336 16336 ?        Ss   May25  15:49 /usr/lib/systemd/systemd --system\n\
+message+     564  0.0  0.0   9232  6016 ?        Ss   May25   6:50 /usr/bin/dbus-daemon --system\n\
+muchini  2411977  0.0  0.0   2772  1664 ?        S    22:06   0:00 sshd-session\n";
+        let args: SshProcessListArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = ProcessListTool::post_process(
+            crate::ports::protocol::ToolCallResult::text("raw"),
+            &args,
+            output,
+            &dr,
+        );
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(
+            serialized.contains("message+"),
+            "App rows dropped: {serialized}"
+        );
+        assert!(serialized.contains("2411977"), "7-digit PID row missing");
+        assert!(serialized.contains("/usr/lib/systemd/systemd --system"));
+    }
+
     // ============== Full Pipeline Test ==============
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {
@@ -404,6 +453,15 @@ mod tests {
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         // post_process adds App content
         assert!(result.content.len() >= 2);
-        assert!(result.structured_content.is_some());
+        // End-to-end (the MCP path): structured_content is auto-populated from
+        // the App and MUST carry the parsed row, not an empty array.
+        let sc = result
+            .structured_content
+            .expect("structured_content present");
+        let rows = sc
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .expect("rows array");
+        assert_eq!(rows.len(), 1, "structured rows empty/wrong: {sc}");
     }
 }

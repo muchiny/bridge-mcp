@@ -266,4 +266,123 @@ mod tests {
         let cmd = ComplianceCheckTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("BASIC COMPLIANCE"));
     }
+
+    #[test]
+    fn test_args_minimal_deserialization() {
+        let json = json!({"host": "server1"});
+        let args: SshComplianceCheckArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(args.host, "server1");
+        assert!(args.profile.is_none());
+        assert!(args.timeout_seconds.is_none());
+        assert!(args.max_output.is_none());
+        assert!(args.save_output.is_none());
+        assert!(args.summarize.is_none());
+        assert!(args.summary_max_tokens.is_none());
+    }
+
+    #[test]
+    fn test_schema_optional_fields() {
+        let handler = SshComplianceCheckHandler::new();
+        let schema = handler.schema();
+        let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
+        let props = schema_json["properties"].as_object().unwrap();
+        assert!(props.contains_key("profile"));
+        assert!(props.contains_key("timeout_seconds"));
+        assert!(props.contains_key("max_output"));
+        assert!(props.contains_key("save_output"));
+        assert!(props.contains_key("summarize"));
+        assert!(props.contains_key("summary_max_tokens"));
+    }
+
+    #[test]
+    fn test_args_debug() {
+        let json = json!({"host": "server1"});
+        let args: SshComplianceCheckArgs = serde_json::from_value(json).unwrap();
+        let debug_str = format!("{args:?}");
+        assert!(debug_str.contains("SshComplianceCheckArgs"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_json_type() {
+        let handler = SshComplianceCheckHandler::new();
+        let ctx = create_test_context();
+        let result = handler.execute(Some(json!({"host": 123})), &ctx).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BridgeError::McpInvalidRequest(_) => {}
+            e => panic!("Expected McpInvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_args_full_deserialization() {
+        let json = json!({
+            "host": "server1",
+            "profile": "cis-level1",
+            "timeout_seconds": 90,
+            "max_output": 4096,
+            "save_output": "/tmp/out.txt",
+            "summarize": true,
+            "summary_max_tokens": 256
+        });
+        let args: SshComplianceCheckArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(args.host, "server1");
+        assert_eq!(args.profile, Some("cis-level1".to_string()));
+        assert_eq!(args.timeout_seconds, Some(90));
+        assert_eq!(args.max_output, Some(4096));
+        assert_eq!(args.save_output, Some("/tmp/out.txt".to_string()));
+        assert_eq!(args.summarize, Some(true));
+        assert_eq!(args.summary_max_tokens, Some(256));
+    }
+
+    #[test]
+    fn test_build_command_cis_level2() {
+        let args = SshComplianceCheckArgs {
+            host: "server1".to_string(),
+            profile: Some("cis-level2".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        };
+        let cmd = ComplianceCheckTool::build_command(&args, &test_host_config()).unwrap();
+        // cis-level2 shares the full CIS check set with cis-level1.
+        assert!(cmd.contains("CIS COMPLIANCE"));
+        assert!(cmd.contains("Core Dumps"));
+        assert!(cmd.contains("Sysctl Security"));
+    }
+
+    #[test]
+    fn test_build_command_unknown_profile_falls_back_to_basic() {
+        let args = SshComplianceCheckArgs {
+            host: "server1".to_string(),
+            profile: Some("does-not-exist".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        };
+        let cmd = ComplianceCheckTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("BASIC COMPLIANCE"));
+        assert!(!cmd.contains("CIS COMPLIANCE"));
+    }
+
+    #[test]
+    fn test_build_command_default_profile_is_cis_level1() {
+        // No profile -> build_command applies the "cis-level1" default.
+        let args = SshComplianceCheckArgs {
+            host: "server1".to_string(),
+            profile: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        };
+        let cmd = ComplianceCheckTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("CIS COMPLIANCE"));
+        assert!(!cmd.contains("BASIC COMPLIANCE"));
+    }
 }

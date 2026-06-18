@@ -249,4 +249,136 @@ mod tests {
             e => panic!("Expected McpInvalidRequest, got: {e:?}"),
         }
     }
+
+    /// Build a minimal `HostConfig` for direct `validate`/`build_command` tests.
+    fn test_host_config() -> HostConfig {
+        use crate::config::{AuthConfig, HostKeyVerification, OsType};
+        HostConfig {
+            hostname: "esxi.local".to_string(),
+            port: 22,
+            user: "root".to_string(),
+            auth: AuthConfig::Agent,
+            description: None,
+            host_key_verification: HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: OsType::default(),
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
+
+    fn args_with_component(component: Option<&str>) -> SshEsxiNetworkListArgs {
+        SshEsxiNetworkListArgs {
+            host: "esxi1".to_string(),
+            component: component.map(str::to_string),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        }
+    }
+
+    #[test]
+    fn test_args_full_with_save_output() {
+        let json = json!({
+            "host": "esxi1",
+            "component": "all",
+            "timeout_seconds": 60,
+            "max_output": 0,
+            "save_output": "/tmp/net.txt"
+        });
+        let args: SshEsxiNetworkListArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(args.component, Some("all".to_string()));
+        assert_eq!(args.timeout_seconds, Some(60));
+        assert_eq!(args.max_output, Some(0));
+        assert_eq!(args.save_output, Some("/tmp/net.txt".to_string()));
+    }
+
+    #[test]
+    fn test_validate_valid_component_ok() {
+        let host = test_host_config();
+        let args = args_with_component(Some("nic"));
+        assert!(EsxiNetworkListTool::validate(&args, &host).is_ok());
+    }
+
+    #[test]
+    fn test_validate_none_component_ok() {
+        // No component => validation branch is skipped entirely.
+        let host = test_host_config();
+        let args = args_with_component(None);
+        assert!(EsxiNetworkListTool::validate(&args, &host).is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_component_denied() {
+        let host = test_host_config();
+        let args = args_with_component(Some("firewall"));
+        match EsxiNetworkListTool::validate(&args, &host).unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("firewall")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_default_all() {
+        // None component => "all" branch combining the three esxcli queries.
+        let host = test_host_config();
+        let args = args_with_component(None);
+        let cmd = EsxiNetworkListTool::build_command(&args, &host).unwrap();
+        assert!(cmd.contains("esxcli network ip interface list"));
+        assert!(cmd.contains("esxcli network vswitch standard list"));
+        assert!(cmd.contains("esxcli network nic list"));
+    }
+
+    #[test]
+    fn test_build_command_interface_only() {
+        let host = test_host_config();
+        let args = args_with_component(Some("interface"));
+        let cmd = EsxiNetworkListTool::build_command(&args, &host).unwrap();
+        assert_eq!(cmd, "esxcli network ip interface list");
+    }
+
+    #[test]
+    fn test_build_command_nic_only() {
+        let host = test_host_config();
+        let args = args_with_component(Some("nic"));
+        let cmd = EsxiNetworkListTool::build_command(&args, &host).unwrap();
+        assert_eq!(cmd, "esxcli network nic list");
+    }
+
+    #[test]
+    fn test_post_process_with_columnar_output() {
+        // Multi-column, space-padded sample drives the table-building branch
+        // that the standard execute() tests never reach.
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let sample = "Name    MAC Address        MTU   Link\n\
+                      vmnic0  00:11:22:33:44:55  1500  Up\n\
+                      vmnic1  00:11:22:33:44:66  1500  Down\n";
+        let args = args_with_component(None);
+        let base = ToolCallResult::text(sample.to_string());
+        let processed = EsxiNetworkListTool::post_process(base, &args, sample, &dr);
+        assert!(!processed.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_unparsable_input_returns_input() {
+        // Single non-empty line cannot form a header+row table; parse returns
+        // None and post_process returns the original result unchanged.
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let args = args_with_component(None);
+        let base = ToolCallResult::text("only one line".to_string());
+        let processed = EsxiNetworkListTool::post_process(base, &args, "only one line", &dr);
+        assert!(!processed.content.is_empty());
+    }
 }

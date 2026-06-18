@@ -14,7 +14,7 @@ pub fn build_instructions(config: &Config, tool_count: usize) -> String {
     // --- Header ---
     let _ = writeln!(
         out,
-        "MCP SSH Bridge: remote server management via SSH ({tool_count} tools)."
+        "Bridge MCP: remote server management via SSH ({tool_count} tools)."
     );
 
     // --- Configured Hosts ---

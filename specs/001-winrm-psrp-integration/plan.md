@@ -25,7 +25,7 @@ the fundamental bug where 44 Windows handlers generate PowerShell but WinRM send
 
 ### Key Version Concern
 
-**russh version mismatch**: mcp-ssh-bridge uses `russh 0.58`, psrp-rs uses `russh 0.49`.
+**russh version mismatch**: bridge-mcp uses `russh 0.58`, psrp-rs uses `russh 0.49`.
 The PSRP-over-SSH transport (Phase 4) requires version alignment. See research.md for resolution.
 
 ## Constitution Check

@@ -171,7 +171,7 @@ pub fn load_runbook(path: &Path) -> Result<Runbook, String> {
 #[must_use]
 pub fn default_runbooks_dir() -> PathBuf {
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("~/.config"));
-    config_dir.join("mcp-ssh-bridge").join("runbooks")
+    config_dir.join("bridge-mcp").join("runbooks")
 }
 
 /// Get built-in runbook definitions (embedded in binary)
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn test_default_runbooks_dir() {
         let dir = default_runbooks_dir();
-        assert!(dir.to_string_lossy().contains("mcp-ssh-bridge"));
+        assert!(dir.to_string_lossy().contains("bridge-mcp"));
         assert!(dir.to_string_lossy().contains("runbooks"));
     }
 
@@ -390,10 +390,8 @@ steps:
     /// Loading a tmp dir with one of each pins the OR semantics.
     #[test]
     fn test_load_runbooks_accepts_both_extensions() {
-        let tmp = std::env::temp_dir().join(format!(
-            "mcp-ssh-bridge-runbook-loader-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("bridge-mcp-runbook-loader-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("mkdir tmp");
 

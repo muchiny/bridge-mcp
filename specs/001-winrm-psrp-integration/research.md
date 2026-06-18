@@ -6,7 +6,7 @@
 
 ### Problem
 
-mcp-ssh-bridge uses `russh 0.58`. psrp-rs uses `russh 0.49` (for its `ssh` feature transport).
+bridge-mcp uses `russh 0.58`. psrp-rs uses `russh 0.49` (for its `ssh` feature transport).
 PSRP-over-SSH (Phase 4) requires version alignment.
 
 ### Decision
@@ -46,7 +46,7 @@ in `src/ssh.rs`, remove `#[async_trait]` from Handler impl, make
 
 ### Problem
 
-mcp-ssh-bridge's `AuthConfig` only supports SSH auth types (`Key`, `Agent`, `Password`).
+bridge-mcp's `AuthConfig` only supports SSH auth types (`Key`, `Agent`, `Password`).
 winrm-rs needs `AuthMethod` (Basic, Ntlm, Kerberos, Certificate) + `WinrmCredentials`
 (username, password as SecretString, domain). How to extend config without breaking
 existing YAML?

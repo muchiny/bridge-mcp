@@ -14,9 +14,9 @@ mod helpers;
 
 use std::path::Path;
 
+use bridge_mcp::error::BridgeError;
+use bridge_mcp::ssh::{SshClient, TransferOptions, TransferProgress};
 use helpers::{MockSshServerBuilder, mock_host_config, mock_limits};
-use mcp_ssh_bridge::error::BridgeError;
-use mcp_ssh_bridge::ssh::{SshClient, TransferOptions, TransferProgress};
 
 /// Produce a `(client, sftp_root)` pair connected to a fresh mock server.
 /// Returns the server handle so the caller can keep it alive for the

@@ -1,10 +1,10 @@
 {
   "$schema": "https://registry.modelcontextprotocol.io/schemas/server.json",
-  "name": "io.github.muchiny/mcp-ssh-bridge",
-  "version": "1.14.0",
+  "name": "io.github.muchiny/bridge-mcp",
+  "version": "1.19.0",
   "description": "Secure SSH bridge for AI-powered remote server management. 357 tools across 75 groups for Linux, Windows, Docker, Kubernetes, and more.",
   "repository": {
-    "url": "https://github.com/muchiny/mcp-ssh-bridge",
+    "url": "https://github.com/muchiny/bridge-mcp",
     "source": "github"
   },
   "license": "MIT",
@@ -21,9 +21,9 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "name": "mcp-ssh-bridge",
-      "version": "1.14.0",
-      "url": "https://github.com/muchiny/mcp-ssh-bridge/releases/latest",
+      "name": "bridge-mcp",
+      "version": "1.19.0",
+      "url": "https://github.com/muchiny/bridge-mcp/releases/latest",
       "platforms": [
         "linux-x64",
         "linux-arm64",
@@ -34,8 +34,8 @@
     },
     {
       "registryType": "oci",
-      "name": "ghcr.io/muchiny/mcp-ssh-bridge",
-      "version": "1.14.0"
+      "name": "ghcr.io/muchiny/bridge-mcp",
+      "version": "1.19.0"
     }
   ],
   "keywords": [
@@ -57,8 +57,8 @@
     }
   ],
   "links": {
-    "homepage": "https://github.com/muchiny/mcp-ssh-bridge",
-    "documentation": "https://docs.rs/mcp-ssh-bridge",
-    "changelog": "https://github.com/muchiny/mcp-ssh-bridge/blob/main/CHANGELOG.md"
+    "homepage": "https://github.com/muchiny/bridge-mcp",
+    "documentation": "https://docs.rs/bridge-mcp",
+    "changelog": "https://github.com/muchiny/bridge-mcp/blob/main/CHANGELOG.md"
   }
 }

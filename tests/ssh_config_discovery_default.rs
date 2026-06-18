@@ -5,7 +5,7 @@
 //! exceeding the YAML-declared production set. Operators who want the
 //! time-to-first-command convenience must now opt in explicitly.
 
-use mcp_ssh_bridge::config::types::SshConfigDiscovery;
+use bridge_mcp::config::types::SshConfigDiscovery;
 
 #[test]
 fn ssh_config_discovery_default_off() {

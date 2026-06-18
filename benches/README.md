@@ -74,8 +74,8 @@ graph TB
 
 ```rust
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mcp_ssh_bridge::config::SecurityConfig;
-use mcp_ssh_bridge::security::CommandValidator;
+use bridge_mcp::config::SecurityConfig;
+use bridge_mcp::security::CommandValidator;
 
 fn benchmark_validation(c: &mut Criterion) {
     let config = SecurityConfig::default();

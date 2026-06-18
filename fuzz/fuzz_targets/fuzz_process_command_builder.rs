@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::process::ProcessCommandBuilder;
+use bridge_mcp::domain::use_cases::process::ProcessCommandBuilder;
 
 fuzz_target!(|data: (u32, &str)| {
     let (pid, text) = data;

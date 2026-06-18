@@ -3,8 +3,8 @@
 
 #![cfg(feature = "http")]
 
-use mcp_ssh_bridge::config::types::{HttpOAuthConfig, HttpOAuthStaticKey};
-use mcp_ssh_bridge::mcp::transport::oauth::build_validator;
+use bridge_mcp::config::types::{HttpOAuthConfig, HttpOAuthStaticKey};
+use bridge_mcp::mcp::transport::oauth::build_validator;
 
 #[tokio::test]
 async fn empty_key_config_fails_closed_at_boot() {

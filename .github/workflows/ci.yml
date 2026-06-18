@@ -105,7 +105,7 @@ jobs:
             auth:
               password: "testpass123"
             host_key_verification: "off"
-            remote_test_dir: "/tmp/mcp-ssh-bridge-tests"
+            remote_test_dir: "/tmp/bridge-mcp-tests"
           EOF
 
       - name: Generate coverage (with integration tests)

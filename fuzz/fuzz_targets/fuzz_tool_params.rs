@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::ToolCallParams;
+use bridge_mcp::ToolCallParams;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz MCP tool call params parsing

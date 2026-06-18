@@ -2,9 +2,9 @@
 //!
 //! Run with: `cargo bench --bench sanitizer_bench`
 
+use bridge_mcp::config::SanitizeConfig;
+use bridge_mcp::security::Sanitizer;
 use criterion::{Criterion, criterion_group, criterion_main};
-use mcp_ssh_bridge::config::SanitizeConfig;
-use mcp_ssh_bridge::security::Sanitizer;
 use std::hint::black_box;
 
 fn create_sanitizer() -> Sanitizer {

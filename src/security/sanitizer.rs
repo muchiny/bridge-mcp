@@ -25,8 +25,8 @@ const PARALLEL_THRESHOLD: usize = 512 * 1024; // 512 KB
 /// # Examples
 ///
 /// ```
-/// use mcp_ssh_bridge::config::SanitizeConfig;
-/// use mcp_ssh_bridge::security::Sanitizer;
+/// use bridge_mcp::config::SanitizeConfig;
+/// use bridge_mcp::security::Sanitizer;
 ///
 /// let sanitizer = Sanitizer::from_config(&SanitizeConfig::default());
 ///

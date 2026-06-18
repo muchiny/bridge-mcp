@@ -1,19 +1,19 @@
 # Configuration
 
-Configuration files for MCP SSH Bridge.
+Configuration files for Bridge MCP.
 
 ## Location
 
 Configuration is loaded from:
 
 ```
-~/.config/mcp-ssh-bridge/config.yaml
+~/.config/bridge-mcp/config.yaml
 ```
 
 Or specified via `--config`:
 
 ```bash
-mcp-ssh-bridge --config /path/to/config.yaml
+bridge-mcp --config /path/to/config.yaml
 ```
 
 ## Structure
@@ -38,9 +38,9 @@ below.
 ## Quick Start
 
 ```bash
-mkdir -p ~/.config/mcp-ssh-bridge
-cp config/config.example.yaml ~/.config/mcp-ssh-bridge/config.yaml
-vim ~/.config/mcp-ssh-bridge/config.yaml
+mkdir -p ~/.config/bridge-mcp
+cp config/config.example.yaml ~/.config/bridge-mcp/config.yaml
+vim ~/.config/bridge-mcp/config.yaml
 ```
 
 ## Minimal Example
@@ -172,7 +172,7 @@ tool_groups:
     hyperv: false
 ```
 
-Run `mcp-ssh-bridge list-tools --groups-only` to see the current list of
+Run `bridge-mcp list-tools --groups-only` to see the current list of
 groups and tool counts for your installed version.
 
 ## Observability (feature `otel`)
@@ -196,7 +196,7 @@ Environment variables read at startup:
 | Variable                      | Default            | Purpose                               |
 |-------------------------------|--------------------|---------------------------------------|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset → disabled) | OTLP/gRPC collector URL               |
-| `OTEL_SERVICE_NAME`           | `mcp-ssh-bridge`   | Service name reported in spans        |
+| `OTEL_SERVICE_NAME`           | `bridge-mcp`   | Service name reported in spans        |
 | `RUST_LOG`                    | `info`             | `tracing-subscriber` filter directive |
 
 Build with:
@@ -214,9 +214,9 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
   -e COLLECTOR_OTLP_ENABLED=true jaegertracing/all-in-one:latest
 
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-  ./target/release/mcp-ssh-bridge tool ssh_status
+  ./target/release/bridge-mcp tool ssh_status
 
-# → open http://localhost:16686 and search service "mcp-ssh-bridge"
+# → open http://localhost:16686 and search service "bridge-mcp"
 ```
 
 ## Daemon mode (shared SSH pool)
@@ -229,8 +229,8 @@ host, those handshakes add up — measured overhead in Sprint 1 was
 
 A local daemon amortizes that cost by keeping the pool alive between
 invocations. The daemon listens on a Unix socket
-(`$XDG_RUNTIME_DIR/mcp-ssh-bridge.sock` by default, or
-`/tmp/mcp-ssh-bridge-$UID.sock` on systems without XDG runtime). CLI
+(`$XDG_RUNTIME_DIR/bridge-mcp.sock` by default, or
+`/tmp/bridge-mcp-$UID.sock` on systems without XDG runtime). CLI
 commands detect the socket and forward their `tools/call` requests over
 it; if the socket is absent, they transparently fall back to the
 stateless path.
@@ -239,18 +239,18 @@ stateless path.
 
 ```bash
 # Start the daemon in the foreground (blocks until Ctrl+C)
-mcp-ssh-bridge daemon start
+bridge-mcp daemon start
 
 # In another terminal: issue tool calls — they route through the daemon
-mcp-ssh-bridge tool ssh_exec host=raspberry command="uptime"
-mcp-ssh-bridge tool ssh_docker_ps host=raspberry
+bridge-mcp tool ssh_exec host=raspberry command="uptime"
+bridge-mcp tool ssh_docker_ps host=raspberry
 # The first call pays the handshake; subsequent calls reuse the pool.
 
 # Check daemon status
-mcp-ssh-bridge daemon status
+bridge-mcp daemon status
 
 # Stop the daemon (sends SIGTERM)
-mcp-ssh-bridge daemon stop
+bridge-mcp daemon stop
 ```
 
 Override the socket path with `--socket-path` on any `daemon`
@@ -296,10 +296,10 @@ tool parameters so you don't have to type `jq_filter=` / `columns=` /
 
 ```bash
 # jq filter (requires tool output to be JSON)
-mcp-ssh-bridge --json --jq '.items[].name' tool ssh_k8s_get host=k8s resource=pods
+bridge-mcp --json --jq '.items[].name' tool ssh_k8s_get host=k8s resource=pods
 
 # Column selection + row limit on tabular output
-mcp-ssh-bridge --json --columns user,pid,command --limit 10 tool ssh_process_list host=prod
+bridge-mcp --json --columns user,pid,command --limit 10 tool ssh_process_list host=prod
 ```
 
 Explicit `key=value` arguments always win — the flags only fill in
@@ -329,8 +329,8 @@ The configuration file is validated on load:
 ## Testing
 
 ```bash
-mcp-ssh-bridge status         # verify config loads and list hosts
-mcp-ssh-bridge exec my-server "echo test"  # test a connection
+bridge-mcp status         # verify config loads and list hosts
+bridge-mcp exec my-server "echo test"  # test a connection
 ```
 
 ## Full Reference

@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::JsonRpcRequest;
+use bridge_mcp::JsonRpcRequest;
 
 fuzz_target!(|data: &[u8]| {
     // Try to parse arbitrary bytes as JSON-RPC request

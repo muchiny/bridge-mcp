@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::HostConfig;
+use bridge_mcp::HostConfig;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz host configuration parsing

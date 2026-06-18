@@ -10,7 +10,7 @@
 //! tool is a true exception, add it to ALLOWLIST with a comment explaining
 //! why.
 
-use mcp_ssh_bridge::mcp::registry::{ToolAnnotationKind, ToolRegistryEntry};
+use bridge_mcp::mcp::registry::{ToolAnnotationKind, ToolRegistryEntry};
 
 const MUTATION_SUFFIXES: &[&str] = &[
     "_apply",

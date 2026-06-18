@@ -1,13 +1,13 @@
 ---
 name: ssh-discover
-description: This skill should be used when the user asks to "show me the available tools", "what Docker tools exist", "search for kubernetes tools", "explore the tool catalog", or wants to browse the 338 mcp-ssh-bridge tools by group or keyword.
+description: This skill should be used when the user asks to "show me the available tools", "what Docker tools exist", "search for kubernetes tools", "explore the tool catalog", or wants to browse the 338 bridge-mcp tools by group or keyword.
 argument-hint: [group-name|search-keyword]
 compatibility: "2.1+"
 ---
 
 # Tool Discovery
 
-Explore the mcp-ssh-bridge tool catalog interactively.
+Explore the bridge-mcp tool catalog interactively.
 
 **Argument:** `$ARGUMENTS`
 
@@ -18,25 +18,25 @@ Run one of these depending on what was requested:
 **No argument — show all groups:**
 
 ```bash
-mcp-ssh-bridge list-tools --groups-only
+bridge-mcp list-tools --groups-only
 ```
 
 **Group name — show tools in that group:**
 
 ```bash
-mcp-ssh-bridge list-tools --group $ARGUMENTS
+bridge-mcp list-tools --group $ARGUMENTS
 ```
 
 **Keyword — search by name or description:**
 
 ```bash
-mcp-ssh-bridge list-tools --search $ARGUMENTS
+bridge-mcp list-tools --search $ARGUMENTS
 ```
 
 After finding interesting tools, show their full schema:
 
 ```bash
-mcp-ssh-bridge describe-tool TOOL_NAME
+bridge-mcp describe-tool TOOL_NAME
 ```
 
 ## Category Quick Reference
@@ -56,5 +56,5 @@ mcp-ssh-bridge describe-tool TOOL_NAME
 To invoke any discovered tool:
 
 ```bash
-mcp-ssh-bridge tool TOOL_NAME host=HOST key=value --json
+bridge-mcp tool TOOL_NAME host=HOST key=value --json
 ```

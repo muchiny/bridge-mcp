@@ -34,4 +34,4 @@ ssh_test:
 
   # Test directories on remote host
   # These directories will be created/used for SFTP tests
-  remote_test_dir: "/tmp/mcp-ssh-bridge-tests"
+  remote_test_dir: "/tmp/bridge-mcp-tests"

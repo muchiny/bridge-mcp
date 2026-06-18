@@ -7,7 +7,7 @@
 //! valid YAML strings. Adding `deny_unknown_fields` is belt-and-suspenders
 //! against typo'd config keys silently being ignored.
 
-use mcp_ssh_bridge::Config;
+use bridge_mcp::Config;
 
 #[test]
 fn unknown_top_level_field_rejected() {
@@ -15,7 +15,7 @@ fn unknown_top_level_field_rejected() {
 hosts: {}
 bogus_field: 1
 ";
-    let r: Result<Config, _> = mcp_ssh_bridge::domain::yaml::parse_yaml(yaml);
+    let r: Result<Config, _> = bridge_mcp::domain::yaml::parse_yaml(yaml);
     assert!(
         r.is_err(),
         "FIND-017: unknown top-level field must be rejected by deny_unknown_fields"
@@ -34,7 +34,7 @@ hosts:
       type: agent
     bogus_host_field: 1
 ";
-    let r: Result<Config, _> = mcp_ssh_bridge::domain::yaml::parse_yaml(yaml);
+    let r: Result<Config, _> = bridge_mcp::domain::yaml::parse_yaml(yaml);
     assert!(
         r.is_err(),
         "FIND-017: unknown nested field on HostConfig must be rejected"
@@ -48,7 +48,7 @@ security:
   mode: standard
   bogus_security_field: hello
 ";
-    let r: Result<Config, _> = mcp_ssh_bridge::domain::yaml::parse_yaml(yaml);
+    let r: Result<Config, _> = bridge_mcp::domain::yaml::parse_yaml(yaml);
     assert!(
         r.is_err(),
         "FIND-017: unknown nested field on SecurityConfig must be rejected"
@@ -62,7 +62,7 @@ limits:
   command_timeout_seconds: 60
   bogus_limit: 9999
 ";
-    let r: Result<Config, _> = mcp_ssh_bridge::domain::yaml::parse_yaml(yaml);
+    let r: Result<Config, _> = bridge_mcp::domain::yaml::parse_yaml(yaml);
     assert!(
         r.is_err(),
         "FIND-017: unknown nested field on LimitsConfig must be rejected"
@@ -71,7 +71,7 @@ limits:
 
 #[test]
 fn unknown_runbook_field_rejected() {
-    use mcp_ssh_bridge::domain::runbook::Runbook;
+    use bridge_mcp::domain::runbook::Runbook;
 
     let yaml = r"
 name: probe
@@ -81,7 +81,7 @@ steps:
     command: echo
 unexpected_top_level: 1
 ";
-    let r: Result<Runbook, _> = mcp_ssh_bridge::domain::yaml::parse_yaml(yaml);
+    let r: Result<Runbook, _> = bridge_mcp::domain::yaml::parse_yaml(yaml);
     assert!(
         r.is_err(),
         "FIND-017: unknown top-level field on Runbook must be rejected"
@@ -90,7 +90,7 @@ unexpected_top_level: 1
 
 #[test]
 fn unknown_runbook_step_field_rejected() {
-    use mcp_ssh_bridge::domain::runbook::Runbook;
+    use bridge_mcp::domain::runbook::Runbook;
 
     let yaml = r"
 name: probe
@@ -100,7 +100,7 @@ steps:
     command: echo
     bogus_step_field: 1
 ";
-    let r: Result<Runbook, _> = mcp_ssh_bridge::domain::yaml::parse_yaml(yaml);
+    let r: Result<Runbook, _> = bridge_mcp::domain::yaml::parse_yaml(yaml);
     assert!(
         r.is_err(),
         "FIND-017: unknown nested field on RunbookStep must be rejected"
@@ -125,7 +125,7 @@ limits:
 security:
   mode: standard
 ";
-    let r: Result<Config, _> = mcp_ssh_bridge::domain::yaml::parse_yaml(yaml);
+    let r: Result<Config, _> = bridge_mcp::domain::yaml::parse_yaml(yaml);
     assert!(
         r.is_ok(),
         "FIND-017: known-good config must still parse: {:?}",

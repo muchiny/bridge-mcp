@@ -1,9 +1,9 @@
 # Default owner for everything
-* @muchini
+* @muchiny
 
 # Security-critical paths require explicit review
-src/security/ @muchini
-deny.toml @muchini
-Cargo.toml @muchini
-Cargo.lock @muchini
-.github/workflows/ @muchini
+src/security/ @muchiny
+deny.toml @muchiny
+Cargo.toml @muchiny
+Cargo.lock @muchiny
+.github/workflows/ @muchiny

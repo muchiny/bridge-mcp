@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::active_directory::{
+use bridge_mcp::domain::use_cases::active_directory::{
     validate_ad_identity, ActiveDirectoryCommandBuilder,
 };
 

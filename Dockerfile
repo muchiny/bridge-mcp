@@ -14,9 +14,9 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates openssh-client \
     && adduser -D -h /home/bridge bridge
 
-COPY --from=builder /app/target/release/mcp-ssh-bridge /usr/local/bin/
-COPY config/config.example.yaml /etc/mcp-ssh-bridge/config.example.yaml
+COPY --from=builder /app/target/release/bridge-mcp /usr/local/bin/
+COPY config/config.example.yaml /etc/bridge-mcp/config.example.yaml
 
 USER bridge
 
-ENTRYPOINT ["mcp-ssh-bridge"]
+ENTRYPOINT ["bridge-mcp"]

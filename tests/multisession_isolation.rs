@@ -1,9 +1,9 @@
 //! Verify two clients on the same daemon do not share pending-request
 //! state. Regression test for Vuln 8 (audit 2026-05-09).
 
-use mcp_ssh_bridge::config::Config;
-use mcp_ssh_bridge::mcp::McpServer;
-use mcp_ssh_bridge::mcp::pending_requests::ClientResponse;
+use bridge_mcp::config::Config;
+use bridge_mcp::mcp::McpServer;
+use bridge_mcp::mcp::pending_requests::ClientResponse;
 
 #[tokio::test]
 async fn pending_requests_are_isolated_across_sessions() {
@@ -33,8 +33,8 @@ async fn pending_requests_are_isolated_across_sessions() {
 
 #[tokio::test]
 async fn elicitation_capability_does_not_leak_across_sessions() {
-    let config = mcp_ssh_bridge::config::Config::default();
-    let (server, _audit_task) = mcp_ssh_bridge::mcp::McpServer::new(config);
+    let config = bridge_mcp::config::Config::default();
+    let (server, _audit_task) = bridge_mcp::mcp::McpServer::new(config);
     let server = std::sync::Arc::new(server);
 
     let caps_a = server.allocate_session_capabilities_for_test();

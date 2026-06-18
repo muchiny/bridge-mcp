@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::database::DatabaseType;
+use bridge_mcp::domain::use_cases::database::DatabaseType;
 
 fuzz_target!(|data: &str| {
     // Fuzz the DatabaseType parser with arbitrary strings

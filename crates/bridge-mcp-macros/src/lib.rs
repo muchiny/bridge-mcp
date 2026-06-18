@@ -1,4 +1,4 @@
-//! Proc-macro helpers for `mcp-ssh-bridge` tool handlers.
+//! Proc-macro helpers for `bridge-mcp` tool handlers.
 //!
 //! The `#[mcp_tool(...)]` attribute macro attaches to a unit struct
 //! (typically the `XxxHandler` or `XxxTool` empty struct that the
@@ -11,7 +11,7 @@
 //!    annotation kind, and a factory closure that returns
 //!    `Arc<dyn ToolHandler>` for that handler type.
 //!
-//! The parent crate (`mcp-ssh-bridge`) defines `ToolRegistryEntry`
+//! The parent crate (`bridge-mcp`) defines `ToolRegistryEntry`
 //! and `ToolAnnotationKind` and runs `inventory::collect!` so every
 //! `#[mcp_tool]`-annotated type is gathered into a single static
 //! table at compile time. `create_filtered_registry()`,
@@ -21,9 +21,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use mcp_ssh_bridge_macros::mcp_tool;
+//! use bridge_mcp_macros::mcp_tool;
 //! use std::sync::Arc;
-//! use mcp_ssh_bridge::ports::ToolHandler;
+//! use bridge_mcp::ports::ToolHandler;
 //!
 //! #[mcp_tool(name = "ssh_exec", group = "core", annotation = "mutating")]
 //! pub struct SshExecHandler;
@@ -165,13 +165,13 @@ fn expand_mcp_tool(attr: TokenStream, item: TokenStream, wrap_standard: bool) ->
     let name_lit = args.name;
     let group_lit = args.group;
     let annotation_ident = match args.annotation.as_str() {
-        "read_only" => quote! { ::mcp_ssh_bridge::mcp::registry::ToolAnnotationKind::ReadOnly },
-        "mutating" => quote! { ::mcp_ssh_bridge::mcp::registry::ToolAnnotationKind::Mutating },
+        "read_only" => quote! { ::bridge_mcp::mcp::registry::ToolAnnotationKind::ReadOnly },
+        "mutating" => quote! { ::bridge_mcp::mcp::registry::ToolAnnotationKind::Mutating },
         "mutating_idempotent" => {
-            quote! { ::mcp_ssh_bridge::mcp::registry::ToolAnnotationKind::MutatingIdempotent }
+            quote! { ::bridge_mcp::mcp::registry::ToolAnnotationKind::MutatingIdempotent }
         }
         "destructive" => {
-            quote! { ::mcp_ssh_bridge::mcp::registry::ToolAnnotationKind::Destructive }
+            quote! { ::bridge_mcp::mcp::registry::ToolAnnotationKind::Destructive }
         }
         _ => unreachable!(),
     };
@@ -179,21 +179,21 @@ fn expand_mcp_tool(attr: TokenStream, item: TokenStream, wrap_standard: bool) ->
     let factory_expr = if wrap_standard {
         quote! {
             || ::std::sync::Arc::new(
-                ::mcp_ssh_bridge::mcp::standard_tool::StandardToolHandler::<#struct_name>::new()
-            ) as ::std::sync::Arc<dyn ::mcp_ssh_bridge::ports::ToolHandler>
+                ::bridge_mcp::mcp::standard_tool::StandardToolHandler::<#struct_name>::new()
+            ) as ::std::sync::Arc<dyn ::bridge_mcp::ports::ToolHandler>
         }
     } else {
         quote! {
             || ::std::sync::Arc::new(#struct_name)
-                as ::std::sync::Arc<dyn ::mcp_ssh_bridge::ports::ToolHandler>
+                as ::std::sync::Arc<dyn ::bridge_mcp::ports::ToolHandler>
         }
     };
 
     let expanded = quote! {
         #input
 
-        ::mcp_ssh_bridge::inventory::submit! {
-            ::mcp_ssh_bridge::mcp::registry::ToolRegistryEntry {
+        ::bridge_mcp::inventory::submit! {
+            ::bridge_mcp::mcp::registry::ToolRegistryEntry {
                 name: #name_lit,
                 group: #group_lit,
                 annotation_kind: #annotation_ident,

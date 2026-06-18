@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::KubernetesCommandBuilder;
+use bridge_mcp::KubernetesCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // Fuzz the 3 validation methods on KubernetesCommandBuilder.

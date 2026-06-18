@@ -4,16 +4,16 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 
-use mcp_ssh_bridge::McpServer;
-use mcp_ssh_bridge::cli::{
+use bridge_mcp::McpServer;
+use bridge_mcp::cli::{
     Cli, Commands, DaemonAction, DataReductionFlags, run_config_diff, run_describe_tool,
     run_download, run_exec, run_history, run_list_tools, run_status, run_tool, run_upload,
     run_validate,
 };
-use mcp_ssh_bridge::config::{default_config_path, load_config};
-use mcp_ssh_bridge::daemon;
-use mcp_ssh_bridge::error::BridgeError;
-use mcp_ssh_bridge::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};
+use bridge_mcp::config::{default_config_path, load_config};
+use bridge_mcp::daemon;
+use bridge_mcp::error::BridgeError;
+use bridge_mcp::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -64,8 +64,8 @@ async fn main() -> Result<()> {
             bind,
             insecure_bind,
         }) => {
-            use mcp_ssh_bridge::mcp::transport::http as http_transport;
-            use mcp_ssh_bridge::mcp::transport::oauth::OAuthConfig as TransportOAuthConfig;
+            use bridge_mcp::mcp::transport::http as http_transport;
+            use bridge_mcp::mcp::transport::oauth::OAuthConfig as TransportOAuthConfig;
 
             let (server, _audit_task) = McpServer::new((*config).clone());
             let server = Arc::new(server);
@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
             clap_complete::generate(
                 shell,
                 &mut Cli::command(),
-                "mcp-ssh-bridge",
+                "bridge-mcp",
                 &mut std::io::stdout(),
             );
         }

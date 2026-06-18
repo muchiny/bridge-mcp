@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::database::DatabaseCommandBuilder;
+use bridge_mcp::domain::use_cases::database::DatabaseCommandBuilder;
 
 fuzz_target!(|data: &str| {
     // Fuzz the SQL query validator with arbitrary strings

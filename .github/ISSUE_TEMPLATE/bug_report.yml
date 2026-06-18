@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in mcp-ssh-bridge
+description: Report a bug in bridge-mcp
 labels: [bug]
 body:
   - type: markdown
@@ -47,8 +47,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `mcp-ssh-bridge --version`
-      placeholder: "mcp-ssh-bridge 1.7.0"
+      description: Output of `bridge-mcp --version`
+      placeholder: "bridge-mcp 1.7.0"
     validations:
       required: true
 

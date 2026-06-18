@@ -2,8 +2,8 @@
 //!
 //! When running as a daemon, the bridge spawns a single long-lived
 //! [`McpServer`] process that listens on a Unix domain socket at
-//! `$XDG_RUNTIME_DIR/mcp-ssh-bridge.sock` (fallback:
-//! `/tmp/mcp-ssh-bridge-$UID.sock`). CLI invocations detect the socket,
+//! `$XDG_RUNTIME_DIR/bridge-mcp.sock` (fallback:
+//! `/tmp/bridge-mcp-$UID.sock`). CLI invocations detect the socket,
 //! connect, and forward their `tools/call` requests over JSON-RPC. The
 //! shared `McpServer` connection pool keeps SSH handshakes cached
 //! between invocations.
@@ -42,17 +42,17 @@ pub use pidfile::{DaemonStatus, PidFile};
 
 /// Default socket path resolution.
 ///
-/// - `$XDG_RUNTIME_DIR/mcp-ssh-bridge.sock` if `$XDG_RUNTIME_DIR` is set
+/// - `$XDG_RUNTIME_DIR/bridge-mcp.sock` if `$XDG_RUNTIME_DIR` is set
 ///   (standard systemd-logind behavior on Linux, mode `0700`, auto-cleaned
 ///   at logout).
-/// - `/tmp/mcp-ssh-bridge-$UID.sock` as a safe fallback, using the
+/// - `/tmp/bridge-mcp-$UID.sock` as a safe fallback, using the
 ///   effective UID to avoid collisions between users on a shared host.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
     if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR")
         && !runtime.is_empty()
     {
-        return PathBuf::from(runtime).join("mcp-ssh-bridge.sock");
+        return PathBuf::from(runtime).join("bridge-mcp.sock");
     }
     // Fallback: /tmp with UID suffix. Use `unsafe`-free UID lookup via libc
     // through the `rustix` crate if available — otherwise read `$UID` from
@@ -62,9 +62,9 @@ pub fn default_socket_path() -> PathBuf {
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
     if uid > 0 {
-        PathBuf::from(format!("/tmp/mcp-ssh-bridge-{uid}.sock"))
+        PathBuf::from(format!("/tmp/bridge-mcp-{uid}.sock"))
     } else {
-        PathBuf::from("/tmp/mcp-ssh-bridge.sock")
+        PathBuf::from("/tmp/bridge-mcp.sock")
     }
 }
 
@@ -148,7 +148,7 @@ mod tests {
         let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
         // Either the XDG-based default or a fallback with UID suffix.
         assert!(
-            file_name == "mcp-ssh-bridge.sock" || file_name.starts_with("mcp-ssh-bridge-"),
+            file_name == "bridge-mcp.sock" || file_name.starts_with("bridge-mcp-"),
             "unexpected filename: {file_name}"
         );
         assert_eq!(

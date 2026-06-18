@@ -24,17 +24,17 @@
 
 use std::process::Command;
 
-use mcp_ssh_bridge::domain::use_cases::docker::{
+use bridge_mcp::domain::use_cases::docker::{
     DockerCommandBuilder, docker_compose_detect_prefix, docker_detect_prefix,
 };
-use mcp_ssh_bridge::domain::use_cases::firewall::{
+use bridge_mcp::domain::use_cases::firewall::{
     FirewallCommandBuilder, firewall_detect, validate_port,
 };
-use mcp_ssh_bridge::domain::use_cases::kubernetes::{
+use bridge_mcp::domain::use_cases::kubernetes::{
     KubernetesCommandBuilder, helm_detect_prefix, kubectl_detect_prefix,
 };
-use mcp_ssh_bridge::domain::use_cases::package::{PackageCommandBuilder, pkg_detect_prefix};
-use mcp_ssh_bridge::domain::use_cases::templates::TemplateCommandBuilder;
+use bridge_mcp::domain::use_cases::package::{PackageCommandBuilder, pkg_detect_prefix};
+use bridge_mcp::domain::use_cases::templates::TemplateCommandBuilder;
 
 // ---- helpers --------------------------------------------------------------
 

@@ -2,9 +2,9 @@
 //!
 //! Run with: `cargo bench --bench registry_bench`
 
+use bridge_mcp::config::ToolGroupsConfig;
+use bridge_mcp::mcp::registry::create_filtered_registry;
 use criterion::{Criterion, criterion_group, criterion_main};
-use mcp_ssh_bridge::config::ToolGroupsConfig;
-use mcp_ssh_bridge::mcp::registry::create_filtered_registry;
 use std::hint::black_box;
 
 fn benchmark_registry_lookup(c: &mut Criterion) {

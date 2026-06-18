@@ -1,4 +1,4 @@
-//! Basic usage example for MCP SSH Bridge
+//! Basic usage example for Bridge MCP
 //!
 //! This example demonstrates how to:
 //! - Load configuration from the default path
@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use mcp_ssh_bridge::config::{default_config_path, load_config};
-use mcp_ssh_bridge::security::CommandValidator;
+use bridge_mcp::config::{default_config_path, load_config};
+use bridge_mcp::security::CommandValidator;
 
 fn main() {
     // Get the default config path
@@ -49,7 +49,7 @@ fn main() {
         }
         Err(e) => {
             println!("Could not load config: {e}");
-            println!("\nTo use MCP SSH Bridge, create a config file at:");
+            println!("\nTo use Bridge MCP, create a config file at:");
             println!("  {}", config_path.display());
             println!("\nSee config/config.example.yaml for the format.");
         }

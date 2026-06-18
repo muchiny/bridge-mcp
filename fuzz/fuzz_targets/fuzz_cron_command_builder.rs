@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::cron::{
+use bridge_mcp::domain::use_cases::cron::{
     validate_cron_comment, validate_cron_schedule, CronCommandBuilder,
 };
 

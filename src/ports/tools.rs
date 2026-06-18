@@ -398,6 +398,19 @@ pub trait ToolHandler: Send + Sync {
     fn output_kind(&self) -> crate::domain::output_kind::OutputKind {
         crate::domain::output_kind::OutputKind::RawText
     }
+
+    /// Declares the JSON Schema for this tool's `structuredContent`
+    /// return value (MCP 2025-06-18+, JSON Schema 2020-12).
+    ///
+    /// Returning `Some(schema)` advertises the schema in `tools/list`
+    /// under `outputSchema`; clients can then validate or strongly type
+    /// the `structuredContent` a tool returns. The schema SHOULD include
+    /// `"$schema": "https://json-schema.org/draft/2020-12/schema"`.
+    ///
+    /// Default `None` — the tool emits no typed output contract.
+    fn output_schema(&self) -> Option<Value> {
+        None
+    }
 }
 
 #[cfg(test)]

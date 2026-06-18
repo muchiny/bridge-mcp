@@ -13,10 +13,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mcp_ssh_bridge::config::{
+use bridge_mcp::config::{
     AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, OsType, RedactedSecret,
 };
-use mcp_ssh_bridge::ssh::{SshClient, TransferMode, TransferOptions, TransferProgress};
+use bridge_mcp::ssh::{SshClient, TransferMode, TransferOptions, TransferProgress};
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 
@@ -103,7 +103,7 @@ fn to_host_config(config: &SshTestConfig) -> HostConfig {
         os_type: OsType::Linux,
         shell: None,
         retry: None,
-        protocol: mcp_ssh_bridge::config::Protocol::default(),
+        protocol: bridge_mcp::config::Protocol::default(),
 
         #[cfg(feature = "winrm")]
         winrm_use_tls: None,

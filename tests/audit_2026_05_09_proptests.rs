@@ -18,8 +18,8 @@
 // `normalize_for_blacklist_match` function at `src/security/validator.rs:55-63`
 // claims to handle.
 
-use mcp_ssh_bridge::config::SecurityConfig;
-use mcp_ssh_bridge::security::CommandValidator;
+use bridge_mcp::config::SecurityConfig;
+use bridge_mcp::security::CommandValidator;
 use proptest::prelude::*;
 
 proptest! {
@@ -93,7 +93,7 @@ proptest! {
 
 // Property 3 + 4 (runbook validator + apply_template invariants) — DEFERRED.
 // `validate_runbook`, `apply_template`, `Runbook` are not currently part of
-// the public crate API (`mcp_ssh_bridge::domain::runbook` is `pub(crate)`).
+// the public crate API (`bridge_mcp::domain::runbook` is `pub(crate)`).
 // To activate these properties, either expose those symbols behind a
 // `pub use` in `src/lib.rs` for testing, or move the proptest cases into
 // `src/domain/runbook.rs` as inline `#[cfg(test)] mod tests`.

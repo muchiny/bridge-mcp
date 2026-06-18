@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mcp_ssh_bridge::domain::use_cases::windows_registry::{
+use bridge_mcp::domain::use_cases::windows_registry::{
     validate_file_path, validate_registry_name, validate_registry_path,
     WindowsRegistryCommandBuilder,
 };

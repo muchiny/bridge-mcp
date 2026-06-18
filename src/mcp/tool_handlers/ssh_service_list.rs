@@ -93,7 +93,13 @@ impl StandardTool for ServiceListTool {
         output: &str,
         dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
-        let Some(parsed) = super::utils::parse_columnar_output(output) else {
+        // `systemctl list-units --no-legend` prints NO header row and prefixes
+        // non-running units with a status glyph (●/*/×). The space-gutter parser
+        // treated the first service as the header, so `position("unit")` never
+        // matched and every row was dropped. Parse positionally against the known
+        // fixed schema, stripping the glyph. See utils::parse_fixed_columns.
+        const COLS: &[&str] = &["unit", "load", "active", "sub", "description"];
+        let Some(parsed) = super::utils::parse_fixed_columns(output, COLS, false, true) else {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
@@ -109,16 +115,16 @@ impl StandardTool for ServiceListTool {
         let sub_idx = parsed.headers.iter().position(|h| h == "sub");
 
         for row in &parsed.rows {
-            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            let unit = get(unit_idx);
-            if !unit.is_empty() {
-                tbl = tbl.row(json!({
-                    "unit": unit,
-                    "load": get(load_idx),
-                    "active": get(active_idx),
-                    "sub": get(sub_idx),
-                }));
+            if row.iter().all(String::is_empty) {
+                continue;
             }
+            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
+            tbl = tbl.row(json!({
+                "unit": get(unit_idx),
+                "load": get(load_idx),
+                "active": get(active_idx),
+                "sub": get(sub_idx),
+            }));
         }
         tbl = tbl.action(
             "refresh",
@@ -368,7 +374,8 @@ mod tests {
         let ctx = crate::ports::mock::create_test_context_with_mock_executor(
             server1_hosts(),
             mock_output(
-                "UNIT                 LOAD   ACTIVE SUB     DESCRIPTION\nnginx.service        loaded active running Nginx\nsshd.service         loaded active running OpenSSH\n",
+                // `--no-legend` output has NO header row (matches build_command).
+                "nginx.service        loaded active running Nginx\nsshd.service         loaded active running OpenSSH\n",
             ),
         );
         let result = handler
@@ -378,6 +385,50 @@ mod tests {
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         // post_process adds App content
         assert!(result.content.len() >= 2);
-        assert!(result.structured_content.is_some());
+        // End-to-end (the MCP path): structured_content is auto-populated from
+        // the App and MUST carry the parsed rows, not an empty array.
+        let sc = result
+            .structured_content
+            .expect("structured_content present");
+        let rows = sc
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .expect("rows array");
+        assert_eq!(rows.len(), 2, "structured rows empty/wrong: {sc}");
+    }
+
+    #[test]
+    fn test_post_process_no_legend_app_rows_populated() {
+        // Regression: `systemctl list-units --no-legend` has no header, so the
+        // space-gutter parser ate the first service as the header and dropped
+        // every App row. A leading status glyph (`*`/`●`) must be stripped too.
+        let output = "  alsa-restore.service                loaded active     exited       Save/Restore Sound Card State\n\
+* cloudflared.service                 loaded activating auto-restart cloudflared DNS over HTTPS proxy\n\
+  ssh.service                         loaded active     running      OpenBSD Secure Shell server\n";
+        let args: SshServiceListArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = ServiceListTool::post_process(
+            crate::ports::protocol::ToolCallResult::text("raw"),
+            &args,
+            output,
+            &dr,
+        );
+        let serialized = serde_json::to_string(&result).unwrap();
+        // All three services survive into the App — including the first one
+        // (no longer eaten as a header) and the glyph-prefixed one.
+        assert!(
+            serialized.contains("alsa-restore.service"),
+            "first service dropped: {serialized}"
+        );
+        assert!(
+            serialized.contains("cloudflared.service"),
+            "glyph row dropped"
+        );
+        assert!(serialized.contains("ssh.service"));
+        // The `*` status glyph must not leak into the unit name.
+        assert!(
+            !serialized.contains("* cloudflared"),
+            "status glyph leaked into unit name"
+        );
     }
 }
