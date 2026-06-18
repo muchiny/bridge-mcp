@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_post_process_unparseable_returns_original() {
+    fn test_post_process_unparsable_returns_original() {
         let args = minimal_args();
         let dr = crate::domain::data_reduction::DataReductionArgs::default();
         // A single line cannot be parsed as a table (needs >= 2 non-empty lines).

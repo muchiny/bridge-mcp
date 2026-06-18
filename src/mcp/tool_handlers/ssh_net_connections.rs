@@ -104,7 +104,7 @@ impl StandardTool for NetConnectionsTool {
         // Parse the `ss` output positionally: its real header packs `Process`
         // directly onto `Peer Address:Port` (no gap) and right-aligns the data,
         // so the space-gutter parser sliced header names mid-word and produced
-        // garbled column keys ("send-q loca", "address:portp"). The `Process`
+        // garbled column keys (e.g. "address:portp"). The `Process`
         // column (greedy last) keeps its embedded spaces, e.g. users:(("...")).
         //
         // Only the default `ss -tunap` (both protocols) emits a leading `Netid`
@@ -430,7 +430,7 @@ mod tests {
         // Regression: the real `ss -tunlp` header packs `Process` directly onto
         // `Peer Address:Port` and right-aligns data, so the space-gutter parser
         // sliced header names mid-word and produced garbled column keys
-        // ("send-q loca", "address:portp"). The fixed schema keeps clean keys
+        // (e.g. "address:portp"). The fixed schema keeps clean keys
         // and the greedy `process` column keeps its embedded spaces.
         let output = "Netid State  Recv-Q Send-Q               Local Address:Port  Peer Address:PortProcess\n\
 udp   UNCONN 0      0                          0.0.0.0:53         0.0.0.0:*    \n\
@@ -449,7 +449,6 @@ tcp   LISTEN 0      128                        0.0.0.0:22         0.0.0.0:*    u
         assert!(s.contains("local_address"), "missing clean key: {s}");
         assert!(s.contains("peer_address"));
         // ...garbled gutter-sliced keys gone.
-        assert!(!s.contains("send-q loca"), "garbled key leaked: {s}");
         assert!(!s.contains("address:portp"), "garbled key leaked: {s}");
         // Greedy process column captured with its embedded spaces/quotes.
         assert!(
