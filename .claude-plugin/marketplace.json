@@ -11,7 +11,7 @@
       "name": "bridge-mcp",
       "source": "./plugin",
       "description": "Secure SSH bridge for remote server management — 357 tools across 75 groups (Linux, Windows, Docker, Kubernetes, cloud) over one SSH connection. CLI-first for 10-32x token savings vs MCP; MCP transport also available.",
-      "version": "1.18.0",
+      "version": "1.19.0",
       "category": "devops",
       "author": {
         "name": "muchiny",

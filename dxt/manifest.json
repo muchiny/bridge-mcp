@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "bridge-mcp",
   "display_name": "Bridge MCP",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "description": "Execute commands securely on remote servers via SSH. 357 tools for Linux, Windows, Docker, Kubernetes, and more, with progress / elicitation / sampling / logger MCP integration.",
   "author": {
     "name": "muchiny"

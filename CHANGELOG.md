@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-06-19
+
+### Added
+
+- **Claude Code plugin marketplace** — `.claude-plugin/marketplace.json` lets the
+  plugin install via `claude plugin marketplace add muchiny/bridge-mcp` then
+  `claude plugin install bridge-mcp@muchiny`. The `SessionStart` hook now detects a
+  missing `bridge-mcp` binary and prints the `cargo install --git` bootstrap.
+
+### Fixed
+
+- **Structured output for tabular tools** — `ssh_process_list`, `ssh_service_list`
+  and `ssh_net_connections` returned empty or garbled structured rows on real host
+  output: the space-gutter parser merged columns on tight `ps aux` spacing (8-char
+  user + 7-digit PID), lost the header on `systemctl --no-legend`, and sliced the
+  `ss` header mid-word (Process packed onto Peer). These known-schema tools are now
+  parsed positionally via `utils::parse_fixed_columns`; `net_connections` adapts to
+  the `Netid` column only emitted by `ss -tunap`. `docker_ps`/`docker_stats` gain a
+  positional name fallback. Verified live across all variants.
+- Corrected the GitHub handle typo `muchini` → `muchiny` in every repository URL,
+  manifest, and `CODEOWNERS` entry (the unix username `muchini` is unchanged).
+
+### Changed
+
+- Bumped `kube` 3.1→4.0, `k8s-openapi` 0.27→0.28, `tower-http` 0.6→0.7, plus 73
+  semver-compatible lockfile updates (all compile with no code changes).
+- Rebranded user-facing display strings `"MCP SSH Bridge"` → `"Bridge MCP"`.
+- Added +79 targeted unit tests (session capabilities, telemetry, known_hosts,
+  pidfile, and several tool handlers).
+
 ## [1.18.0] - 2026-05-31
 
 ### Added

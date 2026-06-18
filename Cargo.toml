@@ -3,7 +3,7 @@ members = [".", "crates/bridge-mcp-macros"]
 
 [package]
 name = "bridge-mcp"
-version = "1.18.0"
+version = "1.19.0"
 edition = "2024"
 rust-version = "1.94"
 description = "MCP server that bridges Claude Code to air-gapped environments via SSH"
