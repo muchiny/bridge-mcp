@@ -12,6 +12,9 @@ set -euo pipefail
 REPO="muchiny/bridge-mcp"
 BIN="bridge-mcp"
 DEST="${HOME}/.local/bin"
+# When set (e.g. auto-run from the SessionStart hook), never block on a
+# multi-minute `cargo` build — print the manual command instead.
+AUTO="${BRIDGE_MCP_BOOTSTRAP_AUTO:-}"
 
 if command -v "${BIN}" >/dev/null 2>&1; then
   echo "✔ ${BIN} already installed: $("${BIN}" --version 2>/dev/null || echo present)"
@@ -79,6 +82,11 @@ install_cargo() {
 
 if install_prebuilt; then
   echo "✔ Installed ${BIN} -> ${DEST}/${BIN}"
+elif [ -n "${AUTO}" ]; then
+  # Auto mode (hook): no prebuilt for this platform — don't block on a build.
+  echo "ℹ No prebuilt binary for ${os}/${arch}. Build it manually (needs Rust):"
+  echo "  cargo install --git https://github.com/${REPO} --features full"
+  exit 0
 elif install_cargo; then
   echo "✔ Installed ${BIN} via cargo"
 else
