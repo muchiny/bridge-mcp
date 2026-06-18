@@ -1,9 +1,14 @@
 ---
 name: bridge
 description: |
-  Use when the user says "bridge", "remote", "ssh", "run on host", "check host",
-  "configure host", "setup bridge", or wants to manage remote servers via CLI.
-  Provides guided SSH bridge setup, status checks, and tool execution.
+  Use when the user wants to run a command on or manage a remote host over SSH —
+  a server, Raspberry Pi, VM, NAS, network switch, or air-gapped machine.
+  Triggers: "check/manage my server", "run X on host Y", "ssh into / exec on
+  host", "restart nginx on prod", "docker ps / containers on", "kubectl / k8s
+  pods / helm on the cluster", "tail the logs on", "disk usage / cpu / memory /
+  processes on host", "what's listening on port", "is host reachable", "service
+  status", "configure / validate the bridge". Drives the bridge-mcp CLI (357 SSH
+  tools) — guided setup, status checks, and tool execution.
 user-invocable: true
 argument-hint: "[status|config|tool-name] [args...]"
 ---

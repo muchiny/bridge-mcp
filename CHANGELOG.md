@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Plugin 1.19.1** (binary unchanged): enriched the `bridge` and `discover`
+  skill `description` frontmatter with concrete trigger phrases (docker,
+  kubernetes, systemd, logs, metrics, ports, host names) so Claude auto-invokes
+  them more reliably, per Anthropic's skill-authoring guidance. Fixed stale
+  counts in the `discover` skill (75 groups, 9 protocols — dropped the removed
+  ZeroMQ/NATS/MQTT/SNMP/NETCONF stubs).
+
 ## [1.19.0] - 2026-06-19
 
 ### Added

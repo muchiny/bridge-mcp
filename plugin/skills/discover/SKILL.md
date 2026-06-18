@@ -1,8 +1,12 @@
 ---
 name: discover
 description: |
-  Use when the user wants to explore available tools, find tools by category,
-  or learn what bridge-mcp can do. Progressive discovery workflow.
+  Use when the user wants to explore, search, or learn what bridge-mcp can do:
+  "what tools are available", "list bridge tools", "find a tool for X", "show
+  docker / kubernetes / systemd / network tools", "search tools for logs /
+  firewall / packages / databases", "which tool groups exist", "what can the
+  bridge do". Progressive discovery across the 357 tools and 75 groups, with
+  token-efficient describe-tool output.
 user-invocable: true
 argument-hint: "[group-name|search-term]"
 ---
@@ -33,6 +37,6 @@ telling you which params (jq_filter, columns, limit, etc.) apply for token-effic
 
 ## Tips for the user
 
-- **74 groups**: docker, kubernetes, systemd, networking, firewall, packages, users, cron, logs, files, etc.
+- **75 groups**: docker, kubernetes, systemd, networking, firewall, packages, users, cron, logs, files, etc.
 - **Token-efficient**: always use `columns`, `limit`, or `jq_filter` params to reduce output
-- **13 protocols**: SSH, WinRM, Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP, ZeroMQ, NATS, MQTT, SNMP, NETCONF
+- **9 protocols**: SSH, WinRM, PSRP, Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP
