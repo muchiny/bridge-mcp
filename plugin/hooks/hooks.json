@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v bridge-mcp >/dev/null 2>&1 && echo 'Bridge MCP ready. Use /bridge-mcp:bridge to manage remote hosts, or /bridge-mcp:discover to explore 357 tools.' || echo '⚠️  Bridge MCP plugin loaded, but the bridge-mcp binary was not found on PATH. Install it: cargo install --git https://github.com/muchiny/bridge-mcp --features full'"
+            "command": "command -v bridge-mcp >/dev/null 2>&1 && echo 'Bridge MCP ready. Use /bridge-mcp:bridge to manage remote hosts, or /bridge-mcp:discover to explore 357 tools.' || { echo '⚠️  bridge-mcp binary not found — auto-installing (prebuilt download)…'; BRIDGE_MCP_BOOTSTRAP_AUTO=1 bash \"${CLAUDE_PLUGIN_ROOT}/scripts/install.sh\"; }",
+            "timeout": 90
           }
         ]
       }

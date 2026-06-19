@@ -1,9 +1,9 @@
-# MCP SSH Bridge
+# Bridge MCP
 
 <!-- markdownlint-disable MD033 -->
 <div align="center">
 
-<img src="dxt/icon.svg" alt="MCP SSH Bridge" width="96" height="96">
+<img src="dxt/icon.svg" alt="Bridge MCP" width="96" height="96">
 
 [![CI](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/bridge-mcp?style=flat-square&logo=rust)](https://crates.io/crates/bridge-mcp)
@@ -15,7 +15,7 @@
 **A Rust MCP server for secure remote infrastructure management — 357 tools, 9 protocols.**
 
 ```
-Claude Code  ◄──JSON-RPC──►  MCP SSH Bridge  ◄──9 protocols──►  Your Infrastructure
+Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──►  Your Infrastructure
 ```
 
 </div>
@@ -151,6 +151,16 @@ git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp && make release
 
 </details>
 
+> **Claude Code plugin (one command).** Install the plugin from the marketplace — it registers the `/bridge-mcp:bridge` and `/bridge-mcp:discover` skills, the MCP server, and a binary-bootstrap hook:
+>
+> ```bash
+> claude plugin marketplace add muchiny/bridge-mcp
+> claude plugin install bridge-mcp@muchiny
+> cargo install --git https://github.com/muchiny/bridge-mcp --features full   # the binary the plugin drives
+> ```
+>
+> The skills auto-trigger when you mention a remote host, Docker, Kubernetes, services, logs, ports, etc.
+
 ### 2. Configure
 
 ```bash
@@ -200,11 +210,11 @@ bridge-mcp status
 
 ## Architecture
 
-MCP SSH Bridge sits between Claude Code and your infrastructure. It routes commands through 9 protocol adapters with built-in security validation, output sanitization, and audit logging.
+Bridge MCP sits between Claude Code and your infrastructure. It routes commands through 9 protocol adapters with built-in security validation, output sanitization, and audit logging.
 
 ```mermaid
 graph LR
-    CC[Claude Code] -->|JSON-RPC stdio or Unix socket| BR[MCP SSH Bridge]
+    CC[Claude Code] -->|JSON-RPC stdio or Unix socket| BR[Bridge MCP]
 
     BR --> SEC[Security<br/>Validator · Sanitizer · Audit]
     SEC --> ER[Executor Router]
