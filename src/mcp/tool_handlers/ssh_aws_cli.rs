@@ -34,7 +34,7 @@ pub struct SshAwsCliArgs {
 
 impl_common_args!(SshAwsCliArgs);
 
-#[mcp_standard_tool(name = "ssh_aws_cli", group = "cloud", annotation = "read_only")]
+#[mcp_standard_tool(name = "ssh_aws_cli", group = "cloud", annotation = "destructive")]
 pub struct AwsCliTool;
 
 impl StandardTool for AwsCliTool {

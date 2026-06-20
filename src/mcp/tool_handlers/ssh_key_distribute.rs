@@ -30,7 +30,7 @@ impl_common_args!(SshKeyDistributeArgs);
 #[mcp_standard_tool(
     name = "ssh_key_distribute",
     group = "key_management",
-    annotation = "mutating"
+    annotation = "mutating_idempotent"
 )]
 pub struct KeyDistributeTool;
 

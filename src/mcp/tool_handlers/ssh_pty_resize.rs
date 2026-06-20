@@ -30,7 +30,7 @@ pub struct SshPtyResizeArgs {
 
 impl_common_args!(SshPtyResizeArgs);
 
-#[mcp_standard_tool(name = "ssh_pty_resize", group = "pty", annotation = "read_only")]
+#[mcp_standard_tool(name = "ssh_pty_resize", group = "pty", annotation = "mutating")]
 pub struct PtyResizeTool;
 
 impl StandardTool for PtyResizeTool {

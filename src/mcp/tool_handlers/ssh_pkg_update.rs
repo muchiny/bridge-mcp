@@ -29,7 +29,7 @@ pub struct SshPkgUpdateArgs {
 
 impl_common_args!(SshPkgUpdateArgs);
 
-#[mcp_standard_tool(name = "ssh_pkg_update", group = "package", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_pkg_update", group = "package", annotation = "destructive")]
 pub struct PkgUpdateTool;
 
 impl StandardTool for PkgUpdateTool {

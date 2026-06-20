@@ -49,8 +49,6 @@ const ALLOWLIST: &[(&str, ToolAnnotationKind)] = &[
     ("ssh_tunnel_create", ToolAnnotationKind::Mutating),
     ("ssh_tunnel_close", ToolAnnotationKind::Mutating),
     ("ssh_runbook_execute", ToolAnnotationKind::Mutating),
-    ("ssh_backup_restore", ToolAnnotationKind::MutatingIdempotent),
-    ("ssh_db_restore", ToolAnnotationKind::MutatingIdempotent),
     ("ssh_helm_rollback", ToolAnnotationKind::Destructive),
     ("ssh_helm_uninstall", ToolAnnotationKind::Destructive),
     ("ssh_helm_install", ToolAnnotationKind::Mutating),
@@ -142,6 +140,48 @@ fn destructive_suffix_implies_destructive() {
         "tools with destructive-suffixed names but non-destructive annotation: {violations:#?}\n\
          If a tool is reversible/idempotent, add it to ALLOWLIST in \
          tests/annotation_audit.rs with a justification."
+    );
+}
+
+/// Tools whose NAME does not carry a destructive suffix but whose normal
+/// operation can irreversibly destroy/overwrite data or run arbitrary
+/// commands. The suffix-based rules above cannot catch these, so they are
+/// pinned here: each MUST be annotated `destructive` so the
+/// `require_elicitation_on_destructive` gate can confirm before they run.
+/// (Audit 2026-06-20.)
+const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
+    "ssh_exec",            // arbitrary shell (rm -rf, mkfs, dd)
+    "ssh_aws_cli",         // raw AWS passthrough (ec2 terminate, s3 rm, iam delete)
+    "ssh_ansible_adhoc",   // arbitrary module exec (shell -a "rm ...")
+    "ssh_db_restore",      // overwrites the target database
+    "ssh_backup_restore",  // overwrites files at the restore destination
+    "ssh_docker_compose",  // `down` removes containers + networks
+    "ssh_esxi_snapshot",   // `remove_all` permanently deletes snapshots
+    "ssh_ldap_modify",     // LDIF `changetype: delete` removes entries
+    "ssh_vault_write",     // overwrites a secret (KV v1 has no versioning)
+    "ssh_pkg_update",      // full system upgrade can remove/replace packages
+    "ssh_terraform_state", // `rm`/`mv` irreversibly mutate state
+];
+
+#[test]
+fn behavioral_destructive_tools_are_destructive() {
+    use std::collections::HashMap;
+    let kinds: HashMap<&str, ToolAnnotationKind> = inventory::iter::<ToolRegistryEntry>()
+        .map(|e| (e.name, e.annotation_kind))
+        .collect();
+    let mut violations = vec![];
+    for name in BEHAVIORAL_DESTRUCTIVE {
+        match kinds.get(name) {
+            Some(ToolAnnotationKind::Destructive) => {}
+            Some(other) => violations.push(format!("{name}: {other:?} (expected Destructive)")),
+            None => violations.push(format!("{name}: not registered (stale entry?)")),
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "behaviorally-destructive tools must be annotated `destructive` \
+         (edit the handler macro, or remove from BEHAVIORAL_DESTRUCTIVE if \
+         intentionally downgraded): {violations:#?}"
     );
 }
 

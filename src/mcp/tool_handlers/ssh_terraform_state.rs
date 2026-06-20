@@ -22,7 +22,7 @@ impl_common_args!(SshTerraformStateArgs);
 #[mcp_standard_tool(
     name = "ssh_terraform_state",
     group = "terraform",
-    annotation = "read_only"
+    annotation = "destructive"
 )]
 pub struct TerraformStateTool;
 

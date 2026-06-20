@@ -22,7 +22,7 @@ impl_common_args!(SshTerraformInitArgs);
 #[mcp_standard_tool(
     name = "ssh_terraform_init",
     group = "terraform",
-    annotation = "read_only"
+    annotation = "mutating_idempotent"
 )]
 pub struct TerraformInitTool;
 

@@ -27,7 +27,7 @@ pub struct SshBackupRestoreArgs {
 
 impl_common_args!(SshBackupRestoreArgs);
 
-#[mcp_standard_tool(name = "ssh_backup_restore", group = "backup", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_backup_restore", group = "backup", annotation = "destructive")]
 pub struct BackupRestoreTool;
 
 impl StandardTool for BackupRestoreTool {

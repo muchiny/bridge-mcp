@@ -25,7 +25,7 @@ pub struct SshVaultWriteArgs {
 
 impl_common_args!(SshVaultWriteArgs);
 
-#[mcp_standard_tool(name = "ssh_vault_write", group = "vault", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_vault_write", group = "vault", annotation = "destructive")]
 pub struct VaultWriteTool;
 
 impl StandardTool for VaultWriteTool {

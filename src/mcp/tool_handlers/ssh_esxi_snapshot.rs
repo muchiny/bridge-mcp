@@ -36,7 +36,7 @@ pub struct SshEsxiSnapshotArgs {
 
 impl_common_args!(SshEsxiSnapshotArgs);
 
-#[mcp_standard_tool(name = "ssh_esxi_snapshot", group = "esxi", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_esxi_snapshot", group = "esxi", annotation = "destructive")]
 pub struct EsxiSnapshotTool;
 
 impl StandardTool for EsxiSnapshotTool {

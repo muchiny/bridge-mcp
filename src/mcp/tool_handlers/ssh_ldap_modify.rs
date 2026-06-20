@@ -26,7 +26,7 @@ pub struct SshLdapModifyArgs {
 
 impl_common_args!(SshLdapModifyArgs);
 
-#[mcp_standard_tool(name = "ssh_ldap_modify", group = "ldap", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_ldap_modify", group = "ldap", annotation = "destructive")]
 pub struct LdapModifyTool;
 
 impl StandardTool for LdapModifyTool {

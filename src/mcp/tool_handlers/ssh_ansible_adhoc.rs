@@ -41,7 +41,7 @@ pub struct SshAnsibleAdhocArgs {
 
 impl_common_args!(SshAnsibleAdhocArgs);
 
-#[mcp_standard_tool(name = "ssh_ansible_adhoc", group = "ansible", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_ansible_adhoc", group = "ansible", annotation = "destructive")]
 pub struct AnsibleAdhocTool;
 
 impl StandardTool for AnsibleAdhocTool {

@@ -29,7 +29,7 @@ impl_common_args!(SshBenchmarkArgs);
 #[mcp_standard_tool(
     name = "ssh_benchmark",
     group = "performance",
-    annotation = "read_only"
+    annotation = "mutating"
 )]
 pub struct BenchmarkTool;
 

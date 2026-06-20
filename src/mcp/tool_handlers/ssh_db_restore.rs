@@ -39,7 +39,7 @@ pub struct SshDbRestoreArgs {
 
 impl_common_args!(SshDbRestoreArgs);
 
-#[mcp_standard_tool(name = "ssh_db_restore", group = "database", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_db_restore", group = "database", annotation = "destructive")]
 pub struct DbRestoreTool;
 
 impl StandardTool for DbRestoreTool {
