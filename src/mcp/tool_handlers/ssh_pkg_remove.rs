@@ -16,7 +16,8 @@ pub struct SshPkgRemoveArgs {
     /// Target host name from configuration.
     host: String,
     /// Package name to remove.
-    name: String,
+    #[serde(alias = "name")]
+    package: String,
     /// Override auto-detected package manager (apt/dnf/yum/apk).
     pkg_manager: Option<String>,
     /// Override default command timeout in seconds.
@@ -48,7 +49,7 @@ impl StandardTool for PkgRemoveTool {
                         "type": "string",
                         "description": "Host alias from config.yaml (use ssh_status to list available hosts)"
                     },
-                    "name": {
+                    "package": {
                         "type": "string",
                         "description": "Package name to remove"
                     },
@@ -71,20 +72,20 @@ impl StandardTool for PkgRemoveTool {
                         "description": "Save full output to a local file path"
                     }
                 },
-                "required": ["host", "name"]
+                "required": ["host", "package"]
             }"#;
 
     const OS_GUARD: Option<OsType> = Some(OsType::Linux);
 
     fn validate(args: &SshPkgRemoveArgs, _host_config: &HostConfig) -> Result<()> {
-        validate_package_name(&args.name)?;
+        validate_package_name(&args.package)?;
         Ok(())
     }
 
     fn build_command(args: &SshPkgRemoveArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(PackageCommandBuilder::build_remove_command(
             args.pkg_manager.as_deref(),
-            &args.name,
+            &args.package,
         ))
     }
 }
@@ -136,7 +137,7 @@ mod tests {
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         let required = schema_json["required"].as_array().unwrap();
         assert!(required.contains(&json!("host")));
-        assert!(required.contains(&json!("name")));
+        assert!(required.contains(&json!("package")));
     }
 
     #[test]
@@ -151,7 +152,7 @@ mod tests {
         });
         let args: SshPkgRemoveArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
-        assert_eq!(args.name, "nginx");
+        assert_eq!(args.package, "nginx");
         assert_eq!(args.pkg_manager.as_deref(), Some("apt"));
         assert_eq!(args.timeout_seconds, Some(120));
         assert_eq!(args.max_output, Some(5000));
@@ -163,7 +164,7 @@ mod tests {
         let json = json!({"host": "server1", "name": "curl"});
         let args: SshPkgRemoveArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
-        assert_eq!(args.name, "curl");
+        assert_eq!(args.package, "curl");
         assert!(args.pkg_manager.is_none());
         assert!(args.timeout_seconds.is_none());
         assert!(args.max_output.is_none());

@@ -16,7 +16,8 @@ use crate::ports::protocol::ToolCallResult;
 #[derive(Debug, Deserialize)]
 pub struct SshHypervVmStopArgs {
     host: String,
-    name: String,
+    #[serde(alias = "name")]
+    vm_name: String,
     #[serde(default)]
     force: bool,
     #[serde(default)]
@@ -46,19 +47,19 @@ impl StandardTool for HypervVmStopTool {
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
-        "required": ["host", "name"],
+        "required": ["host", "vm_name"],
         "properties": {
             "host": {
                 "type": "string",
                 "description": "Host alias from config.yaml — must be a Windows host (use ssh_status to list hosts)"
             },
-            "name": {
+            "vm_name": {
                 "type": "string",
                 "description": "Name of the Hyper-V virtual machine to stop"
             },
             "force": {
                 "type": "boolean",
-                "description": "Force immediate power-off (TurnOff) instead of graceful shutdown (default: false)"
+                "description": "Force immediate power-off via TurnOff — equivalent to pulling the power cord; in-flight writes are not flushed and running workloads may lose data. Default false (graceful shutdown via the integration services)."
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -77,11 +78,11 @@ impl StandardTool for HypervVmStopTool {
     const OS_GUARD: Option<OsType> = Some(OsType::Windows);
 
     fn build_command(args: &SshHypervVmStopArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(HyperVCommandBuilder::vm_stop(&args.name, args.force))
+        Ok(HyperVCommandBuilder::vm_stop(&args.vm_name, args.force))
     }
 
     fn validate(args: &SshHypervVmStopArgs, _host_config: &HostConfig) -> Result<()> {
-        validate_vm_name(&args.name)?;
+        validate_vm_name(&args.vm_name)?;
         Ok(())
     }
 
@@ -93,7 +94,7 @@ impl StandardTool for HypervVmStopTool {
     async fn pre_execute(args: &Self::Args, ctx: &ToolContext) -> Result<Option<ToolCallResult>> {
         let summary = format!(
             "Stop Hyper-V VM `{}` (force=`{}`) on host `{}`",
-            args.name, args.force, args.host,
+            args.vm_name, args.force, args.host,
         );
         match ctx.elicit_confirm(Self::NAME, &summary).await? {
             Some(false) => Ok(Some(ToolCallResult::error(
@@ -150,7 +151,7 @@ mod tests {
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         let required = schema_json["required"].as_array().unwrap();
         assert!(required.contains(&json!("host")));
-        assert!(required.contains(&json!("name")));
+        assert!(required.contains(&json!("vm_name")));
     }
 
     #[test]
@@ -164,7 +165,7 @@ mod tests {
         });
         let args: SshHypervVmStopArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "winhost");
-        assert_eq!(args.name, "MyVM");
+        assert_eq!(args.vm_name, "MyVM");
         assert!(args.force);
         assert_eq!(args.timeout_seconds, Some(30));
         assert_eq!(args.max_output, Some(5000));
@@ -175,7 +176,7 @@ mod tests {
         let json = json!({"host": "winhost", "name": "MyVM"});
         let args: SshHypervVmStopArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "winhost");
-        assert_eq!(args.name, "MyVM");
+        assert_eq!(args.vm_name, "MyVM");
         assert!(!args.force);
         assert!(args.timeout_seconds.is_none());
         assert!(args.max_output.is_none());
