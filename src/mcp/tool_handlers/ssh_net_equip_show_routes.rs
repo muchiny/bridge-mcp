@@ -37,7 +37,11 @@ impl StandardTool for NetEquipShowRoutesTool {
 
     const NAME: &'static str = "ssh_net_equip_show_routes";
 
-    const DESCRIPTION: &'static str = "Show routing table on a network device.";
+    const DESCRIPTION: &'static str = "Show the IP routing table on a network device \
+        (router/switch/firewall). Commands per vendor: Cisco/generic → `show ip route`; \
+        Juniper → `show route`; MikroTik → `/ip route print`; \
+        Fortinet → `get router info routing-table all`. Use ssh_net_equip_show_arp for \
+        MAC-to-IP mappings, ssh_net_equip_show_interfaces for interface status.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -48,7 +52,8 @@ impl StandardTool for NetEquipShowRoutesTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "timeout_seconds": {
                 "type": "integer",

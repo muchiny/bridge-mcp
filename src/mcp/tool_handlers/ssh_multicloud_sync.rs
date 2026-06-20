@@ -39,9 +39,15 @@ impl StandardTool for MulticloudSyncTool {
 
     const NAME: &'static str = "ssh_multicloud_sync";
 
-    const DESCRIPTION: &'static str = "Sync inventory from all cloud providers via a remote host. \
-        Queries AWS EC2, GCP Compute Engine, and Azure VMs simultaneously to build \
-        a unified multi-cloud inventory snapshot.";
+    const DESCRIPTION: &'static str = "Collect a unified inventory snapshot from all three cloud \
+        providers (AWS, GCP, Azure) in a single call via a remote host. Runs 'aws ec2 \
+        describe-instances', 'gcloud compute instances list', and 'az vm list' sequentially \
+        and labels each section ('=== AWS ===', '=== GCP ===', '=== Azure ==='). Requires AWS \
+        CLI, gcloud SDK, and Azure CLI to be installed on the remote host; missing CLIs produce \
+        per-section errors without aborting the others. Use save_output to persist the full \
+        combined output before filtering. For a single provider use ssh_multicloud_list instead \
+        (takes a required 'provider' param). To see count or config discrepancies between two \
+        providers use ssh_multicloud_compare.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

@@ -39,8 +39,12 @@ impl StandardTool for SelinuxBooleansTool {
 
     const NAME: &'static str = "ssh_selinux_booleans";
 
-    const DESCRIPTION: &'static str = "List or set SELinux booleans on a remote host. Without \
-        arguments lists all booleans. Specify name to query one, or name and value to set.";
+    const DESCRIPTION: &'static str = "List or set SELinux booleans (policy tunables) on a remote \
+        host. Omit both name and value to list all booleans (getsebool -a). Supply name alone \
+        to query a single boolean. Supply name and value (true/false) to persistently toggle \
+        one boolean (setsebool -P). Use ssh_selinux_status first to confirm SELinux is enabled \
+        on the host. This tool is SELinux-specific; AppArmor hosts have no equivalent (use \
+        ssh_apparmor_profiles to inspect AppArmor enforcement state).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,11 +56,11 @@ impl StandardTool for SelinuxBooleansTool {
             },
             "name": {
                 "type": "string",
-                "description": "SELinux boolean name to query or set (e.g., httpd_can_network_connect)"
+                "description": "SELinux boolean name to query or set (e.g., httpd_can_network_connect). Omit to list all booleans."
             },
             "value": {
                 "type": "boolean",
-                "description": "Value to set the boolean to (requires name to be specified)"
+                "description": "New value for the boolean (true=on, false=off). Requires 'name' to be specified. Setting is persistent across reboots (setsebool -P)."
             },
             "timeout_seconds": {
                 "type": "integer",

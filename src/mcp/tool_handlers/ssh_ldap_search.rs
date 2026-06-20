@@ -46,9 +46,12 @@ impl StandardTool for LdapSearchTool {
     const DESCRIPTION: &'static str = "Search an LDAP directory on a remote host using \
         ldapsearch (-x -LLL). Specify base DN and optional filter, attributes, and scope. \
         Output is LDIF (attribute: value blocks); use the 'attributes' param to reduce output \
-        rather than columns/limit (which are meaningless on LDIF). Authentication uses the \
-        remote host's system ldap.conf / SASL configuration; no credentials are passed on the \
-        command line. For write operations use ssh_ldap_add or ssh_ldap_modify.";
+        rather than columns/limit (which are meaningless on LDIF). For a specific user lookup \
+        use ssh_ldap_user_info; for group membership use ssh_ldap_group_members; for write \
+        operations use ssh_ldap_add or ssh_ldap_modify. On Windows Active Directory hosts use \
+        the ssh_ad_* tools instead (PowerShell-based). Authentication uses the remote host's \
+        system ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no credentials are \
+        passed on the command line.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -71,7 +74,8 @@ impl StandardTool for LdapSearchTool {
             },
             "scope": {
                 "type": "string",
-                "description": "Search scope: base, one, sub (default: sub)"
+                "description": "Search scope (default: sub when omitted)",
+                "enum": ["base", "one", "sub"]
             },
             "uri": {
                 "type": "string",

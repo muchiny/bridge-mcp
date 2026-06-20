@@ -34,8 +34,12 @@ impl StandardTool for PodmanComposeTool {
 
     const NAME: &'static str = "ssh_podman_compose";
 
-    const DESCRIPTION: &'static str = "Run podman compose commands on a remote host. Specify \
-        action like 'up -d', 'down', 'ps'.";
+    const DESCRIPTION: &'static str = "Run `podman compose` commands on a remote host to manage \
+        multi-container stacks. Pass the subcommand as action (e.g. 'up -d', 'down', 'ps', \
+        'logs', 'restart', 'pull'). Specify file if the compose file is not the default \
+        (compose.yaml or docker-compose.yml in the working directory). For viewing individual \
+        container logs use ssh_podman_logs. For Docker Compose stacks use ssh_docker_compose \
+        instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -50,7 +54,7 @@ impl StandardTool for PodmanComposeTool {
             },
             "file": {
                 "type": "string",
-                "description": "Path to compose file (default: docker-compose.yml in current directory)"
+                "description": "Path to compose file (default: compose.yaml or docker-compose.yml in current directory)"
             },
             "timeout_seconds": {
                 "type": "integer",

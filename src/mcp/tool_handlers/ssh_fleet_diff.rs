@@ -38,9 +38,12 @@ impl StandardTool for FleetDiffTool {
 
     const NAME: &'static str = "ssh_fleet_diff";
 
-    const DESCRIPTION: &'static str = "Execute a command on a host and return its output for \
-        fleet-wide comparison. Run on multiple hosts and compare outputs to detect configuration \
-        drift.";
+    const DESCRIPTION: &'static str = "Execute a READ-ONLY command on ONE host and return its \
+        raw output so you can compare it against other hosts to detect configuration drift. Call \
+        this tool once per host with the same command, then diff the outputs yourself. For \
+        structured drift detection using saved snapshots use ssh_env_snapshot / ssh_env_diff \
+        instead. For mutating operations use ssh_canary_exec (first host) or ssh_rolling_exec \
+        (each subsequent host) instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -51,7 +54,7 @@ impl StandardTool for FleetDiffTool {
             },
             "command": {
                 "type": "string",
-                "description": "The command to execute (output will be compared across hosts)"
+                "description": "Read-only command to run (e.g. 'cat /etc/os-release', 'uname -a', 'systemctl list-units'). Use the same command on every host call so outputs are comparable."
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -66,7 +69,7 @@ impl StandardTool for FleetDiffTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to local file"
+                "description": "Save full output to a file on the remote host (absolute path)"
             }
         },
         "required": ["host", "command"]

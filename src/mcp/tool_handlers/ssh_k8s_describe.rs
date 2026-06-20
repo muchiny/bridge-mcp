@@ -43,12 +43,12 @@ impl StandardTool for K8sDescribeTool {
     const NAME: &'static str = "ssh_k8s_describe";
 
     const DESCRIPTION: &'static str = "Describe a Kubernetes resource in detail via kubectl on a remote host. Use \
-        ssh_k8s_get first to find resource names. Returns unstructured prose text (key-value \
-        format) including events, conditions, status, labels, annotations, and full \
-        specification. Output is not JSON and cannot be filtered with jq_filter or columns; \
-        use save_output for large resources or max_output to truncate. Useful for debugging \
-        pod failures or understanding resource configuration. Auto-detects kubectl binary \
-        (k8s, k3s, microk8s).";
+        ssh_k8s_get first to find resource names; use this tool when you need events, \
+        conditions, status, labels, annotations, and full specification in one view. Unlike \
+        ssh_k8s_get with output='json', the output is unstructured prose text and cannot be \
+        filtered with jq_filter or columns. Use save_output for large resources or max_output \
+        to truncate. Particularly useful for debugging pod failures. Auto-detects kubectl \
+        binary (k8s, k3s, microk8s).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

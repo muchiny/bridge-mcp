@@ -36,9 +36,13 @@ impl StandardTool for ServiceStopTool {
 
     const NAME: &'static str = "ssh_service_stop";
 
-    const DESCRIPTION: &'static str = "Stop a systemd service on a remote host. Prefer this over ssh_exec as it validates \
-        the service name. Requires root/sudo permissions. Check result with \
-        ssh_service_status afterward.";
+    const DESCRIPTION: &'static str = "Stop a systemd service on a remote host (systemctl stop). Prefer this over \
+        ssh_exec as it validates the service name. Requires root/sudo permissions. \
+        This is a destructive operation — a confirmation elicitation is sent before \
+        executing when the client supports it. This only stops the service for the \
+        current session; to also disable it on boot use ssh_service_disable. \
+        Check result with ssh_service_status afterward. \
+        For Windows hosts use ssh_win_service_stop instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

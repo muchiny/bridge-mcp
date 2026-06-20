@@ -98,7 +98,7 @@ impl SshMetricsMultiHandler {
                     "type": "string",
                     "enum": ["cpu", "memory", "disk", "network", "load"]
                 },
-                "description": "Array of metric types to collect",
+                "description": "One or more metric types to collect: cpu (usage + cores), memory (total/used/free bytes), disk (filesystem usage via df), network (interface rx/tx bytes), load (1/5/15 min averages + uptime)",
                 "minItems": 1
             },
             "timeout_seconds": {
@@ -143,9 +143,12 @@ impl ToolHandler for SshMetricsMultiHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Collect system metrics from multiple hosts in parallel. Returns JSON with per-host \
-         results including cpu, memory, disk, network, and load metrics. Use ssh_status first \
-         to discover available host aliases. For a single host, prefer ssh_metrics instead."
+        "Collect system metrics from multiple Linux hosts in parallel (reads /proc/* — \
+         Linux only). Returns JSON with per-host results including cpu, memory, disk, \
+         network, and load metrics; top-level fields: total_hosts, succeeded, failed, \
+         results[]. Set fail_fast=true to abort remaining hosts on first failure. Use \
+         ssh_status first to discover available host aliases. For a single host, prefer \
+         ssh_metrics instead. For Windows hosts use ssh_win_perf_overview instead."
     }
 
     fn schema(&self) -> ToolSchema {

@@ -53,7 +53,7 @@ impl StandardTool for HypervVmInfoTool {
             },
             "vm_name": {
                 "type": "string",
-                "description": "Name of the Hyper-V virtual machine"
+                "description": "Name of the Hyper-V virtual machine (alias: \"name\"). Use ssh_hyperv_vm_list to discover names."
             },
             "timeout_seconds": {
                 "type": "integer",

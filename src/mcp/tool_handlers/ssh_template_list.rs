@@ -40,9 +40,12 @@ impl StandardTool for TemplateListTool {
 
     const NAME: &'static str = "ssh_template_list";
 
-    const DESCRIPTION: &'static str = "List available configuration templates for common \
-        services (nginx, apache, postgresql, mysql, redis). Shows built-in template names \
-        that can be viewed with ssh_template_show and deployed with ssh_template_apply.";
+    const DESCRIPTION: &'static str = "List the six built-in service configuration templates \
+        available on a Linux host: nginx-reverse-proxy, nginx-static, apache-vhost, \
+        postgresql-config, mysql-config, redis-config. Inspect a template's content with \
+        ssh_template_show, preview changes with ssh_template_diff, then deploy with \
+        ssh_template_apply. For envsubst-style substitution on an existing remote file use \
+        ssh_file_template instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

@@ -53,7 +53,7 @@ impl StandardTool for MysqlQueryTool {
             },
             "query": {
                 "type": "string",
-                "description": "SQL query to execute"
+                "description": "SQL statement to execute (any valid SQL: SELECT, INSERT, UPDATE, DELETE, DROP, ALTER, SHOW, etc.)"
             },
             "database": {
                 "type": "string",

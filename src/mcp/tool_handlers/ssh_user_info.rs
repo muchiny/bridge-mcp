@@ -41,8 +41,11 @@ impl StandardTool for UserInfoTool {
 
     const NAME: &'static str = "ssh_user_info";
 
-    const DESCRIPTION: &'static str = "Get detailed information about a user on a remote host \
-        including UID, GID, groups, shell, home directory, and last login.";
+    const DESCRIPTION: &'static str = "Get detailed information about a single user on a remote \
+        Linux host: runs id, getent passwd, lastlog, and groups to show UID, GID, supplementary \
+        groups, shell, home directory, and last login. Use ssh_user_list first to discover valid \
+        usernames. For a quick multi-user overview prefer ssh_user_list. For Active Directory \
+        accounts on Windows hosts use ssh_ad_user_info instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

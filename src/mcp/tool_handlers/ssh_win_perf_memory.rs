@@ -33,9 +33,10 @@ impl StandardTool for WinPerfMemoryTool {
 
     const NAME: &'static str = "ssh_win_perf_memory";
 
-    const DESCRIPTION: &'static str = "Get Windows memory performance counters showing available memory and committed bytes. \
-        Use for diagnosing memory pressure on a Windows host. For a combined system overview, \
-        use ssh_win_perf_overview instead.";
+    const DESCRIPTION: &'static str = "Get Windows memory performance counters: available MBytes \
+        (\\\\Memory\\\\Available MBytes) and committed bytes in use percentage \
+        (\\\\Memory\\\\% Committed Bytes In Use). Use for diagnosing memory pressure on a Windows host. \
+        For a combined CPU+memory+disk overview in one call, use ssh_win_perf_overview instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

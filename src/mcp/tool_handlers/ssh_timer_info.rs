@@ -36,8 +36,13 @@ impl StandardTool for TimerInfoTool {
 
     const NAME: &'static str = "ssh_timer_info";
 
-    const DESCRIPTION: &'static str = "Show detailed information about a systemd timer on a \
-        remote host including calendar schedule, next/last trigger times, and configuration.";
+    const DESCRIPTION: &'static str = "Show detailed information about a specific systemd timer \
+        on a remote host (Linux/systemd only). Runs both `systemctl show` and `systemctl status` \
+        to report the timer's OnCalendar/OnBootSec schedule expression, next and last trigger \
+        timestamps, associated service unit, and active state. Discover available timer names with \
+        ssh_timer_list first. To enable or disable the timer use ssh_timer_enable / \
+        ssh_timer_disable; to fire it immediately use ssh_timer_trigger. On Windows hosts use \
+        ssh_schtask_info instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -61,7 +66,7 @@ impl StandardTool for TimerInfoTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

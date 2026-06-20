@@ -40,8 +40,9 @@ impl StandardTool for K8sScaleTool {
 
     const DESCRIPTION: &'static str = "Scale a Kubernetes deployment, statefulset, or replicaset via kubectl on a remote \
         host. Changes the replica count (set to 0 to scale down completely). Resource format: \
-        'deployment/myapp'. Use ssh_k8s_get first to check current replicas. Auto-detects \
-        kubectl binary (k8s, k3s, microk8s).";
+        'deployment/myapp'. Use ssh_k8s_get first to check current replicas. To do a rolling \
+        restart without changing replica count, use ssh_k8s_rollout with action='restart' \
+        instead. Auto-detects kubectl binary (k8s, k3s, microk8s).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -39,9 +39,12 @@ impl StandardTool for NetEquipShowRunTool {
 
     const NAME: &'static str = "ssh_net_equip_show_run";
 
-    const DESCRIPTION: &'static str = "Show running configuration on a network device \
-        (router/switch/firewall). Supports Cisco IOS, Juniper JunOS, MikroTik RouterOS, \
-        and FortiOS.";
+    const DESCRIPTION: &'static str = "Retrieve the full running configuration from a network \
+        device (router/switch/firewall). Use this tool to audit or diff the active config. \
+        Commands per vendor: Cisco → `show running-config` (with optional `section` filter); \
+        Juniper → `show configuration | display set`; MikroTik → `/export`; \
+        Fortinet → `show full-configuration`; generic → `show running-config`. \
+        To apply changes use ssh_net_equip_config; to persist to NVRAM/flash use ssh_net_equip_save.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,11 +55,12 @@ impl StandardTool for NetEquipShowRunTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "section": {
                 "type": "string",
-                "description": "Filter configuration to a specific section (Cisco IOS only, e.g. 'interface')"
+                "description": "Filter configuration to a specific section — Cisco IOS only (e.g. 'interface', 'bgp'). Appended as `| section <value>`. Ignored for other vendors."
             },
             "timeout_seconds": {
                 "type": "integer",

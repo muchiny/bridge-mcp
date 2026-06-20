@@ -38,8 +38,10 @@ impl StandardTool for WinProcessKillTool {
 
     const NAME: &'static str = "ssh_win_process_kill";
 
-    const DESCRIPTION: &'static str = "Kill a process on a Windows host by PID. Use the force flag to forcefully terminate a \
-        process that does not respond to a graceful stop.";
+    const DESCRIPTION: &'static str = "Kill a process on a Windows host by PID via PowerShell Stop-Process. Default is a \
+        graceful stop; set force=true to forcefully terminate a process that does not respond. \
+        Use ssh_win_process_list or ssh_win_process_by_name first to find the target PID. \
+        For Linux hosts use ssh_process_kill instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -65,6 +67,10 @@ impl StandardTool for WinProcessKillTool {
             "max_output": {
                 "type": "integer",
                 "description": "Maximum output characters (overrides default)"
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to this file path on the bridge server"
             }
         }
     }"#;

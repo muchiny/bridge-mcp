@@ -37,7 +37,11 @@ impl StandardTool for NetEquipShowArpTool {
 
     const NAME: &'static str = "ssh_net_equip_show_arp";
 
-    const DESCRIPTION: &'static str = "Show ARP table on a network device.";
+    const DESCRIPTION: &'static str = "Show the ARP table (IP-to-MAC mappings) on a network \
+        device (router/switch/firewall). Commands per vendor: Cisco/generic → `show arp`; \
+        Juniper → `show arp no-resolve`; MikroTik → `/ip arp print`; \
+        Fortinet → `get system arp`. Use ssh_net_equip_show_routes for the routing table, \
+        ssh_net_equip_show_interfaces for interface status.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -48,7 +52,8 @@ impl StandardTool for NetEquipShowArpTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "timeout_seconds": {
                 "type": "integer",

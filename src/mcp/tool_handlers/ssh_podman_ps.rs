@@ -37,8 +37,11 @@ impl StandardTool for PodmanPsTool {
 
     const NAME: &'static str = "ssh_podman_ps";
 
-    const DESCRIPTION: &'static str = "List Podman containers on a remote host. Set all=true \
-        to include stopped containers.";
+    const DESCRIPTION: &'static str = "List Podman containers on a remote host (runs `podman ps`). \
+        Start here to discover container names and IDs before calling ssh_podman_logs, \
+        ssh_podman_exec, or ssh_podman_inspect. Set all=true to include stopped containers. \
+        Use filter to narrow by status or name (e.g. 'status=running', 'name=myapp'). \
+        For Docker containers use ssh_docker_ps instead. For image inventory use ssh_podman_images.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

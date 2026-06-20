@@ -36,8 +36,9 @@ impl StandardTool for WinNetPingTool {
 
     const NAME: &'static str = "ssh_win_net_ping";
 
-    const DESCRIPTION: &'static str = "Ping a host from a Windows machine using Test-Connection. Returns round-trip time \
-        statistics.";
+    const DESCRIPTION: &'static str = "Ping a target host from a Windows machine using PowerShell Test-Connection; \
+        returns round-trip time statistics. Windows-only — for Linux hosts use ssh_net_ping instead. \
+        The target param is the destination to ping; host is the Windows machine that sends the probe.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -49,7 +50,7 @@ impl StandardTool for WinNetPingTool {
             },
             "target": {
                 "type": "string",
-                "description": "Hostname or IP address to ping"
+                "description": "Hostname or IP address to ping; must contain only alphanumeric, hyphen, dot, colon, or bracket characters (no spaces or shell metacharacters)"
             },
             "count": {
                 "type": "integer",

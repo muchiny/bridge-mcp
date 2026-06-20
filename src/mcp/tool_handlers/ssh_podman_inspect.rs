@@ -36,8 +36,11 @@ impl StandardTool for PodmanInspectTool {
 
     const NAME: &'static str = "ssh_podman_inspect";
 
-    const DESCRIPTION: &'static str = "Inspect a Podman container or image on a remote host. \
-        Returns detailed JSON configuration.";
+    const DESCRIPTION: &'static str = "Inspect a Podman container or image on a remote host \
+        (runs `podman inspect`), returning detailed JSON configuration including mounts, \
+        environment variables, network settings, and image metadata. Discover container names \
+        with ssh_podman_ps and image names with ssh_podman_images before calling this. \
+        For Docker containers or images use ssh_docker_inspect instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -48,7 +51,7 @@ impl StandardTool for PodmanInspectTool {
             },
             "target": {
                 "type": "string",
-                "description": "Container or image name/ID to inspect"
+                "description": "Container or image name/ID to inspect (discover container names with ssh_podman_ps, image names with ssh_podman_images)"
             },
             "timeout_seconds": {
                 "type": "integer",

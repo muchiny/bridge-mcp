@@ -38,8 +38,10 @@ impl StandardTool for WinNetConnectionsTool {
 
     const NAME: &'static str = "ssh_win_net_connections";
 
-    const DESCRIPTION: &'static str = "List TCP connections on a Windows host with optional state filter showing \
-        local/remote addresses, ports, and owning process.";
+    const DESCRIPTION: &'static str = "List TCP connections on a Windows host (Get-NetTCPConnection) with optional state \
+        filter, showing local/remote addresses, ports, and connection state. \
+        Windows-only — for Linux hosts use ssh_net_connections instead. \
+        Use the state param to narrow results (e.g. Established, Listen, TimeWait, CloseWait).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -51,7 +53,7 @@ impl StandardTool for WinNetConnectionsTool {
             },
             "state": {
                 "type": "string",
-                "description": "Filter by connection state (e.g. Established, Listen, TimeWait)"
+                "description": "Filter by TCP connection state passed to Get-NetTCPConnection -State (e.g. Established, Listen, TimeWait, CloseWait, SynSent, SynReceived, FinWait1, FinWait2, Closed, Bound)"
             },
             "timeout_seconds": {
                 "type": "integer",

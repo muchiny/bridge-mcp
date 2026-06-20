@@ -40,9 +40,10 @@ impl StandardTool for NetDnsTool {
 
     const NAME: &'static str = "ssh_net_dns";
 
-    const DESCRIPTION: &'static str = "Perform DNS lookups from a remote host. Prefer this over ssh_exec as it validates \
-        record types and server parameters. Query A, AAAA, MX, TXT, CNAME, NS, and other \
-        record types. Optionally specify a DNS server.";
+    const DESCRIPTION: &'static str = "Perform DNS lookups from a Linux host using `dig`. \
+        Supports any record type (A, AAAA, MX, TXT, CNAME, NS, SOA, PTR, SRV) and optionally \
+        a custom DNS server. Use `short=true` for a concise answer-only response. \
+        For Windows hosts use ssh_win_net_dns instead.";
 
     const SCHEMA: &'static str = r#"{
     "type": "object",

@@ -38,9 +38,11 @@ impl StandardTool for PkgRemoveTool {
 
     const NAME: &'static str = "ssh_pkg_remove";
 
-    const DESCRIPTION: &'static str = "Remove a package from a remote host. Prefer this over ssh_exec as it auto-detects the \
-        package manager (apt/dnf/yum/apk) and handles non-interactive mode. Requires \
-        root/sudo permissions. Use ssh_pkg_list first to verify the package is installed.";
+    const DESCRIPTION: &'static str = "Remove (uninstall) a package from a remote Linux host. Prefer this over ssh_exec as \
+        it auto-detects the package manager (apt/dnf/yum/apk) and runs non-interactively. \
+        Requires root or sudo permissions. Use ssh_pkg_list first to confirm the package is \
+        installed and get the exact name. To install a package use ssh_pkg_install; to upgrade \
+        use ssh_pkg_update.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -51,11 +53,11 @@ impl StandardTool for PkgRemoveTool {
                     },
                     "package": {
                         "type": "string",
-                        "description": "Package name to remove"
+                        "description": "Package name to remove (alias: 'name' is also accepted)"
                     },
                     "pkg_manager": {
                         "type": "string",
-                        "description": "Override auto-detected package manager (apt/dnf/yum/apk)"
+                        "description": "Override auto-detected package manager; common values: apt, dnf, yum, apk; full binary paths like /usr/bin/apt are also accepted"
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -69,7 +71,7 @@ impl StandardTool for PkgRemoveTool {
                     },
                     "save_output": {
                         "type": "string",
-                        "description": "Save full output to a local file path"
+                        "description": "Save full output to a file path on the remote host (untruncated)"
                     }
                 },
                 "required": ["host", "package"]

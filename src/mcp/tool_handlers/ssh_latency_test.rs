@@ -42,9 +42,11 @@ impl StandardTool for LatencyTestTool {
 
     const NAME: &'static str = "ssh_latency_test";
 
-    const DESCRIPTION: &'static str = "Test network latency from a remote host to a target. \
-        Uses ping or mtr to measure round-trip time, packet loss, and routing. Count is capped \
-        at 100 packets.";
+    const DESCRIPTION: &'static str = "Test network latency from a Linux host to a target \
+        hostname or IP. Uses ping (default) or mtr for round-trip time, packet loss, and hop \
+        routing. Count is capped at 100 packets. For CPU/syscall profiling use ssh_perf_trace; \
+        for disk I/O tracing use ssh_io_trace; for throughput benchmarks use ssh_benchmark. \
+        For Windows network diagnostics use ssh_win_net_ping instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -56,7 +58,7 @@ impl StandardTool for LatencyTestTool {
             },
             "target": {
                 "type": "string",
-                "description": "Target hostname or IP address to test latency against"
+                "description": "Target hostname or IP address (IPv4, IPv6, or DNS name). Only alphanumeric, dots, hyphens, colons, and underscores are allowed — no shell metacharacters."
             },
             "count": {
                 "type": "integer",
@@ -79,7 +81,7 @@ impl StandardTool for LatencyTestTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

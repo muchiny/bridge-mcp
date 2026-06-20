@@ -32,7 +32,7 @@ impl SshTunnelCloseHandler {
         "properties": {
             "tunnel_id": {
                 "type": "string",
-                "description": "The tunnel ID to close (returned by ssh_tunnel_create)"
+                "description": "The tunnel_id to close — format: tunnel-{host}-{local_port}-{remote_port}. Use ssh_tunnel_list to enumerate active IDs before closing."
             }
         },
         "required": ["tunnel_id"]
@@ -46,9 +46,11 @@ impl ToolHandler for SshTunnelCloseHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Close an active SSH port forwarding tunnel and release the local port. Use \
-         ssh_tunnel_list to find the tunnel_id. This stops port forwarding but does \
-         not close the SSH connection to the host."
+        "Close an active SSH port forwarding tunnel by tunnel_id, abort its forwarding task, and \
+         release the bound local port. Use ssh_tunnel_list to find the exact tunnel_id (format: \
+         tunnel-{host}-{local_port}-{remote_port}). Returns the final TunnelInfo JSON on success. \
+         Does NOT close the SSH connection to the host — only the port forwarding is stopped. \
+         Returns an error if the tunnel_id is not found."
     }
 
     fn schema(&self) -> ToolSchema {

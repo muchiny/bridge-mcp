@@ -31,9 +31,12 @@ impl StandardTool for TerraformInitTool {
 
     const NAME: &'static str = "ssh_terraform_init";
 
-    const DESCRIPTION: &'static str = "Initialize a Terraform working directory on a remote host. Downloads providers and \
-        modules. Required before ssh_terraform_plan or ssh_terraform_apply. Idempotent and \
-        safe to run multiple times.";
+    const DESCRIPTION: &'static str = "Initialize a Terraform working directory on a remote host — downloads providers and \
+        modules declared in the configuration. Must be called before ssh_terraform_plan or \
+        ssh_terraform_apply on a fresh checkout or after adding new providers. Idempotent and \
+        safe to re-run. Use upgrade=true to pull the latest allowed provider versions; use \
+        backend=false to skip remote-state initialization (useful in CI pipelines that use \
+        a local backend).";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -48,7 +51,7 @@ impl StandardTool for TerraformInitTool {
                     },
                     "backend": {
                         "type": "boolean",
-                        "description": "Enable backend (default: true)"
+                        "description": "Enable remote backend initialization (default: true). Set false to skip backend config and use local state — useful in CI or module-only init."
                     },
                     "upgrade": {
                         "type": "boolean",

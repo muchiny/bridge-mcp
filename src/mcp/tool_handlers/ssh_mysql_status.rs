@@ -31,9 +31,14 @@ impl StandardTool for MysqlStatusTool {
 
     const NAME: &'static str = "ssh_mysql_status";
 
-    const DESCRIPTION: &'static str = "Get MySQL server status on a remote host. Returns server \
-        version, list of databases, and active connection count. Prefer this over ssh_exec for \
-        MySQL status checks as it handles connection parameters automatically.";
+    const DESCRIPTION: &'static str = "Get MySQL server status on a remote host: runs \
+        SELECT VERSION(), SHOW DATABASES, and SHOW STATUS LIKE 'Threads_connected'. Use this \
+        for a quick read-only health check (no SQL knowledge required). Auth credentials are \
+        read from ~/.my.cnf on the remote host when no db_user is supplied; for \
+        password-protected accounts, configure a [client] section in ~/.my.cnf \
+        (password=...) on the remote host rather than passing credentials in plaintext. \
+        Prefer this over ssh_exec for MySQL health checks. To run arbitrary SQL queries \
+        (SELECT, INSERT, DDL, etc.), use ssh_mysql_query instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

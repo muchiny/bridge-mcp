@@ -46,8 +46,12 @@ impl StandardTool for StorageMountTool {
 
     const NAME: &'static str = "ssh_storage_mount";
 
-    const DESCRIPTION: &'static str = "Mount a filesystem on a remote host. Specify device, \
-        mount point, and optionally filesystem type and mount options.";
+    const DESCRIPTION: &'static str = "Mount a filesystem on a remote host (runs mount on the \
+        remote). Requires device (e.g. /dev/sdb1 or //server/share) and mount_point; optionally \
+        specify fs_type (e.g. ext4, xfs, nfs, cifs) and options (e.g. ro,noexec,nosuid). Discover \
+        available block devices and partition names with ssh_storage_lsblk first. To unmount use \
+        ssh_storage_umount; to make the mount persistent add it to /etc/fstab (visible via \
+        ssh_storage_fstab).";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

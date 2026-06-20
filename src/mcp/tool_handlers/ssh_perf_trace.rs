@@ -41,10 +41,12 @@ impl StandardTool for PerfTraceTool {
 
     const NAME: &'static str = "ssh_perf_trace";
 
-    const DESCRIPTION: &'static str = "Profile system or process performance on a remote host. \
-        Uses perf stat or strace to trace syscalls and collect performance counters. Specify a \
-        PID to profile a specific process, or omit for system-wide profiling. Duration is capped \
-        at 60 seconds.";
+    const DESCRIPTION: &'static str = "Profile CPU and syscall performance on a Linux host using \
+        perf stat (with strace fallback). Provide a PID to profile a specific process, or omit \
+        for system-wide counters. Duration is capped at 60 seconds. For disk I/O tracing use \
+        ssh_io_trace; for network latency use ssh_latency_test; for quick throughput benchmarks \
+        use ssh_benchmark. For Windows performance counters use ssh_win_perf_overview or \
+        ssh_win_perf_cpu instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -74,7 +76,7 @@ impl StandardTool for PerfTraceTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

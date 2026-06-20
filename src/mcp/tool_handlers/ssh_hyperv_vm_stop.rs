@@ -41,12 +41,13 @@ impl StandardTool for HypervVmStopTool {
 
     const NAME: &'static str = "ssh_hyperv_vm_stop";
 
-    const DESCRIPTION: &'static str = "Stop a running Hyper-V virtual machine on a Windows host. By default performs a \
-        graceful shutdown via integration services (equivalent to a guest OS shutdown). \
+    const DESCRIPTION: &'static str = "Stop a running Hyper-V virtual machine on a Windows host (runs Stop-VM). By default \
+        performs a graceful shutdown via integration services (equivalent to a guest OS shutdown). \
         Use force=true for immediate power-off (TurnOff — equivalent to pulling the power cord); \
-        this bypasses the guest OS and may cause data loss in running workloads. Shows VM state \
-        after stopping. Discover VM names with `ssh_hyperv_vm_list`; to restart use \
-        `ssh_hyperv_vm_stop` then `ssh_hyperv_vm_start`.";
+        this bypasses the guest OS and may cause data loss in running workloads. Succeeds silently; \
+        call `ssh_hyperv_vm_info` afterwards to confirm the new state. \
+        Discover VM names with `ssh_hyperv_vm_list`; to restart use `ssh_hyperv_vm_stop` then \
+        `ssh_hyperv_vm_start`.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -58,7 +59,7 @@ impl StandardTool for HypervVmStopTool {
             },
             "vm_name": {
                 "type": "string",
-                "description": "Name of the Hyper-V virtual machine to stop"
+                "description": "Name of the Hyper-V virtual machine to stop (alias: \"name\"). Use ssh_hyperv_vm_list to discover names."
             },
             "force": {
                 "type": "boolean",

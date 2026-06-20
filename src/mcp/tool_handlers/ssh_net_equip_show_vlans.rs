@@ -37,7 +37,12 @@ impl StandardTool for NetEquipShowVlansTool {
 
     const NAME: &'static str = "ssh_net_equip_show_vlans";
 
-    const DESCRIPTION: &'static str = "Show VLAN configuration on a network device.";
+    const DESCRIPTION: &'static str = "Show VLANs configured on a network device \
+        (switch/router/firewall). Commands per vendor: Cisco/generic → `show vlan brief`; \
+        Juniper → `show vlans`; MikroTik → `/interface vlan print`; \
+        Fortinet → `show system interface | grep vlan` (filters interface list, not a vlan database). \
+        Use ssh_net_equip_show_interfaces for interface status, ssh_net_equip_show_run to \
+        see the full VLAN config in context.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -48,7 +53,8 @@ impl StandardTool for NetEquipShowVlansTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "timeout_seconds": {
                 "type": "integer",

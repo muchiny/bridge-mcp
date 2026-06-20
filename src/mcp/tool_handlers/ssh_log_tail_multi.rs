@@ -43,9 +43,14 @@ impl StandardTool for LogTailMultiTool {
 
     const NAME: &'static str = "ssh_log_tail_multi";
 
-    const DESCRIPTION: &'static str = "Tail log files on a remote host. Shows the last N lines of \
-        specified log files (default: 50 lines). Useful for viewing recent log entries to \
-        understand current system state or troubleshoot issues.";
+    const DESCRIPTION: &'static str = "Show the last N lines of one or more flat log files on a \
+        Linux host (default: 50 lines, max: 5000). The '_multi' suffix means multiple files \
+        on a single host — for multi-host fan-out use ssh_exec_multi. Use this tool to \
+        read recent raw log content; use ssh_log_search_multi to filter by pattern, and \
+        ssh_log_aggregate to get per-file error/warning counts without reading content. \
+        For systemd unit logs prefer ssh_service_logs; for journald queries with boot/priority \
+        filters prefer ssh_journal_query. Windows hosts are not supported — \
+        use ssh_win_event_logs for Windows event logs.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

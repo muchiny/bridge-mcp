@@ -42,7 +42,10 @@ impl StandardTool for GroupListTool {
 
     const NAME: &'static str = "ssh_group_list";
 
-    const DESCRIPTION: &'static str = "List all groups on a remote Linux host using getent.";
+    const DESCRIPTION: &'static str = "List all groups on a remote Linux host (reads /etc/group \
+        via awk — includes system groups). Returns a table with GROUP, GID, and MEMBERS columns. \
+        Use this to discover group names before calling ssh_group_add or ssh_group_delete. \
+        For Active Directory groups on Windows hosts use ssh_ad_group_list instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

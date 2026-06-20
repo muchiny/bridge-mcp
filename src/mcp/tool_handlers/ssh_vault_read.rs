@@ -30,9 +30,9 @@ impl StandardTool for VaultReadTool {
 
     const NAME: &'static str = "ssh_vault_read";
 
-    const DESCRIPTION: &'static str = "Read a secret from HashiCorp Vault on a remote host. Returns secret data at the given \
-        path. Optionally filter to a specific field. Use ssh_vault_list to discover available \
-        secret paths first.";
+    const DESCRIPTION: &'static str = "Read a secret from HashiCorp Vault on a remote host via `vault kv get`. Returns all \
+        fields at the given KV path, or a single field when `field` is set. Use ssh_vault_list \
+        to discover available paths first, and ssh_vault_status to confirm Vault is unsealed.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -43,23 +43,23 @@ impl StandardTool for VaultReadTool {
                     },
                     "path": {
                         "type": "string",
-                        "description": "Secret path in Vault"
+                        "description": "KV secret path e.g. secret/myapp/config (alphanumeric, slashes, hyphens, underscores, dots; no path traversal)"
                     },
                     "vault_addr": {
                         "type": "string",
-                        "description": "Vault server address (default: from VAULT_ADDR env)"
+                        "description": "Vault server address e.g. https://vault.example.com:8200 (overrides VAULT_ADDR env on the remote host)"
                     },
                     "mount": {
                         "type": "string",
-                        "description": "Secrets engine mount path"
+                        "description": "Secrets engine mount path e.g. secret or kv; passed as `vault kv get -mount=<mount>`"
                     },
                     "field": {
                         "type": "string",
-                        "description": "Specific field to read from the secret"
+                        "description": "Extract a single named field from the secret instead of returning all fields"
                     },
                     "format": {
                         "type": "string",
-                        "description": "Output format: table, json, yaml"
+                        "description": "Output format passed to `vault kv get -format`: table (default), json, yaml, or pretty"
                     },
                     "timeout_seconds": {
                         "type": "integer",

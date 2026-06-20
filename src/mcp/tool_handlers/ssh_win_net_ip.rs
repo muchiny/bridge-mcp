@@ -33,8 +33,10 @@ impl StandardTool for WinNetIpTool {
 
     const NAME: &'static str = "ssh_win_net_ip";
 
-    const DESCRIPTION: &'static str = "List IP addresses on a Windows host showing interface alias, IP address, prefix \
-        length, and address family.";
+    const DESCRIPTION: &'static str = "List IP addresses bound to network interfaces on a Windows host (Get-NetIPAddress), \
+        showing interface alias, IP address, prefix length, and address family (IPv4/IPv6). \
+        Windows-only — for Linux hosts use ssh_net_interfaces instead. \
+        To see adapter hardware details (MAC, link speed) use ssh_win_net_adapters.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

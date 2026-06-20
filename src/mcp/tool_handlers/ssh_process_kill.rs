@@ -42,9 +42,10 @@ impl StandardTool for ProcessKillTool {
 
     const NAME: &'static str = "ssh_process_kill";
 
-    const DESCRIPTION: &'static str = "Send a signal to a process on a remote Linux host. Default signal is TERM (graceful \
-        shutdown). Use signal 9 (KILL) for force kill. Protected PIDs (0, 1) are blocked. Use \
-        ssh_process_list or ssh_process_top first to find target PIDs.";
+    const DESCRIPTION: &'static str = "Send a signal to a process on a Linux host. Default signal is TERM (graceful \
+        shutdown). Use signal KILL (or 9) to force-kill a process that ignores TERM. Protected \
+        PIDs (0, 1) are blocked. Use ssh_process_list or ssh_process_top first to find target \
+        PIDs. For Windows hosts use ssh_win_process_kill instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -60,7 +61,8 @@ impl StandardTool for ProcessKillTool {
                     },
                     "signal": {
                         "type": "string",
-                        "description": "Signal name or number (default: TERM)"
+                        "description": "Signal name or number (default: TERM). Named: TERM, KILL, HUP, INT, QUIT, USR1, USR2, STOP, CONT. Numeric: 1, 2, 3, 9, 10, 12, 15, 18, 19.",
+                        "enum": ["TERM", "KILL", "HUP", "INT", "QUIT", "USR1", "USR2", "STOP", "CONT", "1", "2", "3", "9", "10", "12", "15", "18", "19"]
                     },
                     "timeout_seconds": {
                         "type": "integer",

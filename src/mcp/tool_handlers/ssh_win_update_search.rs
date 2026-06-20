@@ -34,7 +34,11 @@ impl StandardTool for WinUpdateSearchTool {
 
     const NAME: &'static str = "ssh_win_update_search";
 
-    const DESCRIPTION: &'static str = "Search for Windows updates matching a title pattern.";
+    const DESCRIPTION: &'static str = "Search pending Windows updates whose title contains the given keyword (wildcard \
+        applied automatically: query becomes *query*). Returns KB, Title, and Size columns. \
+        Use instead of ssh_win_update_list when you only want updates matching a specific category \
+        (e.g., \"Cumulative\", \"Security\", \".NET\"). To install a found update use \
+        ssh_win_update_install with the KB ID. Requires the PSWindowsUpdate module on the remote host.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -46,7 +50,7 @@ impl StandardTool for WinUpdateSearchTool {
             },
             "query": {
                 "type": "string",
-                "description": "Title pattern to search for (e.g., Cumulative, Security, .NET)"
+                "description": "Keyword to search for in update titles — wildcards (*query*) are added automatically. Examples: \"Cumulative\", \"Security\", \".NET\", \"Defender\""
             },
             "timeout_seconds": {
                 "type": "integer",

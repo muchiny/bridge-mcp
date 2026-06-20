@@ -35,8 +35,12 @@ impl StandardTool for SelinuxStatusTool {
 
     const NAME: &'static str = "ssh_selinux_status";
 
-    const DESCRIPTION: &'static str = "Show SELinux status on a remote host including current \
-        mode (enforcing/permissive/disabled) and policy details.";
+    const DESCRIPTION: &'static str = "Show SELinux status on a remote host: current mode \
+        (Enforcing/Permissive/Disabled), loaded policy name, and MLS/MCS settings via \
+        getenforce + sestatus. Use this tool on RHEL/CentOS/Fedora hosts where SELinux is \
+        the active MAC framework. On Ubuntu/Debian hosts that use AppArmor instead, use \
+        ssh_apparmor_status. To list or change SELinux boolean flags, use \
+        ssh_selinux_booleans.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

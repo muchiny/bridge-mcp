@@ -40,7 +40,7 @@ impl SshSessionExecHandler {
         "properties": {
             "session_id": {
                 "type": "string",
-                "description": "The session ID returned by ssh_session_create"
+                "description": "The session ID (id field) returned by ssh_session_create or found via ssh_session_list"
             },
             "command": {
                 "type": "string",
@@ -59,7 +59,7 @@ impl SshSessionExecHandler {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool."
+                "description": "Absolute path on the bridge-mcp host filesystem to save the full untruncated output. Claude Code (running on the same machine as the bridge) can then read this file with its Read tool."
             },
             "sudo": {
                 "type": "boolean",
@@ -81,11 +81,13 @@ impl ToolHandler for SshSessionExecHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a command in an existing persistent shell session. The session maintains \
-         state (working directory, environment variables) between commands. Requires a \
-         session_id from ssh_session_create. Returns stdout, stderr, and exit code. Use this \
-         for multi-step workflows, e.g.: 'cd /app', then 'npm install', then 'npm run build' \
-         as separate calls sharing the same session."
+        "Execute a command inside an existing persistent shell session (created by \
+         ssh_session_create). Unlike ssh_exec (stateless, one-shot), the session retains \
+         working directory and environment variables between calls — ideal for multi-step \
+         workflows such as 'cd /app', then 'npm install', then 'npm run build'. Returns JSON \
+         with fields: session_id, exit_code, cwd (updated after cd commands), output. Obtain \
+         session_id from ssh_session_create or ssh_session_list. Use ssh_session_close when \
+         the workflow is complete."
     }
 
     fn schema(&self) -> ToolSchema {

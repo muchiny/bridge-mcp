@@ -37,9 +37,11 @@ impl StandardTool for PkgInstallTool {
 
     const NAME: &'static str = "ssh_pkg_install";
 
-    const DESCRIPTION: &'static str = "Install a package on a remote host. Prefer this over ssh_exec as it auto-detects the \
-        package manager (apt/dnf/yum/apk) and handles non-interactive mode. Requires \
-        root/sudo permissions. Use ssh_pkg_search first to verify the package name.";
+    const DESCRIPTION: &'static str = "Install a package on a remote Linux host. Prefer this over ssh_exec as it \
+        auto-detects the package manager (apt/dnf/yum/apk) and runs non-interactively. \
+        Requires root or sudo permissions on the host. Use ssh_pkg_search first to verify the \
+        package name exists in the repo, and ssh_pkg_list to confirm it is not already \
+        installed. To remove a package use ssh_pkg_remove instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -54,7 +56,7 @@ impl StandardTool for PkgInstallTool {
                     },
                     "pkg_manager": {
                         "type": "string",
-                        "description": "Override auto-detected package manager (apt/dnf/yum/apk)"
+                        "description": "Override auto-detected package manager; common values: apt, dnf, yum, apk; full binary paths like /usr/bin/apt are also accepted"
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -68,7 +70,7 @@ impl StandardTool for PkgInstallTool {
                     },
                     "save_output": {
                         "type": "string",
-                        "description": "Save full output to a local file path"
+                        "description": "Save full output to a file path on the remote host (untruncated)"
                     }
                 },
                 "required": ["host", "package"]

@@ -46,11 +46,14 @@ impl StandardTool for SslAuditTool {
 
     const NAME: &'static str = "ssh_ssl_audit";
 
-    const DESCRIPTION: &'static str = "Audit SSL/TLS certificate and configuration on a remote target, including \
-        cipher suites, protocol versions, and HSTS. Prefer this over ssh_exec for SSL inspection \
-        as it safely retrieves and displays certificate details including validity, issuer, subject, \
-        and expiry using openssl. For a lightweight certificate-only check (subject, issuer, dates, \
-        fingerprint) without the full TLS configuration audit, use ssh_cert_check instead.";
+    const DESCRIPTION: &'static str = "Audit the SSL/TLS certificate on a remote target by connecting with \
+        `openssl s_client` and decoding the certificate via `openssl x509 -noout -text`. \
+        Returns the full certificate text: subject, issuer, SANs, validity dates, public key, \
+        extensions, and signature algorithm. `target_host` is the hostname or IP being tested \
+        (can differ from `host`, which is the SSH jump host running openssl). For a quick \
+        certificate summary (subject, issuer, dates, fingerprint only) use `ssh_cert_check` \
+        instead. To check whether a port is open before auditing, use `ssh_port_scan` first. \
+        Linux-only (requires openssl on the remote host).";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -61,11 +64,11 @@ impl StandardTool for SslAuditTool {
                     },
                     "target_host": {
                         "type": "string",
-                        "description": "Target hostname or IP to audit SSL/TLS"
+                        "description": "Hostname or IP of the TLS endpoint to audit (can be different from `host`; used as both connect address and SNI servername)"
                     },
                     "port": {
                         "type": "integer",
-                        "description": "Port to connect to for SSL/TLS audit (e.g., 443)",
+                        "description": "Port of the TLS endpoint (e.g., 443 for HTTPS, 8443, 636 for LDAPS)",
                         "minimum": 1,
                         "maximum": 65535
                     },

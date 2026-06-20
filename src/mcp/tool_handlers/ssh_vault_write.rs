@@ -33,9 +33,11 @@ impl StandardTool for VaultWriteTool {
 
     const NAME: &'static str = "ssh_vault_write";
 
-    const DESCRIPTION: &'static str = "Write a secret to HashiCorp Vault on a remote host. Creates or updates secret data at \
-        the given path. Use ssh_vault_list to browse existing paths and ssh_vault_read to \
-        verify after writing.";
+    const DESCRIPTION: &'static str = "Write (create or overwrite) a secret in HashiCorp Vault on a remote host via `vault kv put`. \
+        Provide key=value pairs in `data`; values are transmitted via a stdin heredoc so they \
+        never appear in the remote process argv or `ps` output. Use ssh_vault_list to browse \
+        existing paths, ssh_vault_status to confirm Vault is unsealed, and ssh_vault_read to \
+        verify the written values.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -46,20 +48,20 @@ impl StandardTool for VaultWriteTool {
                     },
                     "path": {
                         "type": "string",
-                        "description": "Secret path in Vault"
+                        "description": "KV secret path to write e.g. secret/myapp/config (alphanumeric, slashes, hyphens, underscores, dots; no path traversal)"
                     },
                     "data": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Key-value pairs as 'key=value' strings"
+                        "description": "One or more key=value pairs to write e.g. [\"username=admin\", \"password=s3cr3t\"]; values are piped via stdin heredoc and never exposed in remote process argv"
                     },
                     "vault_addr": {
                         "type": "string",
-                        "description": "Vault server address (default: from VAULT_ADDR env)"
+                        "description": "Vault server address e.g. https://vault.example.com:8200 (overrides VAULT_ADDR env on the remote host)"
                     },
                     "mount": {
                         "type": "string",
-                        "description": "Secrets engine mount path"
+                        "description": "Secrets engine mount path e.g. secret or kv; passed as `vault kv put -mount=<mount>`"
                     },
                     "timeout_seconds": {
                         "type": "integer",

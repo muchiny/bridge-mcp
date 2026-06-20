@@ -33,9 +33,10 @@ impl StandardTool for WinDiskUsageTool {
 
     const NAME: &'static str = "ssh_win_disk_usage";
 
-    const DESCRIPTION: &'static str = "Show disk usage on a Windows host. Reports size, free space, and usage percentage for \
-        all fixed logical disks. Use to identify full volumes. For I/O performance metrics, \
-        use ssh_win_perf_disk instead.";
+    const DESCRIPTION: &'static str = "Show disk capacity on a Windows host via Get-PSDrive: reports Name, Used bytes, Free bytes, \
+        and Total bytes (Used+Free) for all FileSystem drives as JSON. Use to identify full volumes. \
+        For I/O performance counters (disk time %, free megabytes per logical disk) use \
+        ssh_win_perf_disk instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

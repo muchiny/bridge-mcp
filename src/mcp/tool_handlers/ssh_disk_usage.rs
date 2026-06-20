@@ -47,20 +47,21 @@ impl ToolHandler for SshDiskUsageHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Show disk usage and filesystem space on a remote host. Prefer this over ssh_exec \
-         for disk checks. Without a path, shows all mounted filesystems (df -h). With a path, \
-         shows both the directory size (du -sh) AND the filesystem it resides on (df -h) — \
-         use this when you need per-directory sizes in addition to filesystem usage. \
-         Prefer ssh_disk_usage over ssh_storage_df when you also need directory size (du -sh) \
-         for a specific path; ssh_storage_df only shows filesystem-level df output. \
+        "Show disk usage and filesystem space on a remote Linux host. Prefer this over \
+         ssh_exec for disk checks. Without a path, shows all mounted filesystems (df -h). \
+         With a path, shows both the directory size (du -sh) AND the filesystem it resides \
+         on (df -h) — use this when you need per-directory sizes in addition to filesystem \
+         usage. Prefer ssh_disk_usage over ssh_storage_df when you also need directory size \
+         (du -sh) for a specific path; ssh_storage_df only shows filesystem-level df output. \
          Returns human-readable text output. For structured JSON disk metrics as part of a \
-         broader system health check, use ssh_metrics with metrics=['disk'] instead."
+         broader system health check, use ssh_metrics with metrics=['disk'] instead. \
+         For Windows hosts use ssh_win_disk_usage instead."
     }
 
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "ssh_disk_usage",
-            description: "Show disk usage and filesystem space on a remote host. Prefer this over ssh_exec for disk checks. Without a path, shows all mounted filesystems (df -h). With a path, shows both the directory size (du -sh) AND the filesystem it resides on (df -h) — use this when you need per-directory sizes. Prefer ssh_disk_usage over ssh_storage_df when you also need directory size (du -sh) for a specific path; ssh_storage_df only shows filesystem-level df output. Returns human-readable text output. For structured JSON disk metrics as part of a broader system health check, use ssh_metrics with metrics=['disk'] instead.",
+            description: "Show disk usage and filesystem space on a remote Linux host. Prefer this over ssh_exec for disk checks. Without a path, shows all mounted filesystems (df -h). With a path, shows both the directory size (du -sh) AND the filesystem it resides on (df -h) — use this when you need per-directory sizes. Prefer ssh_disk_usage over ssh_storage_df when you also need directory size (du -sh) for a specific path; ssh_storage_df only shows filesystem-level df output. Returns human-readable text output. For structured JSON disk metrics use ssh_metrics with metrics=['disk'] instead. For Windows hosts use ssh_win_disk_usage instead.",
             input_schema: r#"{
                 "type": "object",
                 "properties": {

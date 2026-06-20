@@ -35,8 +35,14 @@ impl StandardTool for LdapUserInfoTool {
 
     const NAME: &'static str = "ssh_ldap_user_info";
 
-    const DESCRIPTION: &'static str = "Look up a user in an LDAP directory on a remote host. \
-        Returns all attributes for the matching user.";
+    const DESCRIPTION: &'static str = "Look up a specific user in an LDAP directory on a remote \
+        host using ldapsearch (-x -LLL). Runs filter '(uid=<username>)' with scope sub and returns \
+        all attributes. Use this instead of ssh_ldap_search when you know the exact uid; use \
+        ssh_ldap_search for arbitrary filters or attribute projection. For group membership queries \
+        use ssh_ldap_group_members. On Windows Active Directory hosts use ssh_ad_user_info instead \
+        (PowerShell-based, richer AD attributes). Authentication uses the remote host's system \
+        ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no credentials are passed on the \
+        command line.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

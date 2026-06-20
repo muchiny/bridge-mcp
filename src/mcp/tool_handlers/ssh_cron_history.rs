@@ -49,9 +49,13 @@ impl StandardTool for CronHistoryTool {
 
     const NAME: &'static str = "ssh_cron_history";
 
-    const DESCRIPTION: &'static str = "Show cron execution history from system logs. Displays \
-        recent cron job runs with timestamps, exit statuses, and any error messages. Use \
-        ssh_cron_analyze first for an overview, then this tool for detailed history.";
+    const DESCRIPTION: &'static str = "Show cron execution history from system logs on a remote \
+        Linux host. Reads journalctl (systemd) or /var/log/syslog/cron as available and returns \
+        timestamped log lines for cron invocations. Note: exit statuses are only present when the \
+        cron daemon logs them — not all distributions do, so treat exit-code data as best-effort. \
+        Use the lines param (default 100, max 5000) and since param to narrow the window. For a \
+        plain listing of currently scheduled entries use ssh_cron_list (group: cron); for \
+        overlap/conflict analysis across all crontabs use ssh_cron_analyze.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

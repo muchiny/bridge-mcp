@@ -61,9 +61,11 @@ impl StandardTool for JournalQueryTool {
     const NAME: &'static str = "ssh_journal_query";
 
     const DESCRIPTION: &'static str = "Query systemd journal logs on a remote host. Use this \
-        tool (not ssh_service_logs) when you need multi-filter queries: combining unit + priority \
-        + time range + grep pattern in a single call. ssh_service_logs is limited to unit-only \
-        filtering. Set lines to cap output — default journalctl output is unbounded.";
+        tool when you need system-wide queries (no mandatory service), grep pattern filtering, \
+        or when unit is unknown. Prefer ssh_service_logs when you already know the service name \
+        and want output_format control; prefer ssh_journal_follow for live tailing; use \
+        ssh_journal_boots first to resolve boot IDs when scoping to a past boot. Always set \
+        lines to cap output — default journalctl output is unbounded.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -112,7 +114,7 @@ impl StandardTool for JournalQueryTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

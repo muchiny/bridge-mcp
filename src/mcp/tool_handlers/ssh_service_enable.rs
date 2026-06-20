@@ -34,9 +34,12 @@ impl StandardTool for ServiceEnableTool {
 
     const NAME: &'static str = "ssh_service_enable";
 
-    const DESCRIPTION: &'static str = "Enable a systemd service to start on boot. Prefer this over ssh_exec as it validates \
-        the service name. Requires root/sudo permissions. Check result with \
-        ssh_service_status afterward.";
+    const DESCRIPTION: &'static str = "Enable a systemd service to start on boot (systemctl enable). Prefer this over \
+        ssh_exec as it validates the service name. Note: uses param 'name' (not 'service') \
+        for the service identifier. This only changes boot behavior; to also start the \
+        service now use ssh_service_start separately. Requires root/sudo permissions. \
+        Check boot-enable status with ssh_service_status afterward. \
+        For Windows hosts use ssh_win_service_enable instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

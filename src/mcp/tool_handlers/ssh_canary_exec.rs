@@ -43,10 +43,12 @@ impl StandardTool for CanaryExecTool {
 
     const NAME: &'static str = "ssh_canary_exec";
 
-    const DESCRIPTION: &'static str = "Execute a command on a single canary host first with an \
-        optional health check. Returns the result so you can decide whether to proceed with the \
-        remaining hosts via ssh_exec_multi. Provide the canary host in 'host' and the remaining \
-        hosts as a comma-separated string in 'hosts' for reference.";
+    const DESCRIPTION: &'static str = "Execute a command on a ONE canary host and return its \
+        result so you (the AI) can decide whether to proceed with the remaining hosts. Use this \
+        as the FIRST step of a multi-host operation: run here, inspect the output, then call \
+        ssh_exec_multi on the rest. 'hosts' is a memo field only — this tool runs solely on \
+        'host'. For a sequential one-at-a-time rolling wave across all hosts use ssh_rolling_exec \
+        instead. For read-only fleet comparison (no mutations) use ssh_fleet_diff instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -57,7 +59,7 @@ impl StandardTool for CanaryExecTool {
             },
             "hosts": {
                 "type": "string",
-                "description": "Comma-separated remaining host aliases to run on after canary succeeds"
+                "description": "Memo field: comma-separated remaining host aliases you plan to target after the canary succeeds. Not executed by this tool — pass them to ssh_exec_multi in your next call."
             },
             "command": {
                 "type": "string",
@@ -80,7 +82,7 @@ impl StandardTool for CanaryExecTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to local file"
+                "description": "Save full output to a file on the remote host (absolute path)"
             }
         },
         "required": ["host", "command"]

@@ -40,9 +40,10 @@ impl StandardTool for HypervSnapshotListTool {
 
     const NAME: &'static str = "ssh_hyperv_snapshot_list";
 
-    const DESCRIPTION: &'static str = "List snapshots (checkpoints) of a Hyper-V virtual machine. Returns name, creation \
-        time, snapshot type, and parent snapshot for each checkpoint. Use \
-        `ssh_hyperv_vm_list` first to find VM names.";
+    const DESCRIPTION: &'static str = "List all snapshots (checkpoints) of a Hyper-V virtual machine (runs Get-VMSnapshot). \
+        Returns name, creation time, snapshot type, and parent checkpoint for each entry. \
+        Use `ssh_hyperv_vm_list` first to discover VM names. To create a new checkpoint use \
+        `ssh_hyperv_snapshot_create`. Note: `vm_name` is the required parameter name (no alias).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

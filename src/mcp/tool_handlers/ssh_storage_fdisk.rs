@@ -43,8 +43,12 @@ impl StandardTool for StorageFdiskTool {
 
     const NAME: &'static str = "ssh_storage_fdisk";
 
-    const DESCRIPTION: &'static str = "Show partition table information on a remote host \
-        (read-only). Optionally specify a device to inspect.";
+    const DESCRIPTION: &'static str = "Show partition table information (fdisk -l) on a remote \
+        host (read-only). Without a device, lists all disks and their partition tables including \
+        type, start/end sectors, and filesystem ID. Specify device (e.g. /dev/sda) to scope output \
+        to one disk. Use this for low-level partition geometry; for a device tree overview use \
+        ssh_storage_lsblk, for LVM volumes use ssh_storage_lvm, or for free-space percentages use \
+        ssh_storage_df.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

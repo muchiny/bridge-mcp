@@ -31,8 +31,11 @@ impl StandardTool for TerraformOutputTool {
 
     const NAME: &'static str = "ssh_terraform_output";
 
-    const DESCRIPTION: &'static str = "Read Terraform outputs on a remote host. Shows output values from the Terraform \
-        state. Use json=true for machine-readable format.";
+    const DESCRIPTION: &'static str = "Read declared Terraform output values from the state on a remote host — shows only \
+        values explicitly defined in output {} blocks in the configuration. Omit name to list \
+        all outputs; supply name to read a single output value. Use json=true for \
+        machine-readable JSON (recommended for programmatic use). Use ssh_terraform_state to \
+        inspect raw resource state attributes; use ssh_terraform_plan to preview pending changes.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -47,11 +50,11 @@ impl StandardTool for TerraformOutputTool {
                     },
                     "name": {
                         "type": "string",
-                        "description": "Specific output name to read"
+                        "description": "Name of the specific output block to read (e.g. \"vpc_id\"). Omit to list all outputs."
                     },
                     "json": {
                         "type": "boolean",
-                        "description": "Output in JSON format"
+                        "description": "Return output in JSON format (default: false). Use true for programmatic parsing; combines with name to get a single value as JSON."
                     },
                     "timeout_seconds": {
                         "type": "integer",

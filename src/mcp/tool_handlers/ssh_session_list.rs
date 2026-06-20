@@ -33,9 +33,10 @@ impl ToolHandler for SshSessionListHandler {
     }
 
     fn description(&self) -> &'static str {
-        "List all active persistent shell sessions. Returns session IDs, associated hosts, \
-         current working directories, and session age. Use this to find session_id values \
-         for ssh_session_exec or ssh_session_close."
+        "List all active persistent shell sessions. Returns a JSON array of session objects, \
+         each with fields: id (session_id), host, cwd, created_at_secs_ago, \
+         last_used_secs_ago. Use this to retrieve session_id values for ssh_session_exec or \
+         ssh_session_close. Takes no parameters."
     }
 
     fn schema(&self) -> ToolSchema {

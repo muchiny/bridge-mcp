@@ -39,7 +39,9 @@ impl StandardTool for ServiceLogsTool {
 
     const DESCRIPTION: &'static str = "View journalctl logs for a systemd service on a remote host. Prefer this over \
         ssh_exec as it provides structured filtering by time range, priority level, and \
-        output format. Use ssh_service_status to check the service state first.";
+        output format. Use 'lines' to limit volume, 'since'/'until' for time ranges, \
+        'priority' to filter by severity, and 'output=json' for machine-readable logs. \
+        Use ssh_service_status for a concise current-state summary instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

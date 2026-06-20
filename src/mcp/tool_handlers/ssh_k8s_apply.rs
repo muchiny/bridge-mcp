@@ -61,7 +61,7 @@ impl StandardTool for K8sApplyTool {
             },
             "manifest": {
                 "type": "string",
-                "description": "Path to manifest file on the remote host, or inline YAML content"
+                "description": "Path to manifest file on the remote host (must start with '/', './', or '~') or raw inline YAML content. Strings that start with any of those prefixes are treated as file paths; everything else is piped as inline YAML."
             },
             "namespace": {
                 "type": "string",

@@ -44,8 +44,11 @@ impl ToolHandler for SshRecordingStopHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Stop an active recording session. Returns session summary including event count, \
-         duration, and file path. The recording is saved in asciinema v2 format."
+        "Stop an active recording session started with ssh_recording_start. Requires the \
+         session_id returned by ssh_recording_start; use ssh_recording_list to rediscover IDs \
+         for in-flight sessions. Returns a summary with event count, host, file path, and \
+         whether the HMAC-SHA256 hash chain is enabled. The .cast file path can then be passed \
+         to ssh_recording_replay (to review events) or ssh_recording_verify (to check integrity)."
     }
 
     fn schema(&self) -> ToolSchema {

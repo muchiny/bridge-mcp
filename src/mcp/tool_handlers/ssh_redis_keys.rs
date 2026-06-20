@@ -35,10 +35,12 @@ impl StandardTool for RedisKeysTool {
 
     const NAME: &'static str = "ssh_redis_keys";
 
-    const DESCRIPTION: &'static str = "Scan Redis keys on a remote host using SCAN \
-        (non-blocking). Prefer this over ssh_redis_cli with KEYS command as SCAN does not block \
-        the server. Finds keys matching a pattern safely in production. Use ssh_redis_cli to \
-        read/write specific key values.";
+    const DESCRIPTION: &'static str = "Scan Redis keys on a remote host using the non-blocking \
+        SCAN iterator (redis-cli --scan --pattern). Prefer this over ssh_redis_cli with KEYS \
+        because SCAN does not block the server on large keyspaces. Use the pattern param \
+        (glob-style, default: *) to narrow results. Auth is sourced from the REDISCLI_AUTH \
+        environment variable or ~/.redisclirc on the remote host. Use ssh_redis_cli to \
+        read/write specific key values, or ssh_redis_info for server-level stats.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -53,7 +55,7 @@ impl StandardTool for RedisKeysTool {
             },
             "count": {
                 "type": "integer",
-                "description": "Number of keys to return per SCAN iteration"
+                "description": "Hint for the number of keys Redis should return per SCAN iteration (passed as --count; higher values speed up full scans at the cost of larger individual calls)"
             },
             "redis_host": {
                 "type": "string",

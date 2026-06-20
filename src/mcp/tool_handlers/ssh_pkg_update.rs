@@ -37,10 +37,12 @@ impl StandardTool for PkgUpdateTool {
 
     const NAME: &'static str = "ssh_pkg_update";
 
-    const DESCRIPTION: &'static str = "Update package manager cache or upgrade installed packages on a remote Linux host. \
-        Auto-detects the package manager (apt/dnf/yum/apk). Without a specific package name, \
-        upgrades all packages which may cause breaking changes. Specify a package name to \
-        update only that package.";
+    const DESCRIPTION: &'static str = "Upgrade installed packages on a remote Linux host. Without `package`: runs a \
+        full system upgrade (apt update + apt upgrade -y / dnf update -y / yum update -y / \
+        apk update + apk upgrade) — may cause breaking changes, use with caution. With \
+        `package`: upgrades only that one package by re-installing its latest version. \
+        Auto-detects the package manager (apt/dnf/yum/apk). Use ssh_pkg_list to check the \
+        current version before and after. To install a new package use ssh_pkg_install instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -51,11 +53,11 @@ impl StandardTool for PkgUpdateTool {
                     },
                     "package": {
                         "type": "string",
-                        "description": "Specific package to update (omit to update all)"
+                        "description": "Specific package to upgrade to its latest version; omit to upgrade all installed packages"
                     },
                     "pkg_manager": {
                         "type": "string",
-                        "description": "Override auto-detected package manager (apt/dnf/yum/apk)"
+                        "description": "Override auto-detected package manager; common values: apt, dnf, yum, apk; full binary paths like /usr/bin/apt are also accepted"
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -69,7 +71,7 @@ impl StandardTool for PkgUpdateTool {
                     },
                     "save_output": {
                         "type": "string",
-                        "description": "Save full output to a local file path"
+                        "description": "Save full output to a file path on the remote host (untruncated)"
                     }
                 },
                 "required": ["host"]

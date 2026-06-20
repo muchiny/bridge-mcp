@@ -36,8 +36,11 @@ impl StandardTool for StorageLvmTool {
 
     const NAME: &'static str = "ssh_storage_lvm";
 
-    const DESCRIPTION: &'static str = "List LVM physical volumes, volume groups, and logical \
-        volumes on a remote host.";
+    const DESCRIPTION: &'static str = "List LVM physical volumes (pvs), volume groups (vgs), and \
+        logical volumes (lvs) on a remote host in one call. Use this when the host uses LVM storage \
+        and you need to see how disks are pooled into volume groups or how logical volumes are \
+        allocated. For a device tree view (including non-LVM disks and partitions) use \
+        ssh_storage_lsblk; for free-space percentages per mounted filesystem use ssh_storage_df.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

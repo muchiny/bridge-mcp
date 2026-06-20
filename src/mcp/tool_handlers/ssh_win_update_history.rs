@@ -34,8 +34,10 @@ impl StandardTool for WinUpdateHistoryTool {
 
     const NAME: &'static str = "ssh_win_update_history";
 
-    const DESCRIPTION: &'static str =
-        "Show Windows Update installation history for a specified number of days.";
+    const DESCRIPTION: &'static str = "Show ALREADY-INSTALLED Windows Update history (Date, Title, Result) for the past N days \
+        (default 30). Use this to audit what was applied in the past — not to see pending updates. \
+        To see pending updates use ssh_win_update_list; to check reboot status after an install \
+        use ssh_win_update_reboot. Requires the PSWindowsUpdate module on the remote host.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -47,7 +49,7 @@ impl StandardTool for WinUpdateHistoryTool {
             },
             "days": {
                 "type": "integer",
-                "description": "Number of days of history to show (default: 30)"
+                "description": "How many days back to query update history (default: 30, e.g. 7 for the past week, 90 for the past quarter)"
             },
             "timeout_seconds": {
                 "type": "integer",

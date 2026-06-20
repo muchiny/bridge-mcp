@@ -31,10 +31,13 @@ impl StandardTool for RedisCliTool {
 
     const NAME: &'static str = "ssh_redis_cli";
 
-    const DESCRIPTION: &'static str = "Execute a Redis CLI command on a remote host. Prefer \
-        this over ssh_exec as it handles authentication and database selection. Runs any \
-        redis-cli command (GET, SET, DEL, HGETALL, LRANGE, etc.). Use ssh_redis_info for \
-        server stats or ssh_redis_keys to browse keys safely.";
+    const DESCRIPTION: &'static str = "Execute a single Redis CLI command on a remote host \
+        via redis-cli. Use this when you know the exact key or command to run (GET, SET, DEL, \
+        HGETALL, LRANGE, SCAN, INFO, PING, etc.). Dangerous commands (FLUSHALL, FLUSHDB, \
+        SHUTDOWN, EVAL, SCRIPT, BGSAVE, CONFIG SET) are blocked by the validator. Auth is \
+        sourced from the REDISCLI_AUTH environment variable or ~/.redisclirc on the remote host — \
+        do not embed passwords in the command string. Use ssh_redis_keys to scan keys safely with \
+        SCAN instead of KEYS, or ssh_redis_info for structured server stats.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -45,7 +48,7 @@ impl StandardTool for RedisCliTool {
             },
             "command": {
                 "type": "string",
-                "description": "Redis command to execute (e.g., 'GET mykey', 'SET key value')"
+                "description": "Redis command to execute (e.g., 'GET mykey', 'SET key value', 'HGETALL myhash'). Dangerous commands such as FLUSHALL, FLUSHDB, SHUTDOWN, EVAL, SCRIPT, and BGSAVE are rejected."
             },
             "redis_host": {
                 "type": "string",

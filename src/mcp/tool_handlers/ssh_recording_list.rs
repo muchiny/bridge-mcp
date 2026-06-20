@@ -35,8 +35,11 @@ impl ToolHandler for SshRecordingListHandler {
     }
 
     fn description(&self) -> &'static str {
-        "List all session recordings (active and completed). Returns session IDs, hosts, \
-         timestamps, event counts, and file paths."
+        "List all session recordings — both active (in-memory, started with ssh_recording_start \
+         and not yet stopped) and completed (.cast files on disk). Returns session IDs, hosts, \
+         start timestamps, event counts, and file paths. Use the returned file_path with \
+         ssh_recording_replay to review events or ssh_recording_verify to check hash-chain \
+         integrity. Takes no parameters."
     }
 
     fn schema(&self) -> ToolSchema {

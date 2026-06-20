@@ -39,8 +39,11 @@ impl StandardTool for HypervVmListTool {
 
     const NAME: &'static str = "ssh_hyperv_vm_list";
 
-    const DESCRIPTION: &'static str = "List Hyper-V virtual machines on a Windows host. Returns name, state, CPU usage, \
-        memory, uptime, and status for each VM.";
+    const DESCRIPTION: &'static str = "List all Hyper-V virtual machines on a Windows host (runs Get-VM | ConvertTo-Json). \
+        Returns name, state, CPU usage, memory assigned, and uptime for each VM. Use this to \
+        discover VM names before calling `ssh_hyperv_vm_info` (full VM detail), \
+        `ssh_hyperv_vm_start`, `ssh_hyperv_vm_stop`, or `ssh_hyperv_snapshot_list`. \
+        For VMware ESXi hosts use `ssh_esxi_vm_list` instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

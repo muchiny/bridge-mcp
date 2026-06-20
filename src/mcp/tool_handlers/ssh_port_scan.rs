@@ -47,9 +47,13 @@ impl StandardTool for PortScanTool {
 
     const NAME: &'static str = "ssh_port_scan";
 
-    const DESCRIPTION: &'static str = "Scan for open ports on a remote host. Prefer this over ssh_exec for port \
-        scanning as it uses ss/netstat for local scanning or nmap/bash fallback for remote targets. \
-        Supports custom port lists.";
+    const DESCRIPTION: &'static str = "Scan for open ports on a remote Linux host. When `target` is omitted (or \
+        is localhost/127.0.0.1), runs `ss -tlnp` (falling back to `netstat`) to list all \
+        listening sockets on the SSH host itself — prefer `ssh_net_connections` if you need \
+        established connections too. When `target` is a remote IP or hostname, runs `nmap -sT` \
+        (falling back to a TCP bash probe) against the specified ports (default: \
+        22,80,443,8080,8443,3306,5432,6379,27017). For a full SSL/TLS inspection of an open \
+        port, follow up with `ssh_ssl_audit`.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -60,11 +64,11 @@ impl StandardTool for PortScanTool {
                     },
                     "target": {
                         "type": "string",
-                        "description": "Target address to scan (default: local host)"
+                        "description": "Remote IP or hostname to scan via nmap; omit (or use localhost/127.0.0.1) to scan listening ports on the SSH host itself via ss/netstat"
                     },
                     "ports": {
                         "type": "string",
-                        "description": "Comma-separated list of ports to scan (e.g., '22,80,443')"
+                        "description": "Comma-separated ports for remote scan (e.g., '22,80,443'); default: 22,80,443,8080,8443,3306,5432,6379,27017; ignored for local scans"
                     },
                     "timeout_seconds": {
                         "type": "integer",

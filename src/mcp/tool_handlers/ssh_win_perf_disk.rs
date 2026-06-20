@@ -33,9 +33,11 @@ impl StandardTool for WinPerfDiskTool {
 
     const NAME: &'static str = "ssh_win_perf_disk";
 
-    const DESCRIPTION: &'static str = "Get Windows disk performance counters showing disk time and free space. Use for \
-        identifying I/O bottlenecks on a Windows host. For a combined system overview, use \
-        ssh_win_perf_overview instead.";
+    const DESCRIPTION: &'static str = "Get Windows disk performance counters: physical disk I/O time \
+        (\\\\PhysicalDisk(_Total)\\\\% Disk Time) and free megabytes per logical volume \
+        (\\\\LogicalDisk(*)\\\\Free Megabytes). Use for identifying I/O bottlenecks. \
+        To check disk capacity (size, used, free in bytes) use ssh_win_disk_usage instead. \
+        For a combined CPU+memory+disk overview, use ssh_win_perf_overview instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

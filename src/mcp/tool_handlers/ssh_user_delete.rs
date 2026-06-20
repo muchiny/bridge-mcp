@@ -46,8 +46,11 @@ impl StandardTool for UserDeleteTool {
 
     const NAME: &'static str = "ssh_user_delete";
 
-    const DESCRIPTION: &'static str = "Delete a user from a remote Linux host. Set \
-        remove_home=true to also remove the user's home directory.";
+    const DESCRIPTION: &'static str = "Permanently delete a user from a remote Linux host via \
+        userdel. Set remove_home=true to also remove the user's home directory and mail spool \
+        (irreversible). Prompts for confirmation before executing. Use ssh_user_list to discover \
+        the username and ssh_user_info to review account details before deletion. \
+        Linux-only — for Windows hosts use ssh_exec with net user /delete.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

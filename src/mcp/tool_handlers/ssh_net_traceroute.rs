@@ -42,9 +42,9 @@ impl StandardTool for NetTracerouteTool {
 
     const NAME: &'static str = "ssh_net_traceroute";
 
-    const DESCRIPTION: &'static str = "Trace the network route from a remote host to a target destination. Prefer this over \
-        ssh_exec as it validates parameters and limits hop count. Shows each hop with \
-        latency, useful for diagnosing network path issues.";
+    const DESCRIPTION: &'static str = "Trace the network route from a Linux host to a target using `traceroute`. \
+        Validates the target (hostname/IP, no shell metacharacters), caps hops at max_hops (default 30). \
+        Use ssh_net_ping for simple reachability; use this to diagnose routing hops and latency per hop.";
 
     const SCHEMA: &'static str = r#"{
     "type": "object",

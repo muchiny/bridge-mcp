@@ -36,9 +36,13 @@ impl ToolHandler for SshRunbookListHandler {
     }
 
     fn description(&self) -> &'static str {
-        "List available runbooks (built-in and user-defined). Runbooks are YAML-defined \
-         multi-step operational procedures for common tasks like disk cleanup, service restart, \
-         OOM recovery, log rotation, and certificate renewal."
+        "List available runbooks (built-in and user-defined). Returns a TSV table with each \
+         runbook's name, version, step count, parameter names, and description. Runbooks are \
+         YAML-defined multi-step operational procedures for common tasks such as disk cleanup \
+         (disk_full_recovery), service restart (service_restart), OOM recovery (oom_recovery), \
+         log rotation (log_rotation), and certificate renewal (cert_renewal). Use this tool \
+         first to discover runbook names, then pass a name to ssh_runbook_validate to check its \
+         definition or to ssh_runbook_execute to resolve and run it."
     }
 
     fn schema(&self) -> ToolSchema {

@@ -37,10 +37,14 @@ impl StandardTool for TerraformApplyTool {
 
     const NAME: &'static str = "ssh_terraform_apply";
 
-    const DESCRIPTION: &'static str = "Apply Terraform infrastructure changes on a remote host. Executes planned changes to \
-        create, update, or destroy resources. Use ssh_terraform_plan first to preview \
-        changes. Use auto_approve=true to skip confirmation (use only for trusted, tested \
-        configurations).";
+    const DESCRIPTION: &'static str = "Apply Terraform infrastructure changes on a remote host — creates, updates, or destroys \
+        resources as declared in the configuration. Always run ssh_terraform_plan first to review \
+        the changes; pass the saved plan file via plan_file to guarantee the exact same set of \
+        changes is applied. Without auto_approve=true the remote Terraform process requires \
+        interactive confirmation, which is unavailable over SSH — always set auto_approve=true \
+        or supply a plan_file. Emits structured MCP log events per resource action during the \
+        apply. Use ssh_terraform_output to read output values after apply; use \
+        ssh_terraform_state to inspect resulting state.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -55,12 +59,12 @@ impl StandardTool for TerraformApplyTool {
                     },
                     "auto_approve": {
                         "type": "boolean",
-                        "description": "Skip interactive approval (default: false)"
+                        "description": "Skip interactive approval prompt (default: false). Required when running over SSH since there is no TTY for interactive confirmation; set true or supply a plan_file."
                     },
                     "vars": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Variable assignments (e.g., 'key=value')"
+                        "description": "Variable assignments in 'key=value' format, each passed as a separate -var flag (e.g. [\"region=us-east-1\", \"env=prod\"]). Ignored when plan_file is set."
                     },
                     "var_file": {
                         "type": "string",
@@ -73,7 +77,7 @@ impl StandardTool for TerraformApplyTool {
                     },
                     "plan_file": {
                         "type": "string",
-                        "description": "Path to a saved plan file"
+                        "description": "Path on the remote host to a plan file saved by ssh_terraform_plan (out param). When provided, applies exactly those changes — vars/var_file/targets are ignored."
                     },
                     "timeout_seconds": {
                         "type": "integer",

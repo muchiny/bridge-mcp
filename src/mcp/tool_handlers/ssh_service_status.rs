@@ -34,10 +34,11 @@ impl StandardTool for ServiceStatusTool {
 
     const NAME: &'static str = "ssh_service_status";
 
-    const DESCRIPTION: &'static str = "Show the status of a systemd service on a remote host. Prefer this over ssh_exec as \
-        it provides structured output with active state, loaded state, PID, memory usage, and \
-        recent log entries. Use ssh_service_list first to discover available services. Use \
-        ssh_service_logs for detailed log history.";
+    const DESCRIPTION: &'static str = "Show the status of a systemd service on a remote host (systemctl status). Prefer \
+        this over ssh_exec as it provides structured output with active state, loaded state, \
+        PID, memory usage, and recent log entries. Use ssh_service_list first to discover \
+        available service names. Use ssh_service_logs for detailed log history. \
+        For Windows hosts use ssh_win_service_status instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

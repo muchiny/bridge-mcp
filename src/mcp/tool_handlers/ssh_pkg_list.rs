@@ -37,10 +37,11 @@ impl StandardTool for PkgListTool {
 
     const NAME: &'static str = "ssh_pkg_list";
 
-    const DESCRIPTION: &'static str = "List installed packages on a remote host. Prefer this over ssh_exec as it \
+    const DESCRIPTION: &'static str = "List installed packages on a remote Linux host. Prefer this over ssh_exec as it \
         auto-detects the package manager (apt/dnf/yum/apk) and provides consistent output. \
-        Filter results by package name pattern. Use ssh_pkg_search to find available \
-        packages.";
+        Use `filter` to narrow results by package name pattern. To check whether a specific \
+        package is installed, call this tool with `filter=<name>`. To find packages available \
+        for installation (not yet installed), use ssh_pkg_search instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -55,7 +56,7 @@ impl StandardTool for PkgListTool {
                     },
                     "pkg_manager": {
                         "type": "string",
-                        "description": "Override auto-detected package manager (apt/dnf/yum/apk)"
+                        "description": "Override auto-detected package manager; common values: apt, dnf, yum, apk; full binary paths like /usr/bin/apt are also accepted"
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -69,7 +70,7 @@ impl StandardTool for PkgListTool {
                     },
                     "save_output": {
                         "type": "string",
-                        "description": "Save full output to a local file path"
+                        "description": "Save full output to a file path on the remote host (untruncated)"
                     }
                 },
                 "required": ["host"]

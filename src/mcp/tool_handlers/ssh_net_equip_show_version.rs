@@ -38,7 +38,10 @@ impl StandardTool for NetEquipShowVersionTool {
     const NAME: &'static str = "ssh_net_equip_show_version";
 
     const DESCRIPTION: &'static str = "Show firmware version and system information on a \
-        network device.";
+        network device (router/switch/firewall). Commands per vendor: \
+        Cisco/Juniper/generic → `show version`; MikroTik → `/system resource print`; \
+        Fortinet → `get system status`. Use this as the first step to identify the device \
+        OS version before applying changes with ssh_net_equip_config.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -49,7 +52,8 @@ impl StandardTool for NetEquipShowVersionTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "timeout_seconds": {
                 "type": "integer",

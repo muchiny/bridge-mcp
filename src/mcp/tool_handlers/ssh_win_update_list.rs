@@ -36,8 +36,10 @@ impl StandardTool for WinUpdateListTool {
 
     const NAME: &'static str = "ssh_win_update_list";
 
-    const DESCRIPTION: &'static str = "List available Windows updates with KB article ID, title, size, and status. Requires \
-        the `PSWindowsUpdate` module.";
+    const DESCRIPTION: &'static str = "List all PENDING (not yet installed) Windows updates with KB article ID, title, size, \
+        and status. Requires the PSWindowsUpdate module on the remote host. Use this to see what \
+        needs to be applied before calling ssh_win_update_install. To search by keyword use \
+        ssh_win_update_search; to see already-installed updates use ssh_win_update_history.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

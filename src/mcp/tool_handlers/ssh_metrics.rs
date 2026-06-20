@@ -55,7 +55,7 @@ impl SshMetricsHandler {
                     "type": "string",
                     "enum": ["cpu", "memory", "disk", "network", "load"]
                 },
-                "description": "Array of metric types to collect",
+                "description": "One or more metric types to collect: cpu (usage + cores), memory (total/used/free bytes), disk (filesystem usage via df), network (interface rx/tx bytes), load (1/5/15 min averages + uptime)",
                 "minItems": 1
             },
             "timeout_seconds": {
@@ -96,10 +96,12 @@ impl ToolHandler for SshMetricsHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Collect system metrics from a single host as structured, parseable JSON. Prefer \
-         this over ssh_exec for monitoring as it returns machine-readable data with \
-         consistent format. Available metrics: cpu, memory, disk, network, load. For \
-         metrics from multiple hosts in parallel, use ssh_metrics_multi instead."
+        "Collect system metrics from a single Linux host as structured, parseable JSON \
+         (reads /proc/stat, /proc/net/dev, free, df, /proc/loadavg). Supports jq_filter \
+         for server-side reduction. Available metric types: cpu, memory, disk, network, load \
+         — pass any combination in the metrics array. For metrics from multiple hosts in \
+         parallel, use ssh_metrics_multi instead. For Windows hosts use ssh_win_perf_cpu, \
+         ssh_win_perf_memory, ssh_win_perf_disk, or ssh_win_perf_overview instead."
     }
 
     fn schema(&self) -> ToolSchema {

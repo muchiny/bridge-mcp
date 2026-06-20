@@ -34,8 +34,10 @@ impl StandardTool for WinProcessByNameTool {
 
     const NAME: &'static str = "ssh_win_process_by_name";
 
-    const DESCRIPTION: &'static str = "Find processes by name on a Windows host. Returns all matching processes with PID, \
-        CPU, memory, and start time.";
+    const DESCRIPTION: &'static str = "Find processes by name on a Windows host via PowerShell Get-Process. Returns all \
+        matching processes with PID, CPU, memory, and start time. Use this to look up the PID \
+        before calling ssh_win_process_kill. On Linux hosts use ssh_process_list with the \
+        filter param instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -47,7 +49,7 @@ impl StandardTool for WinProcessByNameTool {
             },
             "name": {
                 "type": "string",
-                "description": "Process name to search for (e.g., svchost, explorer, notepad)"
+                "description": "Process name to search for (e.g., svchost, explorer, notepad); PowerShell wildcards are supported (e.g., chrome* or sys?em)"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -59,7 +61,7 @@ impl StandardTool for WinProcessByNameTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the bridge server"
             }
         }
     }"#;

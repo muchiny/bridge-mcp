@@ -31,10 +31,12 @@ impl StandardTool for RedisInfoTool {
 
     const NAME: &'static str = "ssh_redis_info";
 
-    const DESCRIPTION: &'static str = "Get Redis server information on a remote host. Prefer \
-        this over ssh_exec as it handles authentication and connection parameters. Returns server \
-        stats, memory usage, clients, replication status, and keyspace details. Optionally filter \
-        by section. Use ssh_redis_keys to browse keys or ssh_redis_cli for ad-hoc commands.";
+    const DESCRIPTION: &'static str = "Get Redis server information (INFO) on a remote host. \
+        Use this for structured server diagnostics: memory usage, connected clients, replication \
+        topology, persistence state, CPU, keyspace, and cluster status. Filter by section to \
+        reduce output. Auth is sourced from the REDISCLI_AUTH environment variable or \
+        ~/.redisclirc on the remote host. Use ssh_redis_keys to discover keys with SCAN, or \
+        ssh_redis_cli for arbitrary read/write commands.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -56,8 +58,8 @@ impl StandardTool for RedisInfoTool {
             },
             "section": {
                 "type": "string",
-                "description": "Info section to retrieve (default: all sections)",
-                "enum": ["server", "clients", "memory", "stats", "replication", "cpu", "keyspace", "all"]
+                "description": "INFO section to retrieve (default: all sections). Use 'all' for the full report or 'everything' to include module/latency sections.",
+                "enum": ["server", "clients", "memory", "persistence", "stats", "replication", "cpu", "commandstats", "errorstats", "latencystats", "cluster", "modules", "keyspace", "all", "everything"]
             },
             "timeout_seconds": {
                 "type": "integer",

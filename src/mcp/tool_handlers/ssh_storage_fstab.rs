@@ -40,8 +40,11 @@ impl StandardTool for StorageFstabTool {
 
     const NAME: &'static str = "ssh_storage_fstab";
 
-    const DESCRIPTION: &'static str = "Read the /etc/fstab file on a remote host showing \
-        configured filesystem mounts.";
+    const DESCRIPTION: &'static str = "Read /etc/fstab on a remote host, showing the statically \
+        configured filesystem mounts (device, mount point, filesystem type, options, dump and fsck \
+        order). Use this to understand which mounts are persistent across reboots; for currently \
+        active mounts and free space use ssh_storage_df, to discover block devices use \
+        ssh_storage_lsblk, and to mount a filesystem now use ssh_storage_mount.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

@@ -37,9 +37,11 @@ impl StandardTool for IoTraceTool {
 
     const NAME: &'static str = "ssh_io_trace";
 
-    const DESCRIPTION: &'static str = "Trace disk I/O activity on a remote host. Uses iostat to \
-        monitor disk throughput, IOPS, and latency per device. Optionally filter by device name. \
-        Duration is capped at 60 seconds.";
+    const DESCRIPTION: &'static str = "Trace disk I/O throughput, IOPS, and latency on a Linux \
+        host using iostat (falls back to /proc/diskstats). Optionally filter by device name \
+        (e.g. sda, nvme0n1). Duration is capped at 60 seconds. For CPU/syscall profiling use \
+        ssh_perf_trace; for network latency use ssh_latency_test; for quick write-speed \
+        benchmarks use ssh_benchmark. For Windows disk counters use ssh_win_perf_disk instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -69,7 +71,7 @@ impl StandardTool for IoTraceTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

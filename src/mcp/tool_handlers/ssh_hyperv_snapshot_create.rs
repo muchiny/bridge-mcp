@@ -39,10 +39,12 @@ impl StandardTool for HypervSnapshotCreateTool {
 
     const NAME: &'static str = "ssh_hyperv_snapshot_create";
 
-    const DESCRIPTION: &'static str = "Create a named checkpoint (snapshot) of a Hyper-V virtual machine, enabling rollback \
-        before upgrades or configuration changes. Use `ssh_hyperv_vm_list` to discover VM names \
-        and `ssh_hyperv_snapshot_list` to view existing checkpoints. Requires appropriate \
-        permissions on the Hyper-V host.";
+    const DESCRIPTION: &'static str = "Create a named checkpoint (snapshot) of a Hyper-V virtual machine (runs Checkpoint-VM), \
+        enabling rollback before upgrades or configuration changes. Both `vm_name` and \
+        `snapshot_name` are required and have no short aliases — use those exact parameter names. \
+        Use `ssh_hyperv_vm_list` to discover VM names and `ssh_hyperv_snapshot_list` to view \
+        existing checkpoints before creating a new one. Requires appropriate permissions on the \
+        Hyper-V host.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

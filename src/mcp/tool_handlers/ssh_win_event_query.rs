@@ -39,8 +39,12 @@ impl StandardTool for WinEventQueryTool {
 
     const NAME: &'static str = "ssh_win_event_query";
 
-    const DESCRIPTION: &'static str = "Query Windows Event Logs with optional time filter. Returns event ID, time, level, \
-        and message. Use `ssh_win_event_sources` to discover available log names.";
+    const DESCRIPTION: &'static str = "Query a Windows Event Log with an optional start-time filter (`after` param). \
+        Returns TimeCreated, Id, LevelDisplayName, and Message columns in a structured table. \
+        Prefer this over `ssh_win_event_logs` when you need to scope results to a specific time window; \
+        use `ssh_win_event_logs` when you only want the latest N events without a time filter. \
+        For human-readable word-wrapped output use `ssh_win_event_tail` instead. \
+        Use `ssh_win_event_sources` to discover valid log names. Default count is 50.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

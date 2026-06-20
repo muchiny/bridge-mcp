@@ -43,9 +43,15 @@ impl StandardTool for MulticloudCompareTool {
 
     const NAME: &'static str = "ssh_multicloud_compare";
 
-    const DESCRIPTION: &'static str = "Compare instances between two cloud providers via a \
-        remote host. Fetches instance lists from both providers and outputs them side by side \
-        for comparison. Supports AWS, GCP, and Azure.";
+    const DESCRIPTION: &'static str = "Fetch and display instance lists from two cloud providers \
+        side by side for manual comparison. Requires 'provider1' and 'provider2' (each one of: \
+        aws, gcp, azure); both are required and validated — unsupported values are rejected. \
+        Output is two labelled sections ('=== aws ===', '=== gcp ===', etc.) each containing \
+        the raw JSON from 'aws ec2 describe-instances', 'gcloud compute instances list', or \
+        'az vm list'. Use jq_filter to extract comparable fields (e.g. \
+        '.Reservations[].Instances[].InstanceId' for AWS). For a snapshot of all three \
+        providers at once use ssh_multicloud_sync (no provider params required). For a single \
+        provider use ssh_multicloud_list.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

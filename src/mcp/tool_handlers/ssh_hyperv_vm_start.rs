@@ -37,8 +37,9 @@ impl StandardTool for HypervVmStartTool {
 
     const NAME: &'static str = "ssh_hyperv_vm_start";
 
-    const DESCRIPTION: &'static str = "Start a stopped or saved Hyper-V virtual machine on a Windows host; shows VM state \
-        after the start completes. Discover VM names first with `ssh_hyperv_vm_list`. \
+    const DESCRIPTION: &'static str = "Start a stopped or saved Hyper-V virtual machine on a Windows host (runs Start-VM). \
+        Succeeds silently; call `ssh_hyperv_vm_info` afterwards to confirm the new state. \
+        Discover VM names first with `ssh_hyperv_vm_list`. \
         To stop a VM use `ssh_hyperv_vm_stop`; to create a checkpoint before starting use \
         `ssh_hyperv_snapshot_create`. Requires appropriate permissions on the Hyper-V host.";
 
@@ -52,7 +53,7 @@ impl StandardTool for HypervVmStartTool {
             },
             "vm_name": {
                 "type": "string",
-                "description": "Name of the Hyper-V virtual machine to start"
+                "description": "Name of the Hyper-V virtual machine to start (alias: \"name\"). Use ssh_hyperv_vm_list to discover names."
             },
             "timeout_seconds": {
                 "type": "integer",

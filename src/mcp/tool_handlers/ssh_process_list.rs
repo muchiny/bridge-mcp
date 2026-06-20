@@ -41,10 +41,11 @@ impl StandardTool for ProcessListTool {
 
     const NAME: &'static str = "ssh_process_list";
 
-    const DESCRIPTION: &'static str = "List running processes on a remote host. Prefer this over ssh_exec as it provides \
+    const DESCRIPTION: &'static str = "List running processes on a Linux host. Prefer this over ssh_exec as it provides \
         structured filtering by user or process name with safe parameter handling. Sort by \
         CPU or memory usage. Returns PID, user, CPU%, memory%, and command. Use \
-        ssh_process_kill to send signals to specific processes.";
+        ssh_process_top when you only want the N heaviest consumers; use ssh_process_kill \
+        to send signals to specific processes. For Windows hosts use ssh_win_process_list instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -59,7 +60,7 @@ impl StandardTool for ProcessListTool {
                     },
                     "sort_by": {
                         "type": "string",
-                        "description": "Sort field: %cpu, %mem, rss, vsz"
+                        "description": "ps --sort field (e.g. %cpu, %mem, rss, vsz); passed directly to ps so any valid ps sort key is accepted"
                     },
                     "filter": {
                         "type": "string",

@@ -47,8 +47,10 @@ impl StandardTool for GroupAddTool {
 
     const NAME: &'static str = "ssh_group_add";
 
-    const DESCRIPTION: &'static str = "Create a new group on a remote Linux host. Optionally \
-        specify GID or create as system group.";
+    const DESCRIPTION: &'static str = "Create a new group on a remote Linux host via groupadd. \
+        Optionally specify an explicit GID or create as a system group (GID < 1000). \
+        Use ssh_group_list to verify the group does not already exist before creating. \
+        Linux-only — for Windows hosts use ssh_exec with net localgroup.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

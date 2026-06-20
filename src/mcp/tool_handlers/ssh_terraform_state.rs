@@ -32,9 +32,11 @@ impl StandardTool for TerraformStateTool {
     const NAME: &'static str = "ssh_terraform_state";
 
     const DESCRIPTION: &'static str = "Inspect Terraform state on a remote host (read-only). Supported subcommands: \
-        list (list resource addresses), show (show one resource's attributes — pass resource=ADDR), \
-        pull (download the raw state to stdout). State-mutating subcommands (mv, rm, push) are \
-        intentionally NOT supported — perform those manually after review.";
+        list (list all managed resource addresses), show (show one resource's detailed attributes — \
+        pass resource=ADDR), pull (download the full raw state JSON to stdout). \
+        State-mutating subcommands (mv, rm, push) are intentionally blocked — perform those \
+        manually after review. Use ssh_terraform_output to read declared output values; use \
+        ssh_terraform_plan to see what changes are pending.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

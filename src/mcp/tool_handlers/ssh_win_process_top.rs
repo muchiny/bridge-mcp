@@ -37,8 +37,10 @@ impl StandardTool for WinProcessTopTool {
 
     const NAME: &'static str = "ssh_win_process_top";
 
-    const DESCRIPTION: &'static str = "Show top processes by CPU usage on a Windows host. Returns the N most CPU-intensive \
-        processes sorted descending. Default count is 10.";
+    const DESCRIPTION: &'static str = "Show the N most CPU-intensive processes on a Windows host via PowerShell. Returns \
+        processes sorted by CPU usage descending; default count is 10. Use ssh_win_process_list \
+        to see all processes, or ssh_win_process_by_name to find by name. For Linux hosts use \
+        ssh_process_top instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -63,7 +65,7 @@ impl StandardTool for WinProcessTopTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the bridge server"
             }
         }
     }"#;

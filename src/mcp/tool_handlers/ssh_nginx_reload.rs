@@ -33,9 +33,11 @@ impl StandardTool for NginxReloadTool {
 
     const NAME: &'static str = "ssh_nginx_reload";
 
-    const DESCRIPTION: &'static str = "Reload web server configuration on a remote host. Prefer \
-        this over ssh_exec as it automatically tests configuration syntax before reloading to \
-        prevent downtime. Supports nginx and apache2/httpd. Use ssh_nginx_test for a dry-run check.";
+    const DESCRIPTION: &'static str = "Reload web server configuration on a remote Linux host \
+        (runs config test then `systemctl reload`). Built-in safety: rejects reload if the config \
+        test fails, preventing downtime. Defaults to nginx when `server` is omitted. For a \
+        dry-run without reloading use ssh_nginx_test first. To check server state use \
+        ssh_nginx_status; to inspect enabled sites use ssh_nginx_list_sites.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -46,7 +48,7 @@ impl StandardTool for NginxReloadTool {
             },
             "server": {
                 "type": "string",
-                "description": "Web server name: nginx, apache2, httpd (default: auto-detect)"
+                "description": "Web server to reload: nginx (default when omitted), apache2, or httpd. Custom servers (e.g. openresty) also accepted."
             },
             "timeout_seconds": {
                 "type": "integer",

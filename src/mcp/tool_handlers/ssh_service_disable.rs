@@ -34,9 +34,12 @@ impl StandardTool for ServiceDisableTool {
 
     const NAME: &'static str = "ssh_service_disable";
 
-    const DESCRIPTION: &'static str = "Disable a systemd service from starting on boot. Prefer this over ssh_exec as it \
-        validates the service name. Requires root/sudo permissions. Check result with \
-        ssh_service_status afterward.";
+    const DESCRIPTION: &'static str = "Disable a systemd service from starting on boot (systemctl disable). Prefer this \
+        over ssh_exec as it validates the service name. Note: uses param 'name' (not \
+        'service') for the service identifier. This only changes boot behavior; to also \
+        stop the service now use ssh_service_stop separately. Requires root/sudo \
+        permissions. Check boot-enable status with ssh_service_status afterward. \
+        For Windows hosts use ssh_win_service_disable instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

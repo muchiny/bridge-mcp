@@ -38,7 +38,10 @@ impl StandardTool for SbomGenerateTool {
     const NAME: &'static str = "ssh_sbom_generate";
 
     const DESCRIPTION: &'static str = "Generate a Software Bill of Materials (SBOM) listing all \
-        installed packages, versions, and architecture on a remote host.";
+        installed packages, versions, and architecture on a remote host. Supports dpkg (Debian/Ubuntu), \
+        rpm (RHEL/CentOS), and apk (Alpine); output is a TSV table (PACKAGE / VERSION / ARCH / STATUS). \
+        Use this to inventory what is installed. To check for pending security updates use \
+        ssh_vuln_scan instead. To audit CIS/STIG compliance posture use ssh_compliance_check instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

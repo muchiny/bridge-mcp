@@ -47,8 +47,13 @@ impl StandardTool for VulnScanTool {
 
     const NAME: &'static str = "ssh_vuln_scan";
 
-    const DESCRIPTION: &'static str = "Scan for known vulnerabilities using the system's native \
-        package manager security checks (apt, yum, apk).";
+    const DESCRIPTION: &'static str = "Scan for pending security updates and kernel version on a \
+        remote host using the native package manager (apt, yum/dnf, apk). Reports upgradable \
+        packages with security tags, kernel version, total pending update count, and last update \
+        timestamp. Set summarize=true to append an LLM-generated bullet list of the top CVEs \
+        (requires the client to advertise the sampling capability; falls back to raw output otherwise). \
+        Use ssh_sbom_generate to list all installed packages. Use ssh_compliance_check to audit \
+        CIS/STIG configuration controls.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -56,6 +61,16 @@ impl StandardTool for VulnScanTool {
             "host": {
                 "type": "string",
                 "description": "Host alias from config.yaml"
+            },
+            "summarize": {
+                "type": "boolean",
+                "description": "When true, append an LLM-generated bullet list of the top 3 highest-severity CVEs to the response. Requires the client to advertise the sampling capability; falls back to raw-only output otherwise."
+            },
+            "summary_max_tokens": {
+                "type": "integer",
+                "description": "Maximum tokens for the LLM summary (default: 512). Only meaningful with summarize=true.",
+                "minimum": 32,
+                "maximum": 4096
             },
             "timeout_seconds": {
                 "type": "integer",

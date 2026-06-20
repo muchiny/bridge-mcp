@@ -114,7 +114,7 @@ impl StandardTool for HelmUpgradeTool {
             },
             "install": {
                 "type": "boolean",
-                "description": "Install if release doesn't exist (--install flag)"
+                "description": "Install if release doesn't exist (--install flag, equivalent to ssh_helm_install for first-time installs)"
             },
             "version": {
                 "type": "string",

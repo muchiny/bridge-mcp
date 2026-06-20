@@ -33,7 +33,11 @@ impl StandardTool for PodmanImagesTool {
 
     const NAME: &'static str = "ssh_podman_images";
 
-    const DESCRIPTION: &'static str = "List Podman images on a remote host.";
+    const DESCRIPTION: &'static str = "List locally cached Podman images on a remote host \
+        (runs `podman images`). Use filter to narrow results (e.g. 'reference=myapp', \
+        'dangling=true'). To inspect image details or layer metadata use ssh_podman_inspect \
+        with the image name or ID. For running containers use ssh_podman_ps instead. \
+        For Docker images use ssh_docker_images instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

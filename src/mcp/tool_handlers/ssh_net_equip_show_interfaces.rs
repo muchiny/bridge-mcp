@@ -39,8 +39,12 @@ impl StandardTool for NetEquipShowInterfacesTool {
 
     const NAME: &'static str = "ssh_net_equip_show_interfaces";
 
-    const DESCRIPTION: &'static str = "Show interface status on a network device. Without \
-        interface name, shows a brief summary of all interfaces.";
+    const DESCRIPTION: &'static str = "Show interface status on a network device \
+        (router/switch/firewall). Without `interface`: Cisco → `show ip interface brief`, \
+        Juniper → `show interfaces terse`, MikroTik → `/interface print`, \
+        Fortinet → `get system interface`. With `interface`: Cisco → `show interfaces <name>`, \
+        Juniper → `show interfaces <name> extensive`. Use ssh_net_equip_show_vlans to list VLANs, \
+        ssh_net_equip_show_routes for the routing table.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -51,11 +55,12 @@ impl StandardTool for NetEquipShowInterfacesTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "interface": {
                 "type": "string",
-                "description": "Specific interface name to show details for (e.g. GigabitEthernet0/1)"
+                "description": "Specific interface name to show details for (e.g. GigabitEthernet0/1 on Cisco, ge-0/0/0 on Juniper). Omit to list all interfaces in brief/terse format. Ignored on MikroTik and Fortinet (they always print all interfaces)."
             },
             "timeout_seconds": {
                 "type": "integer",

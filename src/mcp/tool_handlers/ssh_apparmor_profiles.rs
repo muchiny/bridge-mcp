@@ -35,8 +35,12 @@ impl StandardTool for ApparmorProfilesTool {
 
     const NAME: &'static str = "ssh_apparmor_profiles";
 
-    const DESCRIPTION: &'static str = "List AppArmor profiles loaded on a remote host with their \
-        enforcement status.";
+    const DESCRIPTION: &'static str = "List all AppArmor profiles loaded on a remote host with \
+        per-profile enforcement state in JSON format (aa-status --json), falling back to the \
+        raw kernel profiles file when JSON output is unavailable. Use this when you need the \
+        full profile-by-profile breakdown; for a high-level counts-only summary use \
+        ssh_apparmor_status instead. SELinux hosts have no equivalent — use \
+        ssh_selinux_booleans to inspect SELinux policy tunables.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

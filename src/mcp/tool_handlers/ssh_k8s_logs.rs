@@ -75,7 +75,7 @@ impl StandardTool for K8sLogsTool {
             },
             "tail": {
                 "type": "integer",
-                "description": "Number of lines from the end (--tail=N, default: 100)",
+                "description": "Number of lines from the end to show (--tail=N). Omit to get all available log lines (kubectl default).",
                 "minimum": 1
             },
             "since": {

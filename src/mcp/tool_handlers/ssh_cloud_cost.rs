@@ -47,8 +47,8 @@ impl StandardTool for CloudCostTool {
         metric type are fixed server-side. The period param accepts shorthand such as '7d' \
         or '30d' (converted to YYYY-MM-DD Start/End dates). Optionally filter by AWS service \
         name (e.g. 'Amazon S3'). Requires AWS CLI with Cost Explorer IAM permissions; \
-        cross-account data requires Organizations billing access. For GCP or Azure billing \
-        use ssh_aws_cli with the appropriate cloud CLI instead.";
+        cross-account data requires Organizations billing access. For GCP billing run \
+        'gcloud billing' via ssh_exec; for Azure billing run 'az consumption' via ssh_exec.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

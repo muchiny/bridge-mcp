@@ -30,9 +30,11 @@ impl StandardTool for ServiceStartTool {
 
     const NAME: &'static str = "ssh_service_start";
 
-    const DESCRIPTION: &'static str = "Start a systemd service on a remote host. Prefer this over ssh_exec as it validates \
-        the service name and handles enable/start together. Requires root/sudo permissions. \
-        Check result with ssh_service_status afterward.";
+    const DESCRIPTION: &'static str = "Start a systemd service on a remote host (systemctl start). Prefer this over \
+        ssh_exec as it validates the service name. Requires root/sudo permissions. \
+        This only starts the service for the current session; to also enable it on boot \
+        use ssh_service_enable. Check result with ssh_service_status afterward. \
+        For Windows hosts use ssh_win_service_start instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

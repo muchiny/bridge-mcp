@@ -33,9 +33,10 @@ impl StandardTool for WinPerfCpuTool {
 
     const NAME: &'static str = "ssh_win_perf_cpu";
 
-    const DESCRIPTION: &'static str = "Get Windows CPU performance counters showing processor utilization percentage. Use \
-        for identifying high CPU usage on a Windows host. For a combined system overview, use \
-        ssh_win_perf_overview instead.";
+    const DESCRIPTION: &'static str = "Get Windows CPU performance counters showing processor utilization percentage \
+        (\\\\Processor(_Total)\\\\% Processor Time), sampled three times at 1-second intervals and \
+        averaged. Use for identifying high CPU usage on a Windows host. For a combined CPU+memory+disk \
+        overview in one call, use ssh_win_perf_overview instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

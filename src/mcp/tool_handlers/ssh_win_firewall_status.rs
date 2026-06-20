@@ -33,9 +33,10 @@ impl StandardTool for WinFirewallStatusTool {
 
     const NAME: &'static str = "ssh_win_firewall_status";
 
-    const DESCRIPTION: &'static str = "Show Windows Firewall profile status including enabled state and default actions for \
-        domain, private, and public profiles. Use this to check if the firewall is active \
-        before adding rules with ssh_win_firewall_allow or ssh_win_firewall_deny.";
+    const DESCRIPTION: &'static str = "Show Windows Firewall profile status (domain, private, public) via Get-NetFirewallProfile: \
+        enabled state and default inbound/outbound actions. Windows hosts only — for Linux use \
+        ssh_firewall_status instead. Run this first to confirm the firewall is active before \
+        adding rules with ssh_win_firewall_allow or ssh_win_firewall_deny.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

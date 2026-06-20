@@ -48,9 +48,12 @@ impl StandardTool for K8sRolloutTool {
     const NAME: &'static str = "ssh_k8s_rollout";
 
     const DESCRIPTION: &'static str = "Manage Kubernetes rollouts via kubectl on a remote host. Actions: status (check \
-        progress), restart (rolling restart), undo (rollback to previous revision), history \
-        (view revision history). Use after ssh_k8s_apply to monitor deployments. Resource \
-        format: 'deployment/myapp'. Auto-detects kubectl binary (k8s, k3s, microk8s).";
+        rollout progress), restart (rolling restart without changing replica count), undo \
+        (rollback to previous or specific revision via to_revision), history (list revision \
+        history). Allowed actions: status, restart, undo, history — other actions (pause, \
+        resume) are blocked. Use after ssh_k8s_apply to monitor deployments. Resource format: \
+        'deployment/myapp'. For Helm-managed releases use ssh_helm_rollback instead. \
+        Auto-detects kubectl binary (k8s, k3s, microk8s).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

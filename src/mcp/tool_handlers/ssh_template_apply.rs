@@ -47,11 +47,12 @@ impl StandardTool for TemplateApplyTool {
 
     const NAME: &'static str = "ssh_template_apply";
 
-    const DESCRIPTION: &'static str = "Apply a configuration template to a remote host. \
-        WARNING: This is a destructive operation that overwrites the destination file. \
-        Set backup=true to create a .bak copy before overwriting. Use ssh_template_diff \
-        to preview changes before applying, and ssh_template_validate to verify \
-        the configuration afterward.";
+    const DESCRIPTION: &'static str = "Write arbitrary configuration content to a destination \
+        file on a Linux host (destructive — overwrites the file). Use backup=true to create \
+        a .bak copy first. Typical workflow: ssh_template_list → ssh_template_show → \
+        ssh_template_diff (preview) → ssh_template_apply → ssh_template_validate. \
+        For envsubst-style variable substitution on an existing remote template file use \
+        ssh_file_template instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

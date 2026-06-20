@@ -36,9 +36,11 @@ impl StandardTool for WinFirewallListTool {
 
     const NAME: &'static str = "ssh_win_firewall_list";
 
-    const DESCRIPTION: &'static str = "List enabled Windows Firewall rules on a Windows host with display name, direction, \
-        action, and protocol. Use to discover existing rules before adding or removing rules \
-        with ssh_win_firewall_allow, ssh_win_firewall_deny, or ssh_win_firewall_remove.";
+    const DESCRIPTION: &'static str = "List currently enabled Windows Firewall rules (Get-NetFirewallRule -Enabled True) on a \
+        Windows host, showing DisplayName, Direction, Action, and Protocol. Windows hosts only — \
+        for Linux use ssh_firewall_list instead. Use this before adding rules with \
+        ssh_win_firewall_allow or ssh_win_firewall_deny, and to obtain the exact DisplayName \
+        required by ssh_win_firewall_remove.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

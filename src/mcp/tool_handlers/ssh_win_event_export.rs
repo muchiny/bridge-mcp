@@ -35,8 +35,10 @@ impl StandardTool for WinEventExportTool {
 
     const NAME: &'static str = "ssh_win_event_export";
 
-    const DESCRIPTION: &'static str = "Export a Windows Event Log to an .evtx file on the remote host using `wevtutil`. The \
-        exported file can be transferred with `ssh_download`.";
+    const DESCRIPTION: &'static str = "Export a Windows Event Log to an .evtx file on the remote host using `wevtutil epl`. \
+        Use `ssh_win_event_sources` to discover valid log names before exporting. \
+        After export, retrieve the file with `ssh_download`. \
+        For viewing events without exporting, use `ssh_win_event_query` or `ssh_win_event_logs` instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

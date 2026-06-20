@@ -33,10 +33,11 @@ impl StandardTool for WinPerfOverviewTool {
 
     const NAME: &'static str = "ssh_win_perf_overview";
 
-    const DESCRIPTION: &'static str = "Get a combined Windows performance overview including CPU, memory, and disk counters \
-        in a single call. Start here for a quick health check on a Windows host. Use the \
-        individual ssh_win_perf_cpu, ssh_win_perf_memory, ssh_win_perf_disk, or \
-        ssh_win_perf_network tools for deeper analysis.";
+    const DESCRIPTION: &'static str = "Get a combined Windows performance overview covering CPU utilization, memory availability, \
+        committed bytes, and physical disk I/O time in a single PowerShell Get-Counter call. \
+        Network counters are NOT included — use ssh_win_perf_network for that. \
+        Start here for a quick health check; drill down with ssh_win_perf_cpu, \
+        ssh_win_perf_memory, ssh_win_perf_disk, or ssh_win_perf_network for focused analysis.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
