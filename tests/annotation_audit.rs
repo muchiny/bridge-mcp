@@ -160,7 +160,6 @@ const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
     "ssh_ldap_modify",     // LDIF `changetype: delete` removes entries
     "ssh_vault_write",     // overwrites a secret (KV v1 has no versioning)
     "ssh_pkg_update",      // full system upgrade can remove/replace packages
-    "ssh_terraform_state", // `rm`/`mv` irreversibly mutate state
 ];
 
 #[test]

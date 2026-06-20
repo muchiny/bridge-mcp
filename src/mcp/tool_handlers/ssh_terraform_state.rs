@@ -22,7 +22,7 @@ impl_common_args!(SshTerraformStateArgs);
 #[mcp_standard_tool(
     name = "ssh_terraform_state",
     group = "terraform",
-    annotation = "destructive"
+    annotation = "read_only"
 )]
 pub struct TerraformStateTool;
 
@@ -31,8 +31,10 @@ impl StandardTool for TerraformStateTool {
 
     const NAME: &'static str = "ssh_terraform_state";
 
-    const DESCRIPTION: &'static str = "Inspect Terraform state on a remote host. Supports subcommands: list (show \
-        resources), show (resource details), pull (download state), mv (rename resource).";
+    const DESCRIPTION: &'static str = "Inspect Terraform state on a remote host (read-only). Supported subcommands: \
+        list (list resource addresses), show (show one resource's attributes — pass resource=ADDR), \
+        pull (download the raw state to stdout). State-mutating subcommands (mv, rm, push) are \
+        intentionally NOT supported — perform those manually after review.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -47,11 +49,12 @@ impl StandardTool for TerraformStateTool {
                     },
                     "subcommand": {
                         "type": "string",
-                        "description": "State subcommand: list, show, pull, mv"
+                        "enum": ["list", "show", "pull"],
+                        "description": "State subcommand (read-only): list, show, or pull. Any other value (mv/rm/push) is rejected."
                     },
                     "resource": {
                         "type": "string",
-                        "description": "Resource address for show/mv"
+                        "description": "Resource address — required for the `show` subcommand (e.g. aws_instance.web); ignored by list/pull"
                     },
                     "timeout_seconds": {
                         "type": "integer",

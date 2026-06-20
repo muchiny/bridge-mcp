@@ -2583,6 +2583,7 @@ mod tests {
             "ssh_cert_check",
             "ssh_nginx_status",
             "ssh_redis_info",
+            "ssh_terraform_state",
             "ssh_vault_status",
             "ssh_config_get",
             "ssh_session_list",
@@ -2613,7 +2614,6 @@ mod tests {
             "ssh_service_stop",
             // Behaviorally-destructive despite benign names (audit 2026-06-20).
             "ssh_exec",
-            "ssh_terraform_state",
         ];
         for name in &destructive {
             let ann = tool_annotations(name);
