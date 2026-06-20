@@ -41,9 +41,12 @@ impl StandardTool for HypervVmStopTool {
 
     const NAME: &'static str = "ssh_hyperv_vm_stop";
 
-    const DESCRIPTION: &'static str = "Stop a Hyper-V virtual machine on a Windows host. By default performs a graceful \
-        shutdown. Use force=true for immediate power-off (TurnOff). Shows VM state after \
-        stopping.";
+    const DESCRIPTION: &'static str = "Stop a running Hyper-V virtual machine on a Windows host. By default performs a \
+        graceful shutdown via integration services (equivalent to a guest OS shutdown). \
+        Use force=true for immediate power-off (TurnOff — equivalent to pulling the power cord); \
+        this bypasses the guest OS and may cause data loss in running workloads. Shows VM state \
+        after stopping. Discover VM names with `ssh_hyperv_vm_list`; to restart use \
+        `ssh_hyperv_vm_stop` then `ssh_hyperv_vm_start`.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -71,6 +74,10 @@ impl StandardTool for HypervVmStopTool {
                 "type": "integer",
                 "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool."
             }
         }
     }"#;

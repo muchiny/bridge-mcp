@@ -73,7 +73,8 @@ impl ToolHandler for SshAwxTemplateDetailHandler {
 
     fn description(&self) -> &'static str {
         "Get detailed information about an AWX job template including survey spec, credentials, \
-         and last job run. Use jq_filter for specific fields."
+         and last job run. Use ssh_awx_templates to list templates and discover their IDs before \
+         calling this tool. Use jq_filter for specific fields."
     }
 
     fn schema(&self) -> ToolSchema {

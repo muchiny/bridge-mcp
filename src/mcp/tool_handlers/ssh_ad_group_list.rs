@@ -37,8 +37,12 @@ impl StandardTool for AdGroupListTool {
 
     const NAME: &'static str = "ssh_ad_group_list";
 
-    const DESCRIPTION: &'static str = "List all Active Directory groups with name, scope, and category. Requires the AD \
-        PowerShell module.";
+    const DESCRIPTION: &'static str = "List all Active Directory groups with name, scope, and category using Get-ADGroup \
+        on a Windows DC. Requires the AD PowerShell module (RSAT). \
+        Returns all groups (no name filter supported — retrieve all and post-filter, or use \
+        save_output for large environments). \
+        Use ssh_ad_group_members to list members of a specific group, or ssh_ad_domain_info \
+        to first confirm the domain context.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

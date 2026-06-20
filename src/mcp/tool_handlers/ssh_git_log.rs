@@ -45,9 +45,10 @@ impl StandardTool for GitLogTool {
 
     const NAME: &'static str = "ssh_git_log";
 
-    const DESCRIPTION: &'static str = "Show commit history of a Git repository on a remote host. Supports filtering by \
-        branch, author, date (--since), and custom format. Use max_count to limit results and \
-        oneline for compact output.";
+    const DESCRIPTION: &'static str = "Show commit history of a Git repository on a remote host. Outputs plain text — \
+        use max_count to cap result size and oneline or format for compact per-commit lines. \
+        Supports filtering by branch, author, and date (--since). For reading file content or \
+        working-tree state use ssh_git_status or ssh_git_diff instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -83,7 +84,7 @@ impl StandardTool for GitLogTool {
             },
             "format": {
                 "type": "string",
-                "description": "Pretty-print format string (maps to --format, e.g. '%H %s')"
+                "description": "Pretty-print format string passed to --format (equivalent to --pretty=tformat:). Each placeholder is expanded per commit, e.g. '%H %s' for hash + subject, '%an %ae' for author name/email, '%ad' for author date. See git-log(1) PRETTY FORMATS for all placeholders. Mutually exclusive with oneline."
             },
             "timeout_seconds": {
                 "type": "integer",

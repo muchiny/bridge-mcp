@@ -38,9 +38,10 @@ impl StandardTool for HypervVmInfoTool {
 
     const NAME: &'static str = "ssh_hyperv_vm_info";
 
-    const DESCRIPTION: &'static str = "Get detailed information about a Hyper-V virtual machine on a Windows host. Returns \
-        all VM properties including state, CPU, memory, disks, network adapters, and more. \
-        Use `ssh_hyperv_vm_list` first to find VM names.";
+    const DESCRIPTION: &'static str = "Get detailed information about a specific Hyper-V virtual machine on a Windows host. \
+        Returns all guest VM properties including state, CPU, memory, disks, and network adapters. \
+        Use `ssh_hyperv_vm_list` first to discover VM names. For Hyper-V host-role configuration \
+        (not a guest VM) use `ssh_hyperv_host_info` instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

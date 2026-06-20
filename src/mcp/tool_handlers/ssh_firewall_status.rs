@@ -42,7 +42,7 @@ impl StandardTool for FirewallStatusTool {
     const DESCRIPTION: &'static str = "Show the firewall status on a remote Linux host including whether it is active and \
         which backend is in use. Use this to check if the firewall is enabled before adding \
         rules with ssh_firewall_allow or ssh_firewall_deny. Auto-detects ufw, firewall-cmd, \
-        or iptables.";
+        or iptables. For Windows hosts, use ssh_win_firewall_status instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -53,12 +53,14 @@ impl StandardTool for FirewallStatusTool {
                     },
                     "firewall_tool": {
                         "type": "string",
-                        "description": "Override auto-detected firewall tool (ufw/firewall-cmd/iptables)"
+                        "description": "Override auto-detected firewall tool",
+                        "enum": ["ufw", "firewall-cmd", "iptables"]
                     },
                     "timeout_seconds": {
                         "type": "integer",
                         "description": "Override default command timeout in seconds",
-                        "minimum": 1
+                        "minimum": 1,
+                        "maximum": 3600
                     },
                     "max_output": {
                         "type": "integer",

@@ -59,7 +59,7 @@ impl SshUploadHandler {
                 "type": "string",
                 "enum": ["overwrite", "append", "resume", "fail_if_exists"],
                 "default": "overwrite",
-                "description": "Transfer mode: overwrite (default), append, resume, or fail_if_exists"
+                "description": "Transfer mode: 'overwrite' (default) replaces the remote file entirely; 'fail_if_exists' aborts if the remote file already exists; 'resume' continues an interrupted transfer from the last byte written (byte-offset only, no checksum comparison — enable verify_checksum=true to detect corruption after resume); 'append' concatenates local content to an existing remote file (text files only — silently corrupts binary files)."
             },
             "chunk_size": {
                 "type": "integer",

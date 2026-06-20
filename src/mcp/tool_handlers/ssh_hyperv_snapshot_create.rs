@@ -39,8 +39,10 @@ impl StandardTool for HypervSnapshotCreateTool {
 
     const NAME: &'static str = "ssh_hyperv_snapshot_create";
 
-    const DESCRIPTION: &'static str = "Create a snapshot (checkpoint) of a Hyper-V virtual machine. Use before upgrades or \
-        configuration changes to enable rollback. Requires appropriate permissions.";
+    const DESCRIPTION: &'static str = "Create a named checkpoint (snapshot) of a Hyper-V virtual machine, enabling rollback \
+        before upgrades or configuration changes. Use `ssh_hyperv_vm_list` to discover VM names \
+        and `ssh_hyperv_snapshot_list` to view existing checkpoints. Requires appropriate \
+        permissions on the Hyper-V host.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -68,6 +70,10 @@ impl StandardTool for HypervSnapshotCreateTool {
                 "type": "integer",
                 "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool."
             }
         }
     }"#;

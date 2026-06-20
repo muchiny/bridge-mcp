@@ -147,7 +147,7 @@ impl SshExecMultiHandler {
             },
             "normalize": {
                 "type": "boolean",
-                "description": "Normalize volatile tokens (timestamps, PIDs, UUIDs) before diffing so hosts that differ only on runtime metadata still count as matching. Only meaningful when diff=true. Default: false.",
+                "description": "Replaces common volatile patterns — ISO timestamps (2024-01-02T03:04:05Z), syslog timestamps (Jan  2 03:04:05), PID markers (pid=1234 or [1234]:), and lowercase-hex UUIDs — with placeholder tokens (<TIMESTAMP>, <PID>, <UUID>) before diffing. Does not normalize IP addresses or file paths. Only meaningful when diff=true. Default: false.",
                 "default": false
             }
         },

@@ -35,8 +35,9 @@ impl StandardTool for JournalDiskUsageTool {
 
     const NAME: &'static str = "ssh_journal_disk_usage";
 
-    const DESCRIPTION: &'static str =
-        "Show disk space used by the systemd journal on a remote host.";
+    const DESCRIPTION: &'static str = "Show disk space used by the systemd journal on a remote host. Returns a single summary \
+        line reporting total journal disk consumption (journalctl --disk-usage). No filtering \
+        options are needed.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

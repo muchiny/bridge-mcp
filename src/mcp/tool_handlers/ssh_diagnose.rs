@@ -49,7 +49,10 @@ impl StandardTool for DiagnoseTool {
     const DESCRIPTION: &'static str = "Run a comprehensive diagnostic on a remote host in a \
         single call. Collects uptime, CPU load, memory, disk usage, top processes, failed \
         services, recent errors, OOM kills, and network listeners. Much faster than running \
-        individual commands sequentially.";
+        individual commands sequentially. Use this tool for general health checks or when the \
+        root cause is unknown. If you already know the symptom category (slow, crash, oom, disk, \
+        network), prefer ssh_incident_triage for targeted correlation. To capture state for later \
+        diffing, use ssh_compare_state.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -75,7 +78,7 @@ impl StandardTool for DiagnoseTool {
             },
             "summarize": {
                 "type": "boolean",
-                "description": "When true, append an LLM-side summary of the diagnostic output to the response. Requires the client to advertise the sampling capability; falls back to raw-only output otherwise."
+                "description": "When true, append an LLM-side summary of the diagnostic output to the response. Set this only when the MCP client supports sampling (clients that do not support it will receive raw output without error). Claude Code supports sampling natively."
             },
             "summary_max_tokens": {
                 "type": "integer",

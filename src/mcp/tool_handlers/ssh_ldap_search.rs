@@ -44,7 +44,11 @@ impl StandardTool for LdapSearchTool {
     const NAME: &'static str = "ssh_ldap_search";
 
     const DESCRIPTION: &'static str = "Search an LDAP directory on a remote host using \
-        ldapsearch. Specify base DN and optional filter, attributes, and scope.";
+        ldapsearch (-x -LLL). Specify base DN and optional filter, attributes, and scope. \
+        Output is LDIF (attribute: value blocks); use the 'attributes' param to reduce output \
+        rather than columns/limit (which are meaningless on LDIF). Authentication uses the \
+        remote host's system ldap.conf / SASL configuration; no credentials are passed on the \
+        command line. For write operations use ssh_ldap_add or ssh_ldap_modify.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -39,8 +39,9 @@ impl StandardTool for EsxiDatastoreListTool {
     const NAME: &'static str = "ssh_esxi_datastore_list";
 
     const DESCRIPTION: &'static str = "List all datastores and filesystems on a VMware ESXi host. Returns mount point, \
-        volume name, UUID, capacity, free space, and filesystem type (VMFS, vfat, NFS). Uses \
-        esxcli storage filesystem list.";
+        volume name, UUID (the VMFS volume UUID, e.g. 5a1b2c3d-xxxx-xxxx-xxxx-xxxxxxxxxxxx — use this to \
+        reference datastores in paths like /vmfs/volumes/<UUID>), capacity, free space, and filesystem type \
+        (VMFS, vfat, NFS). Uses esxcli storage filesystem list.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -42,10 +42,12 @@ impl StandardTool for BackupSnapshotTool {
 
     const NAME: &'static str = "ssh_backup_snapshot";
 
-    const DESCRIPTION: &'static str = "Create a timestamped snapshot archive of specified paths on \
-        a remote host. The archive is saved to /tmp/ with a timestamp and optional label. \
-        Returns the archive path, size, and SHA-256 checksum. Use ssh_backup_verify to \
-        validate the archive afterward.";
+    const DESCRIPTION: &'static str = "Create a timestamped gzip-compressed tar archive of specified \
+        paths on a remote host (Linux only). The archive is saved to /tmp/ with a timestamp and optional \
+        label; the tool returns the archive path, size, and SHA-256 checksum. Pass paths as a single \
+        space-separated string (e.g., '/var/data /etc/config') — unlike ssh_backup_create which takes \
+        an array. Use ssh_backup_verify to validate the archive afterward, or ssh_backup_list to \
+        inspect its contents.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -56,7 +58,7 @@ impl StandardTool for BackupSnapshotTool {
                     },
                     "paths": {
                         "type": "string",
-                        "description": "Paths to include in the snapshot (space-separated)"
+                        "description": "Paths to include in the snapshot as a single space-separated string (e.g., '/var/data /etc/config'). Unlike ssh_backup_create which takes an array, this tool accepts a plain string."
                     },
                     "label": {
                         "type": "string",

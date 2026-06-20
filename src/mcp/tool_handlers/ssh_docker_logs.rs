@@ -45,7 +45,8 @@ impl StandardTool for DockerLogsTool {
 
     const DESCRIPTION: &'static str = "Fetch logs from a Docker container on a remote host. Use ssh_docker_ps first to find \
         container names. Supports tail (last N lines), since/until time-based filtering, and \
-        timestamps. Auto-detects docker or podman binary. Returns log text.";
+        timestamps. Auto-detects docker or podman binary. Returns log text. To search logs by \
+        pattern use ssh_container_log_search; for log statistics use ssh_container_log_stats.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -65,7 +66,7 @@ impl StandardTool for DockerLogsTool {
             },
             "since": {
                 "type": "string",
-                "description": "Show logs since timestamp or relative time (e.g., 2024-01-01, 1h, 30m)"
+                "description": "Show logs since RFC3339 timestamp (e.g., 2024-01-01T00:00:00Z) or relative duration (1h, 30m, 2h30m)"
             },
             "until": {
                 "type": "string",

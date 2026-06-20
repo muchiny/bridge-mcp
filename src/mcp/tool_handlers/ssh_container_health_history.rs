@@ -41,8 +41,10 @@ impl StandardTool for ContainerHealthHistoryTool {
     const NAME: &'static str = "ssh_container_health_history";
 
     const DESCRIPTION: &'static str = "Show health check history for a Docker container on a \
-        remote host. Displays recent health check results including exit codes, output, and \
-        timestamps. Use ssh_docker_ps to find containers with health checks configured.";
+        remote host. Returns JSON with shape {Status, FailingStreak, Log: [{Start, End, ExitCode, \
+        Output}]}. Use ssh_docker_ps to find containers with health checks configured. To extract \
+        only failures: pipe through jq_filter '.Log[] | select(.ExitCode != 0)'; for last 5 \
+        checks use '.Log[-5:]'.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

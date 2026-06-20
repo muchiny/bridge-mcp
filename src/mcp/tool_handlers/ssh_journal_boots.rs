@@ -39,7 +39,9 @@ impl StandardTool for JournalBootsTool {
     const NAME: &'static str = "ssh_journal_boots";
 
     const DESCRIPTION: &'static str = "List boot entries from the systemd journal on a remote \
-        host. Shows boot ID, timestamps, and boot index.";
+        host. Shows boot ID, timestamps, and boot index (journalctl --list-boots). Use returned \
+        boot IDs or offsets (e.g., 0 for current boot, -1 for previous) with ssh_journal_query \
+        to scope log queries to a specific boot session.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

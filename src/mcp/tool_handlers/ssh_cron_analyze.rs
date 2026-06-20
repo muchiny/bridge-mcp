@@ -40,9 +40,13 @@ impl StandardTool for CronAnalyzeTool {
 
     const NAME: &'static str = "ssh_cron_analyze";
 
-    const DESCRIPTION: &'static str = "Analyze cron jobs on a remote host. Detects scheduling \
-        overlaps, recently failed jobs, and lists all user and system crontabs. Provides a \
-        comprehensive overview of scheduled tasks. Prefer this over ssh_exec for cron analysis.";
+    const DESCRIPTION: &'static str = "Analyze cron jobs on a remote host. Reads all user and \
+        system crontabs (/etc/crontab, /etc/cron.d), detects duplicate schedule entries \
+        (overlap detection), and surfaces recent CRON log entries from journalctl/syslog as \
+        heuristic failure signals — it does NOT track per-run exit codes or timestamps. \
+        Prefer ssh_cron_list (group: cron) when you only need a plain crontab listing with no \
+        analysis. For per-run execution history with exit statuses and exact timestamps, use \
+        ssh_cron_history instead. Linux only.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

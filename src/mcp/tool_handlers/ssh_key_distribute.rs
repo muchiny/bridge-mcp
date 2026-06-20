@@ -53,7 +53,7 @@ impl StandardTool for KeyDistributeTool {
                     },
                     "public_key": {
                         "type": "string",
-                        "description": "SSH public key to distribute (e.g., 'ssh-ed25519 AAAA... user@host')"
+                        "description": "Full SSH public key string as it appears in a .pub file or as returned by ssh_key_generate — must include the algorithm prefix (e.g., 'ssh-ed25519 AAAA... user@host' or 'ssh-rsa AAAA... user@host'). Passing only the key material without the prefix will be rejected."
                     },
                     "timeout_seconds": {
                         "type": "integer",

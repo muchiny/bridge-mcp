@@ -34,8 +34,12 @@ impl StandardTool for LdapModifyTool {
 
     const NAME: &'static str = "ssh_ldap_modify";
 
-    const DESCRIPTION: &'static str = "Modify an entry in an LDAP directory on a remote host \
-        using LDIF format.";
+    const DESCRIPTION: &'static str = "Modify an existing entry in an LDAP directory on a remote \
+        host using LDIF format via ldapmodify. Use for updating existing entries only — to create \
+        a new entry use ssh_ldap_add instead. The LDIF must include 'changetype: modify' (or \
+        'changetype: delete'/'modrdn') for each entry. Authentication uses the remote host's \
+        system ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no credentials are passed \
+        on the command line.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

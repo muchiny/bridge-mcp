@@ -35,8 +35,14 @@ impl StandardTool for MysqlQueryTool {
     const NAME: &'static str = "ssh_mysql_query";
 
     const DESCRIPTION: &'static str = "Execute a SQL query on a remote MySQL database via the \
-        mysql client. Returns query results in table, CSV, or JSON format. Prefer this over \
-        ssh_exec for MySQL interactions as it handles connection parameters automatically.";
+        mysql client. Returns query results in table, CSV, or JSON format. Accepts any SQL \
+        statement including DDL (DROP, ALTER) and DML (INSERT, UPDATE, DELETE) — treat this \
+        tool as potentially destructive. Auth is read from ~/.my.cnf on the remote host when \
+        no db_user is supplied; for password-protected accounts, configure a [client] section \
+        in ~/.my.cnf (password=...) on the remote host rather than passing credentials in \
+        plaintext. Prefer this over ssh_exec for MySQL interactions. For a quick server \
+        health check (version, databases, connection count) without writing SQL, use \
+        ssh_mysql_status instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

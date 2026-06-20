@@ -22,8 +22,8 @@ impl SshConfigGetHandler {
         "properties": {
             "key": {
                 "type": "string",
-                "description": "Specific config key to read. If omitted, returns all limits.",
-                "enum": ["max_output_chars", "command_timeout_seconds", "max_concurrent_commands", "all"]
+                "description": "Config key to retrieve. Omit this parameter entirely to get all limit values as an object.",
+                "enum": ["max_output_chars", "command_timeout_seconds", "max_concurrent_commands"]
             }
         },
         "required": []
@@ -37,9 +37,11 @@ impl ToolHandler for SshConfigGetHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Read the current effective configuration limits. Returns max_output_chars, \
-         command_timeout_seconds, and other limit values. Useful to understand your \
-         output budget before running commands that may produce large output."
+        "Bridge-local: reads the current effective configuration limits of the MCP bridge \
+         session itself — not a remote host (there is no host param). Returns \
+         max_output_chars, command_timeout_seconds, max_concurrent_commands, and other \
+         session-level limits. Use ssh_config_set to change max_output_chars at runtime. \
+         Useful to check your output budget before running commands that produce large output."
     }
 
     fn schema(&self) -> ToolSchema {

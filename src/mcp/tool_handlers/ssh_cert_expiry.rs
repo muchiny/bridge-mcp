@@ -53,7 +53,7 @@ impl StandardTool for CertExpiryTool {
             },
             "is_file": {
                 "type": "boolean",
-                "description": "True if target is a file path, false for remote host:port (default: false)"
+                "description": "MUST be true when target is a file path (e.g. target=/etc/ssl/certs/server.crt, is_file=true); omit or set false when target is a live host:port (e.g. example.com:443). Passing a file path without is_file=true will trigger a connection attempt, not file inspection."
             },
             "days": {
                 "type": "integer",

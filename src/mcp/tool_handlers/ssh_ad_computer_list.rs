@@ -37,8 +37,12 @@ impl StandardTool for AdComputerListTool {
 
     const NAME: &'static str = "ssh_ad_computer_list";
 
-    const DESCRIPTION: &'static str = "List Active Directory computer accounts with operating system and last logon date. \
-        Requires the AD PowerShell module.";
+    const DESCRIPTION: &'static str = "List Active Directory computer accounts with operating system and last logon date \
+        using Get-ADComputer on a Windows DC. Requires the AD PowerShell module (RSAT). \
+        Returns all computers in the domain (no name filter supported — retrieve all and \
+        post-filter, or use save_output for large environments). \
+        Use ssh_ad_domain_info first to confirm the domain, then ssh_ad_group_list or \
+        ssh_ad_user_list to enumerate other domain object types.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

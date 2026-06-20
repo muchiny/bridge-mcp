@@ -42,8 +42,17 @@ impl StandardTool for EnvDriftTool {
 
     const NAME: &'static str = "ssh_env_drift";
 
-    const DESCRIPTION: &'static str = "Check for environment drift by comparing current state \
-        against a desired state. Captures packages, services, and config checksums.";
+    const DESCRIPTION: &'static str = "Captures a fresh environment snapshot on the host \
+        (OS, packages, services, listeners, users, config checksums — same data as \
+        ssh_env_snapshot) and optionally appends an LLM-powered drift summary via the \
+        enrich step. There is no built-in baseline: it does NOT compare against a stored \
+        desired state. Use this tool when you want the snapshot data plus an automated \
+        analysis of the top concerning drift events (pass summarize=true). To compare two \
+        hosts or two points in time, use ssh_env_snapshot with save_output on each, then \
+        call ssh_env_diff for instructions on diffing the saved files. For a one-shot \
+        diagnostic snapshot without drift analysis, use ssh_env_snapshot directly. For \
+        broader system-state capture including network listeners and kernel info, \
+        ssh_compare_state (diagnostics group) covers similar ground.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -47,7 +47,8 @@ impl StandardTool for DockerPsTool {
         before using ssh_docker_inspect (detailed config), ssh_docker_logs (output), \
         ssh_docker_exec (run commands inside), or ssh_docker_stats (resource usage). Shows \
         running containers by default; set all=true to include stopped. Auto-detects docker \
-        or podman binary.";
+        or podman binary. To view real-time Docker daemon events (container start/stop/die), \
+        use ssh_container_events.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

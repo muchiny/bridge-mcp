@@ -33,7 +33,11 @@ impl StandardTool for FileStatTool {
     const NAME: &'static str = "ssh_file_stat";
 
     const DESCRIPTION: &'static str = "Get detailed file information on a remote host using stat. \
-        Returns permissions, owner, group, size, modification time, and file type.";
+        Returns permissions, owner, group, size, modification time, and file type as text. \
+        Output is human-readable stat format; to extract a specific field programmatically, \
+        pipe the result through a follow-up ssh_exec (e.g., stat -c '%a' for octal permissions, \
+        stat -c '%s' for size in bytes, stat -c '%Y' for mtime as epoch). Use before \
+        ssh_file_chmod or ssh_file_chown to verify the current state.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

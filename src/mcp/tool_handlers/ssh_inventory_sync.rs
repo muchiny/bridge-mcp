@@ -39,9 +39,11 @@ impl StandardTool for InventorySyncTool {
 
     const NAME: &'static str = "ssh_inventory_sync";
 
-    const DESCRIPTION: &'static str = "Sync host inventory information from a remote host. \
-        Gathers hostname, OS release information, uptime, and IP addresses to build \
-        an inventory snapshot of the remote system.";
+    const DESCRIPTION: &'static str = "Gather a lightweight inventory snapshot from a remote host: \
+        hostname, OS release, uptime, and IP addresses. \
+        Read-only — does not write or push to any inventory store. \
+        For a deeper snapshot including packages, services, and config checksums, use ssh_env_snapshot. \
+        For a point-in-time state capture for drift comparison, use ssh_compare_state.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

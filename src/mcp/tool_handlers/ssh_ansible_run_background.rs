@@ -66,7 +66,8 @@ impl StandardTool for AnsibleRunBackgroundTool {
     const DESCRIPTION: &'static str = "Launch an Ansible playbook in the background with JSON \
         callback output. Returns a run_id and PID immediately. The playbook output is written \
         to /tmp/ansible-run-{run_id}.json on the remote host. Use ssh_ansible_events to monitor \
-        progress and extract events. Use ssh_exec with 'kill -0 {pid}' to check if still running.";
+        progress and extract events. Use ssh_ansible_events with check_status=true and \
+        pid=<pid> to check if the playbook is still running without a separate ssh_exec call.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

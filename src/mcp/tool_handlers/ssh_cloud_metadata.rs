@@ -36,8 +36,13 @@ impl StandardTool for CloudMetadataTool {
     const NAME: &'static str = "ssh_cloud_metadata";
 
     const DESCRIPTION: &'static str = "Detect and retrieve cloud provider metadata on a remote \
-        host. Auto-detects whether the host is running on AWS, GCP, or Azure by querying \
-        metadata endpoints. Returns provider identification and instance metadata.";
+        host. Auto-detects whether the host is running on AWS, GCP, or Azure by probing \
+        IMDS endpoints (169.254.169.254 for AWS/Azure, metadata.google.internal for GCP). \
+        Returns instance identity information such as instance ID, type, region, and zone. \
+        For resource tags (Name, Environment, Owner) use ssh_cloud_tags instead — it \
+        supports an explicit provider param (aws/gcp/azure). Provider cannot be forced here; \
+        if auto-detection is unreliable on a multi-cloud host, use ssh_cloud_tags with an \
+        explicit provider.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

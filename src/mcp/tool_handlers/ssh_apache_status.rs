@@ -27,9 +27,12 @@ impl StandardTool for ApacheStatusTool {
 
     const NAME: &'static str = "ssh_apache_status";
 
-    const DESCRIPTION: &'static str = "Get Apache HTTP server status on a remote host. Returns \
-        server version, compiled-in modules, virtual host configuration summary, and mod_status \
-        metrics if enabled. Prefer this over ssh_exec for Apache status checks.";
+    const DESCRIPTION: &'static str = "Get Apache HTTP server status on a remote host. Runs \
+        apachectl -V (server version and compiled modules), apachectl -S (virtual host config \
+        summary), and curl http://localhost/server-status?auto (mod_status worker metrics, if \
+        enabled). Use this tool for Apache HTTPD worker metrics and config inspection; for nginx \
+        status on the same host use ssh_nginx_status instead. Prefer this over ssh_exec for \
+        Apache status checks.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

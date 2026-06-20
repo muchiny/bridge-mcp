@@ -44,9 +44,13 @@ impl StandardTool for IncidentTimelineTool {
     const NAME: &'static str = "ssh_incident_timeline";
 
     const DESCRIPTION: &'static str = "Construct an incident timeline on a remote host by \
-        correlating multiple log sources. Collects journalctl errors, failed systemd units, \
-        recent logins, kernel messages (dmesg), and recently modified log files. \
-        Use 'since' and 'until' to narrow the time window.";
+        correlating multiple log sources. Collects journalctl errors (priority err and above), \
+        failed systemd units, recent logins, kernel messages (dmesg), and recently modified \
+        files under /var/log (*.log files newer than the 'since' timestamp, or last 1 hour if \
+        'since' is omitted). Omitting 'since' scans the entire journal and can produce very \
+        large output — strongly recommended to bound the query (e.g., '2 hours ago'). \
+        'until' defaults to now. For targeted service correlation use ssh_incident_correlate; \
+        for automated symptom-based triage use ssh_incident_triage.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -57,11 +61,11 @@ impl StandardTool for IncidentTimelineTool {
                     },
                     "since": {
                         "type": "string",
-                        "description": "Start time (e.g., '1 hour ago', '2024-01-01 00:00:00')"
+                        "description": "Start time (e.g., '1 hour ago', '2024-01-01 00:00:00'). Defaults to no time bound if omitted — strongly recommended during incidents to bound the query (e.g., '2 hours ago') to avoid very large output."
                     },
                     "until": {
                         "type": "string",
-                        "description": "End time (e.g., 'now', '2024-01-01 12:00:00')"
+                        "description": "End time (e.g., '2024-01-01 12:00:00'). Defaults to now if omitted."
                     },
                     "timeout_seconds": {
                         "type": "integer",

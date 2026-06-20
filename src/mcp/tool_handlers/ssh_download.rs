@@ -63,7 +63,7 @@ impl SshDownloadHandler {
                 "type": "string",
                 "enum": ["overwrite", "append", "resume", "fail_if_exists"],
                 "default": "overwrite",
-                "description": "Transfer mode: overwrite (default), append, resume, or fail_if_exists"
+                "description": "Transfer mode: 'overwrite' (default) replaces the local file entirely; 'fail_if_exists' aborts if the local file already exists; 'resume' continues an interrupted transfer from the last byte written (byte-offset only, no checksum comparison — enable verify_checksum=true to detect corruption after resume); 'append' concatenates remote content to an existing local file (text files only — silently corrupts binary files)."
             },
             "chunk_size": {
                 "type": "integer",
@@ -92,10 +92,12 @@ impl ToolHandler for SshDownloadHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Download a single file from a remote host via SFTP. Streaming transfer with no size \
-         limit, optional SHA256 checksum verification, and resume support. For downloading \
-         entire directories, use ssh_sync with direction 'download' instead. Returns transfer \
-         confirmation with bytes transferred."
+        "Download a single file from a remote host via SFTP and save it to a local path. \
+         Streaming transfer with no size limit, optional SHA256 checksum verification, and \
+         resume support. For downloading entire directories, use ssh_sync with direction \
+         'download' instead. To read a small remote text file directly into the response \
+         without saving it locally, use ssh_file_read instead. Returns transfer confirmation \
+         with bytes transferred."
     }
 
     fn schema(&self) -> ToolSchema {

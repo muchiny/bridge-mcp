@@ -26,11 +26,7 @@ pub struct SshBenchmarkArgs {
 
 impl_common_args!(SshBenchmarkArgs);
 
-#[mcp_standard_tool(
-    name = "ssh_benchmark",
-    group = "performance",
-    annotation = "mutating"
-)]
+#[mcp_standard_tool(name = "ssh_benchmark", group = "performance", annotation = "mutating")]
 pub struct BenchmarkTool;
 
 impl StandardTool for BenchmarkTool {

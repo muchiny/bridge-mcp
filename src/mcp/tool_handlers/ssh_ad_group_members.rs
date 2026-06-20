@@ -38,7 +38,13 @@ impl StandardTool for AdGroupMembersTool {
     const NAME: &'static str = "ssh_ad_group_members";
 
     const DESCRIPTION: &'static str = "List members of an Active Directory group with name, SAM account name, and object \
-        class. Requires the AD PowerShell module.";
+        class using Get-ADGroupMember on a Windows DC. Requires the AD PowerShell module (RSAT). \
+        Use this tool (not ssh_ldap_group_members) when the host is a Windows DC with the AD \
+        PowerShell module installed — it returns AD-typed objects including nested group entries \
+        (objectClass=group) and handles the full AD object model. For raw LDAP queries or \
+        non-Windows hosts, use ssh_ldap_group_members instead. \
+        Large groups (e.g. Domain Users) can produce thousands of rows; use save_output to \
+        persist the full result to a file on the remote host when output is truncated.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -39,8 +39,10 @@ impl StandardTool for HypervSwitchListTool {
 
     const NAME: &'static str = "ssh_hyperv_switch_list";
 
-    const DESCRIPTION: &'static str = "List Hyper-V virtual switches on a Windows host. Returns name, switch type, network \
-        adapter, and management OS setting for each virtual switch.";
+    const DESCRIPTION: &'static str = "List all Hyper-V virtual switches on a Windows host. Returns name, switch type \
+        (External = bound to a physical NIC; Internal = host+VM only; Private = VM-to-VM only), \
+        network adapter, and management OS setting. Use this to find switch names before \
+        connecting VMs to a specific network segment.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

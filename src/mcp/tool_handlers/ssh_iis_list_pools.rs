@@ -33,8 +33,9 @@ impl StandardTool for IisListPoolsTool {
     const NAME: &'static str = "ssh_iis_list_pools";
 
     const DESCRIPTION: &'static str = "List all IIS application pools on a Windows host with name, state, and managed \
-        runtime version. Use ssh_iis_restart to recycle a pool. Requires the IIS PowerShell \
-        module.";
+        runtime version. Output is tabular TSV — use the columns and limit params to reduce \
+        output size; jq_filter does not apply to tabular output. Use ssh_iis_restart to recycle \
+        a pool. Requires the IIS PowerShell module (Get-IISAppPool).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

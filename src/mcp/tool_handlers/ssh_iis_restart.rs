@@ -34,8 +34,11 @@ impl StandardTool for IisRestartTool {
 
     const NAME: &'static str = "ssh_iis_restart";
 
-    const DESCRIPTION: &'static str = "Restart (recycle) an IIS application pool on a Windows host by name. Use \
-        ssh_iis_list_pools to discover pool names. Idempotent and safe to retry.";
+    const DESCRIPTION: &'static str = "Restart (recycle) an IIS application pool on a Windows host by name. This \
+        recycles the specified application pool only, without affecting other pools or websites. \
+        Use ssh_iis_list_pools to discover pool names. Idempotent and safe to retry. \
+        To restart the entire IIS stack (all sites and pools), use ssh_win_service_restart with \
+        service name W3SVC instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -47,7 +50,7 @@ impl StandardTool for IisRestartTool {
             },
             "name": {
                 "type": "string",
-                "description": "Name of the IIS website or application pool"
+                "description": "Name of the IIS application pool to recycle (use ssh_iis_list_pools to discover pool names)"
             },
             "timeout_seconds": {
                 "type": "integer",

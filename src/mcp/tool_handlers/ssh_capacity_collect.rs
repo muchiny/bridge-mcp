@@ -37,9 +37,14 @@ impl StandardTool for CapacityCollectTool {
 
     const NAME: &'static str = "ssh_capacity_collect";
 
-    const DESCRIPTION: &'static str = "Collect comprehensive capacity data from a remote host. \
-        Shows CPU count and usage, total/used/free RAM, disk usage per mount, \
-        inode usage, uptime, and load average in a single snapshot.";
+    const DESCRIPTION: &'static str = "Collect a single human-readable snapshot of capacity data \
+        from a remote host, combining CPU count and usage, total/used/free RAM, disk usage per \
+        mount, inode usage, uptime, and load average in one call. Use this tool when you need a \
+        quick overview across all resource types without historical context. \
+        For structured JSON metrics use ssh_metrics instead (overlaps CPU/RAM/disk). \
+        For per-mount disk detail use ssh_disk_usage. \
+        For historical trends use ssh_capacity_trend; \
+        for raw historical data suitable for LLM forecasting use ssh_capacity_predict.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

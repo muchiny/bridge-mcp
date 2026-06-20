@@ -73,8 +73,9 @@ impl ToolHandler for SshSyncHandler {
     fn description(&self) -> &'static str {
         "Synchronize entire directories between local and remote hosts via SFTP. Recursively \
          transfers directory trees with exclude patterns. Use direction 'upload' for local-to-remote, \
-         'download' for remote-to-local. For single files, prefer ssh_upload or ssh_download instead. \
-         Returns count of files transferred."
+         'download' for remote-to-local. NOTE: this tool only copies — it never deletes files at \
+         the destination that are absent from the source; it is an additive copy, not a true mirror. \
+         For single files, prefer ssh_upload or ssh_download instead. Returns count of files transferred."
     }
 
     fn schema(&self) -> ToolSchema {

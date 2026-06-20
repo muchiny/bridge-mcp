@@ -102,10 +102,14 @@ impl ToolHandler for SshFilesWriteHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Write or upload multiple files to a remote host in a single call. Each file entry \
-         provides a remote_path plus either inline content or a local_path to upload. All \
-         files share one SFTP session for efficiency. By default continues on errors and \
-         reports per-file results; set stop_on_error=true to fail fast."
+        "Write or upload multiple files to a remote host in a single SFTP session. Each file \
+         entry provides a remote_path plus either inline content (for small text files) or a \
+         local_path to upload from disk; content and local_path are mutually exclusive. All \
+         files share one SFTP session for efficiency (up to 100 files per call). By default \
+         continues on errors and reports per-file results; set stop_on_error=true to fail fast. \
+         For a single file upload from local disk use ssh_upload; for directory sync use \
+         ssh_sync. Use ssh_files_write when you need to deploy multiple files atomically in one \
+         operation."
     }
 
     fn schema(&self) -> ToolSchema {

@@ -51,10 +51,11 @@ impl StandardTool for ComplianceScoreTool {
 
     const NAME: &'static str = "ssh_compliance_score";
 
-    const DESCRIPTION: &'static str = "Calculate a compliance score on a remote host. Prefer this over ssh_exec \
-        for quick compliance assessment as it runs a scored subset of security checks and \
-        outputs pass/fail/total counts for file permissions, SSH hardening, kernel parameters, \
-        and audit configuration.";
+    const DESCRIPTION: &'static str = "Calculate a numeric compliance score (pass/fail/total counts) for a remote \
+        Linux host across file permissions, SSH hardening, kernel parameters, and audit configuration. \
+        Use this for a quick at-a-glance score. For detailed per-check results filtered by CIS level \
+        use ssh_cis_benchmark; for a full structured report in text or JSON format use \
+        ssh_compliance_report.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

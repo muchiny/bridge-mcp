@@ -41,7 +41,11 @@ pub struct SshAnsibleAdhocArgs {
 
 impl_common_args!(SshAnsibleAdhocArgs);
 
-#[mcp_standard_tool(name = "ssh_ansible_adhoc", group = "ansible", annotation = "destructive")]
+#[mcp_standard_tool(
+    name = "ssh_ansible_adhoc",
+    group = "ansible",
+    annotation = "destructive"
+)]
 pub struct AnsibleAdhocTool;
 
 impl StandardTool for AnsibleAdhocTool {
@@ -52,7 +56,9 @@ impl StandardTool for AnsibleAdhocTool {
     const DESCRIPTION: &'static str = "Run an Ansible ad-hoc command on a remote host without a playbook. Execute a single \
         module (e.g., ping, shell, copy, service) against target hosts. Use \
         ssh_ansible_inventory first to discover hosts. For complex multi-task automation, use \
-        ssh_ansible_playbook instead. Supports check mode for dry-run.";
+        ssh_ansible_playbook instead. Supports check mode for dry-run. Requires Ansible \
+        installed directly on the bridge host (not AWX/Tower — use ssh_awx_job_launch for \
+        AWX-managed environments).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -114,6 +120,10 @@ impl StandardTool for AnsibleAdhocTool {
                 "type": "integer",
                 "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool. Useful for large host groups producing verbose output."
             }
         },
         "required": ["host", "pattern", "module"]

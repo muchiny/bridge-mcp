@@ -36,7 +36,9 @@ impl StandardTool for FileChmodTool {
     const NAME: &'static str = "ssh_file_chmod";
 
     const DESCRIPTION: &'static str = "Change file permissions on a remote host using chmod. \
-        Accepts numeric (755) or symbolic (u+x) mode formats. Use recursive=true for directories.";
+        Accepts numeric (755) or symbolic (u+x) mode formats. Use recursive=true for directories. \
+        Use ssh_file_stat first to inspect current permissions before changing them. To change \
+        file ownership (user/group), use ssh_file_chown instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

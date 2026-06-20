@@ -46,7 +46,8 @@ impl StandardTool for ContainerLogSearchTool {
 
     const DESCRIPTION: &'static str = "Search container logs for a pattern on a remote host. \
         Filters Docker or Podman container logs by grep pattern with optional time range. \
-        Use ssh_docker_ps first to find container names. Returns matching log lines with context.";
+        Use ssh_docker_ps first to find container names. Returns matching log lines (no context \
+        window — grep -C is not available; use ssh_docker_logs for full log streaming).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -69,7 +70,7 @@ impl StandardTool for ContainerLogSearchTool {
             },
             "tail": {
                 "type": "integer",
-                "description": "Number of lines from the end to search (--tail=N, default: all)",
+                "description": "Number of lines from the end to search (--tail=N, default: all). Primary output-reduction lever — always set this for large containers (e.g. tail=1000) before broadening the time window with `since`.",
                 "minimum": 1
             },
             "docker_bin": {

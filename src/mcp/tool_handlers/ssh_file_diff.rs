@@ -36,7 +36,9 @@ impl StandardTool for FileDiffTool {
     const NAME: &'static str = "ssh_file_diff";
 
     const DESCRIPTION: &'static str = "Compare two files on a remote host using unified diff \
-        format. Returns the differences between file1 and file2.";
+        format. Returns the differences between file1 and file2. Both files must exist on the \
+        same remote host; for cross-host comparison, read each file separately with ssh_file_read \
+        and diff locally.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

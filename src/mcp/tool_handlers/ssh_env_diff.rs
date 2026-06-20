@@ -42,9 +42,13 @@ impl StandardTool for EnvDiffTool {
 
     const NAME: &'static str = "ssh_env_diff";
 
-    const DESCRIPTION: &'static str = "Get environment snapshot instructions. To compare \
-        environments, run ssh_env_snapshot on two hosts saving outputs to files, then compare \
-        the files directly.";
+    const DESCRIPTION: &'static str = "Returns step-by-step instructions for comparing two \
+        host environments. Does NOT perform the diff itself — it outputs a static text guide \
+        telling you to run ssh_env_snapshot on each host (with save_output), then diff the \
+        saved files locally. Use ssh_env_snapshot to capture the actual snapshot data, or \
+        ssh_env_drift to capture a snapshot with an optional LLM-powered drift summary. \
+        Pass summarize=true to append an LLM summary of top differences (requires sampling \
+        capability).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

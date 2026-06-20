@@ -64,7 +64,7 @@ impl StandardTool for AnsibleFactsTool {
             },
             "filter": {
                 "type": "string",
-                "description": "Fact filter pattern (e.g., 'ansible_distribution*', 'ansible_memory*', 'ansible_default_ipv4*'). Highly recommended to reduce output."
+                "description": "Fact filter glob pattern passed to the setup module (-a filter=...). Supports wildcards (e.g., 'ansible_distribution*') and comma-separated patterns (e.g., 'ansible_eth*,ansible_memory*' on Ansible 2.9+). Strongly recommended to reduce output — without filter, ALL facts (~50K chars) are returned."
             },
             "inventory": {
                 "type": "string",

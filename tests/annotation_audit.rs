@@ -150,16 +150,16 @@ fn destructive_suffix_implies_destructive() {
 /// `require_elicitation_on_destructive` gate can confirm before they run.
 /// (Audit 2026-06-20.)
 const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
-    "ssh_exec",            // arbitrary shell (rm -rf, mkfs, dd)
-    "ssh_aws_cli",         // raw AWS passthrough (ec2 terminate, s3 rm, iam delete)
-    "ssh_ansible_adhoc",   // arbitrary module exec (shell -a "rm ...")
-    "ssh_db_restore",      // overwrites the target database
-    "ssh_backup_restore",  // overwrites files at the restore destination
-    "ssh_docker_compose",  // `down` removes containers + networks
-    "ssh_esxi_snapshot",   // `remove_all` permanently deletes snapshots
-    "ssh_ldap_modify",     // LDIF `changetype: delete` removes entries
-    "ssh_vault_write",     // overwrites a secret (KV v1 has no versioning)
-    "ssh_pkg_update",      // full system upgrade can remove/replace packages
+    "ssh_exec",           // arbitrary shell (rm -rf, mkfs, dd)
+    "ssh_aws_cli",        // raw AWS passthrough (ec2 terminate, s3 rm, iam delete)
+    "ssh_ansible_adhoc",  // arbitrary module exec (shell -a "rm ...")
+    "ssh_db_restore",     // overwrites the target database
+    "ssh_backup_restore", // overwrites files at the restore destination
+    "ssh_docker_compose", // `down` removes containers + networks
+    "ssh_esxi_snapshot",  // `remove_all` permanently deletes snapshots
+    "ssh_ldap_modify",    // LDIF `changetype: delete` removes entries
+    "ssh_vault_write",    // overwrites a secret (KV v1 has no versioning)
+    "ssh_pkg_update",     // full system upgrade can remove/replace packages
 ];
 
 #[test]

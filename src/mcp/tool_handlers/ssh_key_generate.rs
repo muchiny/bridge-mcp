@@ -61,7 +61,7 @@ impl StandardTool for KeyGenerateTool {
                     },
                     "bits": {
                         "type": "integer",
-                        "description": "Key bit length (e.g., 4096 for RSA)",
+                        "description": "Key bit length. Ignored for ed25519 (fixed-length). For ecdsa, use 256, 384, or 521. For RSA, recommended minimum 2048; use 3072 or 4096 for long-lived keys.",
                         "minimum": 256,
                         "maximum": 16384
                     },

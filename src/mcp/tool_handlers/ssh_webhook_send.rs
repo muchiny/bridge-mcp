@@ -36,9 +36,12 @@ impl StandardTool for WebhookSendTool {
 
     const NAME: &'static str = "ssh_webhook_send";
 
-    const DESCRIPTION: &'static str = "Send a webhook POST request from a remote host. Sends a \
-        JSON payload to the specified HTTPS URL using curl. Returns the response body and HTTP \
-        status code. Useful for ChatOps integrations, CI/CD triggers, and notification systems.";
+    const DESCRIPTION: &'static str = "Send a caller-supplied JSON payload via webhook POST from a remote host. \
+        The payload is transmitted exactly as provided — no envelope, hostname, or timestamp is added. \
+        Use this tool when you control the complete JSON body (CI/CD events, signed payloads, structured data). \
+        For simple text alerts that should be auto-stamped with hostname and timestamp, use ssh_notify instead. \
+        Note: the URL parameter for this tool is named `url` (not `webhook_url`). \
+        Returns the response body and HTTP status code.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -49,7 +52,7 @@ impl StandardTool for WebhookSendTool {
                     },
                     "url": {
                         "type": "string",
-                        "description": "Webhook URL (must start with https://)"
+                        "description": "Webhook endpoint URL. Must use HTTPS (http:// is rejected by the server). Note: this param is named `url`; ssh_notify uses `webhook_url`. Example: https://hooks.slack.com/services/T000/B000/xxxx"
                     },
                     "payload": {
                         "type": "string",

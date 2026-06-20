@@ -69,7 +69,7 @@ impl StandardTool for CronHistoryTool {
                     },
                     "since": {
                         "type": "string",
-                        "description": "Show entries since this time (e.g., '24 hours ago', '2024-01-01')"
+                        "description": "Show entries since this time. On systemd hosts accepts journalctl-style relative strings (e.g. '24 hours ago', 'yesterday') or ISO date ('2024-01-01'). On hosts without journald the tool falls back to syslog grep, which does not support relative strings — prefer ISO dates for portability."
                     },
                     "timeout_seconds": {
                         "type": "integer",

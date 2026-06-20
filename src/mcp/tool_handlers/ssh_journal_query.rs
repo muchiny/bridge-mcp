@@ -60,8 +60,10 @@ impl StandardTool for JournalQueryTool {
 
     const NAME: &'static str = "ssh_journal_query";
 
-    const DESCRIPTION: &'static str = "Query systemd journal logs on a remote host. Filter by \
-        unit, priority, time range, and grep pattern.";
+    const DESCRIPTION: &'static str = "Query systemd journal logs on a remote host. Use this \
+        tool (not ssh_service_logs) when you need multi-filter queries: combining unit + priority \
+        + time range + grep pattern in a single call. ssh_service_logs is limited to unit-only \
+        filtering. Set lines to cap output — default journalctl output is unbounded.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -77,23 +79,24 @@ impl StandardTool for JournalQueryTool {
             },
             "priority": {
                 "type": "string",
-                "description": "Filter by priority level (e.g., emerg, alert, crit, err, warning, notice, info, debug)"
+                "enum": ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"],
+                "description": "Filter by minimum priority level (journalctl -p). Returns entries at this level AND higher severity. Accepts named levels or numeric 0-7. Example: \"err\" returns emerg+alert+crit+err entries."
             },
             "since": {
                 "type": "string",
-                "description": "Show entries since this time (e.g., '1 hour ago', '2024-01-01 00:00:00', 'today')"
+                "description": "Show entries since this time. Accepts journalctl timestamp formats: \"YYYY-MM-DD HH:MM:SS\", relative times (\"2 hours ago\", \"1 day ago\"), or keywords (\"today\", \"yesterday\", \"now\")."
             },
             "until": {
                 "type": "string",
-                "description": "Show entries until this time (e.g., 'now', '2024-01-01 12:00:00')"
+                "description": "Show entries until this time. Accepts journalctl timestamp formats: \"YYYY-MM-DD HH:MM:SS\", relative times (\"2 hours ago\", \"1 day ago\"), or keywords (\"today\", \"yesterday\", \"now\")."
             },
             "lines": {
                 "type": "integer",
-                "description": "Number of recent log lines to show"
+                "description": "RECOMMENDED: Maximum number of recent log lines to return (journalctl -n). Always set this to limit token consumption — default journalctl output is unbounded. Example: lines=100."
             },
             "grep": {
                 "type": "string",
-                "description": "Filter log entries matching this pattern"
+                "description": "Filter log entries matching this PCRE2 regular expression (journalctl --grep). Case-sensitive by default. Example: \"error|fail\" matches either word."
             },
             "reverse": {
                 "type": "boolean",

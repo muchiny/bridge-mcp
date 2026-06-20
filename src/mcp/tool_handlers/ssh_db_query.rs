@@ -70,7 +70,7 @@ impl StandardTool for DbQueryTool {
             },
             "query": {
                 "type": "string",
-                "description": "SQL query to execute"
+                "description": "SQL query to execute. Single-statement only (multi-statement batches are not supported). For PostgreSQL strings containing single quotes, use $$ dollar-quoting (e.g. SELECT $$O'Brien$$). For MySQL, backslash-escape single quotes (e.g. WHERE name=\\'O\\'Brien\\')."
             },
             "database": {
                 "type": "string",

@@ -39,7 +39,11 @@ pub struct SshDbRestoreArgs {
 
 impl_common_args!(SshDbRestoreArgs);
 
-#[mcp_standard_tool(name = "ssh_db_restore", group = "database", annotation = "destructive")]
+#[mcp_standard_tool(
+    name = "ssh_db_restore",
+    group = "database",
+    annotation = "destructive"
+)]
 pub struct DbRestoreTool;
 
 impl StandardTool for DbRestoreTool {
@@ -49,8 +53,9 @@ impl StandardTool for DbRestoreTool {
 
     const DESCRIPTION: &'static str = "Restore a database from a dump file on a remote host via SSH. Supports MySQL and \
         PostgreSQL. The input_file must exist on the remote host (use ssh_upload to send it \
-        first). Auto-detects compressed files (.gz, .bz2, .xz). Use ssh_db_dump to create \
-        backups before restoring.";
+        first). Auto-detects compressed files (.gz, .bz2, .xz). Verbose restore progress and \
+        error messages are returned to the caller — use timeout_seconds for large restores to \
+        avoid the default timeout. Use ssh_db_dump to create backups before restoring.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

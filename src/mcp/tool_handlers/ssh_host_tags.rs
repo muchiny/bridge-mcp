@@ -40,8 +40,12 @@ impl StandardTool for HostTagsTool {
 
     const NAME: &'static str = "ssh_host_tags";
 
-    const DESCRIPTION: &'static str = "Manage host tags on a remote host. \
-        Supports listing, adding, and removing tags stored in /etc/host-tags. \
+    const DESCRIPTION: &'static str = "Manage host tags on a remote host: list, add, or remove labels \
+        stored in /etc/host-tags (a bridge-mcp convention file on the remote host). \
+        `tags` is required for add/remove actions; it is ignored for list. \
+        If `tags` is omitted on add/remove, the command silently falls back to listing current tags. \
+        Typically called after ssh_discover_hosts to label newly found hosts. \
+        Use ssh_inventory_sync first to profile a host before assigning tags. \
         Tags are useful for categorizing and grouping hosts in inventory.";
 
     const SCHEMA: &'static str = r#"{
@@ -58,7 +62,7 @@ impl StandardTool for HostTagsTool {
                     },
                     "tags": {
                         "type": "string",
-                        "description": "Tags to add or remove (comma-separated, e.g. 'web,production')"
+                        "description": "Tags to add or remove (comma-separated, e.g. 'web,production'). Required when action is 'add' or 'remove'; ignored for 'list'. Omitting tags on add/remove silently falls back to listing."
                     },
                     "timeout_seconds": {
                         "type": "integer",

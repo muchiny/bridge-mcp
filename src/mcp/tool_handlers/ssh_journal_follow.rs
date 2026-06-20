@@ -39,8 +39,11 @@ impl StandardTool for JournalFollowTool {
 
     const NAME: &'static str = "ssh_journal_follow";
 
-    const DESCRIPTION: &'static str = "Follow systemd journal output in real-time on a remote \
-        host. Optionally filter by unit. Limited by command timeout.";
+    const DESCRIPTION: &'static str = "Stream systemd journal output in real-time (journalctl -f) \
+        on a remote host. BLOCKING: runs until timeout_seconds elapses. Use only for live \
+        monitoring; for historical inspection use ssh_journal_query. Always set timeout_seconds \
+        explicitly (e.g., 10-30 s). The lines param controls how many recent entries are shown \
+        before following begins.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

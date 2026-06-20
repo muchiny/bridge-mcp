@@ -39,10 +39,14 @@ impl StandardTool for AlertSetTool {
 
     const NAME: &'static str = "ssh_alert_set";
 
-    const DESCRIPTION: &'static str = "Set an alert threshold for a metric on a remote host. \
-        Checks the metric value and reports if it exceeds the threshold. \
-        Supported metrics: cpu, memory, disk, load, swap. \
-        Supported operators: >, <, >=, <=, ==.";
+    const DESCRIPTION: &'static str = "One-shot metric threshold check on a remote host: \
+        reads the current value of a metric, compares it against the required threshold using \
+        the required operator, and prints ALERT or OK. Does NOT persist any rule — nothing is \
+        stored on the host. Use this when you already know the threshold; use ssh_alert_check \
+        when the threshold is optional or unknown (it returns the raw value when omitted). \
+        Threshold units: cpu/memory/disk/swap as percentage 0-100; load as a raw float \
+        (1-minute average). Supported metrics: cpu, memory, disk, load, swap. \
+        Operators: >, <, >=, <=, ==";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -58,11 +62,11 @@ impl StandardTool for AlertSetTool {
                     },
                     "threshold": {
                         "type": "number",
-                        "description": "Threshold value to compare against"
+                        "description": "Threshold value to compare against. Units: percentage 0-100 for cpu/memory/disk/swap; raw float (1-min average) for load."
                     },
                     "operator": {
                         "type": "string",
-                        "description": "Comparison operator (>, <, >=, <=, ==)",
+                        "description": "Comparison operator; required (no default). Use '>' to alert when value exceeds threshold.",
                         "enum": [">", "<", ">=", "<=", "=="]
                     },
                     "timeout_seconds": {

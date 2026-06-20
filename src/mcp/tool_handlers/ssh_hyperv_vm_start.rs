@@ -37,8 +37,10 @@ impl StandardTool for HypervVmStartTool {
 
     const NAME: &'static str = "ssh_hyperv_vm_start";
 
-    const DESCRIPTION: &'static str = "Start a Hyper-V virtual machine on a Windows host. Shows VM state after starting. \
-        Requires appropriate permissions on the Hyper-V host.";
+    const DESCRIPTION: &'static str = "Start a stopped or saved Hyper-V virtual machine on a Windows host; shows VM state \
+        after the start completes. Discover VM names first with `ssh_hyperv_vm_list`. \
+        To stop a VM use `ssh_hyperv_vm_stop`; to create a checkpoint before starting use \
+        `ssh_hyperv_snapshot_create`. Requires appropriate permissions on the Hyper-V host.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -62,6 +64,10 @@ impl StandardTool for HypervVmStartTool {
                 "type": "integer",
                 "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool."
             }
         }
     }"#;

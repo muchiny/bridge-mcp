@@ -36,10 +36,12 @@ impl StandardTool for BackupCreateTool {
 
     const NAME: &'static str = "ssh_backup_create";
 
-    const DESCRIPTION: &'static str = "Create a tar archive backup of files/directories on a remote host via SSH. Supports \
-        gzip, bzip2, and xz compression. The archive is created on the remote host at \
-        output_file. Use ssh_backup_list to verify contents, ssh_backup_restore to extract, \
-        or ssh_download to retrieve the archive locally.";
+    const DESCRIPTION: &'static str = "Create a tar archive backup of files/directories on a remote host via SSH. \
+        Supports gzip, bzip2, and xz compression (default: none). Provide source paths as a JSON array \
+        (source_paths) — unlike ssh_backup_snapshot and ssh_backup_schedule which take a space-separated \
+        string. The archive is written on the remote host at output_file; use ssh_backup_list to verify \
+        contents, ssh_backup_restore to extract, or ssh_download to retrieve the archive locally. \
+        For a quick one-off snapshot with auto-timestamping use ssh_backup_snapshot instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -72,6 +74,15 @@ impl StandardTool for BackupCreateTool {
                 "description": "Optional timeout in seconds (default: from config)",
                 "minimum": 1,
                 "maximum": 3600
+            },
+            "max_output": {
+                "type": "integer",
+                "description": "Max output characters (default: from server config). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
+                "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a file path on the remote host — useful when archiving large directory trees whose verbose listing would be truncated."
             }
         },
         "required": ["host", "source_paths", "output_file"]

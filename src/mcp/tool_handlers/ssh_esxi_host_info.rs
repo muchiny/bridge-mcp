@@ -35,8 +35,9 @@ impl StandardTool for EsxiHostInfoTool {
     const NAME: &'static str = "ssh_esxi_host_info";
 
     const DESCRIPTION: &'static str = "Get VMware ESXi host information. Subsystems: hostname, memory, cpu, version, \
-        maintenance (mode status), or all (default, returns everything). Uses esxcli and \
-        vim-cmd commands. Returns system details for the ESXi hypervisor.";
+        maintenance (read-only check of current maintenance mode status — to enter or exit maintenance mode \
+        use esxcli system maintenanceMode set via ssh_exec), or all (default, returns everything). \
+        Uses esxcli and vim-cmd commands.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

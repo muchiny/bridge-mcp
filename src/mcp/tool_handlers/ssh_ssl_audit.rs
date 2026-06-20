@@ -46,9 +46,11 @@ impl StandardTool for SslAuditTool {
 
     const NAME: &'static str = "ssh_ssl_audit";
 
-    const DESCRIPTION: &'static str = "Audit SSL/TLS certificate and configuration on a remote target. Prefer this \
-        over ssh_exec for SSL inspection as it safely retrieves and displays certificate details \
-        including validity, issuer, subject, and expiry using openssl.";
+    const DESCRIPTION: &'static str = "Audit SSL/TLS certificate and configuration on a remote target, including \
+        cipher suites, protocol versions, and HSTS. Prefer this over ssh_exec for SSL inspection \
+        as it safely retrieves and displays certificate details including validity, issuer, subject, \
+        and expiry using openssl. For a lightweight certificate-only check (subject, issuer, dates, \
+        fingerprint) without the full TLS configuration audit, use ssh_cert_check instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

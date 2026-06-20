@@ -45,9 +45,10 @@ impl StandardTool for DockerVolumeLsTool {
 
     const NAME: &'static str = "ssh_docker_volume_ls";
 
-    const DESCRIPTION: &'static str = "List Docker volumes on a remote host. Shows volume names, drivers, and mount points. \
-        Use filter to narrow results (e.g., dangling=true). Auto-detects docker or podman \
-        binary.";
+    const DESCRIPTION: &'static str = "List Docker volumes on a remote host. Shows volume names and drivers only \
+        (DRIVER and VOLUME NAME columns). To get mount point, labels, and options use \
+        ssh_docker_volume_inspect. Use filter to narrow results (e.g., dangling=true). \
+        Auto-detects docker or podman binary.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

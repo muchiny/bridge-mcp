@@ -36,7 +36,8 @@ impl StandardTool for CertInfoTool {
     const DESCRIPTION: &'static str = "Inspect a local TLS/SSL certificate file on a remote \
         host. Use this to examine certificate details before deploying to a service. Returns \
         subject, issuer, validity, extensions, and public key info. For checking live remote \
-        certificates, use ssh_cert_check instead.";
+        certificates, use ssh_cert_check instead. For Let's Encrypt / certbot-managed \
+        certificates, use ssh_letsencrypt_status instead for renewal status and certbot metadata.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

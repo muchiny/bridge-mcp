@@ -39,7 +39,11 @@ pub struct SshDockerComposeArgs {
 
 impl_common_args!(SshDockerComposeArgs);
 
-#[mcp_standard_tool(name = "ssh_docker_compose", group = "docker", annotation = "destructive")]
+#[mcp_standard_tool(
+    name = "ssh_docker_compose",
+    group = "docker",
+    annotation = "destructive"
+)]
 pub struct DockerComposeTool;
 
 impl StandardTool for DockerComposeTool {

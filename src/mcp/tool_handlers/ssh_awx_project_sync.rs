@@ -58,7 +58,9 @@ impl ToolHandler for SshAwxProjectSyncHandler {
 
     fn description(&self) -> &'static str {
         "Trigger a project SCM sync in AWX. Updates the project from its source control \
-         repository."
+         repository. To discover project IDs, query the AWX API directly \
+         (GET /api/v2/projects/) via ssh_exec or check the AWX web UI; there is no \
+         dedicated list-projects tool in this group."
     }
 
     fn schema(&self) -> ToolSchema {

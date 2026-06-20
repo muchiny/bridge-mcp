@@ -140,7 +140,7 @@ impl StandardTool for AnsiblePlaybookTool {
             },
             "callback": {
                 "type": "string",
-                "description": "Ansible stdout callback plugin. Use 'json' for structured JSON output (enables jq_filter), 'dense' for compact 1-line-per-task, 'yaml' for YAML format, 'minimal' for minimal output. Default: Ansible default.",
+                "description": "Ansible stdout callback plugin. Use 'json' for structured JSON output (enables jq_filter), 'dense' for compact 1-line-per-task, 'yaml' for YAML format, 'minimal' for minimal output. Default: Ansible default. Note: 'oneline' was removed from Ansible core >= 2.8 — use 'minimal' instead on modern installs.",
                 "enum": ["json", "yaml", "dense", "minimal", "tree", "default", "oneline", "debug", "null"]
             },
             "timeout_seconds": {
