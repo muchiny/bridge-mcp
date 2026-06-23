@@ -268,6 +268,31 @@ impl KubernetesCommandBuilder {
         cmd
     }
 
+    /// Build a `kubectl diff` command (server-side dry-run preview).
+    ///
+    /// If `manifest` starts with `/`, `./`, or `~` it is a file path
+    /// (`{kubectl} diff -f {path}`); otherwise it is inline YAML piped in
+    /// (`echo '{yaml}' | {kubectl} diff -f -`).
+    #[must_use]
+    pub fn build_diff_command(
+        kubectl_bin: Option<&str>,
+        manifest: &str,
+        namespace: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let is_file =
+            manifest.starts_with('/') || manifest.starts_with("./") || manifest.starts_with('~');
+        let mut cmd = if is_file {
+            format!("{prefix}diff -f {}", shell_escape(manifest))
+        } else {
+            format!("echo {} | {prefix}diff -f -", shell_escape(manifest))
+        };
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        cmd
+    }
+
     /// Build a `kubectl delete` command.
     ///
     /// Constructs: `{kubectl} delete {resource} {name} [-n {ns}]
@@ -1245,6 +1270,28 @@ mod tests {
         assert!(cmd.contains("--dry-run='server'"));
         assert!(cmd.contains("--force"));
         assert!(cmd.contains("--server-side"));
+    }
+
+    // ============== build_diff_command Tests ==============
+
+    #[test]
+    fn test_build_diff_command_file_path() {
+        let cmd = KubernetesCommandBuilder::build_diff_command(
+            Some("kubectl"),
+            "/tmp/d.yaml",
+            Some("default"),
+        );
+        assert!(cmd.contains("diff -f '/tmp/d.yaml'"), "cmd: {cmd}");
+        assert!(cmd.contains("-n 'default'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_diff_command_inline_yaml() {
+        let yaml = "apiVersion: v1\nkind: Pod";
+        let cmd = KubernetesCommandBuilder::build_diff_command(Some("kubectl"), yaml, None);
+        assert!(cmd.contains("echo "), "cmd: {cmd}");
+        assert!(cmd.contains("| "), "cmd: {cmd}");
+        assert!(cmd.contains("diff -f -"), "cmd: {cmd}");
     }
 
     // ============== build_delete_command Tests ==============
