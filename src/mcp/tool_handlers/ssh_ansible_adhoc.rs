@@ -33,6 +33,10 @@ pub struct SshAnsibleAdhocArgs {
     #[serde(default)]
     check: Option<bool>,
     #[serde(default)]
+    vault_password_file: Option<String>,
+    #[serde(default)]
+    vault_id: Option<String>,
+    #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
@@ -110,6 +114,14 @@ impl StandardTool for AnsibleAdhocTool {
                 "type": "boolean",
                 "description": "Check mode"
             },
+            "vault_password_file": {
+                "type": "string",
+                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file)"
+            },
+            "vault_id": {
+                "type": "string",
+                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id)"
+            },
             "timeout_seconds": {
                 "type": "integer",
                 "description": "Optional timeout in seconds (default: from config)",
@@ -141,6 +153,8 @@ impl StandardTool for AnsibleAdhocTool {
             args.forks,
             args.verbose,
             args.check.unwrap_or(false),
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
         ))
     }
 
@@ -338,6 +352,8 @@ mod tests {
         assert!(properties.contains_key("forks"));
         assert!(properties.contains_key("verbose"));
         assert!(properties.contains_key("check"));
+        assert!(properties.contains_key("vault_password_file"));
+        assert!(properties.contains_key("vault_id"));
         assert!(properties.contains_key("timeout_seconds"));
         assert!(properties.contains_key("max_output"));
     }
@@ -420,6 +436,8 @@ mod tests {
             forks: None,
             verbose: None,
             check: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
@@ -443,6 +461,8 @@ mod tests {
             forks: None,
             verbose: None,
             check: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
@@ -467,6 +487,8 @@ mod tests {
             forks: Some(5),
             verbose: None,
             check: Some(true),
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
