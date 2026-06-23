@@ -131,6 +131,31 @@ impl KubernetesCommandBuilder {
         cmd
     }
 
+    /// Build a `kubectl get events` command sorted by last timestamp.
+    ///
+    /// Constructs: `{kubectl} get events --sort-by=.lastTimestamp [-n {ns}]
+    /// [-A] [--field-selector {fs}]`
+    #[must_use]
+    pub fn build_events_command(
+        kubectl_bin: Option<&str>,
+        namespace: Option<&str>,
+        all_namespaces: bool,
+        field_selector: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}get events --sort-by=.lastTimestamp");
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if all_namespaces {
+            cmd.push_str(" -A");
+        }
+        if let Some(fs) = field_selector {
+            let _ = write!(cmd, " --field-selector {}", shell_escape(fs));
+        }
+        cmd
+    }
+
     /// Build a `kubectl logs` command.
     ///
     /// Constructs: `{kubectl} logs {pod} [-n {ns}] [-c {container}]
@@ -983,6 +1008,36 @@ mod tests {
             None,
         );
         assert!(cmd.contains("-l 'app in (web,api)'"));
+    }
+
+    // ============== build_events_command Tests ==============
+
+    #[test]
+    fn test_build_events_command_with_namespace_and_field_selector() {
+        let cmd = KubernetesCommandBuilder::build_events_command(
+            Some("kubectl"),
+            Some("default"),
+            false,
+            Some("involvedObject.name=p"),
+        );
+        assert!(cmd.contains("get events --sort-by=.lastTimestamp"));
+        assert!(cmd.contains("-n 'default'"));
+        assert!(cmd.contains("--field-selector 'involvedObject.name=p'"));
+    }
+
+    #[test]
+    fn test_build_events_command_all_namespaces() {
+        let cmd = KubernetesCommandBuilder::build_events_command(Some("kubectl"), None, true, None);
+        assert!(cmd.contains("get events --sort-by=.lastTimestamp"));
+        assert!(cmd.contains("-A"));
+        assert!(!cmd.contains("-n "));
+    }
+
+    #[test]
+    fn test_build_events_command_minimal() {
+        let cmd =
+            KubernetesCommandBuilder::build_events_command(Some("kubectl"), None, false, None);
+        assert_eq!(cmd, "kubectl get events --sort-by=.lastTimestamp");
     }
 
     // ============== build_logs_command Tests ==============
