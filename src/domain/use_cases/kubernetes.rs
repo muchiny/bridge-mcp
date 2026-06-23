@@ -574,6 +574,24 @@ impl KubernetesCommandBuilder {
         cmd
     }
 
+    /// Validate the `helm get` subcommand against the allowed set.
+    ///
+    /// # Errors
+    /// Returns `BridgeError::CommandDenied` if `subcommand` is not one of
+    /// all/values/manifest/hooks/notes.
+    pub fn validate_helm_get_subcommand(subcommand: &str) -> Result<()> {
+        let allowed = ["all", "values", "manifest", "hooks", "notes"];
+        if allowed.contains(&subcommand) {
+            Ok(())
+        } else {
+            Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "Helm get subcommand '{subcommand}' is not allowed. Allowed: {allowed:?}"
+                ),
+            })
+        }
+    }
+
     /// Validate `resource_type` for the top command.
     ///
     /// Only allows: `pods`, `nodes`.
@@ -674,6 +692,36 @@ impl HelmCommandBuilder {
             let _ = write!(cmd, " --revision {rev}");
         }
 
+        cmd
+    }
+
+    /// Build a `helm get` command (read-only inspection of a release).
+    ///
+    /// `subcommand` is validated by the caller
+    /// (`KubernetesCommandBuilder::validate_helm_get_subcommand`).
+    ///
+    /// Constructs: `[KUBECONFIG=…] {helm} get {subcommand} {release}
+    /// [-n {ns}] [--revision {N}]`
+    #[must_use]
+    pub fn build_get_command(
+        helm_bin: Option<&str>,
+        kubeconfig: Option<&str>,
+        subcommand: &str,
+        release: &str,
+        namespace: Option<&str>,
+        revision: Option<u64>,
+    ) -> String {
+        let kube_env = kubeconfig_env_prefix(kubeconfig);
+        let prefix = helm_detect_prefix(helm_bin);
+        let escaped_sub = shell_escape(subcommand);
+        let escaped_release = shell_escape(release);
+        let mut cmd = format!("{kube_env}{prefix}get {escaped_sub} {escaped_release}");
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(rev) = revision {
+            let _ = write!(cmd, " --revision {rev}");
+        }
         cmd
     }
 
@@ -2461,5 +2509,39 @@ mod tests {
             cmd.contains("--show-only 'templates/deployment.yaml'"),
             "cmd={cmd}"
         );
+    }
+
+    // ============== HelmCommandBuilder::build_get_command Tests ==============
+
+    #[test]
+    fn test_build_helm_get_command() {
+        let cmd = HelmCommandBuilder::build_get_command(
+            Some("helm"),
+            None,
+            "values",
+            "rel",
+            Some("prod"),
+            Some(2),
+        );
+        assert!(cmd.contains("get 'values' 'rel'"), "cmd={cmd}");
+        assert!(cmd.contains("-n 'prod'"), "cmd={cmd}");
+        assert!(cmd.contains("--revision 2"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_validate_helm_get_subcommand() {
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("values").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("all").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("manifest").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("hooks").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("notes").is_ok());
+
+        let err = KubernetesCommandBuilder::validate_helm_get_subcommand("delete").unwrap_err();
+        match err {
+            crate::error::BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("delete"), "reason={reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }
