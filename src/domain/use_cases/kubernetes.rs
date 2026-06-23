@@ -913,6 +913,56 @@ impl HelmCommandBuilder {
 
         cmd
     }
+
+    /// Build a `helm template` command (client-side render, read-only).
+    ///
+    /// Constructs: `[KUBECONFIG=…] {helm} template {release} {chart}
+    /// [-n {ns}] [--set k=v …] [-f values.yaml …] [--version {v}]
+    /// [--show-only {tpl} …]`
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_template_command(
+        helm_bin: Option<&str>,
+        kubeconfig: Option<&str>,
+        release: &str,
+        chart: &str,
+        namespace: Option<&str>,
+        set_values: Option<&HashMap<String, String>>,
+        values_files: Option<&[String]>,
+        version: Option<&str>,
+        show_only: Option<&[String]>,
+    ) -> String {
+        let kube_env = kubeconfig_env_prefix(kubeconfig);
+        let prefix = helm_detect_prefix(helm_bin);
+        let escaped_release = shell_escape(release);
+        let escaped_chart = shell_escape(chart);
+        let mut cmd = format!("{kube_env}{prefix}template {escaped_release} {escaped_chart}");
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(vals) = set_values {
+            let mut keys: Vec<&String> = vals.keys().collect();
+            keys.sort();
+            for key in keys {
+                let val = &vals[key];
+                let _ = write!(cmd, " --set {}={}", shell_escape(key), shell_escape(val));
+            }
+        }
+        if let Some(files) = values_files {
+            for file in files {
+                let _ = write!(cmd, " -f {}", shell_escape(file));
+            }
+        }
+        if let Some(v) = version {
+            let _ = write!(cmd, " --version {}", shell_escape(v));
+        }
+        if let Some(only) = show_only {
+            for tpl in only {
+                let _ = write!(cmd, " --show-only {}", shell_escape(tpl));
+            }
+        }
+        cmd
+    }
 }
 
 #[cfg(test)]
@@ -2380,5 +2430,36 @@ mod tests {
             None,
         );
         assert_eq!(cmd, "kubectl wait 'pod' --for='condition=Ready'");
+    }
+
+    // ============== HelmCommandBuilder::build_template_command Tests ==============
+
+    #[test]
+    fn test_build_template_command() {
+        let mut set_values = std::collections::HashMap::new();
+        set_values.insert("image.tag".to_string(), "v2".to_string());
+        let values_files = vec!["/tmp/v.yaml".to_string()];
+        let show_only = vec!["templates/deployment.yaml".to_string()];
+
+        let cmd = HelmCommandBuilder::build_template_command(
+            Some("helm"),
+            None,
+            "rel",
+            "repo/chart",
+            None,
+            Some(&set_values),
+            Some(&values_files),
+            Some("1.2.3"),
+            Some(&show_only),
+        );
+
+        assert!(cmd.contains("template 'rel' 'repo/chart'"), "cmd={cmd}");
+        assert!(cmd.contains("--set 'image.tag'='v2'"), "cmd={cmd}");
+        assert!(cmd.contains("-f '/tmp/v.yaml'"), "cmd={cmd}");
+        assert!(cmd.contains("--version '1.2.3'"), "cmd={cmd}");
+        assert!(
+            cmd.contains("--show-only 'templates/deployment.yaml'"),
+            "cmd={cmd}"
+        );
     }
 }
