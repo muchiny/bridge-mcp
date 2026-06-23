@@ -537,6 +537,43 @@ impl KubernetesCommandBuilder {
         Ok(())
     }
 
+    /// Build a `kubectl wait` command (block until a condition holds).
+    ///
+    /// Constructs: `{kubectl} wait {resource} [{name}] --for={cond}
+    /// [-n {ns}] [-A] [-l {selector}] [--timeout={dur}]`
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_wait_command(
+        kubectl_bin: Option<&str>,
+        resource: &str,
+        name: Option<&str>,
+        condition: &str,
+        namespace: Option<&str>,
+        all_namespaces: bool,
+        label_selector: Option<&str>,
+        timeout: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}wait {}", shell_escape(resource));
+        if let Some(n) = name {
+            let _ = write!(cmd, " {}", shell_escape(n));
+        }
+        let _ = write!(cmd, " --for={}", shell_escape(condition));
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if all_namespaces {
+            cmd.push_str(" -A");
+        }
+        if let Some(sel) = label_selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
+        if let Some(t) = timeout {
+            let _ = write!(cmd, " --timeout={}", shell_escape(t));
+        }
+        cmd
+    }
+
     /// Validate `resource_type` for the top command.
     ///
     /// Only allows: `pods`, `nodes`.
@@ -2274,5 +2311,74 @@ mod tests {
         );
         assert!(cmd.starts_with("KUBECONFIG=/etc/rancher/k3s/k3s.yaml "));
         assert!(cmd.contains("command -v helm"));
+    }
+
+    // ============== build_wait_command Tests ==============
+
+    #[test]
+    fn test_build_wait_command_primary() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "pod",
+            Some("my-pod"),
+            "condition=Ready",
+            Some("default"),
+            false,
+            None,
+            Some("60s"),
+        );
+        assert!(cmd.contains("wait 'pod' 'my-pod'"), "cmd={cmd}");
+        assert!(cmd.contains("--for='condition=Ready'"), "cmd={cmd}");
+        assert!(cmd.contains("-n 'default'"), "cmd={cmd}");
+        assert!(cmd.contains("--timeout='60s'"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_wait_command_with_selector() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "pod",
+            None,
+            "condition=Ready",
+            None,
+            false,
+            Some("app=web"),
+            None,
+        );
+        assert!(cmd.contains("wait 'pod'"), "cmd={cmd}");
+        assert!(cmd.contains("--for='condition=Ready'"), "cmd={cmd}");
+        assert!(cmd.contains("-l 'app=web'"), "cmd={cmd}");
+        assert!(!cmd.contains("--timeout="), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_wait_command_all_namespaces() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "job",
+            None,
+            "condition=complete",
+            None,
+            true,
+            None,
+            Some("120s"),
+        );
+        assert!(cmd.contains(" -A"), "cmd={cmd}");
+        assert!(cmd.contains("--timeout='120s'"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_wait_command_minimal() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "pod",
+            None,
+            "condition=Ready",
+            None,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(cmd, "kubectl wait 'pod' --for='condition=Ready'");
     }
 }
