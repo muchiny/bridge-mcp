@@ -31,7 +31,11 @@ struct SshAwxWorkflowLaunchArgs {
 }
 
 /// Handler for the `ssh_awx_workflow_launch` tool.
-#[mcp_tool(name = "ssh_awx_workflow_launch", group = "awx", annotation = "mutating")]
+#[mcp_tool(
+    name = "ssh_awx_workflow_launch",
+    group = "awx",
+    annotation = "mutating"
+)]
 pub struct SshAwxWorkflowLaunchHandler;
 
 impl Default for SshAwxWorkflowLaunchHandler {
@@ -120,13 +124,22 @@ impl ToolHandler for SshAwxWorkflowLaunchHandler {
             );
         }
         if let Some(ref limit) = args.limit {
-            body_map.insert("limit".to_string(), serde_json::Value::String(limit.clone()));
+            body_map.insert(
+                "limit".to_string(),
+                serde_json::Value::String(limit.clone()),
+            );
         }
         if let Some(inventory) = args.inventory {
-            body_map.insert("inventory".to_string(), serde_json::Value::Number(inventory.into()));
+            body_map.insert(
+                "inventory".to_string(),
+                serde_json::Value::Number(inventory.into()),
+            );
         }
 
-        let endpoint = format!("/api/v2/workflow_job_templates/{}/launch/", args.workflow_template_id);
+        let endpoint = format!(
+            "/api/v2/workflow_job_templates/{}/launch/",
+            args.workflow_template_id
+        );
         let body_str = if body_map.is_empty() {
             None
         } else {
@@ -233,7 +246,9 @@ mod tests {
     async fn test_invalid_json_type() {
         let handler = SshAwxWorkflowLaunchHandler;
         let ctx = create_test_context();
-        let result = handler.execute(Some(json!({"workflow_template_id": "not_a_number"})), &ctx).await;
+        let result = handler
+            .execute(Some(json!({"workflow_template_id": "not_a_number"})), &ctx)
+            .await;
         assert!(result.is_err());
         match result.unwrap_err() {
             BridgeError::McpInvalidRequest(_) => {}
@@ -245,7 +260,9 @@ mod tests {
     async fn test_no_awx_config() {
         let handler = SshAwxWorkflowLaunchHandler;
         let ctx = create_test_context();
-        let result = handler.execute(Some(json!({"workflow_template_id": 7})), &ctx).await;
+        let result = handler
+            .execute(Some(json!({"workflow_template_id": 7})), &ctx)
+            .await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(

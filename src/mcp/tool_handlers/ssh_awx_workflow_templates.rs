@@ -26,7 +26,11 @@ struct SshAwxWorkflowTemplatesArgs {
 }
 
 /// Handler for the `ssh_awx_workflow_templates` tool.
-#[mcp_tool(name = "ssh_awx_workflow_templates", group = "awx", annotation = "read_only")]
+#[mcp_tool(
+    name = "ssh_awx_workflow_templates",
+    group = "awx",
+    annotation = "read_only"
+)]
 pub struct SshAwxWorkflowTemplatesHandler;
 
 impl Default for SshAwxWorkflowTemplatesHandler {
@@ -149,8 +153,8 @@ impl ToolHandler for SshAwxWorkflowTemplatesHandler {
 mod tests {
     use super::*;
     use crate::error::BridgeError;
-    use crate::ports::mock::create_test_context;
     use crate::ports::ToolHandler;
+    use crate::ports::mock::create_test_context;
     use serde_json::json;
 
     #[tokio::test]
