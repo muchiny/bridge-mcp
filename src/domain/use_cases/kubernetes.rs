@@ -749,6 +749,43 @@ impl KubernetesCommandBuilder {
         cmd.push_str(&kubectl_context_flag(context));
         cmd
     }
+
+    /// Build `kubectl drain <node>` with safety flags.
+    ///
+    /// Constructs: `{kubectl} drain {node} [--ignore-daemonsets]
+    /// [--delete-emptydir-data] [--force] [--context={ctx}]`
+    ///
+    /// **DESTRUCTIVE** — evicting pods from a node causes workload disruption
+    /// that is not automatically reversed when the node returns.
+    /// Always cordon first; use `--force` only when stuck on pods that do not
+    /// have a controller (bare pods will be lost permanently).
+    ///
+    /// `ignore_daemonsets` defaults to `true` in the handler — `DaemonSet` pods
+    /// cannot be evicted and must be skipped for the drain to proceed.
+    /// `delete_emptydir` permanently deletes emptyDir volume data.
+    #[must_use]
+    pub fn build_drain_command(
+        kubectl_bin: Option<&str>,
+        node: &str,
+        ignore_daemonsets: bool,
+        delete_emptydir: bool,
+        force: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}drain {}", shell_escape(node));
+        if ignore_daemonsets {
+            cmd.push_str(" --ignore-daemonsets");
+        }
+        if delete_emptydir {
+            cmd.push_str(" --delete-emptydir-data");
+        }
+        if force {
+            cmd.push_str(" --force");
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
 }
 
 /// Builds helm CLI commands for remote execution.
@@ -2744,5 +2781,24 @@ mod tests {
             "cmd: {cmd}"
         );
         assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
+    }
+
+    // ============== build_drain_command Tests ==============
+
+    #[test]
+    fn test_build_drain_command() {
+        let cmd = KubernetesCommandBuilder::build_drain_command(
+            Some("kubectl"),
+            "node-1",
+            true,
+            true,
+            false,
+            Some("east"),
+        );
+        assert!(cmd.contains("drain 'node-1'"), "cmd: {cmd}");
+        assert!(cmd.contains("--ignore-daemonsets"), "cmd: {cmd}");
+        assert!(cmd.contains("--delete-emptydir-data"), "cmd: {cmd}");
+        assert!(!cmd.contains("--force"), "cmd: {cmd}");
+        assert!(cmd.contains("--context=east"), "cmd: {cmd}");
     }
 }
