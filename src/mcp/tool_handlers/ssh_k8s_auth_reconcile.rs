@@ -266,7 +266,10 @@ mod tests {
         let handler = SshK8sAuthReconcileHandler::new();
         let ctx = create_test_context();
         let result = handler
-            .execute(Some(json!({"host": 123, "manifest": "/tmp/rbac.yaml"})), &ctx)
+            .execute(
+                Some(json!({"host": 123, "manifest": "/tmp/rbac.yaml"})),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -294,7 +297,10 @@ mod tests {
         assert!(cmd.contains("-f"), "cmd: {cmd}");
         assert!(cmd.contains("/etc/k8s/rbac.yaml"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
-        assert!(!cmd.contains("echo"), "should be file path, not inline: {cmd}");
+        assert!(
+            !cmd.contains("echo"),
+            "should be file path, not inline: {cmd}"
+        );
     }
 
     #[test]

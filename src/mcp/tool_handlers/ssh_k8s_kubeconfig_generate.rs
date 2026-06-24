@@ -239,7 +239,10 @@ mod tests {
         assert_eq!(args.host, "server1");
         assert_eq!(args.service_account, "ci-deployer");
         assert_eq!(args.namespace, Some("ci".to_string()));
-        assert_eq!(args.server_url, Some("https://k8s.example.com:6443".to_string()));
+        assert_eq!(
+            args.server_url,
+            Some("https://k8s.example.com:6443".to_string())
+        );
         assert_eq!(args.cluster_name, Some("prod-cluster".to_string()));
         assert_eq!(args.duration, Some("24h".to_string()));
         assert_eq!(args.context, Some("east".to_string()));
@@ -288,7 +291,10 @@ mod tests {
         let handler = SshK8sKubeconfigGenerateHandler::new();
         let ctx = create_test_context();
         let result = handler
-            .execute(Some(json!({"host": 123, "service_account": "default"})), &ctx)
+            .execute(
+                Some(json!({"host": 123, "service_account": "default"})),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -337,7 +343,10 @@ mod tests {
         let cmd = K8sKubeconfigGenerateTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("create token"), "cmd: {cmd}");
         // Should derive server from config view
-        assert!(cmd.contains("config view"), "should derive server from config view: {cmd}");
+        assert!(
+            cmd.contains("config view"),
+            "should derive server from config view: {cmd}"
+        );
     }
 
     #[test]

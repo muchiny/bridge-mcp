@@ -252,7 +252,10 @@ mod tests {
         assert_eq!(args.service_account, "my-sa");
         assert_eq!(args.namespace, Some("prod".to_string()));
         assert_eq!(args.duration, Some("1h".to_string()));
-        assert_eq!(args.audiences, Some(vec!["https://api.example.com".to_string()]));
+        assert_eq!(
+            args.audiences,
+            Some(vec!["https://api.example.com".to_string()])
+        );
         assert_eq!(args.bound_object_kind, Some("Pod".to_string()));
         assert_eq!(args.bound_object_name, Some("my-pod".to_string()));
         assert_eq!(args.context, Some("east".to_string()));
@@ -291,7 +294,8 @@ mod tests {
         let args: SshK8sCreateTokenArgs = serde_json::from_value(json!({
             "host": "server1",
             "service_account": "default"
-        })).unwrap();
+        }))
+        .unwrap();
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshK8sCreateTokenArgs"));
     }
@@ -301,7 +305,10 @@ mod tests {
         let handler = SshK8sCreateTokenHandler::new();
         let ctx = create_test_context();
         let result = handler
-            .execute(Some(json!({"host": 123, "service_account": "default"})), &ctx)
+            .execute(
+                Some(json!({"host": 123, "service_account": "default"})),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {

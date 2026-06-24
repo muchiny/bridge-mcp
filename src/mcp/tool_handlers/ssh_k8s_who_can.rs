@@ -6,9 +6,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::kubernetes::{
-    KubernetesCommandBuilder, validate_rbac_token,
-};
+use crate::domain::use_cases::kubernetes::{KubernetesCommandBuilder, validate_rbac_token};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -269,7 +267,10 @@ mod tests {
         let handler = SshK8sWhoCanHandler::new();
         let ctx = create_test_context();
         let result = handler
-            .execute(Some(json!({"host": 123, "verb": "get", "resource": "pods"})), &ctx)
+            .execute(
+                Some(json!({"host": 123, "verb": "get", "resource": "pods"})),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {

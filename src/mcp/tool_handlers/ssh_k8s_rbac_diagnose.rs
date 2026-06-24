@@ -6,9 +6,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::kubernetes::{
-    KubernetesCommandBuilder, validate_sa_name,
-};
+use crate::domain::use_cases::kubernetes::{KubernetesCommandBuilder, validate_sa_name};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -245,7 +243,10 @@ mod tests {
         let handler = SshK8sRbacDiagnoseHandler::new();
         let ctx = create_test_context();
         let result = handler
-            .execute(Some(json!({"host": 123, "service_account": "default"})), &ctx)
+            .execute(
+                Some(json!({"host": 123, "service_account": "default"})),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -286,7 +287,10 @@ mod tests {
             save_output: None,
         };
         let cmd = K8sRbacDiagnoseTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("default"), "should have default namespace: cmd: {cmd}");
+        assert!(
+            cmd.contains("default"),
+            "should have default namespace: cmd: {cmd}"
+        );
     }
 
     #[test]

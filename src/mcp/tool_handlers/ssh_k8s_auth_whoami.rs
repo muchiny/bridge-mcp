@@ -221,7 +221,8 @@ mod tests {
 
     #[test]
     fn test_args_debug() {
-        let args: SshK8sAuthWhoamiArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let args: SshK8sAuthWhoamiArgs =
+            serde_json::from_value(json!({"host": "server1"})).unwrap();
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshK8sAuthWhoamiArgs"));
     }
@@ -230,9 +231,7 @@ mod tests {
     async fn test_invalid_json_type() {
         let handler = SshK8sAuthWhoamiHandler::new();
         let ctx = create_test_context();
-        let result = handler
-            .execute(Some(json!({"host": 123})), &ctx)
-            .await;
+        let result = handler.execute(Some(json!({"host": 123})), &ctx).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             BridgeError::McpInvalidRequest(_) => {}

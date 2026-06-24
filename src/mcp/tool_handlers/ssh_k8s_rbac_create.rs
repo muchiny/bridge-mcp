@@ -1,7 +1,7 @@
 //! K8s RBAC Create Tool Handler
 //!
-//! Create Kubernetes RBAC resources (Role, ClusterRole, RoleBinding,
-//! ClusterRoleBinding, ServiceAccount) via `kubectl create`. Mutating.
+//! Create Kubernetes RBAC resources (`Role`, `ClusterRole`, `RoleBinding`,
+//! `ClusterRoleBinding`, `ServiceAccount`) via `kubectl create`. Mutating.
 
 use serde::Deserialize;
 
@@ -166,7 +166,13 @@ impl StandardTool for K8sRbacCreateTool {
     fn build_command(args: &SshK8sRbacCreateArgs, _host_config: &HostConfig) -> Result<String> {
         validate_rbac_kind(
             &args.kind,
-            &["role", "clusterrole", "rolebinding", "clusterrolebinding", "serviceaccount"],
+            &[
+                "role",
+                "clusterrole",
+                "rolebinding",
+                "clusterrolebinding",
+                "serviceaccount",
+            ],
         )?;
         validate_sa_name(&args.name)?;
         if let Some(ns) = args.namespace.as_deref() {
@@ -315,7 +321,10 @@ mod tests {
         assert_eq!(args.kind, "role");
         assert_eq!(args.name, "my-role");
         assert_eq!(args.namespace, Some("prod".to_string()));
-        assert_eq!(args.verbs, Some(vec!["get".to_string(), "list".to_string()]));
+        assert_eq!(
+            args.verbs,
+            Some(vec!["get".to_string(), "list".to_string()])
+        );
         assert_eq!(args.resources, Some(vec!["pods".to_string()]));
         assert!(args.dry_run);
         assert_eq!(args.context, Some("east".to_string()));
@@ -366,7 +375,10 @@ mod tests {
         let handler = SshK8sRbacCreateHandler::new();
         let ctx = create_test_context();
         let result = handler
-            .execute(Some(json!({"host": 123, "kind": "role", "name": "r"})), &ctx)
+            .execute(
+                Some(json!({"host": 123, "kind": "role", "name": "r"})),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -432,7 +444,10 @@ mod tests {
             save_output: None,
         };
         let cmd = K8sRbacCreateTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("create") && cmd.contains("rolebinding"), "cmd: {cmd}");
+        assert!(
+            cmd.contains("create") && cmd.contains("rolebinding"),
+            "cmd: {cmd}"
+        );
         assert!(cmd.contains("ci-binding"), "cmd: {cmd}");
         assert!(cmd.contains("--clusterrole"), "cmd: {cmd}");
         assert!(cmd.contains("--serviceaccount"), "cmd: {cmd}");
