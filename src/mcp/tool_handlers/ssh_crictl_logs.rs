@@ -177,7 +177,7 @@ mod tests {
             "timestamps": true,
             "crictl_bin": "crictl",
             "timeout_seconds": 30,
-            "max_output": 100000
+            "max_output": 100_000
         });
         let args: SshCrictlLogsArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "k3s-node");
@@ -188,7 +188,7 @@ mod tests {
         assert!(args.timestamps);
         assert_eq!(args.crictl_bin, Some("crictl".to_string()));
         assert_eq!(args.timeout_seconds, Some(30));
-        assert_eq!(args.max_output, Some(100000));
+        assert_eq!(args.max_output, Some(100_000));
     }
 
     #[test]
