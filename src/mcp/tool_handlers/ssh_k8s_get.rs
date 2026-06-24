@@ -34,6 +34,14 @@ pub struct SshK8sGetArgs {
     #[serde(default)]
     sort_by: Option<String>,
     #[serde(default)]
+    raw: Option<bool>,
+    #[serde(default)]
+    show_labels: Option<bool>,
+    #[serde(default)]
+    show_kind: Option<bool>,
+    #[serde(default)]
+    chunk_size: Option<u64>,
+    #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
@@ -139,6 +147,10 @@ impl StandardTool for K8sGetTool {
             args.field_selector.as_deref(),
             args.output.as_deref(),
             args.sort_by.as_deref(),
+            args.raw.unwrap_or(false),
+            args.show_labels.unwrap_or(false),
+            args.show_kind.unwrap_or(false),
+            args.chunk_size,
         ))
     }
 
@@ -367,6 +379,10 @@ mod tests {
             field_selector: None,
             output: None,
             sort_by: None,
+            raw: None,
+            show_labels: None,
+            show_kind: None,
+            chunk_size: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -389,6 +405,10 @@ mod tests {
             field_selector: None,
             output: None,
             sort_by: None,
+            raw: None,
+            show_labels: None,
+            show_kind: None,
+            chunk_size: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -413,6 +433,10 @@ mod tests {
             field_selector: None,
             output: None,
             sort_by: None,
+            raw: None,
+            show_labels: None,
+            show_kind: None,
+            chunk_size: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -436,6 +460,10 @@ mod tests {
             field_selector: Some("status.phase=Running".to_string()),
             output: Some("json".to_string()),
             sort_by: Some(".metadata.creationTimestamp".to_string()),
+            raw: None,
+            show_labels: None,
+            show_kind: None,
+            chunk_size: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -467,6 +495,10 @@ mod tests {
             field_selector: None,
             output: None,
             sort_by: None,
+            raw: None,
+            show_labels: None,
+            show_kind: None,
+            chunk_size: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -513,5 +545,84 @@ mod tests {
             }
             _ => panic!("Expected Text content"),
         }
+    }
+
+    #[test]
+    fn test_build_command_with_raw() {
+        let args = SshK8sGetArgs {
+            host: "server1".to_string(),
+            resource: "pods".to_string(),
+            name: None,
+            namespace: None,
+            all_namespaces: None,
+            label_selector: None,
+            field_selector: None,
+            output: None,
+            sort_by: None,
+            raw: Some(true),
+            show_labels: None,
+            show_kind: None,
+            chunk_size: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sGetTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-o json"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_show_labels_show_kind() {
+        let args = SshK8sGetArgs {
+            host: "server1".to_string(),
+            resource: "pods".to_string(),
+            name: None,
+            namespace: None,
+            all_namespaces: None,
+            label_selector: None,
+            field_selector: None,
+            output: None,
+            sort_by: None,
+            raw: None,
+            show_labels: Some(true),
+            show_kind: Some(true),
+            chunk_size: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sGetTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("--show-labels"), "cmd: {cmd}");
+        assert!(cmd.contains("--show-kind"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_chunk_size() {
+        let args = SshK8sGetArgs {
+            host: "server1".to_string(),
+            resource: "pods".to_string(),
+            name: None,
+            namespace: None,
+            all_namespaces: None,
+            label_selector: None,
+            field_selector: None,
+            output: None,
+            sort_by: None,
+            raw: None,
+            show_labels: None,
+            show_kind: None,
+            chunk_size: Some(100),
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sGetTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("--chunk-size=100"), "cmd: {cmd}");
     }
 }
