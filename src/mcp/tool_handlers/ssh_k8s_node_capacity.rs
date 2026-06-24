@@ -41,9 +41,9 @@ impl StandardTool for K8sNodeCapacityTool {
     type Args = SshK8sNodeCapacityArgs;
     const NAME: &'static str = "ssh_k8s_node_capacity";
     const DESCRIPTION: &'static str = "Node allocatable capacity via `kubectl get nodes -o json | jq`. \
-        Emits TSV rows (name, allocatable_cpu, allocatable_memory, allocatable_pods) \
-        followed by a `---REQUESTS---` section with the count of running containers \
-        that declare CPU requests. Use `node` to scope to a single node. \
+        Returns a JSON array of objects with `node`, `allocatable` (cpu/memory/pods), \
+        and `requested` (count of running containers with CPU requests). \
+        Use `node` to scope to a single node. \
         Requires `jq` on the remote host. \
         Use `context` for multi-cluster targeting.";
     const SCHEMA: &'static str = r#"{
@@ -83,6 +83,8 @@ impl StandardTool for K8sNodeCapacityTool {
         },
         "required": ["host"]
     }"#;
+    const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
+        crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshK8sNodeCapacityArgs, _host_config: &HostConfig) -> Result<String> {
         if let Some(ctx) = args.context.as_deref() {
@@ -246,6 +248,7 @@ mod tests {
         };
         let cmd = K8sNodeCapacityTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("get nodes"), "cmd: {cmd}");
+        assert!(cmd.contains("command -v jq"), "cmd: {cmd}");
         assert!(cmd.contains("jq"), "cmd: {cmd}");
         assert!(cmd.contains("allocatable"), "cmd: {cmd}");
     }

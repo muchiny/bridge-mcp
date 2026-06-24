@@ -1,6 +1,6 @@
 //! K8s Node Conditions Tool Handler
 //!
-//! Per-node condition summary via `kubectl get nodes -o jsonpath`.
+//! Per-node condition summary via `kubectl get nodes -o json | jq`.
 
 use serde::Deserialize;
 
@@ -40,10 +40,10 @@ pub struct K8sNodeConditionsTool;
 impl StandardTool for K8sNodeConditionsTool {
     type Args = SshK8sNodeConditionsArgs;
     const NAME: &'static str = "ssh_k8s_node_conditions";
-    const DESCRIPTION: &'static str = "Per-node condition summary via `kubectl get nodes -o jsonpath`. \
-        Returns one tab-separated row per node: name, then semicolon-delimited \
-        `Type=Status` pairs for each condition (Ready, MemoryPressure, DiskPressure, \
-        PIDPressure, NetworkUnavailable). Use `node` to scope to a single node. \
+    const DESCRIPTION: &'static str = "Per-node condition summary via `kubectl get nodes -o json | jq`. \
+        Returns a JSON array of objects: each has `name` and `conditions` \
+        (object with Ready, MemoryPressure, DiskPressure, PIDPressure, NetworkUnavailable). \
+        Use `node` to scope to a single node. Requires `jq` on the remote host. \
         Use `context` for multi-cluster targeting.";
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -82,6 +82,8 @@ impl StandardTool for K8sNodeConditionsTool {
         },
         "required": ["host"]
     }"#;
+    const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
+        crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshK8sNodeConditionsArgs, _host_config: &HostConfig) -> Result<String> {
         if let Some(ctx) = args.context.as_deref() {
@@ -245,7 +247,9 @@ mod tests {
         };
         let cmd = K8sNodeConditionsTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("get nodes"), "cmd: {cmd}");
-        assert!(cmd.contains("jsonpath"), "cmd: {cmd}");
+        assert!(cmd.contains("command -v jq"), "cmd: {cmd}");
+        assert!(cmd.contains("-o json"), "cmd: {cmd}");
+        assert!(cmd.contains("conditions"), "cmd: {cmd}");
     }
 
     #[test]

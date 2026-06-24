@@ -99,6 +99,8 @@ impl StandardTool for K8sApiResourcesTool {
         },
         "required": ["host"]
     }"#;
+    const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
+        crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshK8sApiResourcesArgs, _host_config: &HostConfig) -> Result<String> {
         if let Some(ctx) = args.context.as_deref() {

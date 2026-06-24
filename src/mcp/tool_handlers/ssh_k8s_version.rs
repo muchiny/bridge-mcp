@@ -81,6 +81,8 @@ impl StandardTool for K8sVersionTool {
         },
         "required": ["host"]
     }"#;
+    const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
+        crate::domain::output_kind::OutputKind::Json;
 
     fn build_command(args: &SshK8sVersionArgs, _host_config: &HostConfig) -> Result<String> {
         if let Some(ctx) = args.context.as_deref() {

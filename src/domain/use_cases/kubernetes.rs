@@ -109,7 +109,6 @@ pub fn validate_context(context: &str) -> Result<()> {
 /// # Rules
 /// - Non-empty
 /// - Must start with `/`
-/// - No leading `-` (flag-like)
 /// - Charset: `[A-Za-z0-9._~/?=&%-]` (allows query strings with `?` and `%xx`)
 /// - No `..` segments (path traversal)
 ///
@@ -124,11 +123,6 @@ pub fn validate_raw_path(path: &str) -> Result<()> {
     if !path.starts_with('/') {
         return Err(BridgeError::CommandDenied {
             reason: format!("raw path must start with '/': {path}"),
-        });
-    }
-    if path.starts_with('-') {
-        return Err(BridgeError::CommandDenied {
-            reason: format!("raw path must not look like a flag: {path}"),
         });
     }
     // Check for path traversal
@@ -972,10 +966,11 @@ impl KubernetesCommandBuilder {
 
     /// Build a `kubectl get nodes` command that emits per-node condition rows.
     ///
-    /// Constructs: `{kubectl} get nodes [{node}] -o jsonpath='{range...}'
-    /// [--context={ctx}]`
+    /// Constructs a compound command that pipes `kubectl get nodes -o json`
+    /// through `jq` to produce a JSON array of objects with `name` and
+    /// `conditions` (object keyed by condition type, value = Status string).
     ///
-    /// Output format: `<node>\t<Type>=<Status>;<Type>=<Status>;...\n` per node.
+    /// Requires `jq` on the remote host; exits with code 3 when missing.
     /// Use an optional `node` name to scope to a single node.
     #[must_use]
     pub fn build_node_conditions_command(
@@ -984,6 +979,7 @@ impl KubernetesCommandBuilder {
         context: Option<&str>,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
+        let p = prefix.trim_end();
         let context_flag = kubectl_context_flag(context);
         let node_arg = if let Some(n) = node {
             format!(" {}", shell_escape(n))
@@ -991,16 +987,22 @@ impl KubernetesCommandBuilder {
             String::new()
         };
         format!(
-            "{prefix}get nodes{node_arg} -o jsonpath='{{range .items[*]}}{{.metadata.name}}{{\"\\t\"}}{{range .status.conditions[*]}}{{.type}}={{.status}}{{\";\"}}{{end}}{{\"\\n\"}}{{end}}'{context_flag}"
+            "command -v jq >/dev/null 2>&1 || \
+             {{ echo 'jq not installed on host (required for node conditions rollup)' >&2; exit 3; }}; \
+             P={p}; $P get nodes{node_arg} -o json{context_flag} | \
+             jq '[.items[] | {{name: .metadata.name, conditions: (.status.conditions | \
+             map({{(.type): .status}}) | add)}}]'"
         )
     }
 
     /// Build a compound command that prints allocatable capacity per node and
     /// summarises running container CPU requests.
     ///
-    /// Uses `jq` on the remote host; emits TSV rows (name, cpu, memory, pods)
-    /// followed by a `---REQUESTS---` section with a count of running containers
-    /// that declare CPU requests.
+    /// Uses `jq` on the remote host; returns a JSON array of objects with
+    /// `node`, `allocatable` (cpu/memory/pods), and `requested` (count of
+    /// running containers with CPU requests).
+    ///
+    /// Requires `jq` on the remote host; exits with code 3 when missing.
     #[must_use]
     pub fn build_node_capacity_command(
         kubectl_bin: Option<&str>,
@@ -1016,7 +1018,16 @@ impl KubernetesCommandBuilder {
             String::new()
         };
         format!(
-            "P={p}; $P get nodes{node_arg} -o json{context_flag} | jq -r '.items[] | [.metadata.name, .status.allocatable.cpu, .status.allocatable.memory, .status.allocatable.pods] | @tsv' && echo '---REQUESTS---' && $P get pods -A --field-selector=status.phase=Running -o json{context_flag} | jq -r '[.items[].spec.containers[].resources.requests.cpu // empty] | length as $n | \"running_containers_with_cpu_requests=\\($n)\"'"
+            "command -v jq >/dev/null 2>&1 || \
+             {{ echo 'jq not installed on host (required for node capacity rollup)' >&2; exit 3; }}; \
+             P={p}; NODES=$($P get nodes{node_arg} -o json{context_flag}); \
+             PODS=$($P get pods -A --field-selector=status.phase=Running -o json{context_flag}); \
+             echo \"$NODES\" | jq --argjson pods \"$PODS\" \
+             '[.items[] | {{node: .metadata.name, \
+             allocatable: {{cpu: .status.allocatable.cpu, \
+             memory: .status.allocatable.memory, \
+             pods: .status.allocatable.pods}}, \
+             requested: ($pods.items | map(.spec.containers[].resources.requests.cpu // empty) | length)}}]'"
         )
     }
 
@@ -3076,5 +3087,63 @@ mod tests {
             cmd.contains("--as 'system:serviceaccount:ci:deployer'"),
             "cmd: {cmd}"
         );
+    }
+
+    // ============== validate_raw_path Tests ==============
+
+    #[test]
+    fn test_validate_raw_path_reject_empty() {
+        assert!(validate_raw_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_reject_no_leading_slash() {
+        assert!(validate_raw_path("readyz").is_err());
+        assert!(validate_raw_path("api/v1").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_reject_dotdot_segment() {
+        assert!(validate_raw_path("/foo/../bar").is_err());
+        assert!(validate_raw_path("/../etc").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_reject_space() {
+        assert!(validate_raw_path("/foo bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_reject_shell_metachar_dollar() {
+        assert!(validate_raw_path("/foo$x").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_reject_shell_metachar_semicolon() {
+        assert!(validate_raw_path("/foo;rm").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_reject_shell_metachar_pipe() {
+        assert!(validate_raw_path("/foo|cat").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_reject_backtick() {
+        assert!(validate_raw_path("/foo`cmd`").is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_path_accept_healthz() {
+        assert!(validate_raw_path("/healthz").is_ok());
+        assert!(validate_raw_path("/livez").is_ok());
+        assert!(validate_raw_path("/readyz").is_ok());
+        assert!(validate_raw_path("/readyz?verbose").is_ok());
+    }
+
+    #[test]
+    fn test_validate_raw_path_accept_api_paths() {
+        assert!(validate_raw_path("/api/v1").is_ok());
+        assert!(validate_raw_path("/apis/apps/v1").is_ok());
     }
 }
