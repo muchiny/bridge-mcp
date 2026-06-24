@@ -728,6 +728,27 @@ impl KubernetesCommandBuilder {
         cmd.push_str(&kubectl_context_flag(context));
         cmd
     }
+
+    /// Build a `kubectl cordon|uncordon <node>` command.
+    ///
+    /// Constructs: `{kubectl} cordon|uncordon {node} [--context={ctx}]`
+    ///
+    /// Pass `cordon = true` to mark a node unschedulable; `false` to mark it
+    /// schedulable again (`kubectl uncordon`). Both are idempotent — running
+    /// the same verb twice converges to the same state.
+    #[must_use]
+    pub fn build_cordon_command(
+        kubectl_bin: Option<&str>,
+        node: &str,
+        cordon: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let verb = if cordon { "cordon" } else { "uncordon" };
+        let mut cmd = format!("{prefix}{verb} {}", shell_escape(node));
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
 }
 
 /// Builds helm CLI commands for remote execution.
@@ -2684,6 +2705,26 @@ mod tests {
         );
         assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    // ============== build_cordon_command Tests ==============
+
+    #[test]
+    fn test_build_cordon_command() {
+        assert!(
+            KubernetesCommandBuilder::build_cordon_command(Some("kubectl"), "node-1", true, None)
+                .contains("cordon 'node-1'")
+        );
+        let unc = KubernetesCommandBuilder::build_cordon_command(
+            Some("kubectl"),
+            "node-1",
+            false,
+            Some("east"),
+        );
+        assert!(
+            unc.contains("uncordon 'node-1' --context=east"),
+            "cmd: {unc}"
+        );
     }
 
     // ============== build_patch_command Tests ==============
