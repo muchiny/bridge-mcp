@@ -144,32 +144,29 @@ impl K8sTriageCommandBuilder {
         all_namespaces: bool,
         context: Option<&str>,
     ) -> Result<String> {
-        let k_head = kubectl_k_head(kubectl_bin);
-        let ctxf = super::kubernetes::kubectl_context_flag(context);
         if let Some(ctx) = context {
             super::kubernetes::validate_context(ctx)?;
         }
+        let k_head = kubectl_k_head(kubectl_bin);
+        let ctxf = super::kubernetes::kubectl_context_flag(context);
         let scope_flag = build_scope_flag(namespace, all_namespaces)?;
 
         let mut cmd = String::new();
-        write!(cmd, "{k_head}").unwrap();
-        write!(
+        let _ = write!(cmd, "{k_head}");
+        let _ = write!(
             cmd,
             "command -v jq >/dev/null 2>&1 || \
              {{ echo 'jq not installed on host (required for triage aggregation)' >&2; exit 3; }}; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "PODS=\"$($K{ctxf} get pods{scope_flag} -o json 2>/dev/null)\"; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "EVENTS=\"$($K{ctxf} get events{scope_flag} --field-selector type=Warning -o json 2>/dev/null)\"; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "printf '%s\\n' \"$PODS\" | jq \
              --argjson ev \"$(printf '%s' \"$EVENTS\" | jq \
@@ -184,8 +181,7 @@ impl K8sTriageCommandBuilder {
              select(.state.waiting!=null)|\
              {{container:.name, reason:.state.waiting.reason, \
              message:.state.waiting.message}}]}}], warningEvents: $ev}}'"
-        )
-        .unwrap();
+        );
 
         Ok(cmd)
     }
@@ -216,14 +212,13 @@ impl K8sTriageCommandBuilder {
         let scope_flag = build_scope_flag(namespace, all_namespaces)?;
 
         let mut cmd = String::new();
-        write!(cmd, "{k_head}").unwrap();
-        write!(
+        let _ = write!(cmd, "{k_head}");
+        let _ = write!(
             cmd,
             "command -v jq >/dev/null 2>&1 || \
              {{ echo 'jq not installed on host (required for crashloop aggregation)' >&2; exit 3; }}; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "$K{ctxf} get pods{scope_flag} -o json 2>/dev/null | \
              jq -r '.items[] | \
@@ -243,8 +238,7 @@ impl K8sTriageCommandBuilder {
              $K{ctxf} logs \"$POD\" -n \"$NS\" -c \"$C\" --previous --tail={tail} 2>&1 || \
              echo '(no previous logs)'; \
              done; done"
-        )
-        .unwrap();
+        );
 
         Ok(cmd)
     }
@@ -274,14 +268,13 @@ impl K8sTriageCommandBuilder {
         let sel_flag = build_sel_flag(label_selector);
 
         let mut cmd = String::new();
-        write!(cmd, "{k_head}").unwrap();
-        write!(
+        let _ = write!(cmd, "{k_head}");
+        let _ = write!(
             cmd,
             "command -v jq >/dev/null 2>&1 || \
              {{ echo 'jq not installed on host (required for pod health rollup)' >&2; exit 3; }}; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "$K{ctxf} get pods{scope_flag}{sel_flag} -o json 2>/dev/null | \
              jq '[.items[] | \
@@ -296,8 +289,7 @@ impl K8sTriageCommandBuilder {
              state:(.state|keys[0]), waitingReason:.state.waiting.reason, \
              terminatedReason:.state.terminated.reason}}]}} | \
              select(.ready!=\"True\")]'"
-        )
-        .unwrap();
+        );
 
         Ok(cmd)
     }
@@ -323,26 +315,23 @@ impl K8sTriageCommandBuilder {
         let scope_flag = build_scope_flag(namespace, all_namespaces)?;
 
         let mut cmd = String::new();
-        write!(cmd, "{k_head}").unwrap();
-        write!(
+        let _ = write!(cmd, "{k_head}");
+        let _ = write!(
             cmd,
             "command -v jq >/dev/null 2>&1 || \
              {{ echo 'jq not installed on host (required for pending join)' >&2; exit 3; }}; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "PODS=\"$($K{ctxf} get pods{scope_flag} \
              --field-selector status.phase=Pending -o json 2>/dev/null)\"; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "EVENTS=\"$($K{ctxf} get events{scope_flag} \
              --field-selector reason=FailedScheduling -o json 2>/dev/null)\"; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "printf '%s\\n' \"$PODS\" | jq \
              --argjson ev \"$(printf '%s' \"$EVENTS\" | jq \
@@ -354,8 +343,7 @@ impl K8sTriageCommandBuilder {
              schedulerMessages:[$ev[] | \
              select(.pod==$p.metadata.name \
              and .namespace==$p.metadata.namespace)]}}]'"
-        )
-        .unwrap();
+        );
 
         Ok(cmd)
     }
@@ -380,14 +368,13 @@ impl K8sTriageCommandBuilder {
         let ctxf = super::kubernetes::kubectl_context_flag(context);
 
         let mut cmd = String::new();
-        write!(cmd, "{k_head}").unwrap();
-        write!(
+        let _ = write!(cmd, "{k_head}");
+        let _ = write!(
             cmd,
             "command -v jq >/dev/null 2>&1 || \
              {{ echo 'jq not installed on host (required for node status rollup)' >&2; exit 3; }}; "
-        )
-        .unwrap();
-        write!(
+        );
+        let _ = write!(
             cmd,
             "$K{ctxf} get nodes -o json 2>/dev/null | \
              jq '[.items[] | \
@@ -403,8 +390,7 @@ impl K8sTriageCommandBuilder {
              pods:.status.allocatable.pods}}}} | \
              .problem = ((.ready!=\"True\") or \
              (any(.pressures[]; .status==\"True\")))]'"
-        )
-        .unwrap();
+        );
 
         Ok(cmd)
     }
@@ -440,8 +426,8 @@ impl K8sTriageCommandBuilder {
         let resource_escaped = shell_escape(resource);
 
         let mut cmd = String::new();
-        write!(cmd, "{k_head}").unwrap();
-        write!(
+        let _ = write!(cmd, "{k_head}");
+        let _ = write!(
             cmd,
             "timeout {watch_timeout_secs} \
              $K{ctxf} get {resource_escaped}{scope_flag}{sel_flag} --watch-only 2>&1; \
@@ -449,8 +435,7 @@ impl K8sTriageCommandBuilder {
              if [ $RC -eq 124 ]; then \
              echo \"[watch ended: {watch_timeout_secs}s timeout reached]\"; \
              fi"
-        )
-        .unwrap();
+        );
 
         Ok(cmd)
     }

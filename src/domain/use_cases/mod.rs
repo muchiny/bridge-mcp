@@ -34,7 +34,6 @@ pub mod inventory;
 pub mod journald;
 pub mod k8s_triage;
 pub mod key_management;
-pub use k8s_triage::K8sTriageCommandBuilder;
 pub mod kubernetes;
 pub mod ldap;
 pub mod log_aggregation;
@@ -72,3 +71,5 @@ pub mod windows_process;
 pub mod windows_registry;
 pub mod windows_service;
 pub mod windows_update;
+
+pub use k8s_triage::K8sTriageCommandBuilder;
