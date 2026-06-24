@@ -527,14 +527,14 @@ impl KubernetesCommandBuilder {
 
     /// Validate a rollout action.
     ///
-    /// Only allows: `status`, `restart`, `undo`, `history`.
+    /// Only allows: `status`, `restart`, `undo`, `history`, `pause`, `resume`.
     ///
     /// # Errors
     ///
     /// Returns `BridgeError::CommandDenied` if the action is not in
     /// the allowed list.
     pub fn validate_rollout_action(action: &str) -> Result<()> {
-        let allowed = ["status", "restart", "undo", "history"];
+        let allowed = ["status", "restart", "undo", "history", "pause", "resume"];
         let lower = action.to_lowercase();
 
         if allowed.contains(&lower.as_str()) {
@@ -1862,21 +1862,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rollout_action_pause_denied() {
-        let result = KubernetesCommandBuilder::validate_rollout_action("pause");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            BridgeError::CommandDenied { reason } => {
-                assert!(reason.contains("pause"));
-                assert!(reason.contains("not allowed"));
-            }
-            e => panic!("Expected CommandDenied, got: {e:?}"),
-        }
-    }
-
-    #[test]
-    fn test_validate_rollout_action_resume_denied() {
-        assert!(KubernetesCommandBuilder::validate_rollout_action("resume").is_err());
+    fn test_validate_rollout_allows_pause_resume() {
+        assert!(KubernetesCommandBuilder::validate_rollout_action("pause").is_ok());
+        assert!(KubernetesCommandBuilder::validate_rollout_action("resume").is_ok());
+        assert!(KubernetesCommandBuilder::validate_rollout_action("status").is_ok());
+        assert!(KubernetesCommandBuilder::validate_rollout_action("bogus").is_err());
     }
 
     #[test]
