@@ -210,6 +210,153 @@ pub fn validate_jsonpath_key(k: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a Kubernetes service account name.
+///
+/// Non-empty, ≤253 chars, charset [a-z0-9.-], must not start with '-'.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] on invalid name.
+pub fn validate_sa_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "service account name must not be empty".to_string(),
+        });
+    }
+    if name.len() > 253 {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("service account name exceeds 253 chars: {name}"),
+        });
+    }
+    if name.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("service account name must not start with '-': {name}"),
+        });
+    }
+    if !name
+        .chars()
+        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '.' | '-'))
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("service account name contains disallowed characters: {name}"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a token duration string.
+///
+/// Must match `^[0-9]+(s|m|h)$`.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] on invalid duration.
+pub fn validate_duration(d: &str) -> Result<()> {
+    if d.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "duration must not be empty".to_string(),
+        });
+    }
+    let (digits, suffix) = match d.rfind(|c: char| c.is_ascii_digit()) {
+        Some(pos) => (&d[..=pos], &d[pos + 1..]),
+        None => {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("duration has no numeric prefix: {d}"),
+            });
+        }
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("duration numeric part is invalid: {d}"),
+        });
+    }
+    if !matches!(suffix, "s" | "m" | "h") {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("duration suffix must be one of s/m/h, got: '{suffix}' in {d}"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate an RBAC kind against an allowlist.
+///
+/// Case-sensitive membership check.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] if `kind` is not in `allowed`.
+pub fn validate_rbac_kind(kind: &str, allowed: &[&str]) -> Result<()> {
+    if allowed.contains(&kind) {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!("RBAC kind '{kind}' is not allowed; allowed: {allowed:?}"),
+        })
+    }
+}
+
+/// Validate a server URL for kubeconfig generation.
+///
+/// Must start with `https://`, use only safe chars, no whitespace or shell metachars.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] on invalid URL.
+pub fn validate_url(url: &str) -> Result<()> {
+    if !url.starts_with("https://") {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("server URL must start with 'https://': {url}"),
+        });
+    }
+    for ch in url.chars() {
+        if ch.is_ascii_whitespace() {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("server URL must not contain whitespace: {url}"),
+            });
+        }
+        if matches!(ch, ';' | '$' | '`' | '(') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("server URL contains shell metacharacter '{ch}': {url}"),
+            });
+        }
+        if !ch.is_ascii() {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("server URL must contain only ASCII characters: {url}"),
+            });
+        }
+        if !matches!(ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | ':' | '/' | '%' | '-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("server URL contains disallowed character '{ch}': {url}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a token or RBAC verb/resource string.
+///
+/// Non-empty, charset `[A-Za-z0-9.*/_-]`, no shell metachars, no leading '-'.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] on invalid value.
+pub fn validate_rbac_token(s: &str) -> Result<()> {
+    if s.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "value must not be empty".to_string(),
+        });
+    }
+    if s.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("value must not start with '-': {s}"),
+        });
+    }
+    if !s
+        .chars()
+        .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '*' | '/' | '_' | '-'))
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("value contains disallowed characters: {s}"),
+        });
+    }
+    Ok(())
+}
+
 /// Build an optional ` --context=<ctx>` flag (leading space, shell-escaped).
 ///
 /// Safe context names (only `[A-Za-z0-9._@:/-]`) are emitted bare; names
@@ -1760,6 +1907,311 @@ impl KubernetesCommandBuilder {
             r" -o yaml | grep -v -E '^\s*(creationTimestamp|resourceVersion|uid|selfLink|generation|managedFields):' | grep -v -E '^\s+(kubectl\.kubernetes\.io/last-applied-configuration|namespace):'",
         );
         Ok(cmd)
+    }
+
+    /// Build a `kubectl auth whoami` command.
+    ///
+    /// Constructs: `{kubectl} auth whoami -o {output}[--context={ctx}]`
+    ///
+    /// Default output is `yaml`. The `output` parameter is shell-escaped.
+    #[must_use]
+    pub fn build_auth_whoami_command(
+        kubectl_bin: Option<&str>,
+        output: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let out = output.unwrap_or("yaml");
+        let mut cmd = format!("{prefix}auth whoami -o {}", shell_escape(out));
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build a `kubectl create token <sa>` command.
+    ///
+    /// Constructs: `{kubectl} create token {sa} [-n {ns}] [--duration {dur}]
+    /// [--audience {aud}...] [--bound-object-kind {kind} --bound-object-name {name}]
+    /// [--context={ctx}]`
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_create_token_command(
+        kubectl_bin: Option<&str>,
+        service_account: &str,
+        namespace: Option<&str>,
+        duration: Option<&str>,
+        audiences: Option<&[String]>,
+        bound_object_kind: Option<&str>,
+        bound_object_name: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}create token {}", shell_escape(service_account));
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(dur) = duration {
+            let _ = write!(cmd, " --duration {}", shell_escape(dur));
+        }
+        if let Some(auds) = audiences {
+            for aud in auds {
+                let _ = write!(cmd, " --audience {}", shell_escape(aud));
+            }
+        }
+        if let Some(kind) = bound_object_kind {
+            let _ = write!(cmd, " --bound-object-kind {}", shell_escape(kind));
+            if let Some(name) = bound_object_name {
+                let _ = write!(cmd, " --bound-object-name {}", shell_escape(name));
+            }
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build a `kubectl create <rbac-kind>` command.
+    ///
+    /// Supports: role, clusterrole, rolebinding, clusterrolebinding, serviceaccount.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_rbac_create_command(
+        kubectl_bin: Option<&str>,
+        kind: &str,
+        name: &str,
+        namespace: Option<&str>,
+        verbs: Option<&[String]>,
+        resources: Option<&[String]>,
+        resource_names: Option<&[String]>,
+        clusterrole: Option<&str>,
+        role: Option<&str>,
+        serviceaccount: Option<&str>,
+        user: Option<&str>,
+        group: Option<&str>,
+        dry_run: bool,
+        output: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!(
+            "{prefix}create {} {}",
+            shell_escape(kind),
+            shell_escape(name)
+        );
+
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+
+        // role/clusterrole: verbs, resources, resource-names
+        if matches!(kind, "role" | "clusterrole") {
+            if let Some(vs) = verbs {
+                for v in vs {
+                    let _ = write!(cmd, " --verb={}", shell_escape(v));
+                }
+            }
+            if let Some(rs) = resources {
+                for r in rs {
+                    let _ = write!(cmd, " --resource={}", shell_escape(r));
+                }
+            }
+            if let Some(rns) = resource_names {
+                for rn in rns {
+                    let _ = write!(cmd, " --resource-name={}", shell_escape(rn));
+                }
+            }
+        }
+
+        // rolebinding/clusterrolebinding: role reference + subjects
+        if matches!(kind, "rolebinding" | "clusterrolebinding") {
+            if let Some(cr) = clusterrole {
+                let _ = write!(cmd, " --clusterrole {}", shell_escape(cr));
+            } else if let Some(r) = role {
+                let _ = write!(cmd, " --role {}", shell_escape(r));
+            }
+            if let Some(sa) = serviceaccount {
+                // Format: ns:name — split on ':', shell-escape each half
+                if let Some(colon_pos) = sa.find(':') {
+                    let sa_ns = &sa[..colon_pos];
+                    let sa_name = &sa[colon_pos + 1..];
+                    let _ = write!(
+                        cmd,
+                        " --serviceaccount={}:{}",
+                        shell_escape(sa_ns),
+                        shell_escape(sa_name)
+                    );
+                } else {
+                    let _ = write!(cmd, " --serviceaccount={}", shell_escape(sa));
+                }
+            } else if let Some(u) = user {
+                let _ = write!(cmd, " --user {}", shell_escape(u));
+            } else if let Some(g) = group {
+                let _ = write!(cmd, " --group {}", shell_escape(g));
+            }
+        }
+
+        if dry_run {
+            let out_fmt = output.unwrap_or("yaml");
+            let _ = write!(cmd, " --dry-run=client -o {}", shell_escape(out_fmt));
+        }
+
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build a `kubectl auth reconcile -f <manifest>` command.
+    ///
+    /// Same branch logic as `build_apply_command`: file path if starts with `/`, `./`, `~`;
+    /// else inline via `echo ... | kubectl auth reconcile -f -`.
+    #[must_use]
+    pub fn build_auth_reconcile_command(
+        kubectl_bin: Option<&str>,
+        manifest: &str,
+        dry_run: bool,
+        remove_extra_permissions: bool,
+        remove_extra_subjects: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let is_file =
+            manifest.starts_with('/') || manifest.starts_with("./") || manifest.starts_with('~');
+        let mut cmd = if is_file {
+            format!("{prefix}auth reconcile -f {}", shell_escape(manifest))
+        } else {
+            format!(
+                "echo {} | {prefix}auth reconcile -f -",
+                shell_escape(manifest)
+            )
+        };
+        if dry_run {
+            cmd.push_str(" --dry-run=client");
+        }
+        if remove_extra_permissions {
+            cmd.push_str(" --remove-extra-permissions");
+        }
+        if remove_extra_subjects {
+            cmd.push_str(" --remove-extra-subjects");
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build a composite POSIX pipeline that reverse-scans RBAC bindings
+    /// to find all principals that can perform `verb` on `resource`.
+    ///
+    /// Enumerates all `rolebindings` and `clusterrolebindings`, then for each
+    /// binding resolves the referenced `Role`/`ClusterRole` and checks whether
+    /// its rules cover the requested verb and resource (or `*`).
+    #[must_use]
+    pub fn build_who_can_command(
+        kubectl_bin: Option<&str>,
+        verb: &str,
+        resource: &str,
+        namespace: Option<&str>,
+        all_namespaces: bool,
+        context: Option<&str>,
+    ) -> String {
+        let k_val = if let Some(bin) = kubectl_bin {
+            if is_valid_binary_path(bin) {
+                format!("K={bin}")
+            } else {
+                r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
+            }
+        } else {
+            r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
+        };
+
+        let ctx_flag = kubectl_context_flag(context);
+        let ctx_flag_trimmed = ctx_flag.trim();
+        let v_esc = shell_escape(verb);
+        let r_esc = shell_escape(resource);
+
+        let scope = if all_namespaces {
+            " -A".to_string()
+        } else if let Some(ns) = namespace {
+            format!(" -n {}", shell_escape(ns))
+        } else {
+            String::new()
+        };
+
+        format!(
+            r#"{k_val}; CTX="{ctx_flag_trimmed}"; V={v_esc}; R={r_esc}; SCOPE='{scope}'; for B in $($K get rolebindings,clusterrolebindings$SCOPE $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"\n"}}{{end}}' 2>/dev/null); do RNS=$(printf %s "$B"|cut -d'|' -f1); RKIND=$(printf %s "$B"|cut -d'|' -f4); RNAME=$(printf %s "$B"|cut -d'|' -f5); if [ "$RKIND" = ClusterRole ]; then RULES=$($K get clusterrole "$RNAME" $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); else RULES=$($K get role "$RNAME" ${{RNS:+-n "$RNS"}} $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); fi; printf %s "$RULES" | grep -q -e "$V" -e '\*' && printf %s "$RULES" | grep -q -e "$R" -e '\*' && printf '%s\n' "$B"; done"#
+        )
+    }
+
+    /// Build a composite POSIX pipeline that diagnoses RBAC for a service account.
+    ///
+    /// Prints the SA identity, runs `auth can-i --list`, and lists all bindings
+    /// that reference the service account.
+    #[must_use]
+    pub fn build_rbac_diagnose_command(
+        kubectl_bin: Option<&str>,
+        service_account: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let k_val = if let Some(bin) = kubectl_bin {
+            if is_valid_binary_path(bin) {
+                format!("K={bin}")
+            } else {
+                r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
+            }
+        } else {
+            r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
+        };
+
+        let ctx_flag = kubectl_context_flag(context);
+        let ctx_flag_trimmed = ctx_flag.trim();
+        let sa_esc = shell_escape(service_account);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+
+        format!(
+            r#"{k_val}; CTX="{ctx_flag_trimmed}"; SA={sa_esc}; NS={ns_esc}; AS="system:serviceaccount:$NS:$SA"; printf '== identity ==\n%s\n' "$AS"; printf '== can-i --list ==\n'; $K auth can-i --list --as "$AS" -n "$NS" $CTX 2>/dev/null; printf '== granting bindings ==\n'; $K get rolebindings,clusterrolebindings --all-namespaces $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"/"}}{{{roleRef}}}{{"\n"}}{{range .subjects[*]}}{{"  subj:"}}{{.kind}}{{"/"}}{{.namespace}}{{"/"}}{{{name}}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | grep -A1 -e "ServiceAccount/$NS/$SA" -e "serviceaccount/$NS/$SA" || printf '(no direct bindings found)\n'"#,
+            roleRef = ".roleRef.name",
+            name = ".name",
+        )
+    }
+
+    /// Build a composite POSIX pipeline that assembles a kubeconfig for a service account.
+    ///
+    /// Retrieves the cluster CA and creates a short-lived token, then prints
+    /// a kubeconfig YAML that can be used directly with `KUBECONFIG=<file>`.
+    #[must_use]
+    pub fn build_kubeconfig_generate_command(
+        kubectl_bin: Option<&str>,
+        service_account: &str,
+        namespace: Option<&str>,
+        server_url: Option<&str>,
+        cluster_name: Option<&str>,
+        duration: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let p = prefix.trim_end();
+
+        let ctx_flag = kubectl_context_flag(context);
+        let ctx_flag_trimmed = ctx_flag.trim();
+
+        let sa_esc = shell_escape(service_account);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+        let cn_esc = shell_escape(cluster_name.unwrap_or("gen-cluster"));
+
+        let srv_line = if let Some(url) = server_url {
+            shell_escape(url)
+        } else {
+            format!(
+                r"$({p} config view --minify -o jsonpath='{{.clusters[0].cluster.server}}' {ctx_flag_trimmed})"
+            )
+        };
+
+        let dur_flag = if let Some(d) = duration {
+            format!(" --duration {}", shell_escape(d))
+        } else {
+            String::new()
+        };
+
+        format!(
+            r#"SA={sa_esc}; NS={ns_esc}; CN={cn_esc}; SRV={srv_line}; CA=$({p} config view --minify --raw -o jsonpath='{{.clusters[0].cluster.certificate-authority-data}}' {ctx_flag_trimmed}); TOKEN=$({p} create token "$SA" -n "$NS"{dur_flag} {ctx_flag_trimmed}); printf 'apiVersion: v1\nkind: Config\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: %s\ncontexts:\n- context:\n    cluster: %s\n    namespace: %s\n    user: %s\n  name: %s-%s\ncurrent-context: %s-%s\nusers:\n- name: %s\n  user:\n    token: %s\n' "$CA" "$SRV" "$CN" "$CN" "$NS" "$SA" "$CN" "$SA" "$CN" "$SA" "$SA" "$TOKEN""#
+        )
     }
 }
 
