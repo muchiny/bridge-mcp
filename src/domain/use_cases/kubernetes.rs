@@ -669,6 +669,34 @@ impl KubernetesCommandBuilder {
         }
     }
 
+    /// Build a `kubectl patch <target> --type=<type> -p <patch>` command.
+    ///
+    /// Applies a strategic, merge, or JSON patch to a live resource.
+    /// `patch_type` is one of `strategic`, `merge`, `json` (validated by the
+    /// handler before this builder is called).
+    #[must_use]
+    pub fn build_patch_command(
+        kubectl_bin: Option<&str>,
+        target: &str,
+        patch: &str,
+        patch_type: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!(
+            "{prefix}patch {} --type={} -p {}",
+            shell_escape(target),
+            shell_escape(patch_type),
+            shell_escape(patch)
+        );
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
     /// Build a `kubectl set <subcommand> <target> <assignments...>` command.
     ///
     /// Constructs: `{kubectl} set {subcommand} {target} {assignments...}
@@ -2656,5 +2684,24 @@ mod tests {
         );
         assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    // ============== build_patch_command Tests ==============
+
+    #[test]
+    fn test_build_patch_command_merge() {
+        let cmd = KubernetesCommandBuilder::build_patch_command(
+            Some("kubectl"),
+            "deployment/api",
+            r#"{"spec":{"replicas":3}}"#,
+            "merge",
+            Some("prod"),
+            None,
+        );
+        assert!(
+            cmd.contains("patch 'deployment/api' --type='merge' -p"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
     }
 }
