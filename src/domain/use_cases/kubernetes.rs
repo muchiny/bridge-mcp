@@ -180,6 +180,7 @@ impl KubernetesCommandBuilder {
     /// [--chunk-size={N}]`
     #[must_use]
     #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub fn build_get_command(
         kubectl_bin: Option<&str>,
         resource: &str,
@@ -289,6 +290,7 @@ impl KubernetesCommandBuilder {
     /// [--prefix] [--since-time={t}]`
     #[must_use]
     #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub fn build_logs_command(
         kubectl_bin: Option<&str>,
         pod: &str,
@@ -521,6 +523,7 @@ impl KubernetesCommandBuilder {
     /// Constructs: `{kubectl} rollout {action} {resource} [-n {ns}]
     /// [--to-revision={N}] [-l {sel}] [--watch={bool}] [--timeout={t}]`
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn build_rollout_command(
         kubectl_bin: Option<&str>,
         action: &str,
@@ -585,7 +588,6 @@ impl KubernetesCommandBuilder {
     /// Constructs: `{kubectl} exec [-i] {pod} [-n {ns}] [-c {container}]
     /// -- {argv...}` or `-- sh -c {command}`
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
     pub fn build_exec_command(
         kubectl_bin: Option<&str>,
         pod: &str,
@@ -1261,21 +1263,15 @@ impl KubernetesCommandBuilder {
     ) -> Result<()> {
         let has_name = name.is_some();
         let has_selector = label_selector.is_some() || field_selector.is_some();
-        match (has_name, has_selector, all) {
-            (true, false, false) => {}
-            (false, true, false) => {}
-            (false, false, true) => {}
-            (true, _, true) => {
-                return Err(BridgeError::CommandDenied {
-                    reason: "Cannot use both name and --all".to_string(),
-                });
-            }
-            (false, false, false) => {
-                return Err(BridgeError::CommandDenied {
-                    reason: "Must specify at least one of: name, label_selector, field_selector, or all=true".to_string(),
-                });
-            }
-            _ => {}
+        if has_name && all {
+            return Err(BridgeError::CommandDenied {
+                reason: "Cannot use both name and --all".to_string(),
+            });
+        }
+        if !has_name && !has_selector && !all {
+            return Err(BridgeError::CommandDenied {
+                reason: "Must specify at least one of: name, label_selector, field_selector, or all=true".to_string(),
+            });
         }
         if all {
             let lower = resource.to_lowercase();
@@ -1293,13 +1289,13 @@ impl KubernetesCommandBuilder {
     pub fn validate_exec_invocation(command: Option<&str>, argv: Option<&[String]>) -> Result<()> {
         match (command, argv) {
             (Some(_), None) => Ok(()),
-            (None, Some(args)) => {
-                if args.is_empty() {
+            (None, Some(elems)) => {
+                if elems.is_empty() {
                     return Err(BridgeError::CommandDenied {
                         reason: "argv must not be empty".to_string(),
                     });
                 }
-                if args.iter().any(|a| a.is_empty()) {
+                if elems.iter().any(String::is_empty) {
                     return Err(BridgeError::CommandDenied {
                         reason: "argv elements must not be empty".to_string(),
                     });
