@@ -42,6 +42,10 @@ pub struct SshAnsibleRunBackgroundArgs {
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
+    vault_password_file: Option<String>,
+    #[serde(default)]
+    vault_id: Option<String>,
+    #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
@@ -66,7 +70,8 @@ impl StandardTool for AnsibleRunBackgroundTool {
     const DESCRIPTION: &'static str = "Launch an Ansible playbook in the background with JSON \
         callback output. Returns a run_id and PID immediately. The playbook output is written \
         to /tmp/ansible-run-{run_id}.json on the remote host. Use ssh_ansible_events to monitor \
-        progress and extract events. Use ssh_exec with 'kill -0 {pid}' to check if still running.";
+        progress and extract events. Use ssh_ansible_events with check_status=true and \
+        pid=<pid> to check if the playbook is still running without a separate ssh_exec call.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -130,6 +135,14 @@ impl StandardTool for AnsibleRunBackgroundTool {
                 "type": "string",
                 "description": "Directory to cd into before running"
             },
+            "vault_password_file": {
+                "type": "string",
+                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file)"
+            },
+            "vault_id": {
+                "type": "string",
+                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id)"
+            },
             "timeout_seconds": {
                 "type": "integer",
                 "description": "Optional timeout in seconds (default: from config)",
@@ -168,6 +181,8 @@ impl StandardTool for AnsibleRunBackgroundTool {
             args.become_user.as_deref(),
             args.working_dir.as_deref(),
             Some("json"),
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
         );
 
         // Generate a unique run ID using date + random
@@ -273,6 +288,8 @@ mod tests {
         assert!(properties.contains_key("inventory"));
         assert!(properties.contains_key("tags"));
         assert!(properties.contains_key("become"));
+        assert!(properties.contains_key("vault_password_file"));
+        assert!(properties.contains_key("vault_id"));
     }
 
     #[test]
@@ -357,6 +374,8 @@ mod tests {
             use_become: None,
             become_user: None,
             working_dir: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,

@@ -36,10 +36,12 @@ impl StandardTool for NotifyTool {
 
     const NAME: &'static str = "ssh_notify";
 
-    const DESCRIPTION: &'static str = "Send a notification message via webhook from a remote host. \
-        Formats the message as a JSON payload with hostname and timestamp, then sends it to \
-        the specified webhook URL. Ideal for alerts, deployment notifications, and ChatOps \
-        integration with Slack, Teams, or Discord.";
+    const DESCRIPTION: &'static str = "Send a plain-text notification via webhook from a remote host. \
+        Wraps the message in a fixed JSON envelope with the remote hostname and a UTC timestamp \
+        ({\"text\":\"...\",\"hostname\":\"...\",\"timestamp\":\"...\"}) and POSTs it to the webhook URL. \
+        Use this tool when you have a simple text alert and want the server to stamp it automatically. \
+        For custom JSON payloads (CI/CD bodies, signed events, structured data) use ssh_webhook_send instead. \
+        Works with Slack, Teams, and Discord incoming-webhook URLs.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -54,7 +56,7 @@ impl StandardTool for NotifyTool {
                     },
                     "webhook_url": {
                         "type": "string",
-                        "description": "Webhook URL for the notification (must start with https://)"
+                        "description": "Webhook endpoint URL. Must use HTTPS (http:// is rejected by the server). Example: https://hooks.slack.com/services/T000/B000/xxxx"
                     },
                     "timeout_seconds": {
                         "type": "integer",

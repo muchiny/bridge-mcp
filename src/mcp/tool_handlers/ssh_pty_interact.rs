@@ -40,9 +40,13 @@ impl StandardTool for PtyInteractTool {
 
     const NAME: &'static str = "ssh_pty_interact";
 
-    const DESCRIPTION: &'static str = "Send input to a PTY session on a remote host. \
-        This simplified implementation pipes the input via echo to the shell. \
-        Use ssh_pty_exec to start a command with PTY allocation first.";
+    const DESCRIPTION: &'static str = "Send a line of text to a remote Linux host's \
+        shell by running echo <input>. This is a limited helper: it does NOT maintain \
+        a persistent PTY session — each call is a standalone echo command and the \
+        session_id field is accepted but currently ignored (no session state is stored). \
+        For true interactive PTY execution use ssh_pty_exec. For multi-step shell \
+        workflows with shared state use ssh_session_create + ssh_session_exec. \
+        Not available on Windows hosts.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -53,7 +57,7 @@ impl StandardTool for PtyInteractTool {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Session identifier from a previous ssh_pty_exec call"
+                        "description": "Session identifier (accepted for API compatibility but currently unused — no session state is maintained between calls)"
                     },
                     "input": {
                         "type": "string",

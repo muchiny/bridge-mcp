@@ -43,8 +43,12 @@ impl StandardTool for StorageLsblkTool {
 
     const NAME: &'static str = "ssh_storage_lsblk";
 
-    const DESCRIPTION: &'static str = "List block devices on a remote host. Shows device name, \
-        size, type, filesystem, mount point, and UUID. Set json=true for JSON output.";
+    const DESCRIPTION: &'static str = "List block devices (lsblk) on a remote host. Shows device \
+        name, size, type (disk/part/lvm), filesystem type, mount point, and UUID. Set json=true \
+        for structured JSON output (easier to parse). Use this to discover which block devices and \
+        partitions exist before mounting; for disk usage percentages use ssh_storage_df, for LVM \
+        logical volumes use ssh_storage_lvm, and for partition table details use \
+        ssh_storage_fdisk.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

@@ -38,7 +38,9 @@ impl StandardTool for FileReadTool {
 
     const DESCRIPTION: &'static str = "Read the contents of a file on a remote host. Returns \
         file content as text. Supports optional line offset and limit for reading specific \
-        portions of large files. For binary files, use ssh_download instead.";
+        portions of large files. For binary files, use ssh_download instead. To read the last N \
+        lines of a log file efficiently, prefer ssh_tail. To check file metadata (permissions, \
+        size, mtime) without reading content, use ssh_file_stat.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

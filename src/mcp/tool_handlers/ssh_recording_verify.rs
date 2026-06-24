@@ -35,11 +35,11 @@ impl SshRecordingVerifyHandler {
         "properties": {
             "file_path": {
                 "type": "string",
-                "description": "Path to the .cast recording file to verify"
+                "description": "Absolute path to the .cast recording file to verify (obtain via ssh_recording_list)"
             },
             "hash_key": {
                 "type": "string",
-                "description": "HMAC key used during recording (default: from config/env var MCP_RECORDING_KEY)"
+                "description": "HMAC-SHA256 key used when the recording was started. If omitted, falls back to the MCP_RECORDING_KEY environment variable on the bridge host. Must match the key configured at recording time."
             }
         },
         "required": ["file_path"]
@@ -53,9 +53,12 @@ impl ToolHandler for SshRecordingVerifyHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Verify the HMAC-SHA256 hash chain integrity of a session recording. Detects if any \
-         events have been tampered with, deleted, or reordered. Returns verification status \
-         with the first invalid event index if tampering is detected."
+        "Verify the HMAC-SHA256 hash chain integrity of a .cast recording file. Detects if any \
+         events have been tampered with, deleted, or reordered since the session was recorded. \
+         Returns PASS/FAIL with the index of the first invalid event on failure. Only recordings \
+         captured with hash_chain enabled can be fully verified; those without a chain report \
+         PASS with 0 verified events. Use ssh_recording_list to discover file paths; use \
+         ssh_recording_replay to review the actual event content."
     }
 
     fn schema(&self) -> ToolSchema {

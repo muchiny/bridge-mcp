@@ -29,9 +29,11 @@ impl StandardTool for NginxTestTool {
 
     const NAME: &'static str = "ssh_nginx_test";
 
-    const DESCRIPTION: &'static str = "Test web server configuration syntax on a remote host. \
-        Prefer this over ssh_exec as it auto-detects nginx or apache. Always run this before \
-        ssh_nginx_reload to avoid downtime from invalid config.";
+    const DESCRIPTION: &'static str = "Validate web server configuration syntax on a remote Linux \
+        host (runs `nginx -t` or `apachectl configtest`). Defaults to nginx when `server` is \
+        omitted — pass `server` explicitly for apache2/httpd. Use this as a dry-run before \
+        ssh_nginx_reload to catch config errors without causing downtime. To check service state \
+        use ssh_nginx_status; to list virtual hosts use ssh_nginx_list_sites.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -42,7 +44,7 @@ impl StandardTool for NginxTestTool {
             },
             "server": {
                 "type": "string",
-                "description": "Web server name: nginx, apache2, httpd (default: auto-detect)"
+                "description": "Web server to test: nginx (default when omitted), apache2, or httpd. Custom servers (e.g. openresty) also accepted — the tool runs `<server> -t`."
             },
             "timeout_seconds": {
                 "type": "integer",

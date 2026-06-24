@@ -36,8 +36,10 @@ impl StandardTool for WinNetDnsTool {
 
     const NAME: &'static str = "ssh_win_net_dns";
 
-    const DESCRIPTION: &'static str = "Resolve DNS names from a Windows host using Resolve-DnsName with optional record type \
-        filter.";
+    const DESCRIPTION: &'static str = "Resolve DNS names from a Windows host using PowerShell Resolve-DnsName, with optional \
+        record type filter. Windows-only — for Linux hosts use ssh_net_dns instead. \
+        The name param is the DNS name to resolve (not the bridge host); host is the Windows machine \
+        that performs the lookup.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -49,7 +51,7 @@ impl StandardTool for WinNetDnsTool {
             },
             "name": {
                 "type": "string",
-                "description": "DNS name to resolve"
+                "description": "DNS name or IP to resolve (e.g. example.com or 8.8.8.8); must contain only alphanumeric, hyphen, dot, colon, or bracket characters"
             },
             "record_type": {
                 "type": "string",

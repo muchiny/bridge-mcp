@@ -49,7 +49,12 @@ impl StandardTool for CompareStateTool {
 
     const DESCRIPTION: &'static str = "Capture the current system state of a host including \
         installed packages, active services, network listeners, and kernel version. Save the \
-        output to a file and use it later to compare against the same or different hosts.";
+        output to a file and use it later to compare against the same or different hosts. \
+        Output can be large; pass save_output=/tmp/state-<host>.txt to avoid truncation — \
+        if truncated, use ssh_output_fetch with the returned output_id. \
+        For richer snapshots that also include config file checksums and user accounts, use \
+        ssh_env_snapshot (drift group). To compare a snapshot against a desired state \
+        specification, use ssh_env_drift.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

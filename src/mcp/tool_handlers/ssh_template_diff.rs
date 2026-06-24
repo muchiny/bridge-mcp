@@ -41,9 +41,11 @@ impl StandardTool for TemplateDiffTool {
 
     const NAME: &'static str = "ssh_template_diff";
 
-    const DESCRIPTION: &'static str = "Compare template content against the current \
-        configuration file on a remote host. Shows a unified diff of the differences. \
-        Use this before ssh_template_apply to preview changes that would be made.";
+    const DESCRIPTION: &'static str = "Compare proposed template content against an existing \
+        configuration file on a Linux host, producing a unified diff. Use this before \
+        ssh_template_apply to preview exactly what would change. Obtain template content \
+        to compare with ssh_template_show, and validate the result afterward with \
+        ssh_template_validate.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

@@ -29,10 +29,13 @@ impl StandardTool for NginxStatusTool {
 
     const NAME: &'static str = "ssh_nginx_status";
 
-    const DESCRIPTION: &'static str = "Show web server status on a remote host. Prefer this \
-        over ssh_exec as it auto-detects nginx, apache2, or httpd. Returns service state, PID, \
-        and recent activity. Use ssh_nginx_test to validate config, ssh_nginx_reload to apply \
-        changes, and ssh_nginx_list_sites to see enabled sites.";
+    const DESCRIPTION: &'static str = "Show web server (nginx/apache2/httpd) status on a remote \
+        Linux host via `systemctl status`. Auto-detects the first running server when `server` is \
+        omitted; pass `server` explicitly to target a specific one. Use this to confirm the service \
+        is active before acting. For config validation use ssh_nginx_test; to apply changes use \
+        ssh_nginx_reload; to list virtual hosts use ssh_nginx_list_sites. For an Apache-specific \
+        snapshot including version and mod_status worker metrics use ssh_apache_status instead. \
+        For IIS on Windows use ssh_iis_status instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -43,7 +46,7 @@ impl StandardTool for NginxStatusTool {
             },
             "server": {
                 "type": "string",
-                "description": "Web server name: nginx, apache2, httpd (default: auto-detect)"
+                "description": "Web server name to target (default: auto-detect the first running one among nginx, apache2, httpd). Pass explicitly — e.g. nginx, apache2, httpd — when multiple web servers are installed or auto-detection is unreliable."
             },
             "timeout_seconds": {
                 "type": "integer",

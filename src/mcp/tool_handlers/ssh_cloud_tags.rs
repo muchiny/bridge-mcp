@@ -38,9 +38,12 @@ impl StandardTool for CloudTagsTool {
 
     const NAME: &'static str = "ssh_cloud_tags";
 
-    const DESCRIPTION: &'static str = "Retrieve cloud instance tags from a remote host. \
-        Queries the cloud provider metadata endpoint to fetch instance tags. \
-        Supports AWS, GCP, and Azure. Defaults to AWS if no provider specified.";
+    const DESCRIPTION: &'static str = "Retrieve cloud instance tags (Name, Environment, Owner, \
+        etc.) from a remote host by querying the IMDS metadata endpoint. Supports AWS, GCP, \
+        and Azure via the provider param; defaults to AWS when provider is omitted. Set \
+        provider explicitly on multi-cloud or hybrid hosts to avoid hitting the wrong \
+        endpoint. For general instance identity metadata (instance ID, type, region, zone) \
+        use ssh_cloud_metadata instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

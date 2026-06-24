@@ -46,9 +46,13 @@ impl StandardTool for CisBenchmarkTool {
 
     const NAME: &'static str = "ssh_cis_benchmark";
 
-    const DESCRIPTION: &'static str = "Run CIS benchmark checks on a remote Linux host. Prefer this over ssh_exec \
-        for compliance auditing as it checks file permissions, SSH hardening, kernel parameters, \
-        password policy, and audit rules according to CIS benchmark levels 1 and 2.";
+    const DESCRIPTION: &'static str = "Run targeted CIS benchmark checks on a remote Linux host, \
+        filtered by category (filesystem, ssh, kernel, password) and level (1 or 2). Use this when \
+        you need to audit a specific CIS category at a defined level. For a numeric pass/fail score \
+        across all categories use ssh_compliance_score; for a full structured multi-format report use \
+        ssh_compliance_report. Compared to ssh_compliance_check (security_scan group), this tool adds \
+        level-1/2 granularity and per-category filtering — use ssh_compliance_check for a quick \
+        ad-hoc sweep without level filtering.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -59,13 +63,14 @@ impl StandardTool for CisBenchmarkTool {
                     },
                     "level": {
                         "type": "integer",
-                        "description": "CIS benchmark level (1 or 2)",
+                        "description": "CIS benchmark level (1 or 2). If omitted, defaults to level 1 (level 2 is a strict superset that adds audit rules and MAC framework checks).",
                         "minimum": 1,
                         "maximum": 2
                     },
                     "category": {
                         "type": "string",
-                        "description": "Category to check: filesystem, ssh, kernel, or password"
+                        "description": "Category to check. If omitted, all categories are checked.",
+                        "enum": ["filesystem", "ssh", "kernel", "password"]
                     },
                     "timeout_seconds": {
                         "type": "integer",

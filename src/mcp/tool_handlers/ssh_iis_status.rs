@@ -29,9 +29,10 @@ impl StandardTool for IisStatusTool {
 
     const NAME: &'static str = "ssh_iis_status";
 
-    const DESCRIPTION: &'static str = "Show IIS website status on a Windows host including name, state, bindings, and \
-        physical path. Use ssh_iis_list_sites first to discover site names. Requires the IIS \
-        PowerShell module (WebAdministration).";
+    const DESCRIPTION: &'static str = "Show the status of ALL IIS websites on a Windows host, including name, state, \
+        and bindings. Returns every configured site in one call — there is no per-site filter. \
+        Use ssh_iis_list_pools to list application pools, or ssh_iis_start / ssh_iis_stop to \
+        change a site state. Requires the IIS PowerShell module (WebAdministration).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

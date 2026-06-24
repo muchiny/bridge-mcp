@@ -35,8 +35,12 @@ impl StandardTool for WinEventTailTool {
 
     const NAME: &'static str = "ssh_win_event_tail";
 
-    const DESCRIPTION: &'static str = "Show the most recent entries from a Windows Event Log with wrapped output for \
-        readability. Similar to `ssh_win_event_query` but uses word-wrap formatting.";
+    const DESCRIPTION: &'static str = "Show the most recent entries from a Windows Event Log with word-wrapped message \
+        text for human readability (`Format-Table -Wrap`). Prefer this over `ssh_win_event_query` \
+        or `ssh_win_event_logs` when reading events interactively and message text would otherwise be \
+        truncated; use those tools instead when you need a compact tabular table or a time-range filter. \
+        Default count is 20 (smaller than the 50-event default of the other query tools). \
+        Use `ssh_win_event_sources` to discover valid log names.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

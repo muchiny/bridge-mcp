@@ -37,8 +37,13 @@ impl StandardTool for AdUserInfoTool {
 
     const NAME: &'static str = "ssh_ad_user_info";
 
-    const DESCRIPTION: &'static str = "Show detailed information about an Active Directory user including all properties. \
-        Requires the AD PowerShell module.";
+    const DESCRIPTION: &'static str = "Show detailed information about an Active Directory user including all properties \
+        using Get-ADUser -Properties * on a Windows DC. Requires the AD PowerShell module (RSAT). \
+        Use this tool (not ssh_ldap_user_info) when the host is a Windows DC with the AD \
+        PowerShell module — it returns structured AD-native attributes including account status, \
+        password expiry, locked-out state, and group memberships. For non-Windows hosts or raw \
+        LDAP attribute queries, use ssh_ldap_user_info instead. \
+        Discover user SAM account names first with ssh_ad_user_list.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

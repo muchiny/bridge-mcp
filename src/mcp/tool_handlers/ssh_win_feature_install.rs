@@ -38,8 +38,11 @@ impl StandardTool for WinFeatureInstallTool {
 
     const NAME: &'static str = "ssh_win_feature_install";
 
-    const DESCRIPTION: &'static str = "Install a Windows feature. Optionally include management tools. Validates the feature \
-        name and shows install state after completion. Requires appropriate permissions.";
+    const DESCRIPTION: &'static str = "Install a Windows Server feature or role by name (Windows hosts only, uses \
+        `Install-WindowsFeature`). Set `include_management` to also install management tools (e.g. RSAT snap-ins). \
+        Use `ssh_win_feature_list` to discover installed features or `ssh_win_feature_info` to check if a feature \
+        is already installed before calling this. To uninstall use `ssh_win_feature_remove`. Requires administrator \
+        privileges; a reboot may be required to complete activation.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -64,6 +67,10 @@ impl StandardTool for WinFeatureInstallTool {
             "max_output": {
                 "type": "integer",
                 "description": "Maximum output characters (overrides default)"
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

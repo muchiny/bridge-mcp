@@ -110,11 +110,11 @@ impl StandardTool for HelmUpgradeTool {
             },
             "timeout": {
                 "type": "string",
-                "description": "Timeout for wait e.g. 5m0s"
+                "description": "Helm --timeout: Go duration Helm waits for Kubernetes operations to complete (e.g. '5m0s', '10m'). Only meaningful when wait=true. Distinct from timeout_seconds which is the SSH/bridge-level connection timeout."
             },
             "install": {
                 "type": "boolean",
-                "description": "Install if release doesn't exist (--install flag)"
+                "description": "Install if release doesn't exist (--install flag, equivalent to ssh_helm_install for first-time installs)"
             },
             "version": {
                 "type": "string",
@@ -134,7 +134,7 @@ impl StandardTool for HelmUpgradeTool {
             },
             "timeout_seconds": {
                 "type": "integer",
-                "description": "Optional timeout in seconds (default: from config)",
+                "description": "SSH/bridge-level connection timeout in seconds (default: from config). Controls how long the bridge waits for the SSH command to complete, not how long Helm waits for Kubernetes. Use 'timeout' for Helm's own operation timeout.",
                 "minimum": 1,
                 "maximum": 3600
             },

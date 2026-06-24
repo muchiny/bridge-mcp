@@ -43,11 +43,11 @@ impl SshRunbookExecuteHandler {
             },
             "runbook_name": {
                 "type": "string",
-                "description": "Name of the runbook to execute (from ssh_runbook_list)"
+                "description": "Name of the runbook to execute; obtain valid names from ssh_runbook_list"
             },
             "params": {
                 "type": "object",
-                "description": "Parameters to pass to the runbook (overrides defaults)",
+                "description": "Template variables to inject into runbook steps, overriding any defaults declared in the runbook YAML. Keys must match the {{ variable }} placeholders used in step commands.",
                 "additionalProperties": { "type": "string" }
             }
         },
@@ -62,10 +62,14 @@ impl ToolHandler for SshRunbookExecuteHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Resolve a runbook into an execution plan with all template variables replaced. \
-         Returns the list of commands to run on the host. Execute each step with ssh_exec, \
-         observing the output before proceeding to the next step. Steps marked with \
-         confirm=true should be confirmed with the user before execution."
+        "Resolve a named runbook into an execution plan with all template variables replaced, \
+         then execute it step by step on the target host. Returns the ordered list of resolved \
+         commands; run each step with ssh_exec and observe its output before proceeding. Steps \
+         marked confirm=true require explicit user confirmation before execution. Use \
+         ssh_runbook_list first to discover available runbook names and their accepted params; \
+         use ssh_runbook_validate to dry-check a runbook definition before running it. Unlike \
+         ssh_runbook_validate (read-only), this tool is destructive and should not be called \
+         without confirming the execution plan with the user first."
     }
 
     fn schema(&self) -> ToolSchema {

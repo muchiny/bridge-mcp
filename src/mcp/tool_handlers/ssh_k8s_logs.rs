@@ -63,7 +63,7 @@ impl StandardTool for K8sLogsTool {
             },
             "pod": {
                 "type": "string",
-                "description": "Pod name or label selector (e.g. -l app=nginx)"
+                "description": "Pod name or resource type/name (e.g. 'my-pod-abc123' or 'deployment/myapp'). Use ssh_k8s_get with resource='pods' to find pod names. Do not pass '-l app=nginx' here; label selectors are not supported in this param."
             },
             "namespace": {
                 "type": "string",
@@ -75,7 +75,7 @@ impl StandardTool for K8sLogsTool {
             },
             "tail": {
                 "type": "integer",
-                "description": "Number of lines from the end (--tail=N, default: 100)",
+                "description": "Number of lines from the end to show (--tail=N). Omit to get all available log lines (kubectl default).",
                 "minimum": 1
             },
             "since": {

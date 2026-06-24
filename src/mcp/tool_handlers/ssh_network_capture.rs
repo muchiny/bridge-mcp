@@ -49,9 +49,13 @@ impl StandardTool for NetworkCaptureTool {
 
     const NAME: &'static str = "ssh_network_capture";
 
-    const DESCRIPTION: &'static str = "Capture network traffic on a remote host using tcpdump. Prefer this over \
-        ssh_exec for packet capture as it safely limits the number of captured packets \
-        (max 1000) and formats output with -nn for numeric addresses.";
+    const DESCRIPTION: &'static str = "Capture live network traffic on a remote Linux host using tcpdump. Captures \
+        up to 1000 packets (default 100) and always uses -nn for numeric IPs/ports. Specify \
+        `interface` to target a single NIC (default: any); use `filter` for BPF expressions \
+        such as 'port 80' or 'host 10.0.0.1'. Requires tcpdump and typically root/CAP_NET_RAW \
+        on the remote host. Use `ssh_port_scan` to identify open ports first, and \
+        `ssh_fail2ban_status` to check intrusion-ban activity after reviewing suspicious \
+        traffic.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -62,11 +66,11 @@ impl StandardTool for NetworkCaptureTool {
                     },
                     "interface": {
                         "type": "string",
-                        "description": "Network interface to capture on (default: any)"
+                        "description": "Network interface to capture on (e.g., 'eth0', 'lo'); default: any"
                     },
                     "filter": {
                         "type": "string",
-                        "description": "Capture filter expression (e.g., 'port 80')"
+                        "description": "BPF capture filter expression (e.g., 'port 80', 'host 10.0.0.1', 'tcp')"
                     },
                     "count": {
                         "type": "integer",

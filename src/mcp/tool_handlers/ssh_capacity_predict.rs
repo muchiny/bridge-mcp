@@ -40,9 +40,14 @@ impl StandardTool for CapacityPredictTool {
     const NAME: &'static str = "ssh_capacity_predict";
 
     const DESCRIPTION: &'static str = "Collect current and historical capacity data for a \
-        specific resource on a remote host. The collected data is designed for LLM-based \
-        extrapolation and prediction. Includes current snapshot, sar historical data, \
-        and growth indicators.";
+        specific resource (cpu, memory, disk, or all) on a remote host. \
+        Returns a current snapshot plus sar historical samples and growth indicators designed \
+        for LLM-based extrapolation — this tool does NOT compute a forecast itself. \
+        Use this tool when you need machine-structured raw data to extrapolate or forecast \
+        resource exhaustion programmatically. \
+        For a human-readable trend report with a configurable lookback window use \
+        ssh_capacity_trend instead. \
+        For a combined current-only snapshot across all resources use ssh_capacity_collect.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -53,7 +58,7 @@ impl StandardTool for CapacityPredictTool {
                     },
                     "resource": {
                         "type": "string",
-                        "description": "Resource to predict (cpu, memory, disk, all)",
+                        "description": "Resource to collect historical data for (cpu, memory, disk, all). Use 'all' to gather data across all resource types in a single call.",
                         "enum": ["cpu", "memory", "disk", "all"]
                     },
                     "timeout_seconds": {

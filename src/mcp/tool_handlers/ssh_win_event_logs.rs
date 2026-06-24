@@ -40,7 +40,10 @@ impl StandardTool for WinEventLogsTool {
     const NAME: &'static str = "ssh_win_event_logs";
 
     const DESCRIPTION: &'static str = "Retrieve recent entries from a Windows Event Log (e.g., System, Application, \
-        Security). Specify the log name and optional count (default: 50).";
+        Security) as a structured table. Use this when you only need the latest N events and have no \
+        time-range requirement; if you need to filter by a start time use `ssh_win_event_query` \
+        (which adds an `after` param). To discover valid log names first, call `ssh_win_event_sources`. \
+        Default count is 50.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,7 +55,7 @@ impl StandardTool for WinEventLogsTool {
             },
             "log": {
                 "type": "string",
-                "description": "Event log name (e.g., System, Application, Security)"
+                "description": "Event log name (e.g., System, Application, Security, Microsoft-Windows-Sysmon/Operational); use ssh_win_event_sources to list available names"
             },
             "count": {
                 "type": "integer",

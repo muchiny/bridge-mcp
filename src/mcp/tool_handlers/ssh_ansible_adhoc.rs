@@ -33,6 +33,10 @@ pub struct SshAnsibleAdhocArgs {
     #[serde(default)]
     check: Option<bool>,
     #[serde(default)]
+    vault_password_file: Option<String>,
+    #[serde(default)]
+    vault_id: Option<String>,
+    #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
@@ -41,7 +45,11 @@ pub struct SshAnsibleAdhocArgs {
 
 impl_common_args!(SshAnsibleAdhocArgs);
 
-#[mcp_standard_tool(name = "ssh_ansible_adhoc", group = "ansible", annotation = "mutating")]
+#[mcp_standard_tool(
+    name = "ssh_ansible_adhoc",
+    group = "ansible",
+    annotation = "destructive"
+)]
 pub struct AnsibleAdhocTool;
 
 impl StandardTool for AnsibleAdhocTool {
@@ -52,7 +60,9 @@ impl StandardTool for AnsibleAdhocTool {
     const DESCRIPTION: &'static str = "Run an Ansible ad-hoc command on a remote host without a playbook. Execute a single \
         module (e.g., ping, shell, copy, service) against target hosts. Use \
         ssh_ansible_inventory first to discover hosts. For complex multi-task automation, use \
-        ssh_ansible_playbook instead. Supports check mode for dry-run.";
+        ssh_ansible_playbook instead. Supports check mode for dry-run. Requires Ansible \
+        installed directly on the bridge host (not AWX/Tower — use ssh_awx_job_launch for \
+        AWX-managed environments).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -104,6 +114,14 @@ impl StandardTool for AnsibleAdhocTool {
                 "type": "boolean",
                 "description": "Check mode"
             },
+            "vault_password_file": {
+                "type": "string",
+                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file)"
+            },
+            "vault_id": {
+                "type": "string",
+                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id)"
+            },
             "timeout_seconds": {
                 "type": "integer",
                 "description": "Optional timeout in seconds (default: from config)",
@@ -114,6 +132,10 @@ impl StandardTool for AnsibleAdhocTool {
                 "type": "integer",
                 "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool. Useful for large host groups producing verbose output."
             }
         },
         "required": ["host", "pattern", "module"]
@@ -131,6 +153,8 @@ impl StandardTool for AnsibleAdhocTool {
             args.forks,
             args.verbose,
             args.check.unwrap_or(false),
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
         ))
     }
 
@@ -328,6 +352,8 @@ mod tests {
         assert!(properties.contains_key("forks"));
         assert!(properties.contains_key("verbose"));
         assert!(properties.contains_key("check"));
+        assert!(properties.contains_key("vault_password_file"));
+        assert!(properties.contains_key("vault_id"));
         assert!(properties.contains_key("timeout_seconds"));
         assert!(properties.contains_key("max_output"));
     }
@@ -410,6 +436,8 @@ mod tests {
             forks: None,
             verbose: None,
             check: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
@@ -433,6 +461,8 @@ mod tests {
             forks: None,
             verbose: None,
             check: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
@@ -457,6 +487,8 @@ mod tests {
             forks: Some(5),
             verbose: None,
             check: Some(true),
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,

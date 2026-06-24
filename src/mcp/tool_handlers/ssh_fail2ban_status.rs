@@ -43,9 +43,13 @@ impl StandardTool for Fail2banStatusTool {
 
     const NAME: &'static str = "ssh_fail2ban_status";
 
-    const DESCRIPTION: &'static str = "Check fail2ban status on a remote host. Prefer this over ssh_exec for \
-        fail2ban inspection as it safely queries jail status including banned IPs \
-        and filter statistics. Specify a jail name to get detailed status for that jail.";
+    const DESCRIPTION: &'static str = "Check fail2ban status on a remote Linux host via `fail2ban-client status`. \
+        Without `jail`, returns the overall status including active jail names and counts. \
+        With `jail` (e.g., 'sshd', 'nginx-http-auth'), returns detailed jail status: \
+        currently banned IPs, total bans, and filter hit statistics. Use `ssh_firewall_list` \
+        to see the corresponding iptables/ufw ban rules, or `ssh_network_capture` to trace \
+        traffic triggering the bans. Gracefully reports 'fail2ban not available' if the \
+        service is absent.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -56,7 +60,7 @@ impl StandardTool for Fail2banStatusTool {
                     },
                     "jail": {
                         "type": "string",
-                        "description": "Specific jail to check (e.g., 'sshd')"
+                        "description": "Jail name to inspect in detail (e.g., 'sshd', 'nginx-http-auth'); omit to list all active jails"
                     },
                     "timeout_seconds": {
                         "type": "integer",

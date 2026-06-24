@@ -45,8 +45,11 @@ impl StandardTool for StorageUmountTool {
 
     const NAME: &'static str = "ssh_storage_umount";
 
-    const DESCRIPTION: &'static str = "Unmount a filesystem on a remote host. Use lazy=true for \
-        lazy unmount when the filesystem is busy.";
+    const DESCRIPTION: &'static str = "Unmount a filesystem on a remote host (runs umount on the \
+        remote). Provide path as either the mount point (e.g. /mnt/data) or the device path \
+        (e.g. /dev/sdb1). Set lazy=true to pass -l for a lazy detach when the filesystem is busy \
+        and cannot be unmounted immediately. Use ssh_storage_df or ssh_storage_lsblk to find the \
+        mount point first; to mount use ssh_storage_mount.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

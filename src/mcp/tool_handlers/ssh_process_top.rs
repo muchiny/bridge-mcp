@@ -38,9 +38,11 @@ impl StandardTool for ProcessTopTool {
 
     const NAME: &'static str = "ssh_process_top";
 
-    const DESCRIPTION: &'static str = "Show top processes by resource usage on a remote host. Prefer this over ssh_exec as \
-        it provides a non-interactive snapshot sorted by CPU or memory. Use ssh_process_list \
-        for filtering by user or name.";
+    const DESCRIPTION: &'static str = "Show the N heaviest processes by resource usage on a Linux host as a non-interactive \
+        snapshot. Use this when you want the top consumers ranked by CPU or memory; use \
+        ssh_process_list when you need to filter by user or process name. Use \
+        ssh_process_kill to terminate a found process. For Windows hosts use \
+        ssh_win_process_top instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

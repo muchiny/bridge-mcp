@@ -43,10 +43,12 @@ impl StandardTool for BackupScheduleTool {
 
     const NAME: &'static str = "ssh_backup_schedule";
 
-    const DESCRIPTION: &'static str = "Schedule a periodic backup via cron on a remote host. Adds \
-        a cron job that creates timestamped tar.gz archives of the specified paths in the \
-        destination directory. Use ssh_cron_list to verify the schedule. Specify the schedule \
-        in cron format (e.g., '0 2 * * *' for daily at 2am).";
+    const DESCRIPTION: &'static str = "Schedule a periodic backup via cron on a remote host (Linux only). \
+        Adds a cron job that creates timestamped gzip-compressed tar archives (always .tar.gz — \
+        compression is fixed and cannot be changed) of the specified paths in the destination directory. \
+        Pass paths as a single space-separated string — unlike ssh_backup_create which takes an array. \
+        Use ssh_cron_list to verify the schedule was added. Specify the schedule in standard 5-field \
+        cron format (e.g., '0 2 * * *' for daily at 2am).";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -61,7 +63,7 @@ impl StandardTool for BackupScheduleTool {
                     },
                     "paths": {
                         "type": "string",
-                        "description": "Paths to back up (space-separated)"
+                        "description": "Paths to back up as a single space-separated string (e.g., '/var/data /etc/config'). Unlike ssh_backup_create which takes an array, this tool accepts a plain string."
                     },
                     "dest": {
                         "type": "string",

@@ -42,10 +42,13 @@ impl StandardTool for PtyExecTool {
 
     const NAME: &'static str = "ssh_pty_exec";
 
-    const DESCRIPTION: &'static str = "Execute a command on a remote host with PTY \
-        (pseudo-terminal) allocation. This allocates a PTY using script(1), which is \
-        useful for commands that require a terminal (e.g., top, htop, vim). Optionally \
-        set terminal dimensions with rows and cols parameters.";
+    const DESCRIPTION: &'static str = "Execute a command on a remote Linux host with \
+        PTY (pseudo-terminal) allocation via script(1). Use this when a command requires \
+        a terminal to run correctly (e.g. top, htop, vim, less). Optionally set terminal \
+        dimensions via rows and cols (both must be provided together; range 1-500). \
+        For multi-step interactive workflows with shared shell state (cd, env vars), \
+        prefer ssh_session_create + ssh_session_exec instead. \
+        Not available on Windows hosts.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -56,17 +59,17 @@ impl StandardTool for PtyExecTool {
                     },
                     "command": {
                         "type": "string",
-                        "description": "Command to execute with PTY allocation"
+                        "description": "Command to execute with PTY allocation via script(1) — must be non-empty"
                     },
                     "rows": {
                         "type": "integer",
-                        "description": "Terminal rows (1-500)",
+                        "description": "Terminal rows (1-500); must be provided together with cols — ignored if cols is absent",
                         "minimum": 1,
                         "maximum": 500
                     },
                     "cols": {
                         "type": "integer",
-                        "description": "Terminal columns (1-500)",
+                        "description": "Terminal columns (1-500); must be provided together with rows — ignored if rows is absent",
                         "minimum": 1,
                         "maximum": 500
                     },

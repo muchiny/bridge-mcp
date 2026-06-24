@@ -57,7 +57,7 @@ impl StandardTool for CronRemoveTool {
                     },
                     "user": {
                         "type": "string",
-                        "description": "User whose crontab to modify"
+                        "description": "User whose crontab to modify (default: the SSH user configured for this host). Modifying another user's crontab requires sudo/root privileges."
                     },
                     "timeout_seconds": {
                         "type": "integer",

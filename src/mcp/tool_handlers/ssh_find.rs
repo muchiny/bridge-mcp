@@ -76,14 +76,17 @@ impl ToolHandler for SshFindHandler {
         "Find files and directories on a remote host. Prefer this over ssh_exec for file \
          searches as it provides safe escaping, path validation, and a default max depth of 5 \
          to prevent excessive traversal. Use name for glob patterns (e.g., '*.log') and type \
-         for filtering (f=files, d=directories). Returns one file path per line (plain text). \
-         For listing directory contents, use ssh_ls instead."
+         for filtering (f=files, d=directories, l=symlinks). Only -name glob matching is \
+         supported; for case-insensitive or regex searches use ssh_exec with find -iname/-regex. \
+         Returns one file path per line (plain text); use limit=N to cap result count on large \
+         filesystems or save_output=/tmp/out.txt to persist very large result sets. \
+         For listing directory contents with metadata, use ssh_ls instead."
     }
 
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "ssh_find",
-            description: "Find files and directories on a remote host. Prefer this over ssh_exec for file searches as it provides safe escaping, path validation, and a default max depth of 5 to prevent excessive traversal. Use name for glob patterns (e.g., '*.log') and type for filtering (f=files, d=directories). Returns one file path per line (plain text). For listing directory contents, use ssh_ls instead.",
+            description: "Find files and directories on a remote host. Prefer this over ssh_exec for file searches as it provides safe escaping, path validation, and a default max depth of 5 to prevent excessive traversal. Use name for glob patterns (e.g., '*.log') and type for filtering (f=files, d=directories, l=symlinks). Only -name glob matching is supported; for case-insensitive or regex searches use ssh_exec with find -iname/-regex. Returns one file path per line (plain text); use limit=N to cap result count on large filesystems or save_output=/tmp/out.txt to persist very large result sets. For listing directory contents with metadata, use ssh_ls instead.",
             input_schema: r#"{
                 "type": "object",
                 "properties": {
@@ -97,11 +100,12 @@ impl ToolHandler for SshFindHandler {
                     },
                     "name": {
                         "type": "string",
-                        "description": "File name pattern for -name (e.g., '*.log')"
+                        "description": "Glob pattern matched via find -name (e.g., '*.log'). Only -name glob matching is supported; case-insensitive (-iname) and regex (-regex/-iregex) patterns are not available — use ssh_exec for those."
                     },
                     "type": {
                         "type": "string",
-                        "description": "File type filter: f (regular file), d (directory), l (symlink)"
+                        "enum": ["f", "d", "l", "s", "p"],
+                        "description": "File type filter: f (regular file), d (directory), l (symlink), s (socket), p (named pipe). Only -name glob matching is supported; for regex-based searches use ssh_exec with find -regex."
                     },
                     "max_depth": {
                         "type": "integer",

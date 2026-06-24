@@ -40,16 +40,20 @@ impl StandardTool for RollingExecTool {
 
     const NAME: &'static str = "ssh_rolling_exec";
 
-    const DESCRIPTION: &'static str = "Execute a command on a single host as part of a rolling \
-        deployment. Use ssh_exec_multi for full parallel execution. This tool is designed for \
-        one-at-a-time execution with health checks between hosts.";
+    const DESCRIPTION: &'static str = "Execute a command on ONE host as a single step in a \
+        rolling deployment wave: run, validate the health check, then call this tool again on the \
+        next host. Always appends a health-check result to output (prints 'no health check \
+        configured' when none is supplied) so you can verify each host before advancing. Use \
+        ssh_canary_exec for the first/test host before the wave starts. Use ssh_exec_multi when \
+        you want full parallel execution across all hosts at once. Use ssh_fleet_diff when you \
+        only need to compare read-only command output across hosts without mutating them.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
         "properties": {
             "host": {
                 "type": "string",
-                "description": "Host alias from config.yaml for the current batch"
+                "description": "Host alias from config.yaml for the current rolling-wave host"
             },
             "command": {
                 "type": "string",
@@ -72,7 +76,7 @@ impl StandardTool for RollingExecTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to local file"
+                "description": "Save full output to a file on the remote host (absolute path)"
             }
         },
         "required": ["host", "command"]

@@ -51,8 +51,10 @@ impl StandardTool for AnsibleInventoryTool {
 
     const DESCRIPTION: &'static str = "Query Ansible inventory on a remote host. Start here to discover available hosts and \
         groups before running ssh_ansible_playbook or ssh_ansible_adhoc. Modes: list (full \
-        JSON inventory), graph (visual group hierarchy), or host_pattern (details for a \
-        specific host). Supports YAML output format.";
+        JSON inventory — use with jq_filter), graph (plain-text ASCII tree — jq_filter does \
+        not apply), or host_pattern (JSON details for a specific host). Only one mode applies \
+        at a time (list > graph > host_pattern). Note: yaml=true is incompatible with \
+        jq_filter (jq requires JSON output).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -71,7 +73,7 @@ impl StandardTool for AnsibleInventoryTool {
             },
             "graph": {
                 "type": "boolean",
-                "description": "Output inventory as a graph"
+                "description": "Output inventory as a plain-text ASCII group tree (not JSON — jq_filter does not apply; use list=true for JSON output)"
             },
             "host_pattern": {
                 "type": "string",
@@ -99,6 +101,10 @@ impl StandardTool for AnsibleInventoryTool {
                 "type": "integer",
                 "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool. Recommended for large dynamic inventories."
             }
         },
         "required": ["host"]

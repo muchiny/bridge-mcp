@@ -38,9 +38,11 @@ impl StandardTool for WinFirewallRemoveTool {
 
     const NAME: &'static str = "ssh_win_firewall_remove";
 
-    const DESCRIPTION: &'static str = "Remove a Windows Firewall rule by display name on a Windows host. This is destructive \
-        and cannot be undone. Use ssh_win_firewall_list to find the exact rule display name \
-        first.";
+    const DESCRIPTION: &'static str = "Remove a Windows Firewall rule by its exact DisplayName (Remove-NetFirewallRule) on a \
+        Windows host. Destructive and cannot be undone — prompts for confirmation when the MCP \
+        client supports elicitation. Windows hosts only. Use ssh_win_firewall_list first to \
+        obtain the exact DisplayName; use ssh_win_firewall_allow or ssh_win_firewall_deny to \
+        re-create a rule if needed.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,7 +54,7 @@ impl StandardTool for WinFirewallRemoveTool {
             },
             "name": {
                 "type": "string",
-                "description": "Display name of the firewall rule to remove"
+                "description": "Exact DisplayName of the firewall rule to remove as shown by ssh_win_firewall_list (alphanumeric, hyphen, underscore, space, dot only)"
             },
             "timeout_seconds": {
                 "type": "integer",

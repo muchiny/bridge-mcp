@@ -41,9 +41,14 @@ impl StandardTool for CloudCostTool {
 
     const NAME: &'static str = "ssh_cloud_cost";
 
-    const DESCRIPTION: &'static str = "Retrieve AWS cloud cost and usage data on a remote host. \
-        Uses AWS Cost Explorer to fetch daily blended cost metrics. Optionally filter by \
-        service and time period. Requires AWS CLI with appropriate IAM permissions.";
+    const DESCRIPTION: &'static str = "Retrieve AWS Cost Explorer cost and usage data on a \
+        remote host (AWS only — no GCP or Azure billing support). Uses 'aws ce \
+        get-cost-and-usage' with DAILY granularity and BlendedCost metric; granularity and \
+        metric type are fixed server-side. The period param accepts shorthand such as '7d' \
+        or '30d' (converted to YYYY-MM-DD Start/End dates). Optionally filter by AWS service \
+        name (e.g. 'Amazon S3'). Requires AWS CLI with Cost Explorer IAM permissions; \
+        cross-account data requires Organizations billing access. For GCP billing run \
+        'gcloud billing' via ssh_exec; for Azure billing run 'az consumption' via ssh_exec.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -58,7 +63,7 @@ impl StandardTool for CloudCostTool {
                     },
                     "period": {
                         "type": "string",
-                        "description": "Time period for cost data (e.g. '7d', '30d'). Default: '7d'"
+                        "description": "Time period for cost data using shorthand (e.g. '7d', '30d'). Converted server-side to YYYY-MM-DD Start/End with DAILY granularity. Default: '7d'"
                     },
                     "timeout_seconds": {
                         "type": "integer",

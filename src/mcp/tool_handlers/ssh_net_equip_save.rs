@@ -37,8 +37,12 @@ impl StandardTool for NetEquipSaveTool {
 
     const NAME: &'static str = "ssh_net_equip_save";
 
-    const DESCRIPTION: &'static str = "Save the running configuration on a network device to \
-        persistent storage.";
+    const DESCRIPTION: &'static str = "Persist the running configuration to non-volatile \
+        storage on a network device (router/switch/firewall). Commands per vendor: \
+        Cisco/generic → `write memory`; Juniper → `request system configuration rescue save`; \
+        MikroTik → `/system backup save name=mcp-backup`; Fortinet → `execute backup config flash`. \
+        Run after ssh_net_equip_config to ensure changes survive a reboot. Use \
+        ssh_net_equip_show_run beforehand to verify the running config is correct.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -49,7 +53,8 @@ impl StandardTool for NetEquipSaveTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "timeout_seconds": {
                 "type": "integer",

@@ -39,9 +39,13 @@ impl StandardTool for PostgresqlQueryTool {
     const NAME: &'static str = "ssh_postgresql_query";
 
     const DESCRIPTION: &'static str = "Execute a SQL query on a remote PostgreSQL database via \
-        psql. Returns query results in table, CSV, or JSON format. Use for read-only queries; \
-        write operations should use dedicated migration tools. Prefer this over ssh_exec for \
-        PostgreSQL interactions as it handles connection parameters automatically.";
+        psql. Returns query results in table, CSV, or unaligned format. Suitable for both \
+        read-only queries (SELECT) and DML/DDL; for schema migrations prefer a dedicated \
+        migration tool. Auth is sourced from the remote host's ~/.pgpass file or \
+        PGPASSWORD/PGPASSFILE environment variables — do not pass passwords as arguments. \
+        Use ssh_postgresql_status instead if you only need server health, version, and \
+        connection counts. Prefer this over ssh_exec for PostgreSQL interactions as it handles \
+        connection parameters automatically.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,7 +56,7 @@ impl StandardTool for PostgresqlQueryTool {
             },
             "query": {
                 "type": "string",
-                "description": "SQL query to execute (read-only recommended)"
+                "description": "SQL query to execute (e.g. SELECT, INSERT, UPDATE, DELETE, DDL)"
             },
             "database": {
                 "type": "string",
@@ -70,7 +74,7 @@ impl StandardTool for PostgresqlQueryTool {
             },
             "format": {
                 "type": "string",
-                "description": "Output format: table, csv, json (default: table)",
+                "description": "Output format: table (default, aligned columns), csv (comma-separated), json (unaligned tuples via psql -t -A, one value per line — not JSON serialization)",
                 "enum": ["table", "csv", "json"]
             },
             "timeout_seconds": {

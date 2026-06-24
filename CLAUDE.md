@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-MCP SSH Bridge is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **357 tools** across **75 groups** (60 Linux, 13 Windows, 2 cross-platform).
+MCP SSH Bridge is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **392 tools** across **75 groups** (60 Linux, 13 Windows, 2 cross-platform).
 
 ## CLI-as-Tool Mode (Alternative to MCP)
 
-All 357 MCP tools are accessible directly via CLI, enabling **10-32x token savings** compared to MCP mode. Use CLI for dev workflows, MCP for enterprise integration.
+All 392 MCP tools are accessible directly via CLI, enabling **10-32x token savings** compared to MCP mode. Use CLI for dev workflows, MCP for enterprise integration.
 
 ### Quick Reference
 
@@ -136,7 +136,7 @@ dxt/                              # DXT packaging (Claude Desktop extension)
 
 ## Tool Groups Reference
 
-75 groups, 357 tools (60 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `bridge-mcp list-tools --groups-only`.
+75 groups, 392 tools (60 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `bridge-mcp list-tools --groups-only`.
 
 ## Feature Flags
 

@@ -54,9 +54,12 @@ impl StandardTool for IncidentCorrelateTool {
     const NAME: &'static str = "ssh_incident_correlate";
 
     const DESCRIPTION: &'static str = "Correlate log entries across specific services on a \
-        remote host. Queries journalctl for multiple services simultaneously to find \
-        related events. Service names should be comma-separated (e.g., 'nginx,postgresql'). \
-        Use 'since' to narrow the time window.";
+        remote host. Issues a single journalctl command with multiple -u unit filters to find \
+        related events in one pass. Service names must be comma-separated (e.g., 'nginx,postgresql'); \
+        only alphanumeric, '-', '_', and '.' characters are allowed per name. \
+        Always set 'since' to bound the query — omitting it scans the entire journal and \
+        can produce very large output. Use ssh_incident_timeline for a broader multi-source \
+        overview, or ssh_service_logs / ssh_journal_query for a single service.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -71,7 +74,7 @@ impl StandardTool for IncidentCorrelateTool {
                     },
                     "since": {
                         "type": "string",
-                        "description": "Start time (e.g., '1 hour ago', '2024-01-01 00:00:00')"
+                        "description": "Start time for log query (e.g., '1 hour ago', '2024-01-01 00:00:00'). Defaults to no time bound (all journal entries) if omitted — strongly recommended to set this to avoid very large output."
                     },
                     "timeout_seconds": {
                         "type": "integer",

@@ -38,9 +38,11 @@ impl StandardTool for WinFirewallDenyTool {
 
     const NAME: &'static str = "ssh_win_firewall_deny";
 
-    const DESCRIPTION: &'static str = "Create a Windows Firewall block rule for inbound traffic on a specific port. Use \
-        ssh_win_firewall_list to check existing rules first. Verify with \
-        ssh_win_firewall_list afterward.";
+    const DESCRIPTION: &'static str = "Create a Windows Firewall inbound Block rule (New-NetFirewallRule -Action Block \
+        -Direction Inbound) for a specific TCP/UDP port on a Windows host. Windows hosts only — \
+        for Linux use ssh_firewall_deny instead. To allow traffic use ssh_win_firewall_allow; \
+        to remove a rule use ssh_win_firewall_remove. Run ssh_win_firewall_list first to avoid \
+        duplicate rules.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,7 +54,7 @@ impl StandardTool for WinFirewallDenyTool {
             },
             "name": {
                 "type": "string",
-                "description": "Display name for the firewall rule"
+                "description": "Display name for the firewall rule (alphanumeric, hyphen, underscore, space, dot only)"
             },
             "port": {
                 "type": "integer",

@@ -41,9 +41,15 @@ impl StandardTool for MulticloudListTool {
 
     const NAME: &'static str = "ssh_multicloud_list";
 
-    const DESCRIPTION: &'static str = "List instances from a cloud provider via a remote host. \
-        Queries AWS EC2, GCP Compute Engine, or Azure VMs to list all instances. \
-        Returns JSON output for programmatic processing.";
+    const DESCRIPTION: &'static str = "List instances from a single cloud provider via a remote host. \
+        Queries AWS EC2 (aws ec2 describe-instances), GCP Compute Engine \
+        (gcloud compute instances list), or Azure VMs (az vm list) and returns their JSON output. \
+        For AWS the output includes a text banner followed by the JSON body; for GCP and Azure the \
+        output is raw JSON. Use jq_filter to extract fields (e.g. InstanceId/State for AWS, \
+        name/status for GCP, name/powerState for Azure). \
+        For a single-call snapshot of all three providers use ssh_multicloud_sync instead. \
+        For raw AWS CLI commands beyond listing use ssh_aws_cli. \
+        For instance-attached metadata or tags use ssh_cloud_metadata or ssh_cloud_tags.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

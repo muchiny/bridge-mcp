@@ -38,7 +38,11 @@ impl StandardTool for PodmanLogsTool {
 
     const NAME: &'static str = "ssh_podman_logs";
 
-    const DESCRIPTION: &'static str = "View logs from a Podman container on a remote host.";
+    const DESCRIPTION: &'static str = "Stream or fetch logs from a Podman container on a remote host \
+        (runs `podman logs`). Discover container names first with ssh_podman_ps. Use tail to limit \
+        output lines; use since for time-bounded queries (e.g. '1h', '30m', '2024-01-01T00:00:00'). \
+        For Docker container logs use ssh_docker_logs instead. For multi-container log search use \
+        ssh_container_log_search.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -49,7 +53,7 @@ impl StandardTool for PodmanLogsTool {
             },
             "container": {
                 "type": "string",
-                "description": "Container name or ID to fetch logs from"
+                "description": "Container name or ID to fetch logs from (discover with ssh_podman_ps)"
             },
             "tail": {
                 "type": "integer",

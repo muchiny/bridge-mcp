@@ -27,7 +27,11 @@ pub struct SshBackupRestoreArgs {
 
 impl_common_args!(SshBackupRestoreArgs);
 
-#[mcp_standard_tool(name = "ssh_backup_restore", group = "backup", annotation = "mutating")]
+#[mcp_standard_tool(
+    name = "ssh_backup_restore",
+    group = "backup",
+    annotation = "destructive"
+)]
 pub struct BackupRestoreTool;
 
 impl StandardTool for BackupRestoreTool {
@@ -65,6 +69,15 @@ impl StandardTool for BackupRestoreTool {
                 "description": "Optional timeout in seconds (default: from config)",
                 "minimum": 1,
                 "maximum": 3600
+            },
+            "max_output": {
+                "type": "integer",
+                "description": "Max output characters (default: from server config). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
+                "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full restore output to a file path on the remote host — useful when extracting large archives whose verbose output would be truncated."
             }
         },
         "required": ["host", "archive_file"]

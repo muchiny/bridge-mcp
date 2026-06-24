@@ -49,8 +49,15 @@ impl StandardTool for ComplianceCheckTool {
 
     const NAME: &'static str = "ssh_compliance_check";
 
-    const DESCRIPTION: &'static str = "Run CIS benchmark compliance checks including file \
-        permissions, SSH config, firewall, password policy, and sysctl settings.";
+    const DESCRIPTION: &'static str = "Run a quick ad-hoc CIS compliance sweep on a remote Linux \
+        host, checking file permissions, SSH config, firewall, password policy, core-dump limits, \
+        and sysctl security settings. Use profile=cis-level1 or cis-level2 (both run the full CIS \
+        check set) or profile=basic for a minimal sweep; unknown profiles fall back to basic. \
+        Set summarize=true to append an LLM summary of the top failing controls. \
+        For a numeric pass/fail score use ssh_compliance_score; for a full structured report use \
+        ssh_compliance_report; for level-filtered per-category CIS auditing use ssh_cis_benchmark \
+        (compliance group). To list installed packages use ssh_sbom_generate; to check pending \
+        security updates use ssh_vuln_scan.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -61,7 +68,7 @@ impl StandardTool for ComplianceCheckTool {
             },
             "profile": {
                 "type": "string",
-                "description": "Compliance profile to check (default: cis-level1)",
+                "description": "Compliance profile to check (default: cis-level1). Both cis-level1 and cis-level2 run the full CIS check set (file perms, SSH, firewall, password policy, core dumps, sysctl). Use basic for a minimal sweep. Unrecognized values fall back to basic.",
                 "enum": ["cis-level1", "cis-level2", "basic"]
             },
             "timeout_seconds": {

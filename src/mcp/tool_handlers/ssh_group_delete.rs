@@ -43,7 +43,11 @@ impl StandardTool for GroupDeleteTool {
 
     const NAME: &'static str = "ssh_group_delete";
 
-    const DESCRIPTION: &'static str = "Delete a group from a remote Linux host.";
+    const DESCRIPTION: &'static str = "Permanently delete a group from a remote Linux host via \
+        groupdel. Fails if the group is the primary group of any existing user. Prompts for \
+        confirmation before executing. Use ssh_group_list to discover group names and \
+        ssh_user_list to check which users have it as their primary GID. \
+        Linux-only — for Windows hosts use ssh_exec with net localgroup /delete.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

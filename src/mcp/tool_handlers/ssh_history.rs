@@ -50,9 +50,11 @@ impl ToolHandler for SshHistoryHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Get recent command execution history. Returns a list of past commands with host, \
-         command text, exit code, duration, and timestamp. Useful to review what was run, \
-         verify success/failure, or recall previous outputs. Filter by host to narrow results."
+        "Get recent command execution history. Returns metadata only (host, command text, exit \
+         code, duration, timestamp) — not the full command output. Useful to review what was run, \
+         verify success/failure, or find when a command last executed. Filter by host to narrow \
+         results. To retrieve the full output of a past command, use ssh_output_fetch with the \
+         output_id if one was captured at execution time."
     }
 
     fn schema(&self) -> ToolSchema {

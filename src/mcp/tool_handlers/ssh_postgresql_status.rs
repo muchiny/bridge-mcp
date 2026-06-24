@@ -36,7 +36,10 @@ impl StandardTool for PostgresqlStatusTool {
     const NAME: &'static str = "ssh_postgresql_status";
 
     const DESCRIPTION: &'static str = "Get PostgreSQL server status on a remote host. Returns \
-        version, database sizes, and active connection count. Prefer this over ssh_exec for \
+        server version, per-database sizes, and active connection count. Auth is sourced from \
+        the remote host's ~/.pgpass file or PGPASSWORD/PGPASSFILE environment variables — \
+        no password parameter is accepted. Use ssh_postgresql_query instead to run arbitrary \
+        SQL queries or retrieve application data. Prefer this over ssh_exec for \
         PostgreSQL status checks as it handles connection parameters automatically.";
 
     const SCHEMA: &'static str = r#"{

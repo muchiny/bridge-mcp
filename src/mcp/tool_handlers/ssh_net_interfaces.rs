@@ -38,9 +38,9 @@ impl StandardTool for NetInterfacesTool {
 
     const NAME: &'static str = "ssh_net_interfaces";
 
-    const DESCRIPTION: &'static str = "Show network interface information on a remote host. Prefer this over ssh_exec as it \
-        provides structured output with IP addresses, MAC addresses, and status. Optionally \
-        filter by interface name.";
+    const DESCRIPTION: &'static str = "Show network interface information on a Linux host using `ip addr show`. \
+        Returns IP addresses, MAC addresses, MTU, and link status for all or a single interface. \
+        For Windows hosts use ssh_win_net_adapters instead.";
 
     const SCHEMA: &'static str = r#"{
     "type": "object",

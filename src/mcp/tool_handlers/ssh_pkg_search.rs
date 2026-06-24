@@ -37,10 +37,11 @@ impl StandardTool for PkgSearchTool {
 
     const NAME: &'static str = "ssh_pkg_search";
 
-    const DESCRIPTION: &'static str = "Search for available (not yet installed) packages on a remote Linux host. \
-        Auto-detects the package manager (apt/dnf/yum/apk). Returns matching package names \
-        and descriptions. Use before ssh_pkg_install to verify a package exists. For listing \
-        already installed packages, use ssh_pkg_list instead.";
+    const DESCRIPTION: &'static str = "Search for available (not yet installed) packages in the remote host's package \
+        repository. Auto-detects the package manager (apt/dnf/yum/apk). The `query` field \
+        accepts package name patterns including wildcards (e.g. `lib*`). Use this before \
+        ssh_pkg_install to verify a package name and confirm it exists in the repo. To check \
+        which packages are already installed, use ssh_pkg_list instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -51,11 +52,11 @@ impl StandardTool for PkgSearchTool {
                     },
                     "query": {
                         "type": "string",
-                        "description": "Search query string"
+                        "description": "Package name or pattern to search (alphanumeric, hyphens, dots, wildcards like 'lib*' allowed)"
                     },
                     "pkg_manager": {
                         "type": "string",
-                        "description": "Override auto-detected package manager (apt/dnf/yum/apk)"
+                        "description": "Override auto-detected package manager; common values: apt, dnf, yum, apk; full binary paths like /usr/bin/apt are also accepted"
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -69,7 +70,7 @@ impl StandardTool for PkgSearchTool {
                     },
                     "save_output": {
                         "type": "string",
-                        "description": "Save full output to a local file path"
+                        "description": "Save full output to a file path on the remote host (untruncated)"
                     }
                 },
                 "required": ["host", "query"]

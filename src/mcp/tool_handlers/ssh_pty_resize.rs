@@ -30,7 +30,7 @@ pub struct SshPtyResizeArgs {
 
 impl_common_args!(SshPtyResizeArgs);
 
-#[mcp_standard_tool(name = "ssh_pty_resize", group = "pty", annotation = "read_only")]
+#[mcp_standard_tool(name = "ssh_pty_resize", group = "pty", annotation = "mutating")]
 pub struct PtyResizeTool;
 
 impl StandardTool for PtyResizeTool {
@@ -38,9 +38,13 @@ impl StandardTool for PtyResizeTool {
 
     const NAME: &'static str = "ssh_pty_resize";
 
-    const DESCRIPTION: &'static str = "Resize the terminal on a remote host by setting \
-        the number of rows and columns via stty. Use this after ssh_pty_exec to adjust \
-        terminal dimensions for interactive commands.";
+    const DESCRIPTION: &'static str = "Update the reported terminal size on a remote \
+        Linux host by running stty rows ROWS cols COLS. Use this to inform terminal-aware \
+        programs of the correct dimensions when the window size changes; both rows and \
+        cols are required (range 1-500 each). This runs as a standalone command — it does \
+        not modify a specific PTY session object. To launch a command with initial \
+        dimensions already set, pass rows and cols directly to ssh_pty_exec instead. \
+        Not available on Windows hosts.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

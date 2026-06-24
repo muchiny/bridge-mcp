@@ -131,6 +131,31 @@ impl KubernetesCommandBuilder {
         cmd
     }
 
+    /// Build a `kubectl get events` command sorted by last timestamp.
+    ///
+    /// Constructs: `{kubectl} get events --sort-by=.lastTimestamp [-n {ns}]
+    /// [-A] [--field-selector {fs}]`
+    #[must_use]
+    pub fn build_events_command(
+        kubectl_bin: Option<&str>,
+        namespace: Option<&str>,
+        all_namespaces: bool,
+        field_selector: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}get events --sort-by=.lastTimestamp");
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if all_namespaces {
+            cmd.push_str(" -A");
+        }
+        if let Some(fs) = field_selector {
+            let _ = write!(cmd, " --field-selector {}", shell_escape(fs));
+        }
+        cmd
+    }
+
     /// Build a `kubectl logs` command.
     ///
     /// Constructs: `{kubectl} logs {pod} [-n {ns}] [-c {container}]
@@ -240,6 +265,31 @@ impl KubernetesCommandBuilder {
             cmd.push_str(" --server-side");
         }
 
+        cmd
+    }
+
+    /// Build a `kubectl diff` command (server-side dry-run preview).
+    ///
+    /// If `manifest` starts with `/`, `./`, or `~` it is a file path
+    /// (`{kubectl} diff -f {path}`); otherwise it is inline YAML piped in
+    /// (`echo '{yaml}' | {kubectl} diff -f -`).
+    #[must_use]
+    pub fn build_diff_command(
+        kubectl_bin: Option<&str>,
+        manifest: &str,
+        namespace: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let is_file =
+            manifest.starts_with('/') || manifest.starts_with("./") || manifest.starts_with('~');
+        let mut cmd = if is_file {
+            format!("{prefix}diff -f {}", shell_escape(manifest))
+        } else {
+            format!("echo {} | {prefix}diff -f -", shell_escape(manifest))
+        };
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
         cmd
     }
 
@@ -487,6 +537,61 @@ impl KubernetesCommandBuilder {
         Ok(())
     }
 
+    /// Build a `kubectl wait` command (block until a condition holds).
+    ///
+    /// Constructs: `{kubectl} wait {resource} [{name}] --for={cond}
+    /// [-n {ns}] [-A] [-l {selector}] [--timeout={dur}]`
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_wait_command(
+        kubectl_bin: Option<&str>,
+        resource: &str,
+        name: Option<&str>,
+        condition: &str,
+        namespace: Option<&str>,
+        all_namespaces: bool,
+        label_selector: Option<&str>,
+        timeout: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}wait {}", shell_escape(resource));
+        if let Some(n) = name {
+            let _ = write!(cmd, " {}", shell_escape(n));
+        }
+        let _ = write!(cmd, " --for={}", shell_escape(condition));
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if all_namespaces {
+            cmd.push_str(" -A");
+        }
+        if let Some(sel) = label_selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
+        if let Some(t) = timeout {
+            let _ = write!(cmd, " --timeout={}", shell_escape(t));
+        }
+        cmd
+    }
+
+    /// Validate the `helm get` subcommand against the allowed set.
+    ///
+    /// # Errors
+    /// Returns `BridgeError::CommandDenied` if `subcommand` is not one of
+    /// all/values/manifest/hooks/notes.
+    pub fn validate_helm_get_subcommand(subcommand: &str) -> Result<()> {
+        let allowed = ["all", "values", "manifest", "hooks", "notes"];
+        if allowed.contains(&subcommand) {
+            Ok(())
+        } else {
+            Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "Helm get subcommand '{subcommand}' is not allowed. Allowed: {allowed:?}"
+                ),
+            })
+        }
+    }
+
     /// Validate `resource_type` for the top command.
     ///
     /// Only allows: `pods`, `nodes`.
@@ -587,6 +692,36 @@ impl HelmCommandBuilder {
             let _ = write!(cmd, " --revision {rev}");
         }
 
+        cmd
+    }
+
+    /// Build a `helm get` command (read-only inspection of a release).
+    ///
+    /// `subcommand` is validated by the caller
+    /// (`KubernetesCommandBuilder::validate_helm_get_subcommand`).
+    ///
+    /// Constructs: `[KUBECONFIG=…] {helm} get {subcommand} {release}
+    /// [-n {ns}] [--revision {N}]`
+    #[must_use]
+    pub fn build_get_command(
+        helm_bin: Option<&str>,
+        kubeconfig: Option<&str>,
+        subcommand: &str,
+        release: &str,
+        namespace: Option<&str>,
+        revision: Option<u64>,
+    ) -> String {
+        let kube_env = kubeconfig_env_prefix(kubeconfig);
+        let prefix = helm_detect_prefix(helm_bin);
+        let escaped_sub = shell_escape(subcommand);
+        let escaped_release = shell_escape(release);
+        let mut cmd = format!("{kube_env}{prefix}get {escaped_sub} {escaped_release}");
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(rev) = revision {
+            let _ = write!(cmd, " --revision {rev}");
+        }
         cmd
     }
 
@@ -826,6 +961,56 @@ impl HelmCommandBuilder {
 
         cmd
     }
+
+    /// Build a `helm template` command (client-side render, read-only).
+    ///
+    /// Constructs: `[KUBECONFIG=…] {helm} template {release} {chart}
+    /// [-n {ns}] [--set k=v …] [-f values.yaml …] [--version {v}]
+    /// [--show-only {tpl} …]`
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_template_command(
+        helm_bin: Option<&str>,
+        kubeconfig: Option<&str>,
+        release: &str,
+        chart: &str,
+        namespace: Option<&str>,
+        set_values: Option<&HashMap<String, String>>,
+        values_files: Option<&[String]>,
+        version: Option<&str>,
+        show_only: Option<&[String]>,
+    ) -> String {
+        let kube_env = kubeconfig_env_prefix(kubeconfig);
+        let prefix = helm_detect_prefix(helm_bin);
+        let escaped_release = shell_escape(release);
+        let escaped_chart = shell_escape(chart);
+        let mut cmd = format!("{kube_env}{prefix}template {escaped_release} {escaped_chart}");
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(vals) = set_values {
+            let mut keys: Vec<&String> = vals.keys().collect();
+            keys.sort();
+            for key in keys {
+                let val = &vals[key];
+                let _ = write!(cmd, " --set {}={}", shell_escape(key), shell_escape(val));
+            }
+        }
+        if let Some(files) = values_files {
+            for file in files {
+                let _ = write!(cmd, " -f {}", shell_escape(file));
+            }
+        }
+        if let Some(v) = version {
+            let _ = write!(cmd, " --version {}", shell_escape(v));
+        }
+        if let Some(only) = show_only {
+            for tpl in only {
+                let _ = write!(cmd, " --show-only {}", shell_escape(tpl));
+            }
+        }
+        cmd
+    }
 }
 
 #[cfg(test)]
@@ -983,6 +1168,36 @@ mod tests {
             None,
         );
         assert!(cmd.contains("-l 'app in (web,api)'"));
+    }
+
+    // ============== build_events_command Tests ==============
+
+    #[test]
+    fn test_build_events_command_with_namespace_and_field_selector() {
+        let cmd = KubernetesCommandBuilder::build_events_command(
+            Some("kubectl"),
+            Some("default"),
+            false,
+            Some("involvedObject.name=p"),
+        );
+        assert!(cmd.contains("get events --sort-by=.lastTimestamp"));
+        assert!(cmd.contains("-n 'default'"));
+        assert!(cmd.contains("--field-selector 'involvedObject.name=p'"));
+    }
+
+    #[test]
+    fn test_build_events_command_all_namespaces() {
+        let cmd = KubernetesCommandBuilder::build_events_command(Some("kubectl"), None, true, None);
+        assert!(cmd.contains("get events --sort-by=.lastTimestamp"));
+        assert!(cmd.contains("-A"));
+        assert!(!cmd.contains("-n "));
+    }
+
+    #[test]
+    fn test_build_events_command_minimal() {
+        let cmd =
+            KubernetesCommandBuilder::build_events_command(Some("kubectl"), None, false, None);
+        assert_eq!(cmd, "kubectl get events --sort-by=.lastTimestamp");
     }
 
     // ============== build_logs_command Tests ==============
@@ -1190,6 +1405,28 @@ mod tests {
         assert!(cmd.contains("--dry-run='server'"));
         assert!(cmd.contains("--force"));
         assert!(cmd.contains("--server-side"));
+    }
+
+    // ============== build_diff_command Tests ==============
+
+    #[test]
+    fn test_build_diff_command_file_path() {
+        let cmd = KubernetesCommandBuilder::build_diff_command(
+            Some("kubectl"),
+            "/tmp/d.yaml",
+            Some("default"),
+        );
+        assert!(cmd.contains("diff -f '/tmp/d.yaml'"), "cmd: {cmd}");
+        assert!(cmd.contains("-n 'default'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_diff_command_inline_yaml() {
+        let yaml = "apiVersion: v1\nkind: Pod";
+        let cmd = KubernetesCommandBuilder::build_diff_command(Some("kubectl"), yaml, None);
+        assert!(cmd.contains("echo "), "cmd: {cmd}");
+        assert!(cmd.contains("| "), "cmd: {cmd}");
+        assert!(cmd.contains("diff -f -"), "cmd: {cmd}");
     }
 
     // ============== build_delete_command Tests ==============
@@ -2172,5 +2409,139 @@ mod tests {
         );
         assert!(cmd.starts_with("KUBECONFIG=/etc/rancher/k3s/k3s.yaml "));
         assert!(cmd.contains("command -v helm"));
+    }
+
+    // ============== build_wait_command Tests ==============
+
+    #[test]
+    fn test_build_wait_command_primary() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "pod",
+            Some("my-pod"),
+            "condition=Ready",
+            Some("default"),
+            false,
+            None,
+            Some("60s"),
+        );
+        assert!(cmd.contains("wait 'pod' 'my-pod'"), "cmd={cmd}");
+        assert!(cmd.contains("--for='condition=Ready'"), "cmd={cmd}");
+        assert!(cmd.contains("-n 'default'"), "cmd={cmd}");
+        assert!(cmd.contains("--timeout='60s'"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_wait_command_with_selector() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "pod",
+            None,
+            "condition=Ready",
+            None,
+            false,
+            Some("app=web"),
+            None,
+        );
+        assert!(cmd.contains("wait 'pod'"), "cmd={cmd}");
+        assert!(cmd.contains("--for='condition=Ready'"), "cmd={cmd}");
+        assert!(cmd.contains("-l 'app=web'"), "cmd={cmd}");
+        assert!(!cmd.contains("--timeout="), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_wait_command_all_namespaces() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "job",
+            None,
+            "condition=complete",
+            None,
+            true,
+            None,
+            Some("120s"),
+        );
+        assert!(cmd.contains(" -A"), "cmd={cmd}");
+        assert!(cmd.contains("--timeout='120s'"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_wait_command_minimal() {
+        let cmd = KubernetesCommandBuilder::build_wait_command(
+            Some("kubectl"),
+            "pod",
+            None,
+            "condition=Ready",
+            None,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(cmd, "kubectl wait 'pod' --for='condition=Ready'");
+    }
+
+    // ============== HelmCommandBuilder::build_template_command Tests ==============
+
+    #[test]
+    fn test_build_template_command() {
+        let mut set_values = std::collections::HashMap::new();
+        set_values.insert("image.tag".to_string(), "v2".to_string());
+        let values_files = vec!["/tmp/v.yaml".to_string()];
+        let show_only = vec!["templates/deployment.yaml".to_string()];
+
+        let cmd = HelmCommandBuilder::build_template_command(
+            Some("helm"),
+            None,
+            "rel",
+            "repo/chart",
+            None,
+            Some(&set_values),
+            Some(&values_files),
+            Some("1.2.3"),
+            Some(&show_only),
+        );
+
+        assert!(cmd.contains("template 'rel' 'repo/chart'"), "cmd={cmd}");
+        assert!(cmd.contains("--set 'image.tag'='v2'"), "cmd={cmd}");
+        assert!(cmd.contains("-f '/tmp/v.yaml'"), "cmd={cmd}");
+        assert!(cmd.contains("--version '1.2.3'"), "cmd={cmd}");
+        assert!(
+            cmd.contains("--show-only 'templates/deployment.yaml'"),
+            "cmd={cmd}"
+        );
+    }
+
+    // ============== HelmCommandBuilder::build_get_command Tests ==============
+
+    #[test]
+    fn test_build_helm_get_command() {
+        let cmd = HelmCommandBuilder::build_get_command(
+            Some("helm"),
+            None,
+            "values",
+            "rel",
+            Some("prod"),
+            Some(2),
+        );
+        assert!(cmd.contains("get 'values' 'rel'"), "cmd={cmd}");
+        assert!(cmd.contains("-n 'prod'"), "cmd={cmd}");
+        assert!(cmd.contains("--revision 2"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_validate_helm_get_subcommand() {
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("values").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("all").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("manifest").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("hooks").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("notes").is_ok());
+
+        let err = KubernetesCommandBuilder::validate_helm_get_subcommand("delete").unwrap_err();
+        match err {
+            crate::error::BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("delete"), "reason={reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }

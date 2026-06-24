@@ -38,8 +38,11 @@ impl StandardTool for GitBranchTool {
 
     const NAME: &'static str = "ssh_git_branch";
 
-    const DESCRIPTION: &'static str = "Manage branches in a Git repository on a remote host. Actions: list (show local or \
-        remote branches), create (new branch), delete (remove branch with -d safe delete).";
+    const DESCRIPTION: &'static str = "Manage branches in a Git repository on a remote host. Actions: list (local branches, \
+        or remote-tracking with remote=true), create (new branch from current HEAD), delete \
+        (remove branch using -d, which refuses to delete unmerged branches — no force-delete is \
+        available; use ssh_exec with 'git branch -D' if force is needed). Use ssh_git_checkout \
+        to switch to a branch.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -63,7 +66,7 @@ impl StandardTool for GitBranchTool {
             },
             "remote": {
                 "type": "boolean",
-                "description": "Show remote branches when listing (default: false)"
+                "description": "Show remote-tracking branches only (git branch -r) instead of local branches when action=list (default: false). To list both local and remote, use ssh_exec with 'git branch -a'."
             },
             "timeout_seconds": {
                 "type": "integer",

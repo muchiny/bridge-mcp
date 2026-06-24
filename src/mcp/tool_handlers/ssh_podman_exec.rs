@@ -35,8 +35,12 @@ impl StandardTool for PodmanExecTool {
 
     const NAME: &'static str = "ssh_podman_exec";
 
-    const DESCRIPTION: &'static str = "Execute a command inside a running Podman container on \
-        a remote host.";
+    const DESCRIPTION: &'static str = "Execute a command inside a running Podman container on a \
+        remote host (runs `podman exec`). Use ssh_podman_ps first to confirm the container is \
+        running and obtain its name or ID. For host-level commands use ssh_exec instead. \
+        For Docker containers use ssh_docker_exec instead. Note: interactive=true adds a \
+        pseudo-TTY (-it) and is rarely useful over a non-interactive SSH connection; \
+        leave it false for scripted commands.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -47,7 +51,7 @@ impl StandardTool for PodmanExecTool {
             },
             "container": {
                 "type": "string",
-                "description": "Container name or ID to execute in"
+                "description": "Container name or ID to execute in (discover running containers with ssh_podman_ps)"
             },
             "command": {
                 "type": "string",

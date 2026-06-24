@@ -56,8 +56,11 @@ impl StandardTool for UserAddTool {
 
     const NAME: &'static str = "ssh_user_add";
 
-    const DESCRIPTION: &'static str = "Create a new user on a remote Linux host. Optionally \
-        specify home directory, shell, groups, and whether to create home directory.";
+    const DESCRIPTION: &'static str = "Create a new user on a remote Linux host via useradd. \
+        Optionally specify home directory, login shell, supplementary groups (comma-separated), \
+        and whether to create the home directory (default: true). Use ssh_group_list to verify \
+        that any requested supplementary groups already exist before adding the user. \
+        Linux-only — for Windows hosts there is no equivalent tool; use ssh_exec with net user.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

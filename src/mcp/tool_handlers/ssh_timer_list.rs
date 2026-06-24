@@ -37,8 +37,13 @@ impl StandardTool for TimerListTool {
 
     const NAME: &'static str = "ssh_timer_list";
 
-    const DESCRIPTION: &'static str = "List systemd timers on a remote host. Shows next trigger \
-        time, last trigger, and associated unit. Set all=true to include inactive timers.";
+    const DESCRIPTION: &'static str = "List systemd timers on a remote host (Linux/systemd only). \
+        Shows each timer's next trigger time, time left, last trigger, time passed, and the \
+        associated service unit. Set all=true to include inactive/disabled timers (default: active \
+        only). Use ssh_timer_info to inspect a specific timer's calendar schedule and configuration \
+        in detail. To enable, disable, or manually fire a timer use ssh_timer_enable, \
+        ssh_timer_disable, or ssh_timer_trigger. For cron-based scheduled tasks (not systemd) use \
+        ssh_cron_list instead. On Windows hosts use ssh_schtask_list to list scheduled tasks.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -62,7 +67,7 @@ impl StandardTool for TimerListTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

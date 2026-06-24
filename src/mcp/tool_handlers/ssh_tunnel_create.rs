@@ -37,22 +37,22 @@ impl SshTunnelCreateHandler {
         "properties": {
             "host": {
                 "type": "string",
-                "description": "Host alias from config.yaml — the SSH host to tunnel through (use ssh_status to list hosts)"
+                "description": "Host alias from config.yaml — the SSH host to tunnel through (use ssh_status to list available hosts)"
             },
             "local_port": {
                 "type": "integer",
-                "description": "Local port to listen on",
+                "description": "Local port to listen on (bound to 127.0.0.1 on the bridge host); fails immediately if already in use",
                 "minimum": 1,
                 "maximum": 65535
             },
             "remote_host": {
                 "type": "string",
-                "description": "Remote host to forward to (default: localhost)",
+                "description": "Remote hostname or IP to forward to, resolved on the remote SSH host (default: localhost, i.e. the remote machine itself)",
                 "default": "localhost"
             },
             "remote_port": {
                 "type": "integer",
-                "description": "Remote port to forward to",
+                "description": "Port number on remote_host to forward to (e.g. 3306 for MySQL, 5432 for PostgreSQL, 6379 for Redis)",
                 "minimum": 1,
                 "maximum": 65535
             }
@@ -68,10 +68,12 @@ impl ToolHandler for SshTunnelCreateHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Create a local port forwarding tunnel through SSH. Traffic sent to the local port \
-         is forwarded to remote_host:remote_port via the SSH connection. Returns a tunnel_id \
-         for use with ssh_tunnel_close. Useful for accessing remote databases, web UIs, or \
-         internal services. Use ssh_tunnel_list to see active tunnels."
+        "Create a LOCAL port forwarding tunnel through SSH (traffic sent to 127.0.0.1:local_port \
+         on the bridge host is forwarded to remote_host:remote_port on the remote side). Binds \
+         the local port to 127.0.0.1 only. Returns a TunnelInfo JSON object including a tunnel_id \
+         (format: tunnel-{host}-{local_port}-{remote_port}) required by ssh_tunnel_close. Only \
+         local-direction forwarding is supported — there is no remote forwarding option. Use \
+         ssh_tunnel_list to inspect active tunnels before creating a duplicate."
     }
 
     fn schema(&self) -> ToolSchema {

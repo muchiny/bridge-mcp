@@ -39,7 +39,11 @@ impl StandardTool for JournalBootsTool {
     const NAME: &'static str = "ssh_journal_boots";
 
     const DESCRIPTION: &'static str = "List boot entries from the systemd journal on a remote \
-        host. Shows boot ID, timestamps, and boot index.";
+        host. Shows boot index, boot ID, and timestamps (journalctl --list-boots). Use this \
+        before ssh_journal_query to orient the time range — pass the FIRST ENTRY or LAST ENTRY \
+        timestamps as the since/until params in ssh_journal_query to scope a query to a specific \
+        boot session. To check current disk consumption of all journal files use \
+        ssh_journal_disk_usage.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -59,7 +63,7 @@ impl StandardTool for JournalBootsTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

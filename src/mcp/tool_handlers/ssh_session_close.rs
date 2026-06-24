@@ -46,8 +46,11 @@ impl ToolHandler for SshSessionCloseHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Close a persistent shell session and release its resources. Use ssh_session_list \
-         to find the session_id. Always close sessions when the workflow is complete."
+        "Close a persistent shell session and release its resources (SSH connection, server-side \
+         shell process). Always call this after a multi-step workflow created with \
+         ssh_session_create is finished to avoid resource leaks. Returns JSON: \
+         {status: \"closed\", session_id}. Use ssh_session_list to look up the session_id if \
+         you did not save it from ssh_session_create."
     }
 
     fn schema(&self) -> ToolSchema {

@@ -35,9 +35,11 @@ impl StandardTool for ServiceRestartTool {
 
     const NAME: &'static str = "ssh_service_restart";
 
-    const DESCRIPTION: &'static str = "Restart or reload a systemd service on a remote host. Prefer this over ssh_exec as it \
-        validates the service name and action. Supports restart, reload, and \
-        reload-or-restart actions. Check result with ssh_service_status afterward.";
+    const DESCRIPTION: &'static str = "Restart or reload a systemd service on a remote host. Prefer this over ssh_exec as \
+        it validates the service name and action. Use 'action' to choose between restart \
+        (default, stops then starts), reload (sends SIGHUP, keeps PID), and \
+        reload-or-restart (reload if supported, else restart). Check result with \
+        ssh_service_status afterward. For Windows hosts use ssh_win_service_restart instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -42,7 +42,11 @@ impl StandardTool for FilePatchTool {
     const NAME: &'static str = "ssh_file_patch";
 
     const DESCRIPTION: &'static str = "Apply a unified diff patch to a file on a remote host. \
-        Use dry_run=true to preview changes without applying.";
+        The patch is applied with patch -p0, meaning filenames in the patch must match the \
+        target_file path exactly with no leading path components to strip. For patches produced \
+        by git diff (which include a/ and b/ prefixes), remove those prefixes from the patch \
+        content before passing it, or specify just the target filename in target_file matching \
+        the stripped path. Use dry_run=true to preview changes without applying.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

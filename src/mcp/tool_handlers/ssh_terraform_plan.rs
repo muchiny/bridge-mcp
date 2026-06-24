@@ -34,9 +34,13 @@ impl StandardTool for TerraformPlanTool {
 
     const NAME: &'static str = "ssh_terraform_plan";
 
-    const DESCRIPTION: &'static str = "Generate a Terraform execution plan on a remote host. Shows what changes will be made \
-        without applying them. Always run this before ssh_terraform_apply to preview resource \
-        creation, modification, or destruction.";
+    const DESCRIPTION: &'static str = "Generate a Terraform execution plan on a remote host — shows what resources will be \
+        created, modified, or destroyed without making any changes. Always run before \
+        ssh_terraform_apply to preview the impact. Save the plan to a file with out=PATH and \
+        pass that path as plan_file to ssh_terraform_apply for a guaranteed-exact apply. Use \
+        destroy=true to generate a full-teardown plan. Requires ssh_terraform_init to have been \
+        run first. Use ssh_terraform_output to read declared output values; use \
+        ssh_terraform_state for inspecting existing state.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -52,7 +56,7 @@ impl StandardTool for TerraformPlanTool {
                     "vars": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Variable assignments (e.g., 'key=value')"
+                        "description": "Variable assignments in 'key=value' format, each passed as a separate -var flag (e.g. [\"region=us-east-1\", \"env=prod\"])"
                     },
                     "var_file": {
                         "type": "string",
@@ -65,7 +69,7 @@ impl StandardTool for TerraformPlanTool {
                     },
                     "out": {
                         "type": "string",
-                        "description": "Path to save the plan file"
+                        "description": "Path on the remote host to save the plan file (e.g. /tmp/plan.tfplan). Pass this path as plan_file to ssh_terraform_apply for an exact, pre-reviewed apply."
                     },
                     "destroy": {
                         "type": "boolean",

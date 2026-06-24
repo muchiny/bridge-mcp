@@ -52,7 +52,7 @@ const SCHEMA: &str = r#"{
         },
         "limit": {
             "type": "string",
-            "description": "Limit execution to specific hosts"
+            "description": "AWX host-filter pattern passed to the job template (e.g. 'webservers' or 'host1,host2'). This is NOT a row/pagination limit — it restricts which inventory hosts participate in the run."
         },
         "poll_interval": {
             "type": "integer",
@@ -99,7 +99,9 @@ impl ToolHandler for SshAwxJobFollowHandler {
         "Launch an AWX job and wait for completion, returning a structured summary. \
          Combines launch + poll + summary into one call. Returns per-host ok/changed/failed \
          counts and failure details. Use poll_interval and max_wait to control timing. \
-         For long jobs, prefer ssh_awx_job_launch + ssh_awx_job_status polling instead."
+         For long jobs, prefer ssh_awx_job_launch + ssh_awx_job_status polling instead. \
+         Requires AWX — for direct SSH-based playbook execution with a compact summary, \
+         use ssh_ansible_recap instead."
     }
 
     fn schema(&self) -> ToolSchema {

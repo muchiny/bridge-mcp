@@ -32,7 +32,7 @@ impl SshRecordingStartHandler {
         "properties": {
             "host": {
                 "type": "string",
-                "description": "Host alias to associate with this recording session"
+                "description": "Host alias (as defined in bridge config) to associate with this recording session; the same alias used by all other ssh_* tools"
             },
             "title": {
                 "type": "string",
@@ -52,7 +52,9 @@ impl ToolHandler for SshRecordingStartHandler {
     fn description(&self) -> &'static str {
         "Start recording all SSH commands and outputs for this host. Records in asciinema v2 \
          format with optional HMAC-SHA256 hash chain for tamper-proof compliance auditing \
-         (SOC2, HIPAA, PCI-DSS). Returns a session_id to use with ssh_recording_stop."
+         (SOC2, HIPAA, PCI-DSS). Returns a session_id — pass it to ssh_recording_stop to end \
+         the session and get the .cast file path. Use ssh_recording_list to see all active and \
+         completed sessions."
     }
 
     fn schema(&self) -> ToolSchema {

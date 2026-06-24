@@ -40,9 +40,10 @@ impl StandardTool for NetPingTool {
 
     const NAME: &'static str = "ssh_net_ping";
 
-    const DESCRIPTION: &'static str = "Ping a target host from a remote host to test network connectivity. Prefer this over \
-        ssh_exec as it validates parameters and limits packet count. Returns round-trip time \
-        statistics and packet loss information.";
+    const DESCRIPTION: &'static str = "Ping a target from a Linux host using the `ping` CLI to test reachability. \
+        Validates the target (hostname/IP only, no shell metacharacters), sends 4 packets by default, \
+        and returns RTT statistics and packet loss. \
+        For Windows hosts use ssh_win_net_ping instead.";
 
     const SCHEMA: &'static str = r#"{
     "type": "object",

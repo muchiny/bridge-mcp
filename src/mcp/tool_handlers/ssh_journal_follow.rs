@@ -39,8 +39,12 @@ impl StandardTool for JournalFollowTool {
 
     const NAME: &'static str = "ssh_journal_follow";
 
-    const DESCRIPTION: &'static str = "Follow systemd journal output in real-time on a remote \
-        host. Optionally filter by unit. Limited by command timeout.";
+    const DESCRIPTION: &'static str = "Stream systemd journal output in real-time (journalctl -f) \
+        on a remote host. BLOCKING: runs until timeout_seconds elapses — always set it explicitly \
+        (e.g., 10-30 s). Use only for live monitoring; for historical inspection use \
+        ssh_journal_query (supports grep, priority, time range); for past boot logs use \
+        ssh_journal_boots then ssh_journal_query. The lines param controls how many recent \
+        entries are shown before following begins (default: 50).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -68,7 +72,7 @@ impl StandardTool for JournalFollowTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

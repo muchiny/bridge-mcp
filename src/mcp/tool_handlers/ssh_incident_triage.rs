@@ -56,7 +56,10 @@ impl StandardTool for IncidentTriageTool {
 
     const DESCRIPTION: &'static str = "Automated incident triage that adapts diagnostics to the \
         reported symptom. Supports: slow/performance, crash/restart, oom/memory, disk/storage, \
-        network/connectivity. Correlates logs, metrics, and service states in one call.";
+        network/connectivity. Correlates logs, metrics, and service states in one call. \
+        Use this as the first call when you already know the symptom type. For an unknown or \
+        general health check, use ssh_diagnose first. For deeper log correlation across services \
+        after triage, chain with ssh_incident_correlate or ssh_incident_timeline (incident group).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -67,7 +70,7 @@ impl StandardTool for IncidentTriageTool {
             },
             "symptom": {
                 "type": "string",
-                "description": "Type of issue: slow, crash, oom, disk, network",
+                "description": "Type of issue. Each pair is equivalent — use either form: slow=performance, crash=restart, oom=memory, disk=storage, network=connectivity.",
                 "enum": ["slow", "performance", "crash", "restart", "oom", "memory", "disk", "storage", "network", "connectivity"]
             },
             "since": {

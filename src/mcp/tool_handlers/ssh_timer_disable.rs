@@ -38,8 +38,12 @@ impl StandardTool for TimerDisableTool {
 
     const NAME: &'static str = "ssh_timer_disable";
 
-    const DESCRIPTION: &'static str = "Disable a systemd timer on a remote host. Set now=true to \
-        also stop it immediately.";
+    const DESCRIPTION: &'static str = "Disable a systemd timer on a remote host (Linux/systemd \
+        only) so it no longer starts automatically at boot or on its configured schedule. Set \
+        now=true to also stop the timer unit immediately (equivalent to `systemctl disable --now`). \
+        Use ssh_timer_list to discover timer names and confirm the timer is enabled before \
+        disabling. To reverse use ssh_timer_enable. On Windows hosts use ssh_schtask_disable \
+        instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -67,7 +71,7 @@ impl StandardTool for TimerDisableTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

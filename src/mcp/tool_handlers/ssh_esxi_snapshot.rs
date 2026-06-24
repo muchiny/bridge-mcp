@@ -36,7 +36,7 @@ pub struct SshEsxiSnapshotArgs {
 
 impl_common_args!(SshEsxiSnapshotArgs);
 
-#[mcp_standard_tool(name = "ssh_esxi_snapshot", group = "esxi", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_esxi_snapshot", group = "esxi", annotation = "destructive")]
 pub struct EsxiSnapshotTool;
 
 impl StandardTool for EsxiSnapshotTool {
@@ -44,9 +44,11 @@ impl StandardTool for EsxiSnapshotTool {
 
     const NAME: &'static str = "ssh_esxi_snapshot";
 
-    const DESCRIPTION: &'static str = "Manage VM snapshots on a VMware ESXi host. Actions: list (show snapshot tree), create \
-        (new snapshot with optional memory/quiesce), revert (restore to snapshot_id), \
-        remove_all (delete all snapshots). Use ssh_esxi_vm_list first to find VM IDs.";
+    const DESCRIPTION: &'static str = "Manage VM snapshots on a VMware ESXi host via vim-cmd vmsvc/snapshot.*. \
+        Actions: list — show snapshot tree (no extra params); create — take a new snapshot (requires name, \
+        optionally description/include_memory/quiesce); revert — restore to a specific snapshot (requires \
+        snapshot_id); remove_all — delete every snapshot for the VM (snapshot_id not needed, irreversible). \
+        Use ssh_esxi_vm_list first to find VM IDs.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -47,6 +47,10 @@ pub struct SshAnsiblePlaybookArgs {
     #[serde(default)]
     callback: Option<String>,
     #[serde(default)]
+    vault_password_file: Option<String>,
+    #[serde(default)]
+    vault_id: Option<String>,
+    #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
@@ -140,8 +144,16 @@ impl StandardTool for AnsiblePlaybookTool {
             },
             "callback": {
                 "type": "string",
-                "description": "Ansible stdout callback plugin. Use 'json' for structured JSON output (enables jq_filter), 'dense' for compact 1-line-per-task, 'yaml' for YAML format, 'minimal' for minimal output. Default: Ansible default.",
+                "description": "Ansible stdout callback plugin. Use 'json' for structured JSON output (enables jq_filter), 'dense' for compact 1-line-per-task, 'yaml' for YAML format, 'minimal' for minimal output. Default: Ansible default. Note: 'oneline' was removed from Ansible core >= 2.8 — use 'minimal' instead on modern installs.",
                 "enum": ["json", "yaml", "dense", "minimal", "tree", "default", "oneline", "debug", "null"]
+            },
+            "vault_password_file": {
+                "type": "string",
+                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file)"
+            },
+            "vault_id": {
+                "type": "string",
+                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id)"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -181,6 +193,8 @@ impl StandardTool for AnsiblePlaybookTool {
             args.become_user.as_deref(),
             args.working_dir.as_deref(),
             args.callback.as_deref(),
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
         ))
     }
 
@@ -440,6 +454,8 @@ mod tests {
         assert!(properties.contains_key("become_user"));
         assert!(properties.contains_key("working_dir"));
         assert!(properties.contains_key("callback"));
+        assert!(properties.contains_key("vault_password_file"));
+        assert!(properties.contains_key("vault_id"));
         assert!(properties.contains_key("timeout_seconds"));
         assert!(properties.contains_key("max_output"));
     }
@@ -522,6 +538,8 @@ mod tests {
             become_user: None,
             working_dir: None,
             callback: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
@@ -550,6 +568,8 @@ mod tests {
             become_user: None,
             working_dir: None,
             callback: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
@@ -581,6 +601,8 @@ mod tests {
             become_user: None,
             working_dir: None,
             callback: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,
@@ -612,6 +634,8 @@ mod tests {
             become_user: Some("root".to_string()),
             working_dir: Some("/opt/ansible".to_string()),
             callback: None,
+            vault_password_file: None,
+            vault_id: None,
             timeout_seconds: None,
             max_output: None,
             save_output: None,

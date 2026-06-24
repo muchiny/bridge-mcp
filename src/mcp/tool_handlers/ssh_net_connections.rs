@@ -45,9 +45,10 @@ impl StandardTool for NetConnectionsTool {
 
     const NAME: &'static str = "ssh_net_connections";
 
-    const DESCRIPTION: &'static str = "List active network connections on a remote host. Prefer this over ssh_exec as it \
-        provides structured filtering by protocol, state, and listening mode. Returns \
-        connection details including local/remote addresses and process info.";
+    const DESCRIPTION: &'static str = "List active network connections on a Linux host using `ss`. \
+        Filter by protocol (tcp/udp), connection state, or show only listening ports. \
+        Returns local/remote addresses and owning process info. \
+        For Windows hosts use ssh_win_net_connections instead.";
 
     const SCHEMA: &'static str = r#"{
     "type": "object",
@@ -64,7 +65,7 @@ impl StandardTool for NetConnectionsTool {
         },
         "state": {
             "type": "string",
-            "description": "Filter by connection state (e.g., established, listening, time-wait)"
+            "description": "Filter by connection state passed directly to `ss state <value>` (e.g., established, time-wait, close-wait, syn-sent)"
         },
         "listening": {
             "type": "boolean",

@@ -51,9 +51,14 @@ impl StandardTool for LogAggregateTool {
 
     const NAME: &'static str = "ssh_log_aggregate";
 
-    const DESCRIPTION: &'static str = "Aggregate log statistics on a remote host. Counts total lines, \
-        error lines, and warning lines across specified log files. Useful for quick health \
-        assessment and identifying problematic log files.";
+    const DESCRIPTION: &'static str = "Aggregate log statistics on a Linux host — counts total lines, \
+        error occurrences, and warning occurrences per file, returning a TSV table with columns \
+        FILE, TOTAL, ERRORS, WARNINGS. Use this tool when you want a quick health summary across \
+        multiple log files without reading their content; use ssh_log_tail_multi to read the last \
+        N lines of log files, and ssh_log_search_multi to search for a specific pattern. \
+        Set summarize=true to append an LLM-generated SRE summary of the top anomalies (requires \
+        the client to advertise the sampling capability). Windows hosts are not supported — \
+        use ssh_win_event_logs for Windows event logs.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

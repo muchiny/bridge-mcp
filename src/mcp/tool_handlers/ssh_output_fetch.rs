@@ -42,7 +42,7 @@ impl SshOutputFetchHandler {
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum characters to return (default: from server config, typically 20000)",
+                "description": "Maximum characters to return in this page (default: server config max_output_chars, typically 20000). Use with offset to paginate: increment offset by the chars returned each call until has_more=false in the response header.",
                 "minimum": 1
             }
         },

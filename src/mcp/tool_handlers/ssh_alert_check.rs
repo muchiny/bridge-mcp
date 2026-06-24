@@ -41,10 +41,14 @@ impl StandardTool for AlertCheckTool {
 
     const NAME: &'static str = "ssh_alert_check";
 
-    const DESCRIPTION: &'static str = "Check a specific metric against a threshold on a remote \
-        host. If no threshold is provided, returns the current metric value. \
-        Supported metrics: cpu, memory, disk, load, swap. \
-        If threshold is provided without an operator, defaults to '>'.";
+    const DESCRIPTION: &'static str = "One-shot metric check on a remote host: reads the \
+        current value of a metric and, if threshold is supplied, compares it and prints ALERT \
+        or OK; if no threshold is given, returns the raw value. Both threshold and operator are \
+        optional. Use this for flexible probing; use ssh_alert_set when both threshold and \
+        operator are always known (they are required there). For an overview of all five metrics \
+        at once use ssh_alert_list. Threshold units: cpu/memory/disk/swap as percentage 0-100; \
+        load as a raw float (1-minute average from /proc/loadavg). \
+        Supported metrics: cpu, memory, disk, load, swap.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -60,7 +64,7 @@ impl StandardTool for AlertCheckTool {
                     },
                     "threshold": {
                         "type": "number",
-                        "description": "Threshold value to compare against"
+                        "description": "Threshold value to compare against. Units: percentage 0-100 for cpu/memory/disk/swap; raw float (1-min average) for load. Omit to return the raw value without comparison."
                     },
                     "operator": {
                         "type": "string",

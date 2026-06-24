@@ -39,9 +39,11 @@ impl StandardTool for TemplateShowTool {
 
     const NAME: &'static str = "ssh_template_show";
 
-    const DESCRIPTION: &'static str = "Show the content of a configuration template. \
-        Use ssh_template_list to see available templates. The template content can then \
-        be customized and deployed using ssh_template_apply.";
+    const DESCRIPTION: &'static str = "Show the content of one of the six built-in service \
+        configuration templates on a Linux host. Call ssh_template_list first to see all \
+        available names (nginx-reverse-proxy, nginx-static, apache-vhost, postgresql-config, \
+        mysql-config, redis-config). After reviewing, use ssh_template_diff to preview \
+        changes and ssh_template_apply to deploy the template.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -52,7 +54,7 @@ impl StandardTool for TemplateShowTool {
                     },
                     "template_name": {
                         "type": "string",
-                        "description": "Name of the template to show (e.g., 'nginx-reverse-proxy')"
+                        "description": "Name of the template to show. Built-in names: nginx-reverse-proxy, nginx-static, apache-vhost, postgresql-config, mysql-config, redis-config. Custom names are accepted if they contain only alphanumerics, hyphens, and underscores."
                     },
                     "timeout_seconds": {
                         "type": "integer",

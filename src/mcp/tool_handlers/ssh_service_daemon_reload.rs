@@ -33,9 +33,10 @@ impl StandardTool for ServiceDaemonReloadTool {
 
     const NAME: &'static str = "ssh_service_daemon_reload";
 
-    const DESCRIPTION: &'static str = "Reload systemd manager configuration on a remote host (equivalent to systemctl \
-        daemon-reload). Use this after modifying unit files to pick up changes. Requires \
-        root/sudo permissions.";
+    const DESCRIPTION: &'static str = "Reload systemd manager configuration on a remote host (systemctl daemon-reload). \
+        Use this after modifying or installing unit files in /etc/systemd/system/ to make \
+        systemd pick up the changes before running ssh_service_enable or ssh_service_start. \
+        Requires root/sudo permissions. Linux-only; no Windows equivalent.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -34,7 +34,7 @@ struct SshExecArgs {
 }
 
 /// SSH Exec tool handler
-#[mcp_tool(name = "ssh_exec", group = "core", annotation = "mutating")]
+#[mcp_tool(name = "ssh_exec", group = "core", annotation = "destructive")]
 pub struct SshExecHandler;
 
 impl SshExecHandler {

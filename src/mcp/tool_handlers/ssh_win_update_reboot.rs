@@ -33,8 +33,10 @@ impl StandardTool for WinUpdateRebootTool {
 
     const NAME: &'static str = "ssh_win_update_reboot";
 
-    const DESCRIPTION: &'static str = "Check if a reboot is required after Windows Update installation. This is a read-only \
-        check that does NOT perform a reboot. Returns pending reboot status.";
+    const DESCRIPTION: &'static str = "Check whether a reboot is pending on a Windows host after update installation \
+        (calls Get-WURebootStatus). Read-only: does NOT trigger a reboot. Call this after \
+        ssh_win_update_install to determine whether the host needs to be restarted before the \
+        update takes effect. To see which updates were installed use ssh_win_update_history.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

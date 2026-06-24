@@ -53,10 +53,12 @@ impl ToolHandler for SshSessionCreateHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Create a persistent interactive shell session on a remote host. Returns a session_id \
-         to use with ssh_session_exec. Sessions maintain state (working directory, environment \
-         variables) across multiple commands. Ideal for multi-step workflows. Close sessions \
-         with ssh_session_close when done. Use ssh_session_list to see active sessions."
+        "Create a persistent interactive shell session on a remote host. Returns a JSON object \
+         with fields: id (session_id to pass to ssh_session_exec/ssh_session_close), host, cwd, \
+         created_at_secs_ago. Unlike ssh_exec (one-shot, stateless), a session preserves working \
+         directory and environment variables across all subsequent ssh_session_exec calls — use \
+         this when commands depend on each other (e.g. 'cd /app' then 'make build'). Close with \
+         ssh_session_close when done; list open sessions with ssh_session_list."
     }
 
     fn schema(&self) -> ToolSchema {

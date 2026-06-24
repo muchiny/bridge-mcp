@@ -45,8 +45,11 @@ impl StandardTool for UserListTool {
 
     const NAME: &'static str = "ssh_user_list";
 
-    const DESCRIPTION: &'static str = "List users on a remote Linux host. By default shows only \
-        regular users (UID >= 1000). Set system=true to include system accounts.";
+    const DESCRIPTION: &'static str = "List users on a remote Linux host (reads /etc/passwd via \
+        awk). By default shows only regular users (UID >= 1000); set system=true to include all \
+        system accounts. Returns a table with USER, UID, GID, HOME, SHELL columns — use this to \
+        discover usernames before calling ssh_user_info, ssh_user_modify, or ssh_user_delete. \
+        For Active Directory user accounts on Windows hosts use ssh_ad_user_list instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

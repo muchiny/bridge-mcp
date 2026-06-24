@@ -34,9 +34,9 @@ impl StandardTool for NetRoutesTool {
 
     const NAME: &'static str = "ssh_net_routes";
 
-    const DESCRIPTION: &'static str = "Show the routing table on a remote host. Prefer this over ssh_exec as it provides \
-        structured output with destination, gateway, interface, and metrics. Supports IPv4 \
-        and IPv6.";
+    const DESCRIPTION: &'static str = "Show the routing table on a Linux host using `ip route show`. \
+        Defaults to IPv4; pass family=\"6\" or \"ipv6\" for the IPv6 table. \
+        For Windows hosts use ssh_win_net_routes instead.";
 
     const SCHEMA: &'static str = r#"{
     "type": "object",
@@ -48,7 +48,8 @@ impl StandardTool for NetRoutesTool {
         },
         "family": {
             "type": "string",
-            "description": "Address family: 4/ipv4 (default) or 6/ipv6"
+            "description": "Address family: omit or \"4\"/\"ipv4\" for IPv4 (default), \"6\"/\"ipv6\" for IPv6",
+            "enum": ["4", "ipv4", "6", "ipv6"]
         },
         "timeout_seconds": {
             "type": "integer",

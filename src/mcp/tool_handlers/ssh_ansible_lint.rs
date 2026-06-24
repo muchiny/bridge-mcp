@@ -38,9 +38,11 @@ impl StandardTool for AnsibleLintTool {
     const NAME: &'static str = "ssh_ansible_lint";
 
     const DESCRIPTION: &'static str = "Run ansible-lint on a remote host to validate playbooks, \
-        roles, or collections against best practices. Use output_format='json' for structured \
-        output compatible with jq_filter. Use parseable=true for grep-friendly single-line \
-        output. Non-zero exit code means lint violations were found.";
+        roles, or collections against best practices. Use output_format='json' or \
+        output_format='sarif' to get structured output (maps to ansible-lint's --format flag); \
+        use parseable=true for grep-friendly single-line output (equivalent to -p). \
+        Exit codes: 0 = no violations; 2 = violations found; 3 = invalid configuration; \
+        5 = no Ansible files matched; 8 = all violations auto-fixed.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -55,8 +57,8 @@ impl StandardTool for AnsibleLintTool {
             },
             "output_format": {
                 "type": "string",
-                "description": "Output format: 'json' for structured output (enables jq_filter), default for human-readable",
-                "enum": ["json", "codeclimate", "sarif"]
+                "description": "ansible-lint native output format (--format flag). Use 'json' or 'sarif' for structured output compatible with jq_filter. Use 'pep8' for grep-friendly single-line output (similar to parseable=true). Default: human-readable.",
+                "enum": ["json", "codeclimate", "sarif", "pep8", "brief"]
             },
             "parseable": {
                 "type": "boolean",

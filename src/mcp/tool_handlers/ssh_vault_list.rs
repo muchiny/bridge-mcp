@@ -32,9 +32,10 @@ impl StandardTool for VaultListTool {
 
     const NAME: &'static str = "ssh_vault_list";
 
-    const DESCRIPTION: &'static str = "List secrets at a path in HashiCorp Vault on a remote host. Shows available secret \
-        keys under the specified path. Use this to discover secrets before reading with \
-        ssh_vault_read. Use ssh_vault_status to check Vault health first.";
+    const DESCRIPTION: &'static str = "List secret keys at a path in HashiCorp Vault on a remote host via `vault kv list`. \
+        Returns the names of secrets directly under the given path prefix; append a trailing \
+        slash to traverse into a sub-directory. Use ssh_vault_status to confirm Vault is \
+        unsealed first, then ssh_vault_read to read individual secrets.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -45,19 +46,19 @@ impl StandardTool for VaultListTool {
                     },
                     "path": {
                         "type": "string",
-                        "description": "Secret path in Vault to list"
+                        "description": "KV path prefix to list e.g. secret/ or secret/myapp/ (alphanumeric, slashes, hyphens, underscores, dots; no path traversal)"
                     },
                     "vault_addr": {
                         "type": "string",
-                        "description": "Vault server address (default: from VAULT_ADDR env)"
+                        "description": "Vault server address e.g. https://vault.example.com:8200 (overrides VAULT_ADDR env on the remote host)"
                     },
                     "mount": {
                         "type": "string",
-                        "description": "Secrets engine mount path"
+                        "description": "Secrets engine mount path e.g. secret or kv; passed as `vault kv list -mount=<mount>`"
                     },
                     "format": {
                         "type": "string",
-                        "description": "Output format: table, json, yaml"
+                        "description": "Output format passed to `vault kv list -format`: table (default), json, yaml, or pretty"
                     },
                     "timeout_seconds": {
                         "type": "integer",

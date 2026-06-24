@@ -27,9 +27,9 @@ impl StandardTool for VaultStatusTool {
 
     const NAME: &'static str = "ssh_vault_status";
 
-    const DESCRIPTION: &'static str = "Check HashiCorp Vault server status on a remote host. Returns seal status, cluster \
-        info, and server version. Use this first to verify Vault is unsealed and healthy \
-        before reading or writing secrets.";
+    const DESCRIPTION: &'static str = "Check HashiCorp Vault server status on a remote host via `vault status`. Returns seal \
+        status, HA cluster info, and server version. Use this first to verify Vault is unsealed \
+        and reachable before calling ssh_vault_list, ssh_vault_read, or ssh_vault_write.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -40,11 +40,11 @@ impl StandardTool for VaultStatusTool {
                     },
                     "vault_addr": {
                         "type": "string",
-                        "description": "Vault server address (default: from VAULT_ADDR env)"
+                        "description": "Vault server address e.g. https://vault.example.com:8200 (overrides VAULT_ADDR env on the remote host)"
                     },
                     "format": {
                         "type": "string",
-                        "description": "Output format: table, json, yaml"
+                        "description": "Output format passed to `vault status -format`: table (default), json, yaml, or pretty"
                     },
                     "timeout_seconds": {
                         "type": "integer",

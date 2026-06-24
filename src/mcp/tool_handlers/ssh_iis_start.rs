@@ -43,7 +43,7 @@ impl StandardTool for IisStartTool {
             },
             "name": {
                 "type": "string",
-                "description": "Name of the IIS website or application pool"
+                "description": "Name of the IIS website to start (use ssh_iis_list_sites to discover site names; passing an application pool name will fail)"
             },
             "timeout_seconds": {
                 "type": "integer",

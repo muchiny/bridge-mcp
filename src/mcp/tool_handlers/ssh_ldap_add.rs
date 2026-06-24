@@ -34,8 +34,13 @@ impl StandardTool for LdapAddTool {
 
     const NAME: &'static str = "ssh_ldap_add";
 
-    const DESCRIPTION: &'static str = "Add an entry to an LDAP directory on a remote host \
-        using LDIF format.";
+    const DESCRIPTION: &'static str = "Add a new entry to an LDAP directory on a remote host \
+        using LDIF format via ldapadd. Use for new entries only — fails if the DN already \
+        exists; to update an existing entry use ssh_ldap_modify instead. Do not include \
+        'changetype: add' in the LDIF — ldapadd treats all entries as additions implicitly \
+        (including changetype causes errors). Authentication uses the remote host's system \
+        ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no credentials are passed \
+        on the command line.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -46,7 +51,7 @@ impl StandardTool for LdapAddTool {
             },
             "ldif": {
                 "type": "string",
-                "description": "LDIF content for the entry to add (e.g. 'dn: cn=test,dc=example,dc=com\nobjectClass: top')"
+                "description": "LDIF content for the entry to add (e.g. 'dn: cn=test,dc=example,dc=com\nobjectClass: top'). Do not include 'changetype: add' — it is implied."
             },
             "uri": {
                 "type": "string",

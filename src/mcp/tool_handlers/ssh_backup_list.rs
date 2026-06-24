@@ -66,6 +66,10 @@ impl StandardTool for BackupListTool {
                 "type": "integer",
                 "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to a file path on the remote host — useful for archives with many files whose listing would be truncated."
             }
         },
         "required": ["host", "archive_file"]

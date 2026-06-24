@@ -43,7 +43,7 @@ impl StandardTool for IisStopTool {
             },
             "name": {
                 "type": "string",
-                "description": "Name of the IIS website or application pool"
+                "description": "Name of the IIS website to stop (use ssh_iis_list_sites to discover site names; passing an application pool name will fail)"
             },
             "timeout_seconds": {
                 "type": "integer",

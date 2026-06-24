@@ -37,9 +37,12 @@ impl StandardTool for NginxListSitesTool {
 
     const NAME: &'static str = "ssh_nginx_list_sites";
 
-    const DESCRIPTION: &'static str = "List enabled sites/virtual hosts on a remote web server. \
-        Prefer this over ssh_exec as it auto-detects the config directory for nginx or apache. \
-        Shows files in sites-enabled or conf.d. Use ssh_nginx_status to check the server state.";
+    const DESCRIPTION: &'static str = "List enabled virtual host config files on a remote Linux \
+        web server (shows `sites-enabled/` for nginx/apache2, `conf.d/` for httpd). Defaults to \
+        `/etc/nginx/sites-enabled/` with a fallback to `/etc/nginx/conf.d/` when `server` is \
+        omitted. Pass `config_dir` to override the directory entirely. Use ssh_nginx_status to \
+        confirm the server is running first; use ssh_nginx_test / ssh_nginx_reload to validate \
+        and apply config changes.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -50,11 +53,11 @@ impl StandardTool for NginxListSitesTool {
             },
             "server": {
                 "type": "string",
-                "description": "Web server name: nginx, apache2, httpd (default: auto-detect)"
+                "description": "Web server to inspect: nginx (default, uses /etc/nginx/sites-enabled/), apache2 (uses /etc/apache2/sites-enabled/), or httpd (uses /etc/httpd/conf.d/). Any other value also defaults to the nginx path unless config_dir overrides it."
             },
             "config_dir": {
                 "type": "string",
-                "description": "Custom configuration directory path"
+                "description": "Absolute path of the config directory to list, overriding the server-derived default (e.g. /etc/nginx/conf.d/)"
             },
             "timeout_seconds": {
                 "type": "integer",

@@ -40,9 +40,13 @@ impl StandardTool for AtJobsTool {
 
     const NAME: &'static str = "ssh_at_jobs";
 
-    const DESCRIPTION: &'static str = "List and inspect at jobs (one-time scheduled tasks) on a \
-        remote host. Shows pending jobs from the at queue with their scheduled times and \
-        commands. Use ssh_cron_analyze for recurring cron jobs instead.";
+    const DESCRIPTION: &'static str = "List and inspect pending at jobs (one-time scheduled \
+        tasks) on a remote Linux host. Shows jobs still waiting in the at queue with their \
+        scheduled times and commands. Note: only pending (not yet executed) jobs appear — \
+        completed at-jobs are removed from the queue automatically, so this tool cannot show \
+        historical at-job executions. For post-execution evidence, check ssh_cron_history or \
+        system logs. Use ssh_cron_analyze for recurring cron jobs. For Windows one-time \
+        scheduled tasks, use ssh_schtask_run or ssh_schtask_list (group: scheduled_tasks).";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

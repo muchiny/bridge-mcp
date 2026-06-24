@@ -47,8 +47,13 @@ impl StandardTool for SecurityAuditTool {
 
     const NAME: &'static str = "ssh_security_audit";
 
-    const DESCRIPTION: &'static str = "Run a quick security audit on a remote host. Checks for \
-        users without passwords, SUID binaries, world-writable files, and listening ports.";
+    const DESCRIPTION: &'static str = "Run a quick point-in-time security audit on a remote Linux \
+        host, covering: users with no/locked password (/etc/shadow), SUID binaries (top 50), \
+        world-writable files outside /tmp (top 50), and listening TCP ports. Set summarize=true \
+        to append an LLM-generated bullet-point triage of the top findings (requires the MCP \
+        client to advertise the sampling capability; silently omitted otherwise). For \
+        CIS-benchmark or STIG compliance scoring use ssh_cis_benchmark or ssh_compliance_score \
+        instead. For MAC framework status see ssh_selinux_status or ssh_apparmor_status.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -72,11 +77,11 @@ impl StandardTool for SecurityAuditTool {
             },
             "summarize": {
                 "type": "boolean",
-                "description": "When true, append an LLM-side summary of the audit output to the response. Requires the client to advertise the sampling capability; falls back to raw-only output otherwise."
+                "description": "When true, append an LLM-generated bullet-point triage (top 3 high-severity findings) after the raw audit output. The LLM analysis is performed via MCP sampling and requires the client to advertise the sampling capability; if unavailable the raw output is returned unchanged."
             },
             "summary_max_tokens": {
                 "type": "integer",
-                "description": "Maximum tokens for the LLM summary (default: 512). Only meaningful with summarize=true.",
+                "description": "Token budget for the LLM summary (default: 512, range: 32-4096). Only meaningful when summarize=true.",
                 "minimum": 32,
                 "maximum": 4096
             }

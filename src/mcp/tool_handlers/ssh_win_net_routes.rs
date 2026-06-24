@@ -33,8 +33,8 @@ impl StandardTool for WinNetRoutesTool {
 
     const NAME: &'static str = "ssh_win_net_routes";
 
-    const DESCRIPTION: &'static str = "List network routes on a Windows host showing destination prefix, next hop, route \
-        metric, and interface alias.";
+    const DESCRIPTION: &'static str = "List network routes on a Windows host (Get-NetRoute) showing destination prefix, \
+        next hop, route metric, and interface alias. Windows-only — for Linux hosts use ssh_net_routes instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

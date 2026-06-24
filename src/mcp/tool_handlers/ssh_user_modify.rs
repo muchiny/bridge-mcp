@@ -56,8 +56,11 @@ impl StandardTool for UserModifyTool {
 
     const NAME: &'static str = "ssh_user_modify";
 
-    const DESCRIPTION: &'static str = "Modify an existing user on a remote Linux host. Change \
-        shell, groups, home directory, or lock/unlock the account.";
+    const DESCRIPTION: &'static str = "Modify an existing user on a remote Linux host via usermod. \
+        Can change login shell, supplementary groups (append_groups=true appends, false replaces), \
+        home directory, and lock/unlock the account. Use ssh_user_list to discover the username \
+        and ssh_user_info to verify current settings before modifying. \
+        Linux-only — for Windows hosts use ssh_exec with net user.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

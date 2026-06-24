@@ -35,8 +35,10 @@ impl StandardTool for JournalDiskUsageTool {
 
     const NAME: &'static str = "ssh_journal_disk_usage";
 
-    const DESCRIPTION: &'static str =
-        "Show disk space used by the systemd journal on a remote host.";
+    const DESCRIPTION: &'static str = "Show disk space used by the systemd journal on a remote host. Returns a single summary \
+        line reporting total journal disk consumption (journalctl --disk-usage). No filtering \
+        options are needed. To list individual boot sessions use ssh_journal_boots; to query \
+        log content use ssh_journal_query.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -56,7 +58,7 @@ impl StandardTool for JournalDiskUsageTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

@@ -51,9 +51,10 @@ impl StandardTool for K8sDeleteTool {
     const NAME: &'static str = "ssh_k8s_delete";
 
     const DESCRIPTION: &'static str = "Delete a Kubernetes resource via kubectl on a remote host. Protected namespaces \
-        (kube-system, kube-public, default) cannot be deleted. Supports dry-run to preview \
-        deletions safely. Use ssh_k8s_get first to verify the resource exists. Auto-detects \
-        kubectl binary (k8s, k3s, microk8s).";
+        (kube-system, kube-public, default, kube-node-lease) cannot be deleted. Supports \
+        dry-run to preview deletions safely. Use ssh_k8s_get first to verify the resource \
+        exists, then use this tool; for Helm-managed resources prefer ssh_helm_uninstall. \
+        Auto-detects kubectl binary (k8s, k3s, microk8s).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

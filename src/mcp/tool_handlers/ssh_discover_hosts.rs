@@ -46,16 +46,18 @@ impl StandardTool for DiscoverHostsTool {
 
     const NAME: &'static str = "ssh_discover_hosts";
 
-    const DESCRIPTION: &'static str = "Discover hosts on a network from a remote host. \
-        Scans the specified network using nmap, arp-scan, or ip neigh to find active hosts. \
-        Auto-detects the best available scanning method if not specified.";
+    const DESCRIPTION: &'static str = "Discover hosts on a network by running a scan FROM a configured bridge host outward to the target network. \
+        Scans the specified network CIDR using nmap, arp-scan, or ip neigh to find active hosts; \
+        auto-detects the best available scanning method if not specified. \
+        The `host` parameter is the pivot/scanner host, not the scan target. \
+        After discovering hosts, use ssh_inventory_sync to profile each one or ssh_host_tags to label them by role.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
                 "properties": {
                     "host": {
                         "type": "string",
-                        "description": "Host alias from config.yaml (use ssh_status to list available hosts)"
+                        "description": "Bridge host alias from config.yaml — this is the host FROM which the network scan runs (the pivot/scanner), not the scan target. Use ssh_status to list available hosts."
                     },
                     "network": {
                         "type": "string",

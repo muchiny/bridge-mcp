@@ -58,6 +58,8 @@ impl AnsibleCommandBuilder {
         become_user: Option<&str>,
         working_dir: Option<&str>,
         callback: Option<&str>,
+        vault_password_file: Option<&str>,
+        vault_id: Option<&str>,
     ) -> String {
         let mut cmd = String::new();
 
@@ -118,6 +120,14 @@ impl AnsibleCommandBuilder {
 
         if let Some(user) = become_user {
             let _ = write!(cmd, " --become-user {}", shell_escape(user));
+        }
+
+        if let Some(vpf) = vault_password_file {
+            let _ = write!(cmd, " --vault-password-file {}", shell_escape(vpf));
+        }
+
+        if let Some(vid) = vault_id {
+            let _ = write!(cmd, " --vault-id {}", shell_escape(vid));
         }
 
         cmd
@@ -199,6 +209,8 @@ impl AnsibleCommandBuilder {
         forks: Option<u32>,
         verbose: Option<u8>,
         check: bool,
+        vault_password_file: Option<&str>,
+        vault_id: Option<&str>,
     ) -> String {
         let mut cmd = String::new();
 
@@ -239,6 +251,14 @@ impl AnsibleCommandBuilder {
 
         if check {
             cmd.push_str(" -C");
+        }
+
+        if let Some(vpf) = vault_password_file {
+            let _ = write!(cmd, " --vault-password-file {}", shell_escape(vpf));
+        }
+
+        if let Some(vid) = vault_id {
+            let _ = write!(cmd, " --vault-id {}", shell_escape(vid));
         }
 
         cmd
@@ -414,7 +434,7 @@ mod tests {
     fn test_build_playbook_minimal() {
         let cmd = AnsibleCommandBuilder::build_playbook_command(
             "site.yml", None, None, None, None, None, false, false, None, None, false, None, None,
-            None,
+            None, None, None,
         );
         assert_eq!(cmd, "ansible-playbook 'site.yml'");
     }
@@ -437,6 +457,8 @@ mod tests {
             true,
             Some("deploy_user"),
             Some("/opt/ansible"),
+            None,
+            None,
             None,
         );
         assert!(cmd.starts_with("cd '/opt/ansible' && "));
@@ -474,6 +496,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         // Keys are sorted, so env comes before version
         assert!(cmd.contains("-e 'env'='staging'"));
@@ -497,6 +521,8 @@ mod tests {
             None,
             Some("/home/deploy/playbooks"),
             None,
+            None,
+            None,
         );
         assert!(cmd.starts_with("cd '/home/deploy/playbooks' && "));
         assert!(cmd.contains("ansible-playbook 'site.yml'"));
@@ -517,6 +543,8 @@ mod tests {
                 Some(level),
                 None,
                 false,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -551,6 +579,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
         // Should be capped at -vvvv (4)
         assert!(cmd.contains("-vvvv"));
@@ -571,6 +601,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
             None,
             None,
             None,
@@ -656,7 +688,7 @@ mod tests {
     #[test]
     fn test_build_adhoc_ping() {
         let cmd = AnsibleCommandBuilder::build_adhoc_command(
-            "all", "ping", None, None, false, None, None, None, None, false,
+            "all", "ping", None, None, false, None, None, None, None, false, None, None,
         );
         assert_eq!(cmd, "ansible 'all' -m 'ping'");
     }
@@ -674,6 +706,8 @@ mod tests {
             Some(5),
             Some(3),
             true,
+            None,
+            None,
         );
         assert!(cmd.contains("ansible 'webservers' -m 'shell'"));
         assert!(cmd.contains("-a 'uptime'"));
@@ -699,6 +733,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
         );
         assert!(cmd.contains("-m 'shell'"));
         assert!(cmd.contains("-a 'cat /etc/hostname'"));
@@ -844,6 +880,8 @@ mod tests {
             None,
             Some(10), // Should be capped at 4
             false,
+            None,
+            None,
         );
         // Should have -vvvv (4 v's max), not -vvvvvvvvvv
         assert!(cmd.contains("-vvvv"));
@@ -869,6 +907,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
             None,
             None,
             None,
@@ -912,6 +952,8 @@ mod tests {
             None,
             None,
             Some("json"),
+            None,
+            None,
         );
         assert!(cmd.starts_with("ANSIBLE_STDOUT_CALLBACK='json' "));
         assert!(cmd.contains("ansible-playbook 'site.yml'"));
@@ -934,6 +976,8 @@ mod tests {
             None,
             Some("/opt/ansible"),
             Some("dense"),
+            None,
+            None,
         );
         assert!(cmd.starts_with("ANSIBLE_STDOUT_CALLBACK='dense' cd '/opt/ansible' && "));
     }
@@ -1008,6 +1052,52 @@ mod tests {
     #[test]
     fn test_validate_lint_target_traversal() {
         assert!(AnsibleCommandBuilder::validate_lint_target("../../etc/passwd").is_err());
+    }
+
+    // ============== Vault Passthrough Tests ==============
+
+    #[test]
+    fn test_build_playbook_with_vault() {
+        let cmd = AnsibleCommandBuilder::build_playbook_command(
+            "site.yml",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            Some("/etc/ansible/pass"),
+            Some("prod@/etc/ansible/prod-pass"),
+        );
+        assert!(cmd.contains("--vault-password-file '/etc/ansible/pass'"));
+        assert!(cmd.contains("--vault-id 'prod@/etc/ansible/prod-pass'"));
+    }
+
+    #[test]
+    fn test_build_adhoc_with_vault() {
+        let cmd = AnsibleCommandBuilder::build_adhoc_command(
+            "all",
+            "ping",
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("/etc/ansible/pass"),
+            Some("prod@/etc/ansible/prod-pass"),
+        );
+        assert!(cmd.contains("--vault-password-file '/etc/ansible/pass'"));
+        assert!(cmd.contains("--vault-id 'prod@/etc/ansible/prod-pass'"));
     }
 
     // ============== Config Command Tests ==============

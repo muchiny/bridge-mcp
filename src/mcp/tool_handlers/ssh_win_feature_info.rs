@@ -36,9 +36,10 @@ impl StandardTool for WinFeatureInfoTool {
 
     const NAME: &'static str = "ssh_win_feature_info";
 
-    const DESCRIPTION: &'static str = "Get details about a Windows feature including name, display name, install state, \
-        description, dependencies, and parent. Use `ssh_win_feature_list` first to discover \
-        feature names.";
+    const DESCRIPTION: &'static str = "Get full details about a specific Windows Server feature including name, display name, \
+        install state, description, sub-features, and parent role (Windows hosts only, uses `Get-WindowsFeature -Name`). \
+        Use `ssh_win_feature_list` first to discover exact feature names. To install a feature use \
+        `ssh_win_feature_install`; to remove one use `ssh_win_feature_remove`.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -62,7 +63,7 @@ impl StandardTool for WinFeatureInfoTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

@@ -41,8 +41,13 @@ impl StandardTool for FileTemplateTool {
 
     const NAME: &'static str = "ssh_file_template";
 
-    const DESCRIPTION: &'static str = "Render a template file using environment variable \
-        substitution (envsubst). Variables in the template are replaced with provided values.";
+    const DESCRIPTION: &'static str = "Render an existing template file on the remote host using \
+        environment variable substitution (envsubst): reads template_path, replaces $VAR / ${VAR} \
+        placeholders with the provided variables map, and writes the result to output_path. \
+        Use this when you already have a template file on the remote host and need ad-hoc variable \
+        substitution. For built-in service configuration templates (nginx, postgresql, redis, etc.) \
+        use ssh_template_apply instead, which selects from server-side predefined templates by \
+        service name.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

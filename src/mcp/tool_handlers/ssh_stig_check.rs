@@ -56,7 +56,7 @@ impl StandardTool for StigCheckTool {
                     },
                     "stig_id": {
                         "type": "string",
-                        "description": "Specific STIG ID to check (e.g., 'V-12345' or 'RHEL-07-010010')"
+                        "description": "STIG ID to check (e.g., 'V-12345' for generic or 'RHEL-07-010010' for RHEL7 format). Must contain only alphanumeric characters, hyphens, or underscores. The ID is used as a grep pattern in audit and security config files. If omitted, all applicable STIG checks (account policy, file integrity, audit configuration, crypto policy) are run."
                     },
                     "timeout_seconds": {
                         "type": "integer",

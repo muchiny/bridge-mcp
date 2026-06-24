@@ -54,7 +54,7 @@ impl SshLsHandler {
             "max_depth": {
                 "type": "integer",
                 "default": 10,
-                "description": "Maximum depth for recursive listing (default: 10)"
+                "description": "Maximum depth for recursive listing (default: 10). Applies only when recursive=true. The default of 10 can produce very large output on deep trees — lower this or apply a jq_filter when recursing large directories."
             },
             "include_hidden": {
                 "type": "boolean",
@@ -81,9 +81,11 @@ impl ToolHandler for SshLsHandler {
     fn description(&self) -> &'static str {
         "List files and directories on a remote host via SFTP. Prefer this over ssh_exec \
          as it returns structured JSON entries with name, size, type, permissions, and \
-         modified timestamp via native SFTP (not shell). Supports recursive listing with \
-         configurable depth. For searching files by pattern, use ssh_find. For reading \
-         file contents, use ssh_tail or ssh_download instead."
+         modified timestamp via native SFTP (not shell) — works even when the remote shell \
+         is restricted or unavailable (e.g. rssh/scponly setups) and avoids shell injection \
+         risks. Supports recursive listing with configurable depth. For searching files by \
+         name pattern, use ssh_find. For reading file contents, use ssh_tail or ssh_download \
+         instead."
     }
 
     fn schema(&self) -> ToolSchema {

@@ -116,7 +116,7 @@ impl ToolHandler for SshAwxInventoryHostsHandler {
         let page_size_str = args.page_size.unwrap_or(50).to_string();
         let query_params: Vec<(&str, &str)> = vec![("page_size", &page_size_str)];
 
-        let cmd = AwxCommandBuilder::build_api_call(
+        let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
             &endpoint,
@@ -141,11 +141,11 @@ impl ToolHandler for SshAwxInventoryHostsHandler {
             .await?;
         let output = conn.exec(&cmd, &limits).await?;
 
-        let stdout = ctx
+        let raw = ctx
             .execute_use_case
             .process_success(host, &cmd, &output.into())
             .stdout;
-        let mut stdout = stdout;
+        let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction(&mut stdout, &dr, OutputKind::Json)?;
         Ok(ToolCallResult::text(stdout))
     }

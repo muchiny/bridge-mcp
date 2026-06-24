@@ -37,8 +37,10 @@ impl StandardTool for AlertListTool {
     const NAME: &'static str = "ssh_alert_list";
 
     const DESCRIPTION: &'static str = "List current metric values on a remote host. \
-        Shows CPU, memory, disk, load, and swap usage in a single overview. \
-        Use ssh_alert_check to compare a specific metric against a threshold.";
+        Shows CPU, memory, disk, load, and swap usage in a single overview — always exactly \
+        five rows, one per metric. Use ssh_alert_check to probe a single metric with an \
+        optional threshold (returns raw value or ALERT/OK). Use ssh_alert_set for the same \
+        one-shot check when threshold and operator are both required.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

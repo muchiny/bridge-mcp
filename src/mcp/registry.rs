@@ -2612,6 +2612,8 @@ mod tests {
             "ssh_tunnel_close",
             "ssh_firewall_deny",
             "ssh_service_stop",
+            // Behaviorally-destructive despite benign names (audit 2026-06-20).
+            "ssh_exec",
         ];
         for name in &destructive {
             let ann = tool_annotations(name);
@@ -2649,7 +2651,6 @@ mod tests {
     #[test]
     fn test_mutating_tools_annotations() {
         let mutating = [
-            "ssh_exec",
             "ssh_exec_multi",
             "ssh_docker_exec",
             "ssh_git_pull",

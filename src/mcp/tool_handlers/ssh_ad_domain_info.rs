@@ -35,7 +35,11 @@ impl StandardTool for AdDomainInfoTool {
     const NAME: &'static str = "ssh_ad_domain_info";
 
     const DESCRIPTION: &'static str = "Show Active Directory domain and forest information including domain name, forest \
-        name, domain controllers, and FSMO roles. Requires the AD PowerShell module.";
+        name, domain controllers, and FSMO role holders (the 5 single-master operation roles: \
+        Schema Master, Domain Naming Master, RID Master, PDC Emulator, Infrastructure Master). \
+        Runs Get-ADDomain and Get-ADForest. Requires the AD PowerShell module (RSAT). \
+        Use this as the entry point for AD exploration, then enumerate domain objects with \
+        ssh_ad_user_list, ssh_ad_group_list, or ssh_ad_computer_list.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

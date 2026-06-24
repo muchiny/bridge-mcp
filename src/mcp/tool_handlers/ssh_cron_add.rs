@@ -43,8 +43,9 @@ impl StandardTool for CronAddTool {
 
     const DESCRIPTION: &'static str = "Add a cron job on a remote host. Prefer this over ssh_exec as it safely appends to \
         the existing crontab without overwriting. Specify the schedule in cron format (e.g., \
-        '0 2 * * *' for daily at 2am) and the command to run. Verify with ssh_cron_list \
-        afterward.";
+        '0 2 * * *' for daily at 2am) and the command to run. For backup-specific scheduling \
+        with built-in tar/retention logic, prefer ssh_backup_schedule instead. Verify with \
+        ssh_cron_list afterward.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -63,7 +64,7 @@ impl StandardTool for CronAddTool {
                     },
                     "user": {
                         "type": "string",
-                        "description": "User whose crontab to modify"
+                        "description": "User whose crontab to modify (default: the SSH user configured for this host). Modifying another user's crontab requires the SSH user to have sudo/root privileges."
                     },
                     "comment": {
                         "type": "string",

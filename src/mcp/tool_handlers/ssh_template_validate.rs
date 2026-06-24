@@ -45,10 +45,11 @@ impl StandardTool for TemplateValidateTool {
 
     const NAME: &'static str = "ssh_template_validate";
 
-    const DESCRIPTION: &'static str = "Validate a service's configuration on a remote host. \
-        Runs the appropriate validation command for the specified service: nginx -t, \
-        apachectl configtest, pg_isready, mysqld --validate-config, or redis-cli ping. \
-        Use after ssh_template_apply to verify the configuration is correct.";
+    const DESCRIPTION: &'static str = "Validate a service's configuration on a Linux host by \
+        running its native config-test command: nginx -t, apachectl configtest, pg_isready, \
+        mysqld --validate-config, or redis-cli ping. Use after ssh_template_apply to confirm \
+        the deployed configuration is syntactically correct. Discover template names first \
+        with ssh_template_list.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -59,7 +60,8 @@ impl StandardTool for TemplateValidateTool {
                     },
                     "service": {
                         "type": "string",
-                        "description": "Service to validate: nginx, apache, postgresql, mysql, redis"
+                        "description": "Service to validate; must be one of the five supported values.",
+                        "enum": ["nginx", "apache", "postgresql", "mysql", "redis"]
                     },
                     "config_path": {
                         "type": "string",

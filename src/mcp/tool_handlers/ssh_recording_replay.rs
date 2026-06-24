@@ -36,7 +36,7 @@ impl SshRecordingReplayHandler {
         "properties": {
             "file_path": {
                 "type": "string",
-                "description": "Path to the .cast recording file"
+                "description": "Absolute path to the .cast recording file (obtain via ssh_recording_list)"
             },
             "max_events": {
                 "type": "integer",
@@ -55,8 +55,11 @@ impl ToolHandler for SshRecordingReplayHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Replay a recorded session from a .cast file. Returns the session header and all \
-         events (commands and outputs) with timestamps. Use max_events to limit output."
+        "Read and display events from a .cast recording file (asciinema v2 format). Returns the \
+         session header (title, terminal size, timestamp) followed by all events with relative \
+         timestamps; event types are 'i' (stdin input), 'o' (stdout/stderr output), and 'm' \
+         (marker). Use ssh_recording_list to discover file paths. Use max_events to cap output \
+         for large sessions. To verify integrity instead of replaying, use ssh_recording_verify."
     }
 
     fn schema(&self) -> ToolSchema {

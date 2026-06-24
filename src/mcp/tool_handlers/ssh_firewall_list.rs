@@ -41,10 +41,10 @@ impl StandardTool for FirewallListTool {
 
     const NAME: &'static str = "ssh_firewall_list";
 
-    const DESCRIPTION: &'static str = "List firewall rules on a remote host. Prefer this over ssh_exec as it auto-detects \
+    const DESCRIPTION: &'static str = "List firewall rules on a remote Linux host. Prefer this over ssh_exec as it auto-detects \
         the firewall tool (ufw/firewall-cmd/iptables). Returns numbered rules with protocol, \
-        port, and action details. Use ssh_firewall_allow or ssh_firewall_deny to modify \
-        rules.";
+        port, and action details. Use ssh_firewall_allow or ssh_firewall_deny to add rules. \
+        For Windows hosts, use ssh_win_firewall_list instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -55,7 +55,8 @@ impl StandardTool for FirewallListTool {
                     },
                     "firewall_tool": {
                         "type": "string",
-                        "description": "Override auto-detected firewall tool (ufw/firewall-cmd/iptables)"
+                        "description": "Override auto-detected firewall tool",
+                        "enum": ["ufw", "firewall-cmd", "iptables"]
                     },
                     "chain": {
                         "type": "string",
@@ -64,7 +65,8 @@ impl StandardTool for FirewallListTool {
                     "timeout_seconds": {
                         "type": "integer",
                         "description": "Override default command timeout in seconds",
-                        "minimum": 1
+                        "minimum": 1,
+                        "maximum": 3600
                     },
                     "max_output": {
                         "type": "integer",

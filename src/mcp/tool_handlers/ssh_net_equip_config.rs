@@ -40,8 +40,13 @@ impl StandardTool for NetEquipConfigTool {
 
     const NAME: &'static str = "ssh_net_equip_config";
 
-    const DESCRIPTION: &'static str = "Send configuration commands to a network device. \
-        Automatically wraps in configure mode for the device type. Use with caution.";
+    const DESCRIPTION: &'static str = "Send configuration commands to a network device \
+        (router/switch/firewall). Automatically wraps commands in the appropriate configure \
+        mode: Cisco → `configure terminal ... end`; Juniper → `configure ... commit\\nexit`; \
+        Fortinet → `config system global ... end`; MikroTik/generic → commands sent as-is \
+        (no wrapper). DESTRUCTIVE — requires elicitation confirmation. Read the running \
+        config first with ssh_net_equip_show_run. Persist changes with ssh_net_equip_save \
+        (Cisco: write memory; Juniper: rescue save; MikroTik: backup file).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,11 +57,12 @@ impl StandardTool for NetEquipConfigTool {
             },
             "equipment_type": {
                 "type": "string",
-                "description": "Device type: cisco, juniper, mikrotik, fortinet, or generic (default: generic)"
+                "description": "Device vendor/OS. Accepted values: cisco (alias: ios), juniper (alias: junos), mikrotik (alias: routeros), fortinet (aliases: fortios, fortigate), or any other string for generic. Default: generic.",
+                "enum": ["cisco", "juniper", "mikrotik", "fortinet", "generic"]
             },
             "commands": {
                 "type": "string",
-                "description": "Configuration commands to send (newline-separated for multiple commands)"
+                "description": "Configuration commands to apply, newline-separated for multiple commands (e.g. \"interface Gi0/1\\nno shutdown\" for Cisco). These are the inner commands — do not include configure terminal / end yourself, the tool adds the correct wrapper per vendor."
             },
             "timeout_seconds": {
                 "type": "integer",

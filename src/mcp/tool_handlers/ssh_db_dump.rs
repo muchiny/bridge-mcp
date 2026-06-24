@@ -52,9 +52,10 @@ impl StandardTool for DbDumpTool {
     const NAME: &'static str = "ssh_db_dump";
 
     const DESCRIPTION: &'static str = "Create a database dump on a remote host via SSH. Uses mysqldump for MySQL and pg_dump \
-        for PostgreSQL. The dump file is saved on the remote host at output_file. Supports \
-        optional compression (gzip, bzip2, xz) and per-table dumps. Use ssh_download to \
-        retrieve the dump file locally, or ssh_db_restore to restore it.";
+        for PostgreSQL. The dump is written to output_file on the remote host — only status \
+        and warning messages from the dump tool are returned to the caller (not the dump data \
+        itself). Supports optional compression (gzip, bzip2, xz) and per-table dumps. Use \
+        ssh_download to retrieve the dump file locally, or ssh_db_restore to restore it.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -74,7 +75,7 @@ impl StandardTool for DbDumpTool {
             },
             "output_file": {
                 "type": "string",
-                "description": "Remote path for the dump file"
+                "description": "Remote path where the dump file will be written on the host. Only status/warning messages are returned to the caller; use ssh_download to retrieve the file."
             },
             "db_host": {
                 "type": "string",
@@ -100,7 +101,7 @@ impl StandardTool for DbDumpTool {
             "compress": {
                 "type": "string",
                 "enum": ["gzip", "bzip2", "xz"],
-                "description": "Compression method for the dump file"
+                "description": "Compression method for the dump file: gzip (fast, widely supported, recommended for most use cases), bzip2 (better compression, slower), xz (best compression, slowest). Omit to leave the dump uncompressed."
             },
             "timeout_seconds": {
                 "type": "integer",

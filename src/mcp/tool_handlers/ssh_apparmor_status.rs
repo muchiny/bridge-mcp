@@ -35,8 +35,11 @@ impl StandardTool for ApparmorStatusTool {
 
     const NAME: &'static str = "ssh_apparmor_status";
 
-    const DESCRIPTION: &'static str = "Show AppArmor status on a remote host including loaded \
-        profiles and their modes.";
+    const DESCRIPTION: &'static str = "Show AppArmor status summary on a remote host: module \
+        load state, total profile counts, and how many are in enforce vs complain mode (via \
+        aa-status). Use this on Ubuntu/Debian hosts where AppArmor is the active MAC framework. \
+        For a detailed per-profile listing with enforcement state, use ssh_apparmor_profiles \
+        instead. On RHEL/CentOS/Fedora hosts that use SELinux, use ssh_selinux_status.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -38,8 +38,12 @@ impl StandardTool for TimerEnableTool {
 
     const NAME: &'static str = "ssh_timer_enable";
 
-    const DESCRIPTION: &'static str = "Enable a systemd timer on a remote host. Set now=true to \
-        also start it immediately.";
+    const DESCRIPTION: &'static str = "Enable a systemd timer on a remote host (Linux/systemd \
+        only) so it starts automatically at boot and on its configured schedule. Set now=true to \
+        also start it immediately (equivalent to `systemctl enable --now`). Use ssh_timer_list \
+        to discover timer names. To reverse use ssh_timer_disable; to fire the timer's service \
+        once without enabling it use ssh_timer_trigger instead. On Windows hosts use \
+        ssh_schtask_enable instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -67,7 +71,7 @@ impl StandardTool for TimerEnableTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

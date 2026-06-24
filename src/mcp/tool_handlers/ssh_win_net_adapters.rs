@@ -36,8 +36,9 @@ impl StandardTool for WinNetAdaptersTool {
 
     const NAME: &'static str = "ssh_win_net_adapters";
 
-    const DESCRIPTION: &'static str = "List network adapters on a Windows host showing name, description, status, MAC \
-        address, and link speed.";
+    const DESCRIPTION: &'static str = "List network adapters on a Windows host (Get-NetAdapter) showing name, status, \
+        MAC address, and link speed. Windows-only — for Linux hosts use ssh_net_interfaces instead. \
+        To see IP addresses assigned to each adapter use ssh_win_net_ip.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

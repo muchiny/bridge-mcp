@@ -38,7 +38,9 @@ impl StandardTool for CertCheckTool {
     const DESCRIPTION: &'static str = "Check a remote TLS/SSL certificate by connecting to a \
         host:port from a remote host. Use this to verify HTTPS certificates of live services. \
         Returns subject, issuer, validity dates, and fingerprint. For inspecting local \
-        certificate files, use ssh_cert_info instead. For expiry monitoring, use ssh_cert_expiry.";
+        certificate files, use ssh_cert_info instead. For expiry monitoring only, use \
+        ssh_cert_expiry. For a broader SSL/TLS configuration audit (cipher suites, protocol \
+        versions, HSTS), use ssh_ssl_audit instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -57,7 +59,7 @@ impl StandardTool for CertCheckTool {
             },
             "servername": {
                 "type": "string",
-                "description": "SNI server name override"
+                "description": "SNI server name override — use when the TLS target IP hosts multiple certificates (CDN, reverse proxy, virtual hosting) and you need a specific cert that differs from the target hostname"
             },
             "timeout_seconds": {
                 "type": "integer",

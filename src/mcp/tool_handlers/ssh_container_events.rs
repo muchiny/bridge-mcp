@@ -47,7 +47,10 @@ impl StandardTool for ContainerEventsTool {
 
     const DESCRIPTION: &'static str = "Show Docker daemon events on a remote host. Displays \
         container lifecycle events like start, stop, die, restart, OOM kills, and health check \
-        failures. Useful for understanding container behavior over time.";
+        failures. Filter by event_type (container/image/network/volume only — daemon, service, \
+        plugin, and Swarm node/secret/config types are not supported by this tool). \
+        For full log streaming from a specific container use ssh_docker_logs; to search \
+        container logs by pattern use ssh_container_log_search.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -66,7 +69,7 @@ impl StandardTool for ContainerEventsTool {
             },
             "event_type": {
                 "type": "string",
-                "description": "Filter by event type",
+                "description": "Filter by event type. Supported: container, image, network, volume. Docker's daemon/plugin/service/node/secret/config types are not accepted by this tool's validator.",
                 "enum": ["container", "image", "network", "volume"]
             },
             "docker_bin": {

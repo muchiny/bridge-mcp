@@ -37,10 +37,12 @@ impl StandardTool for CronListTool {
 
     const NAME: &'static str = "ssh_cron_list";
 
-    const DESCRIPTION: &'static str = "List cron jobs on a remote host. Prefer this over ssh_exec as it handles both user \
-        and system crontabs safely. Shows user crontab entries and optionally system-wide \
-        cron jobs from /etc/cron.d/ and /etc/crontab. Use ssh_cron_add to create new jobs or \
-        ssh_cron_remove to delete existing ones.";
+    const DESCRIPTION: &'static str = "List cron jobs on a remote host. Shows only scheduled crontab entries (not execution \
+        history); for past execution logs use ssh_cron_history (cron_analysis group), for deeper \
+        conflict/overlap analysis use ssh_cron_analyze. Prefer this over ssh_exec as it handles \
+        both user and system crontabs safely. By default shows the SSH user's crontab only; set \
+        system=true to also include /etc/crontab and /etc/cron.d/* entries. Use ssh_cron_add to \
+        create new jobs or ssh_cron_remove to delete existing ones.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -51,11 +53,11 @@ impl StandardTool for CronListTool {
                     },
                     "user": {
                         "type": "string",
-                        "description": "Show crontab for a specific user"
+                        "description": "Show crontab for a specific user (default: the SSH user configured for this host)"
                     },
                     "system": {
                         "type": "boolean",
-                        "description": "Include system-wide cron jobs from /etc/cron.d/ and /etc/crontab"
+                        "description": "Include /etc/crontab and /etc/cron.d/* entries (default: false, user crontab only)"
                     },
                     "timeout_seconds": {
                         "type": "integer",

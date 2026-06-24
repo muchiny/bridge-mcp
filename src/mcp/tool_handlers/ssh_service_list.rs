@@ -35,10 +35,12 @@ impl StandardTool for ServiceListTool {
 
     const NAME: &'static str = "ssh_service_list";
 
-    const DESCRIPTION: &'static str = "List systemd services on a remote host. Start here to discover service names before \
-        using ssh_service_status, ssh_service_start, ssh_service_stop, or \
-        ssh_service_restart. Filter by state (running, failed, inactive) and unit type. \
-        Returns service name, load state, active state, and description.";
+    const DESCRIPTION: &'static str = "List systemd services on a remote host (systemctl list-units). Start here to \
+        discover service names before using ssh_service_status, ssh_service_start, \
+        ssh_service_stop, or ssh_service_restart. Filter by state (running, failed, \
+        inactive, active) and unit type (service, socket, timer, mount). Returns service \
+        name, load state, active state, and sub-state. For Windows hosts use \
+        ssh_win_service_list instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

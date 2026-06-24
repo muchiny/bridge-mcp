@@ -36,8 +36,10 @@ impl StandardTool for WinFeatureListTool {
 
     const NAME: &'static str = "ssh_win_feature_list";
 
-    const DESCRIPTION: &'static str = "List installed Windows features with name, display name, and install state. Use this \
-        first to discover feature names before using other `ssh_win_feature_*` tools.";
+    const DESCRIPTION: &'static str = "List all currently-installed Windows Server features/roles with name, display name, \
+        and install state (Windows hosts only, uses `Get-WindowsFeature | Where-Object Installed`). Use this first to \
+        discover exact feature names before calling `ssh_win_feature_info` (details), \
+        `ssh_win_feature_install` (add a feature), or `ssh_win_feature_remove` (remove a feature).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -57,7 +59,7 @@ impl StandardTool for WinFeatureListTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

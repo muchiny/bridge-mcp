@@ -34,7 +34,7 @@ pub struct SshAwsCliArgs {
 
 impl_common_args!(SshAwsCliArgs);
 
-#[mcp_standard_tool(name = "ssh_aws_cli", group = "cloud", annotation = "read_only")]
+#[mcp_standard_tool(name = "ssh_aws_cli", group = "cloud", annotation = "destructive")]
 pub struct AwsCliTool;
 
 impl StandardTool for AwsCliTool {
@@ -43,8 +43,13 @@ impl StandardTool for AwsCliTool {
     const NAME: &'static str = "ssh_aws_cli";
 
     const DESCRIPTION: &'static str = "Execute AWS CLI commands on a remote host. Runs \
-        'aws SERVICE SUBCOMMAND [ARGS] --output json' via SSH. Use this for any AWS API \
-        interaction including EC2, S3, IAM, Lambda, and other services.";
+        'aws SERVICE SUBCOMMAND [ARGS] --output json' via SSH — the --output json flag is \
+        appended automatically; do NOT pass --output in args or jq_filter will fail on \
+        non-JSON text output. Use this only when no specialized tool covers the operation: \
+        for read-only instance metadata use ssh_cloud_metadata or ssh_cloud_tags, for cost \
+        data use ssh_cloud_cost (AWS only), and for multi-cloud instance listing or \
+        comparison across AWS, GCP, and Azure prefer ssh_multicloud_list or \
+        ssh_multicloud_compare.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -63,7 +68,7 @@ impl StandardTool for AwsCliTool {
                     },
                     "args": {
                         "type": "string",
-                        "description": "Additional arguments (e.g. '--region us-east-1 --instance-ids i-123')"
+                        "description": "Additional arguments (e.g. '--region us-east-1 --instance-ids i-123'). Do NOT include --output here; --output json is appended automatically and overriding it will break jq_filter."
                     },
                     "timeout_seconds": {
                         "type": "integer",

@@ -36,9 +36,10 @@ impl StandardTool for HypervHostInfoTool {
 
     const NAME: &'static str = "ssh_hyperv_host_info";
 
-    const DESCRIPTION: &'static str = "Get Hyper-V host configuration and capabilities. Returns host properties including \
-        virtual hard disk path, virtual machine path, supported VM versions, NUMA spanning, \
-        and more.";
+    const DESCRIPTION: &'static str = "Get Hyper-V HOST role configuration and capabilities on a Windows Server running the \
+        Hyper-V role (calls Get-VMHost). Returns host-level properties including virtual hard disk \
+        path, virtual machine path, supported VM versions, and NUMA spanning settings. For guest \
+        VM details use `ssh_hyperv_vm_info` instead; for a list of all VMs use `ssh_hyperv_vm_list`.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

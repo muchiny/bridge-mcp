@@ -33,8 +33,10 @@ impl StandardTool for WinEventSourcesTool {
 
     const NAME: &'static str = "ssh_win_event_sources";
 
-    const DESCRIPTION: &'static str = "List available Windows Event Log sources with record count and last write time. Use \
-        this to discover log names before querying with `ssh_win_event_query`.";
+    const DESCRIPTION: &'static str = "List all available Windows Event Log sources with their record count and last-write \
+        time, sorted by most recently written. Use this first to discover valid log names before \
+        calling `ssh_win_event_logs`, `ssh_win_event_query`, `ssh_win_event_tail`, or \
+        `ssh_win_event_export`.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -26,11 +26,7 @@ pub struct SshBenchmarkArgs {
 
 impl_common_args!(SshBenchmarkArgs);
 
-#[mcp_standard_tool(
-    name = "ssh_benchmark",
-    group = "performance",
-    annotation = "read_only"
-)]
+#[mcp_standard_tool(name = "ssh_benchmark", group = "performance", annotation = "mutating")]
 pub struct BenchmarkTool;
 
 impl StandardTool for BenchmarkTool {
@@ -38,9 +34,12 @@ impl StandardTool for BenchmarkTool {
 
     const NAME: &'static str = "ssh_benchmark";
 
-    const DESCRIPTION: &'static str = "Run a quick performance benchmark on a remote host. \
-        Supports CPU (md5sum throughput), I/O (dd write speed), and memory (throughput) \
-        benchmarks. Results are approximate and suitable for quick comparisons between hosts.";
+    const DESCRIPTION: &'static str = "Run a quick throughput benchmark on a Linux host using \
+        standard shell tools: cpu (dd|md5sum hash rate), io (dd write to /tmp, file deleted \
+        afterwards), memory (dd to /dev/null). Results are approximate and suited for quick \
+        host comparisons, not precision workload testing. For live I/O metrics use ssh_io_trace; \
+        for CPU/syscall profiling use ssh_perf_trace; for network latency use ssh_latency_test. \
+        For Windows performance counters use ssh_win_perf_overview instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -52,7 +51,7 @@ impl StandardTool for BenchmarkTool {
             },
             "bench_type": {
                 "type": "string",
-                "description": "Type of benchmark to run: 'cpu', 'io', or 'memory'",
+                "description": "Benchmark type: 'cpu' (dd|md5sum hash throughput), 'io' (dd write to /tmp with fdatasync, file deleted after), 'memory' (dd to /dev/null throughput)",
                 "enum": ["cpu", "io", "memory"]
             },
             "timeout_seconds": {
@@ -65,7 +64,7 @@ impl StandardTool for BenchmarkTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

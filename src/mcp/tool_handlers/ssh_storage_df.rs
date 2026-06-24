@@ -45,8 +45,12 @@ impl StandardTool for StorageDfTool {
 
     const NAME: &'static str = "ssh_storage_df";
 
-    const DESCRIPTION: &'static str = "Show disk space usage on a remote host. Displays \
-        filesystem type, size, used, available, and mount point. Set inodes=true for inode usage.";
+    const DESCRIPTION: &'static str = "Show disk space usage (df -hT) on a remote host. Reports \
+        filesystem type, size, used, available space, and mount point for each filesystem. Set \
+        inodes=true to report inode counts instead of blocks. Use this when you need free-space \
+        percentages per mount; use ssh_storage_lsblk to see physical block devices and partitions, \
+        ssh_storage_lvm for LVM volume details, or ssh_storage_fstab for persistent mount \
+        configuration.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

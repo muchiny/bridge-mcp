@@ -34,8 +34,10 @@ impl StandardTool for WinProcessInfoTool {
 
     const NAME: &'static str = "ssh_win_process_info";
 
-    const DESCRIPTION: &'static str = "Get detailed information about a Windows process by PID. Shows all process properties \
-        including memory, handles, threads, and module information.";
+    const DESCRIPTION: &'static str = "Get detailed information about a Windows process by PID via PowerShell. Shows all \
+        process properties including memory, handles, threads, and module information. Use \
+        ssh_win_process_by_name or ssh_win_process_list to discover PIDs first. For Linux \
+        hosts there is no direct equivalent — use ssh_exec with ps or /proc/<pid>/status.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -60,7 +62,7 @@ impl StandardTool for WinProcessInfoTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the bridge server"
             }
         }
     }"#;

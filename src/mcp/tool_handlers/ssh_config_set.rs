@@ -33,7 +33,7 @@ impl SshConfigSetHandler {
             },
             "value": {
                 "type": "integer",
-                "description": "The new value (e.g., 80000 for max_output_chars, 0 to disable truncation).",
+                "description": "Integer value in characters for max_output_chars. Default is ~40000. Use 0 to disable truncation entirely. Recommended range: 10000-200000. Setting too small a value will cause most tool outputs to be truncated.",
                 "minimum": 0
             }
         },
@@ -48,9 +48,10 @@ impl ToolHandler for SshConfigSetHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Set a runtime configuration limit for this session. Currently supports \
-         'max_output_chars' to adjust the output truncation threshold. Changes take \
-         effect immediately for subsequent tool calls. Use ssh_config_get to verify."
+        "Bridge-local: sets a runtime configuration limit for the MCP bridge session itself \
+         — not a remote host (there is no host param). Currently supports 'max_output_chars' \
+         to adjust the output truncation threshold. Changes take effect immediately for \
+         subsequent tool calls. Use ssh_config_get to read current values before and after."
     }
 
     fn schema(&self) -> ToolSchema {

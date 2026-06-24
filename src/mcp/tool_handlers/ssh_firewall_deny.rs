@@ -47,10 +47,12 @@ impl StandardTool for FirewallDenyTool {
 
     const NAME: &'static str = "ssh_firewall_deny";
 
-    const DESCRIPTION: &'static str = "Add a firewall deny/block rule on a remote host. Prefer this over ssh_exec as it \
-        auto-detects the firewall tool (ufw/firewall-cmd/iptables) and validates parameters. \
-        Blocks incoming traffic on a port, optionally restricted to a source IP/CIDR. Verify \
-        with ssh_firewall_list afterward.";
+    const DESCRIPTION: &'static str = "Add a firewall deny/block rule on a remote Linux host (ufw/firewall-cmd/iptables). \
+        Prefer this over ssh_exec as it auto-detects the firewall tool and validates parameters. \
+        Blocks incoming traffic on a port, optionally restricted to a source IP/CIDR. \
+        Use ssh_firewall_list to verify the rule afterward; to remove a rule later, use \
+        ssh_exec with the appropriate backend command (e.g., 'ufw delete deny <port>/tcp' or \
+        'iptables -D INPUT ...'). For Windows hosts, use ssh_win_firewall_deny instead.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -61,7 +63,7 @@ impl StandardTool for FirewallDenyTool {
                     },
                     "port": {
                         "type": "string",
-                        "description": "Port number or range to deny (e.g., '80', '8080:8090')"
+                        "description": "Port number, range, or service name to deny (e.g., '80', '8080:8090', 'ssh', 'http'). Service names are resolved via /etc/services on the remote host; ufw also has its own built-in service database."
                     },
                     "protocol": {
                         "type": "string",

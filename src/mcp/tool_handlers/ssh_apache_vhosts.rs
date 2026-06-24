@@ -27,9 +27,13 @@ impl StandardTool for ApacheVhostsTool {
 
     const NAME: &'static str = "ssh_apache_vhosts";
 
-    const DESCRIPTION: &'static str = "List Apache virtual hosts on a remote host. Shows all \
-        configured virtual hosts with their document roots and server names. Prefer this over \
-        ssh_exec for listing Apache vhosts.";
+    const DESCRIPTION: &'static str = "List Apache virtual host configuration on a remote host. \
+        Runs `apachectl -S` (or `httpd -S`) and returns each VirtualHost entry with its server name, \
+        document root, port bindings, and config file path. Use this tool when you only need the \
+        vhost listing; use ssh_apache_status instead when you also need worker metrics \
+        (mod_status), compiled-in settings, or a combined status+config snapshot — note that \
+        ssh_apache_status also includes the -S vhost output alongside the other sections. \
+        Prefer this over ssh_exec for Apache vhost inspection.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -45,9 +45,15 @@ impl StandardTool for LogSearchMultiTool {
 
     const NAME: &'static str = "ssh_log_search_multi";
 
-    const DESCRIPTION: &'static str = "Search logs on a remote host for a pattern. Uses journalctl \
-        when available, falling back to grep. Supports filtering by time range. \
-        Use this to find specific errors, events, or patterns across log files.";
+    const DESCRIPTION: &'static str = "Search multiple log files on a single Linux host for a \
+        pattern (the '_multi' suffix means multiple files, not multiple hosts — for multi-host \
+        fan-out use ssh_exec_multi). Uses journalctl --grep when available, falling back to \
+        grep -r across flat log files (grep results are capped at 100 lines via tail -100). \
+        Prefer ssh_journal_query for structured journald filtering by unit, priority, or \
+        boot ID; use this tool for specific flat log files (e.g. /var/log/auth.log) or when \
+        journald is unavailable. Use ssh_log_tail_multi to read recent lines without filtering, \
+        or ssh_log_aggregate to count error/warning occurrences. Windows hosts are not \
+        supported — use ssh_win_event_query for Windows Event Log searches.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -58,7 +64,7 @@ impl StandardTool for LogSearchMultiTool {
                     },
                     "pattern": {
                         "type": "string",
-                        "description": "Search pattern (grep-compatible regex)"
+                        "description": "Search pattern — journalctl uses PCRE2 (avoid PCRE-only syntax like \\d when the grep fallback matters; use [0-9] instead); grep fallback uses basic regex (BRE)"
                     },
                     "log_files": {
                         "type": "string",

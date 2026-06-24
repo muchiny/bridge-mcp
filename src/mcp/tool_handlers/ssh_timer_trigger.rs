@@ -37,7 +37,12 @@ impl StandardTool for TimerTriggerTool {
     const NAME: &'static str = "ssh_timer_trigger";
 
     const DESCRIPTION: &'static str = "Manually trigger a systemd timer's associated service on \
-        a remote host. Starts the service immediately without waiting for the timer schedule.";
+        a remote host (Linux/systemd only). Runs `systemctl start <service>` on the corresponding \
+        service unit (strips the .timer suffix automatically), starting it immediately without \
+        waiting for the next scheduled trigger and without altering the timer's enabled/disabled \
+        state. Use ssh_timer_list to discover timer names. To change the timer's persistent state \
+        use ssh_timer_enable (with now=true) or ssh_timer_disable (with now=true) instead. On \
+        Windows hosts use ssh_schtask_run instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -61,7 +66,7 @@ impl StandardTool for TimerTriggerTool {
             },
             "save_output": {
                 "type": "string",
-                "description": "Save full output to this file path on the local machine"
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

@@ -97,11 +97,13 @@ impl ToolHandler for SshTailHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Read the last N lines of a remote file, with optional regex filtering. Prefer \
-         this over ssh_exec for log reading as it provides safe path validation and \
-         built-in grep filtering. Use grep parameter to filter lines (e.g., 'ERROR|WARN' \
-         to find errors). For listing directory contents, use ssh_ls instead. For full \
-         file download, use ssh_download."
+        "Read the last N lines of a remote file (via tail -n), with optional regex \
+         filtering (grep -E). Prefer this over ssh_exec for log reading as it shell-escapes \
+         the path and pattern to prevent injection. Use grep parameter to filter lines \
+         (e.g., 'ERROR|WARN' to find errors). For systemd journal logs use \
+         ssh_journal_query (structured filtering by unit/priority) or ssh_journal_follow \
+         (live streaming) instead. For listing directory contents use ssh_ls. For full \
+         file download use ssh_download."
     }
 
     fn schema(&self) -> ToolSchema {

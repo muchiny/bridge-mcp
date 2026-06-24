@@ -58,7 +58,9 @@ impl ToolHandler for SshAwxProjectSyncHandler {
 
     fn description(&self) -> &'static str {
         "Trigger a project SCM sync in AWX. Updates the project from its source control \
-         repository."
+         repository. To discover project IDs, query the AWX API directly \
+         (GET /api/v2/projects/) via ssh_exec or check the AWX web UI; there is no \
+         dedicated list-projects tool in this group."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -91,7 +93,7 @@ impl ToolHandler for SshAwxProjectSyncHandler {
 
         let endpoint = format!("/api/v2/projects/{}/update/", args.project_id);
 
-        let cmd = AwxCommandBuilder::build_api_call(
+        let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
             &endpoint,
@@ -116,11 +118,11 @@ impl ToolHandler for SshAwxProjectSyncHandler {
             .await?;
         let output = conn.exec(&cmd, &limits).await?;
 
-        let stdout = ctx
+        let raw = ctx
             .execute_use_case
             .process_success(host, &cmd, &output.into())
             .stdout;
-        let mut stdout = stdout;
+        let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction(
             &mut stdout,
             &dr,

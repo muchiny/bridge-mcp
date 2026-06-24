@@ -33,9 +33,10 @@ impl StandardTool for WinPerfNetworkTool {
 
     const NAME: &'static str = "ssh_win_perf_network";
 
-    const DESCRIPTION: &'static str = "Get Windows network performance counters showing bytes sent and received per second. \
-        Use for diagnosing network throughput issues on a Windows host. For a combined system \
-        overview, use ssh_win_perf_overview instead.";
+    const DESCRIPTION: &'static str = "Get Windows network performance counters showing total bytes per second across all \
+        network interfaces (\\\\Network Interface(*)\\\\Bytes Total/sec). Use for diagnosing \
+        network throughput issues on a Windows host. Note: network counters are NOT included in \
+        ssh_win_perf_overview — use this tool for dedicated network analysis.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

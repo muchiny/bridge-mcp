@@ -34,7 +34,11 @@ impl StandardTool for EnvSnapshotTool {
 
     const DESCRIPTION: &'static str = "Capture a comprehensive environment snapshot including \
         OS, packages, services, listeners, users, and config file checksums. Save the output \
-        to a local file with save_output for later comparison.";
+        to a local file with save_output for later comparison. Use this as the first step \
+        before calling ssh_env_diff (which provides diffing instructions) or to record a \
+        baseline for manual comparison. If you only need a one-shot diagnostic without saving \
+        files, ssh_compare_state (diagnostics group) covers similar scope. For drift analysis \
+        with an automated LLM summary, use ssh_env_drift instead.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

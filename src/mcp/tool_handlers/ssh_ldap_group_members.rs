@@ -39,7 +39,14 @@ impl StandardTool for LdapGroupMembersTool {
 
     const NAME: &'static str = "ssh_ldap_group_members";
 
-    const DESCRIPTION: &'static str = "List members of an LDAP group on a remote host.";
+    const DESCRIPTION: &'static str = "List members of a named LDAP group on a remote host using \
+        ldapsearch (-x -LLL). Runs filter '(cn=<group>)' with scope sub and returns the 'member' \
+        and 'memberUid' attributes. Use this instead of ssh_ldap_search when you want group \
+        membership for a known group by cn; use ssh_ldap_search for arbitrary filters. To look up \
+        a specific user use ssh_ldap_user_info. On Windows Active Directory hosts use \
+        ssh_ad_group_members instead (PowerShell-based, richer AD attributes). Authentication uses \
+        the remote host's system ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no \
+        credentials are passed on the command line.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

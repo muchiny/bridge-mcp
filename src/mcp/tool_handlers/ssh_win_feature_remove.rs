@@ -38,8 +38,10 @@ impl StandardTool for WinFeatureRemoveTool {
 
     const NAME: &'static str = "ssh_win_feature_remove";
 
-    const DESCRIPTION: &'static str = "Remove a Windows feature. Validates the feature name and shows install state after \
-        removal. Requires appropriate permissions. May require a reboot to complete.";
+    const DESCRIPTION: &'static str = "Uninstall a Windows Server feature or role by name (Windows hosts only, uses \
+        `Uninstall-WindowsFeature`; destructive — prompts for confirmation). Use `ssh_win_feature_list` first to \
+        confirm the feature is installed, or `ssh_win_feature_info` to inspect it before removal. To install a feature \
+        use `ssh_win_feature_install`. Requires administrator privileges; a reboot is often required to complete removal.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -60,6 +62,10 @@ impl StandardTool for WinFeatureRemoveTool {
             "max_output": {
                 "type": "integer",
                 "description": "Maximum output characters (overrides default)"
+            },
+            "save_output": {
+                "type": "string",
+                "description": "Save full output to this file path on the remote host"
             }
         }
     }"#;

@@ -44,7 +44,9 @@ impl StandardTool for DockerInspectTool {
     const DESCRIPTION: &'static str = "Inspect a Docker container, image, network, or volume on a remote host. Returns \
         detailed JSON metadata. Use format parameter for Go template extraction (e.g., \
         '{{.State.Status}}'). Use ssh_docker_ps or ssh_docker_images first to find names. \
-        Auto-detects docker or podman.";
+        Auto-detects docker or podman. For hosts running Podman without Docker, prefer \
+        ssh_podman_inspect which is purpose-built for Podman; use this tool when the host \
+        runs Docker or a mixed Docker/Podman environment.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -73,7 +73,8 @@ impl ToolHandler for SshAwxTemplateDetailHandler {
 
     fn description(&self) -> &'static str {
         "Get detailed information about an AWX job template including survey spec, credentials, \
-         and last job run. Use jq_filter for specific fields."
+         and last job run. Use ssh_awx_templates to list templates and discover their IDs before \
+         calling this tool. Use jq_filter for specific fields."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -107,7 +108,7 @@ impl ToolHandler for SshAwxTemplateDetailHandler {
         let mut endpoint = String::new();
         let _ = write!(endpoint, "/api/v2/job_templates/{}/", args.template_id);
 
-        let cmd = AwxCommandBuilder::build_api_call(
+        let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
             &endpoint,
@@ -132,11 +133,11 @@ impl ToolHandler for SshAwxTemplateDetailHandler {
             .await?;
         let output = conn.exec(&cmd, &limits).await?;
 
-        let stdout = ctx
+        let raw = ctx
             .execute_use_case
             .process_success(host, &cmd, &output.into())
             .stdout;
-        let mut stdout = stdout;
+        let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction(&mut stdout, &dr, OutputKind::Json)?;
         Ok(ToolCallResult::text(stdout))
     }

@@ -32,15 +32,18 @@ impl StandardTool for LetsencryptStatusTool {
     const NAME: &'static str = "ssh_letsencrypt_status";
 
     const DESCRIPTION: &'static str = "Get Let's Encrypt / certbot certificate status on a \
-        remote host. Lists all managed certificates with their domains, expiry dates, and \
-        renewal status. Prefer this over ssh_exec for checking Let's Encrypt certificates.";
+        Linux remote host. Runs `certbot certificates` and lists all certbot-managed certificates \
+        with their domains, expiry dates, and renewal status. If certbot is not installed the \
+        output says so — use ssh_cert_expiry (live TLS endpoint check) or ssh_cert_info (cert \
+        file inspection) as alternatives for non-certbot certificates. For a full TLS config \
+        audit use ssh_ssl_audit. Windows hosts are not supported (certbot is Linux-only).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
         "properties": {
             "host": {
                 "type": "string",
-                "description": "Host alias from config.yaml (use ssh_status to list available hosts)"
+                "description": "Linux host alias from config.yaml (use ssh_status to list available hosts). Windows hosts are not supported. If certbot is not installed the tool returns an informational message; use ssh_cert_expiry or ssh_cert_info instead."
             },
             "timeout_seconds": {
                 "type": "integer",

@@ -41,10 +41,11 @@ impl StandardTool for K8sExecTool {
     const NAME: &'static str = "ssh_k8s_exec";
 
     const DESCRIPTION: &'static str = "Execute a command inside a Kubernetes pod via kubectl exec on a remote host. Use \
-        ssh_k8s_get with resource 'pods' first to find pod names. The command runs inside the \
-        pod container (e.g., 'cat /etc/config' or 'env'). For multi-container pods, specify \
-        the container parameter. Auto-detects kubectl binary (k8s, k3s, microk8s). Returns \
-        command stdout/stderr.";
+        ssh_k8s_get with resource 'pods' first to find pod names. The command is always \
+        wrapped as 'sh -c <command>', so shell syntax (pipes, redirects) is supported. For \
+        reading logs without exec, use ssh_k8s_logs instead. For multi-container pods, \
+        specify the container parameter. Auto-detects kubectl binary (k8s, k3s, microk8s). \
+        Returns command stdout/stderr.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

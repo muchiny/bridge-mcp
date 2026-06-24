@@ -43,9 +43,14 @@ impl StandardTool for CapacityTrendTool {
 
     const NAME: &'static str = "ssh_capacity_trend";
 
-    const DESCRIPTION: &'static str = "Show resource usage trends on a remote host. \
-        Uses sar (sysstat) for historical data if available, falls back to current snapshot. \
-        Supports cpu, memory, disk, or all resources. Specify days to control lookback period.";
+    const DESCRIPTION: &'static str = "Show a human-readable resource usage trend report on a \
+        remote host for cpu, memory, disk, or all resources over a configurable lookback window \
+        (default 7 days, up to 365). Uses sar (sysstat) for historical data when available. \
+        If sar/sysstat is not installed the tool falls back to a current-only snapshot \u{2014} \
+        historical trend data will be absent; install sysstat on the remote host to enable full \
+        historical reporting. Use this tool when you need a readable summary of usage over time. \
+        For machine-structured raw historical data for LLM forecasting use ssh_capacity_predict. \
+        For a current-only snapshot across all resources use ssh_capacity_collect.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

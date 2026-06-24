@@ -29,8 +29,11 @@ impl ToolHandler for SshTunnelListHandler {
     }
 
     fn description(&self) -> &'static str {
-        "List all active SSH port forwarding tunnels. Returns tunnel IDs, local/remote \
-         ports, SSH host, and uptime. Use tunnel_id values with ssh_tunnel_close."
+        "List all active SSH port forwarding tunnels managed by this bridge process. Returns a \
+         JSON array of TunnelInfo objects with fields: id (tunnel_id for ssh_tunnel_close), host, \
+         local_port, remote_host, remote_port, direction, age_seconds. Returns 'No active \
+         tunnels.' when none exist. Call this before ssh_tunnel_create to avoid binding a port \
+         that is already in use, and before ssh_tunnel_close to find the exact tunnel_id."
     }
 
     fn schema(&self) -> ToolSchema {

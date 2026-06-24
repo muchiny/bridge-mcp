@@ -36,11 +36,11 @@ impl SshRunbookValidateHandler {
         "properties": {
             "runbook_name": {
                 "type": "string",
-                "description": "Name of an existing runbook to validate"
+                "description": "Name of an existing built-in or user-defined runbook to validate; obtain names from ssh_runbook_list. Mutually exclusive with yaml_content."
             },
             "yaml_content": {
                 "type": "string",
-                "description": "Raw YAML content of a runbook to validate"
+                "description": "Raw YAML text of a runbook to parse and validate. Must conform to the runbook schema: top-level fields name, description, steps (required); params and version are optional. Each step requires a name and at least one of command or condition. Mutually exclusive with runbook_name."
             }
         }
     }"#;
@@ -53,9 +53,12 @@ impl ToolHandler for SshRunbookValidateHandler {
     }
 
     fn description(&self) -> &'static str {
-        "Validate a runbook definition. Provide either a runbook_name (to validate an existing \
-         runbook) or yaml_content (to validate raw YAML). Checks structure, required fields, \
-         and step definitions."
+        "Validate a runbook definition without executing anything (read-only, safe for preflight \
+         checks). Provide either runbook_name to validate a built-in or user-defined runbook by \
+         name, or yaml_content to validate raw YAML before saving it. Reports the step count, \
+         parameter count, how many steps require user confirmation, and how many steps have \
+         rollback commands. Use ssh_runbook_list to discover existing runbook names; use \
+         ssh_runbook_execute to run a validated runbook on a host."
     }
 
     fn schema(&self) -> ToolSchema {

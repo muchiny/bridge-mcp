@@ -54,10 +54,13 @@ impl StandardTool for ComplianceReportTool {
 
     const NAME: &'static str = "ssh_compliance_report";
 
-    const DESCRIPTION: &'static str = "Generate a full compliance report on a remote host. Prefer this over ssh_exec \
-        for compliance reporting as it produces a structured report covering file permissions, \
-        SSH configuration, kernel security, password policy, and audit status. Supports text \
-        and JSON output formats.";
+    const DESCRIPTION: &'static str = "Generate a full compliance report on a remote Linux host covering all categories \
+        (file permissions, SSH configuration, kernel security, password policy, audit status) in a \
+        single call, with text or JSON output. Use this when you need a complete multi-category \
+        deliverable (CI artifact, audit log). For a numeric pass/fail score use ssh_compliance_score; \
+        for per-category CIS level filtering use ssh_cis_benchmark. Prefer this over \
+        ssh_compliance_check (security_scan group) when you need multi-format (text/JSON) output or \
+        a structured report covering all categories in one call.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",

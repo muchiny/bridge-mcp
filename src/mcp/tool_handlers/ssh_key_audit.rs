@@ -37,9 +37,12 @@ impl StandardTool for KeyAuditTool {
 
     const NAME: &'static str = "ssh_key_audit";
 
-    const DESCRIPTION: &'static str = "Audit SSH authorized keys on a remote host. Shows key count, \
-        types, comments, and file permissions for ~/.ssh/authorized_keys. Useful for security \
-        auditing and identifying unauthorized or outdated keys.";
+    const DESCRIPTION: &'static str = "Audit the ~/.ssh/authorized_keys file of the user the bridge \
+        connects as on the target host. Shows key count, types, comments, and file permissions. \
+        Scope: SSH authorized key management only — for broader security hardening checks use \
+        ssh_security_audit; for CIS benchmark compliance use ssh_compliance_check. To audit other \
+        users' authorized keys, use ssh_exec with sudo per-user. Output size scales with number of \
+        keys; pass save_output for hosts with many authorized keys (e.g. CI jump boxes).";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
