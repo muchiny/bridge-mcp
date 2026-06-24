@@ -77,6 +77,7 @@ fn extract_detail(body: &str) -> String {
 pub enum HttpMethod {
     Get,
     Post,
+    Patch,
     Delete,
 }
 
@@ -86,6 +87,7 @@ impl HttpMethod {
         match self {
             Self::Get => "-X GET",
             Self::Post => "-X POST",
+            Self::Patch => "-X PATCH",
             Self::Delete => "-X DELETE",
         }
     }
@@ -398,6 +400,22 @@ mod tests {
             30,
         );
         assert!(cmd.contains("-X DELETE"));
+    }
+
+    #[test]
+    fn test_build_api_call_patch() {
+        let cmd = AwxCommandBuilder::build_api_call(
+            "https://awx.internal",
+            "tok",
+            "/api/v2/schedules/5/",
+            HttpMethod::Patch,
+            Some(r#"{"enabled":false}"#),
+            true,
+            &[],
+            30,
+        );
+        assert!(cmd.contains("-X PATCH"));
+        assert!(cmd.contains("enabled"));
     }
 
     #[test]
