@@ -786,6 +786,39 @@ impl KubernetesCommandBuilder {
         cmd.push_str(&kubectl_context_flag(context));
         cmd
     }
+
+    /// Build a `kubectl auth can-i <verb> <resource>` command (RBAC preflight).
+    ///
+    /// Constructs: `{kubectl} auth can-i {verb} {resource} [-n {ns}]
+    /// [--as {user}] [--context={ctx}]`
+    ///
+    /// Use this before a mutating change to fail fast on permission errors.
+    /// Pass `as_user` to impersonate a user or service account (maps to `kubectl --as`).
+    /// Use `context` for multi-cluster targeting.
+    #[must_use]
+    pub fn build_auth_can_i_command(
+        kubectl_bin: Option<&str>,
+        verb: &str,
+        resource: &str,
+        namespace: Option<&str>,
+        as_user: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!(
+            "{prefix}auth can-i {} {}",
+            shell_escape(verb),
+            shell_escape(resource)
+        );
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(u) = as_user {
+            let _ = write!(cmd, " --as {}", shell_escape(u));
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
 }
 
 /// Builds helm CLI commands for remote execution.
@@ -2800,5 +2833,28 @@ mod tests {
         assert!(cmd.contains("--delete-emptydir-data"), "cmd: {cmd}");
         assert!(!cmd.contains("--force"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    // ============== build_auth_can_i_command Tests ==============
+
+    #[test]
+    fn test_build_auth_can_i_command() {
+        let cmd = KubernetesCommandBuilder::build_auth_can_i_command(
+            Some("kubectl"),
+            "create",
+            "deployments",
+            Some("prod"),
+            Some("system:serviceaccount:ci:deployer"),
+            None,
+        );
+        assert!(
+            cmd.contains("auth can-i 'create' 'deployments'"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
+        assert!(
+            cmd.contains("--as 'system:serviceaccount:ci:deployer'"),
+            "cmd: {cmd}"
+        );
     }
 }
