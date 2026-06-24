@@ -118,8 +118,11 @@ impl ToolHandler for SshAwxWorkflowApprovalsHandler {
         let id_str = args.workflow_job_id.to_string();
         let status = args.status.as_deref().unwrap_or("pending");
         let page_size_str = args.page_size.unwrap_or(50).to_string();
+        // `source_workflow_job` is only a summary_field, not a filterable DB
+        // column. The queryable relation from a WorkflowApproval (a UnifiedJob)
+        // to its run is `unified_job_node__workflow_job`.
         let query_params: Vec<(&str, &str)> = vec![
-            ("source_workflow_job__id", &id_str),
+            ("unified_job_node__workflow_job", &id_str),
             ("status", status),
             ("page_size", &page_size_str),
         ];

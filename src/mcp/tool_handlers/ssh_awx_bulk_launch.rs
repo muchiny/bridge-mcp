@@ -73,11 +73,42 @@ const SCHEMA: &str = r#"{
         },
         "name": {
             "type": "string",
-            "description": "Optional name for the bulk job"
+            "description": "Name for the bulk job (defaults to 'bridge-mcp bulk launch' if omitted)"
         }
     },
     "required": ["jobs"]
 }"#;
+
+/// Build the bulk job-launch request body.
+///
+/// `name` is ALWAYS emitted (defaulted when the caller omits it) because AWX's
+/// bulk serializer treats it as required on some releases; per-job `None` fields
+/// are omitted. Each job entry always carries `unified_job_template`.
+fn build_bulk_body(args: &SshAwxBulkLaunchArgs) -> Value {
+    let mut jobs_arr = Vec::with_capacity(args.jobs.len());
+    for job in &args.jobs {
+        let mut job_map = serde_json::Map::new();
+        job_map.insert(
+            "unified_job_template".to_string(),
+            Value::Number(job.unified_job_template.into()),
+        );
+        if let Some(inventory) = job.inventory {
+            job_map.insert("inventory".to_string(), Value::Number(inventory.into()));
+        }
+        if let Some(ref limit) = job.limit {
+            job_map.insert("limit".to_string(), Value::String(limit.clone()));
+        }
+        if let Some(ref extra_vars) = job.extra_vars {
+            job_map.insert("extra_vars".to_string(), extra_vars.clone());
+        }
+        jobs_arr.push(Value::Object(job_map));
+    }
+    let mut body_map = serde_json::Map::new();
+    let name = args.name.as_deref().unwrap_or("bridge-mcp bulk launch");
+    body_map.insert("name".to_string(), Value::String(name.to_string()));
+    body_map.insert("jobs".to_string(), Value::Array(jobs_arr));
+    Value::Object(body_map)
+}
 
 /// Handler for launching N AWX jobs atomically.
 #[mcp_tool(name = "ssh_awx_bulk_launch", group = "awx", annotation = "mutating")]
@@ -147,38 +178,7 @@ impl ToolHandler for SshAwxBulkLaunchHandler {
             )
         })?;
 
-        // Build the jobs array, including only non-None fields per entry.
-        let mut jobs_arr = Vec::with_capacity(args.jobs.len());
-        for job in &args.jobs {
-            let mut job_map = serde_json::Map::new();
-            job_map.insert(
-                "unified_job_template".to_string(),
-                serde_json::Value::Number(job.unified_job_template.into()),
-            );
-            if let Some(inventory) = job.inventory {
-                job_map.insert(
-                    "inventory".to_string(),
-                    serde_json::Value::Number(inventory.into()),
-                );
-            }
-            if let Some(ref limit) = job.limit {
-                job_map.insert(
-                    "limit".to_string(),
-                    serde_json::Value::String(limit.clone()),
-                );
-            }
-            if let Some(ref extra_vars) = job.extra_vars {
-                job_map.insert("extra_vars".to_string(), extra_vars.clone());
-            }
-            jobs_arr.push(serde_json::Value::Object(job_map));
-        }
-
-        let mut body_map = serde_json::Map::new();
-        if let Some(ref name) = args.name {
-            body_map.insert("name".to_string(), serde_json::Value::String(name.clone()));
-        }
-        body_map.insert("jobs".to_string(), serde_json::Value::Array(jobs_arr));
-        let body_str = serde_json::Value::Object(body_map).to_string();
+        let body_str = build_bulk_body(&args).to_string();
 
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
@@ -361,28 +361,7 @@ mod tests {
         }))
         .unwrap();
 
-        let mut jobs_arr = Vec::with_capacity(args.jobs.len());
-        for job in &args.jobs {
-            let mut job_map = serde_json::Map::new();
-            job_map.insert(
-                "unified_job_template".to_string(),
-                serde_json::Value::Number(job.unified_job_template.into()),
-            );
-            if let Some(inventory) = job.inventory {
-                job_map.insert(
-                    "inventory".to_string(),
-                    serde_json::Value::Number(inventory.into()),
-                );
-            }
-            jobs_arr.push(serde_json::Value::Object(job_map));
-        }
-        let mut body_map = serde_json::Map::new();
-        if let Some(ref name) = args.name {
-            body_map.insert("name".to_string(), serde_json::Value::String(name.clone()));
-        }
-        body_map.insert("jobs".to_string(), serde_json::Value::Array(jobs_arr));
-        let body = serde_json::Value::Object(body_map);
-
+        let body = build_bulk_body(&args);
         let jobs = body["jobs"].as_array().expect("jobs must be an array");
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0]["unified_job_template"], 42);
@@ -390,5 +369,18 @@ mod tests {
         assert_eq!(jobs[1]["unified_job_template"], 7);
         assert!(jobs[1].get("inventory").is_none());
         assert_eq!(body["name"], "wave");
+    }
+
+    #[test]
+    fn test_body_always_sends_name_when_omitted() {
+        // AWX requires `name` on the bulk request on some releases; the body must
+        // carry a non-empty default even when the caller omits it.
+        let args: SshAwxBulkLaunchArgs =
+            serde_json::from_value(json!({"jobs": [{"unified_job_template": 1}]})).unwrap();
+        assert!(args.name.is_none());
+
+        let body = build_bulk_body(&args);
+        let name = body["name"].as_str().expect("name must be present");
+        assert!(!name.is_empty(), "default name must be non-empty");
     }
 }
