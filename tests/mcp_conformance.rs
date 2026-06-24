@@ -163,7 +163,7 @@ fn all_tools_have_valid_json_schema() {
     let registry = bridge_mcp::mcp::registry::create_all_enabled_registry();
     let tools = registry.list_tools();
 
-    assert_eq!(tools.len(), 392, "Expected 392 tools in default registry");
+    assert_eq!(tools.len(), 398, "Expected 398 tools in default registry");
 
     for tool in &tools {
         // Name must be non-empty and snake_case
