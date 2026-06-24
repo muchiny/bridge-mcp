@@ -25,11 +25,18 @@ pub struct SshK8sRolloutArgs {
     #[serde(default)]
     to_revision: Option<u64>,
     #[serde(default)]
+    watch: Option<bool>,
+    #[serde(default)]
+    timeout: Option<String>,
+    #[serde(default)]
+    label_selector: Option<String>,
+    #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
+    #[serde(default)]
     save_output: Option<String>,
 }
 
@@ -108,6 +115,9 @@ impl StandardTool for K8sRolloutTool {
             &args.resource,
             args.namespace.as_deref(),
             args.to_revision,
+            args.watch,
+            args.timeout.as_deref(),
+            args.label_selector.as_deref(),
         ))
     }
 
@@ -140,6 +150,7 @@ impl StandardTool for K8sRolloutTool {
                 "resource": args.resource,
                 "namespace": args.namespace.clone().unwrap_or_else(|| "default".to_string()),
                 "to_revision": args.to_revision,
+                "label_selector": args.label_selector.clone(),
             }),
         );
         for line in output.lines() {
@@ -310,7 +321,7 @@ mod tests {
             .execute(
                 Some(json!({
                     "host": "server1",
-                    "action": "pause",
+                    "action": "invalid_action",
                     "resource": "deployment/myapp"
                 })),
                 &ctx,
@@ -406,6 +417,9 @@ mod tests {
             resource: "deployment/myapp".to_string(),
             namespace: None,
             to_revision: None,
+            watch: None,
+            timeout: None,
+            label_selector: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -424,6 +438,9 @@ mod tests {
             resource: "deployment/myapp".to_string(),
             namespace: Some("production".to_string()),
             to_revision: None,
+            watch: None,
+            timeout: None,
+            label_selector: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -443,6 +460,9 @@ mod tests {
             resource: "deployment/myapp".to_string(),
             namespace: Some("staging".to_string()),
             to_revision: Some(3),
+            watch: None,
+            timeout: None,
+            label_selector: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -453,5 +473,68 @@ mod tests {
         assert!(cmd.contains("kubectl rollout 'undo'"));
         assert!(cmd.contains("-n 'staging'"));
         assert!(cmd.contains("--to-revision=3"));
+    }
+
+    #[test]
+    fn test_build_command_with_watch() {
+        let args = SshK8sRolloutArgs {
+            host: "server1".to_string(),
+            action: "status".to_string(),
+            resource: "deployment/myapp".to_string(),
+            namespace: None,
+            to_revision: None,
+            watch: Some(true),
+            timeout: None,
+            label_selector: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sRolloutTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("--watch=true"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_timeout() {
+        let args = SshK8sRolloutArgs {
+            host: "server1".to_string(),
+            action: "status".to_string(),
+            resource: "deployment/myapp".to_string(),
+            namespace: None,
+            to_revision: None,
+            watch: None,
+            timeout: Some("5m".to_string()),
+            label_selector: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sRolloutTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("--timeout='5m'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_label_selector() {
+        let args = SshK8sRolloutArgs {
+            host: "server1".to_string(),
+            action: "restart".to_string(),
+            resource: "deployment".to_string(),
+            namespace: Some("prod".to_string()),
+            to_revision: None,
+            watch: None,
+            timeout: None,
+            label_selector: Some("app=nginx".to_string()),
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sRolloutTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-l 'app=nginx'"), "cmd: {cmd}");
     }
 }
