@@ -16,6 +16,8 @@ projet = "projet"
 # Legitimate code patterns
 secur = "secur"
 routeros = "routeros"
+# BRE = Basic Regular Expression (grep regex flavor)
+BRE = "BRE"
 
 [files]
 # Ignore generated files
@@ -23,4 +25,6 @@ extend-exclude = [
     "target/",
     "*.lock",
     "PLAN.md",
+    # Internal French research/planning artifact — prose, not shipped docs
+    "docs/feature-research-2026-06.md",
 ]

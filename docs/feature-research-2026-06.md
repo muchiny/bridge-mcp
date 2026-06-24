@@ -37,6 +37,7 @@ Tri par (valeur DESC, effort ASC).
 *(doublons inter-lentilles fusionnés ; partiels marqués)*
 
 ### K8s — core (workload & troubleshooting)
+
 - **`ssh_k8s_diff`** — `kubectl diff -f <manifest|->`, render unifié du delta avant apply [small/high] *(complète `apply --dry-run=server`)*
 - **`ssh_k8s_events`** — events triés `.lastTimestamp`, filtre Warning, `--for` object-scoping [small/high] *(complète `ssh_k8s_get resource=events`)*
 - **`ssh_k8s_wait`** — `kubectl wait --for=condition=...|delete|jsonpath=...`, primitive de synchro [small/high]
@@ -49,12 +50,14 @@ Tri par (valeur DESC, effort ASC).
 - **`ssh_k8s_kustomize` + `-k` sur apply** — render overlay vers stdout ; apply est `-f`-only [small/medium]
 
 ### K8s — cluster & RBAC admin
+
 - **Node maintenance : `ssh_k8s_drain` / `ssh_k8s_cordon` / `ssh_k8s_uncordon`** — split pour annotations propres (drain=destructive→élicitation, cordon/uncordon=mutating_idempotent) ; zéro capacité node aujourd'hui [small/high]
 - **`ssh_k8s_auth_can_i` (+ `ssh_k8s_who_can`)** — pré-flight RBAC, transforme un 403 cryptique mid-runbook en blocage lisible ; `--as` pour audit SA [small→medium/high (medium si SA cluster-admin, fréquent en homelab)]
 - **`ssh_k8s_cluster_info` / `ssh_k8s_health`** — rollup control-plane (`--raw /readyz?verbose`, version skew, componentstatuses) ; synergie `ssh_incident_*` [small/medium] *(componentstatuses partiellement via `ssh_k8s_get`)*
 - **CSR : `ssh_k8s_csr_list` / `_approve` / `_deny`** — bootstrap kubelet, cert-manager edge cases ; complète `ssh_cert_*` [small/low — plus basse priorité du set gardé]
 
 ### GitOps — ArgoCD & Flux *(groupe absent ; confirmer Argo vs Flux avant build)*
+
 - **`ssh_argocd_app_list` + `_app_get`** — inventaire + santé/drift (Synced/OutOfSync, Healthy/Degraded), flags `drifted_only`/`refresh=hard` ; entrée de tout le reste [medium (création groupe)/high]
 - **`ssh_argocd_app_diff`** — live-vs-Git desired (la *vraie* preview-of-sync, pas un dry-run serveur) [small/high]
 - **`ssh_argocd_app_sync`** — `--prune` (destructive→élicitation) / `--dry-run` / `--resource` sélectif [small/high]
@@ -68,6 +71,7 @@ Tri par (valeur DESC, effort ASC).
 - **`ssh_gitops_drift`** — sweep unifié cross-controller (argocd OutOfSync + flux NotReady → table normalisée), detect-and-skip si un CLI absent ; outil de standup matinal [medium/high — build en dernier, dépend des reads par-moteur]
 
 ### Helm — depth + supply chain
+
 - **`ssh_helm_template`** — render client-side offline ; keystone, dont dépend diff [small/high]
 - **`ssh_helm_diff`** — `helm diff upgrade` (plugin) ou fallback `template | get manifest` ; `--detailed-exitcode` = signal no-op machine [medium/high]
 - **`ssh_helm_get`** — values/manifest/hooks/notes/metadata `--revision` ; counterpart read de template [small/high] *(`ssh_helm_status` = proxy faible)*
@@ -80,6 +84,7 @@ Tri par (valeur DESC, effort ASC).
 - **`ssh_helm_dependency`** — build/update/list sous-charts (umbrella) [small/medium]
 
 ### Ansible — execution depth + qualité/idempotence/drift
+
 - **Passthrough vault** — `vault_password_file`/`vault_id` sur playbook/recap/run_background/adhoc [trivial/high] *(complète l'existant ; cause n°1 d'échec)*
 - **`ssh_ansible_vault`** — lifecycle view/encrypt/decrypt/rekey/encrypt_string (verbe enum ; view=read_only, reste=mutating) ; ssh_vault_* = HashiCorp, sans rapport [small→medium/high]
 - **`ssh_ansible_doc`** — argspec module en `--json` au lieu d'halluciner les params ; révèle les plugins installés [small/high]
@@ -100,6 +105,7 @@ Tri par (valeur DESC, effort ASC).
 - **`ssh_ansible_navigator_run`** — Execution Environment (image AAP) `-m stdout` ; élimine le drift « marche dans AWX, casse sur le bridge » [medium/medium — footprint lourd]
 
 ### AWX / AAP — control-plane depth
+
 - **Workflows : `ssh_awx_workflow_templates` / `_launch` / `_status` / `_nodes`** — pipeline réel = workflow ; `_nodes` résout quel node a échoué → feed `ssh_awx_job_stdout` [small/high]
 - **Approvals : `ssh_awx_approvals` / `_approval_approve` / `_approval_deny`** — un workflow gated hang sinon ; `_deny`=destructive auto-résolu [small/high]
 - **`ssh_awx_job_relaunch`** — `{"hosts":"failed"}`, récupération canonique [trivial/high] *(complète launch+cancel)*
@@ -112,6 +118,7 @@ Tri par (valeur DESC, effort ASC).
 - **Prérequis : `HttpMethod::Patch` + préfixe API configurable** — débloque tout le write-side (toggle/edit) ; gateway-aware AAP 2.5 (`/api/gateway/v1`, `/api/controller/v2`) ; PATCH inconditionnellement requis par schedules/inventory [medium/medium — *enabler, pas feature standalone*]
 
 ### Observabilité & SRE
+
 - **`ssh_prom_query` + `ssh_prom_query_range`** — PromQL instant + range ; keystone qui débloque SLO/burn-rate/corrélation ; `prometheus_url` default depuis section `observability:` config [medium/high — build en premier]
 - **`ssh_prom_labels` / `_targets` / `_rules`** — discovery métriques + santé scrape-targets (un exporter down explique la data manquante) + rules/alerts firing [small/high]
 - **`ssh_alertmgr_list` / `_silence` / `_expire`** — silence pendant fenêtre maintenance puis expire ; `ssh_alert_*` = awk interne, pas Alertmanager [medium/high]
@@ -123,6 +130,7 @@ Tri par (valeur DESC, effort ASC).
 - **`ssh_trace_get` / `_search`** — Tempo/Jaeger span-flattening [medium/low — seulement si tracing confirmé in-stack]
 
 ### DX agent & efficacité tokens *(cross-cutting)*
+
 - **`suggested_next` (champ d'erreur universel)** — table signature→hint dans le payload d'erreur (CrashLoopBackOff → `logs previous=true`) ; transforme un dead-end en recovery one-hop [small/high]
 - **`ssh_k8s_bundle` (+ `ssh_service_bundle`)** — un appel = get -o wide + events triés + Conditions de describe + N log lines + owner chain ; « pourquoi mon pod crashe » coûte ~5 round-trips aujourd'hui [medium/high]
 - **`ssh_k8s_can_i` + `ssh_capability_check` (+ `ssh_preflight`)** — pré-flight RBAC/binaire/no-op « will this succeed » [small/high]
@@ -134,6 +142,7 @@ Tri par (valeur DESC, effort ASC).
 - **`cache_ttl`/`cache_bypass` (+ `ssh_session_cache_stats`)** — cache TTL court args-keyed pour reads (l'agent re-fetch la même liste 3x) [medium/medium] *(`OutputCache` = pagination-only)*
 
 ### Sécurité, policy-as-code & change control
+
 - **`ssh_policy_conftest` / `_kubeconform` / `_kyverno`** — nouveau groupe `policy` validant manifests rendus avant cluster ; flag `policy_gate=` sur apply/install/upgrade + plan terraform JSON [medium/high — *cœur de la lentille* ; requiert conftest/kubeconform sur le bridge]
 - **`ssh_audit_query`** — query le propre audit log du bridge (actor/host/tool/destructive/window) ; capture existe (`security/audit.rs`) mais aucun read [small/medium] *(complète l'audit write-only)*
 - **`ssh_k8s_drift_check`** — refuse apply si le cluster a divergé out-of-band (ne clobber pas un hotfix manuel) ; dépend de `ssh_k8s_diff` [small/medium] *(complète `ssh_env_drift`)*
@@ -142,6 +151,7 @@ Tri par (valeur DESC, effort ASC).
 *(diff/wait/events/can-i/helm template/get/show/verify déjà listés sous K8s/Helm)*
 
 ### Orchestration & runbooks higher-order
+
 - **`ssh_runbook_run` (tool-aware steps)** — step invoque un outil par nom+args via la registry, capture structurée `save_as`, honore destructive_hint ; **build en premier**, débloque tous les orchestrateurs ci-dessous en YAML [large/high] *(complète `ssh_runbook_execute` plan-only/shell-only)*
 - **`ssh_fleet_runbook` (foreach)** — itère host-group/liste/inventory AWX, concurrence bornée, agrégation + rollout staged dev→staging→prod (halt on first fail) [medium/medium] *(complète `ssh_rolling_exec`/`ssh_exec_multi` shell-only hors engine)*
 - **`ssh_k8s_incident_triage`** — chaîne read-only get→describe→events→logs --previous→top + cross-ref helm/rollout/AWX history → hypothèse rankée + remédiation suggérée (non exécutée) [medium/high — dépend du leaf `ssh_k8s_events`] *(complète `ssh_incident_triage` host-OS)*
@@ -153,6 +163,7 @@ Tri par (valeur DESC, effort ASC).
 - **`ssh_sentinel_*`** — drift/health planifié (cron/timer sur bridge), alerte sur change-of-state [large/low — *stretch* ; le modèle one-shot SSH combat le scheduling persistant ; approximable via `ssh_cron_add`/`ssh_timer_*`]
 
 ### Nouveaux adaptateurs / APIs directes
+
 - **Adaptateur K8s natif (kube-rs)** — `Protocol::Kube`, débloque l'infaisable en one-shot SSH : logs `-f`, `wait` (watch API), exec stdin/tty, `cp`, port-forward ; re-route les 9 outils existants transparemment [large/high — *class (d)*, seule classe touchant le dispatch core]
 - **Adaptateur Prometheus/Thanos** — curl-over-SSH (pattern AWX éprouvé), pourrait graduer en (d) HTTP natif [medium/high]
 - **AWX gateway-aware (AAP 2.5)** — promouvoir le builder curl en client version-aware (`/api/gateway/v1`, `/api/controller/v2`) + PATCH/PUT [medium/high]
