@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-MCP SSH Bridge is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **398 tools** across **75 groups** (60 Linux, 13 Windows, 2 cross-platform).
+MCP SSH Bridge is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **422 tools** across **76 groups** (60 Linux, 13 Windows, 2 cross-platform).
 
 ## CLI-as-Tool Mode (Alternative to MCP)
 
-All 398 MCP tools are accessible directly via CLI, enabling **10-32x token savings** compared to MCP mode. Use CLI for dev workflows, MCP for enterprise integration.
+All 422 MCP tools are accessible directly via CLI, enabling **10-32x token savings** compared to MCP mode. Use CLI for dev workflows, MCP for enterprise integration.
 
 ### Quick Reference
 
@@ -17,7 +17,7 @@ bridge-mcp tool ssh_exec host=prod command="df -h" --json
 bridge-mcp tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
 
 # Progressive discovery (token-efficient for AI agents)
-bridge-mcp list-tools --groups-only          # 75 groups (~2K tokens)
+bridge-mcp list-tools --groups-only          # 76 groups (~2K tokens)
 bridge-mcp list-tools --group docker          # tools in group (~500 tokens)
 bridge-mcp list-tools --search kubernetes     # keyword search
 bridge-mcp describe-tool ssh_docker_ps        # full schema + Reduction Strategy (~200 tokens)
@@ -136,7 +136,7 @@ dxt/                              # DXT packaging (Claude Desktop extension)
 
 ## Tool Groups Reference
 
-75 groups, 398 tools (60 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `bridge-mcp list-tools --groups-only`.
+76 groups, 422 tools (60 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `bridge-mcp list-tools --groups-only`.
 
 ## Feature Flags
 
