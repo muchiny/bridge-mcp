@@ -30,14 +30,15 @@ use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
     ClientInfo, CompletionRef, CompletionResult, CompletionsCapability, CompletionsCompleteParams,
-    CompletionsCompleteResult, CreateTaskResult, InitializeParams, InitializeResult, JsonRpcError,
-    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel, LoggingCapability,
-    LoggingSetLevelParams, PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult,
-    PromptsListResult, ResourcesCapability, ResourcesListResult, ResourcesReadParams,
-    ResourcesReadResult, SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
-    ServerCapabilities, ServerInfo, TaskCancelParams, TaskGetParams, TaskListParams,
-    TaskListResult, TaskRequestsCapability, TaskResultParams, TaskToolsCapability, TasksCapability,
-    ToolCallParams, ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
+    CompletionsCompleteResult, CreateTaskResult, Icon, InitializeParams, InitializeResult,
+    JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
+    LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION, PromptsCapability,
+    PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
+    ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
+    SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
+    TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability, TaskResultParams,
+    TaskToolsCapability, TasksCapability, ToolCallParams, ToolCallResult, ToolContent,
+    ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -1244,7 +1245,12 @@ impl McpServer {
                     "Secure SSH bridge for remote server management via MCP".to_string(),
                 ),
                 website_url: Some("https://github.com/muchiny/bridge-mcp".to_string()),
-                icons: None,
+                icons: Some(vec![Icon {
+                    src: SERVER_ICON_URL.to_string(),
+                    mime_type: Some("image/svg+xml".to_string()),
+                    sizes: Some(vec!["any".to_string()]),
+                    theme: None,
+                }]),
             },
             instructions: Some(instructions),
         };

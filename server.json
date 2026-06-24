@@ -9,7 +9,10 @@
   },
   "license": "MIT",
   "runtime": "binary",
-  "transport": ["stdio", "streamable-http"],
+  "transport": [
+    "stdio",
+    "streamable-http"
+  ],
   "mcpVersion": "2025-11-25",
   "capabilities": {
     "tools": true,

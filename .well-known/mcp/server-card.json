@@ -14,8 +14,14 @@
     "logging": true,
     "progress": true
   },
-  "transports": ["stdio", "streamable-http"],
-  "authentication": ["oauth2", "jwt"],
+  "transports": [
+    "stdio",
+    "streamable-http"
+  ],
+  "authentication": [
+    "oauth2",
+    "jwt"
+  ],
   "tool_count": 357,
   "tool_groups": 75,
   "homepage": "https://github.com/muchiny/bridge-mcp",
@@ -26,7 +32,11 @@
     "progressive_discovery": {
       "supported": true,
       "description": "Three meta-tools let clients discover the registry on demand instead of loading all 357 schemas up front. Call mcp_list_tool_groups first (~75 entries), then mcp_search_tools to narrow by keyword, then mcp_describe_tool for the one full schema you need. All three are read-only and argument-validated locally.",
-      "tools": ["mcp_list_tool_groups", "mcp_search_tools", "mcp_describe_tool"]
+      "tools": [
+        "mcp_list_tool_groups",
+        "mcp_search_tools",
+        "mcp_describe_tool"
+      ]
     },
     "data_reduction": {
       "supported": true,
@@ -41,7 +51,10 @@
         "max_output": "Override default output character cap",
         "timeout_seconds": "Override default command timeout"
       },
-      "formats": ["json", "tsv"],
+      "formats": [
+        "json",
+        "tsv"
+      ],
       "pagination": {
         "mechanism": "output_id",
         "fetch_tool": "ssh_output_fetch",

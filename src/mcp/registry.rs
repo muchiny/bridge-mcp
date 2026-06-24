@@ -182,7 +182,7 @@ impl ToolRegistry {
                         task_support: "optional".to_string(),
                     }),
                     output_schema: handler.output_schema(),
-                    icons: None,
+                    icons: tool_icons(schema.name),
                     meta: tool_meta(schema.name),
                 }
             })
@@ -387,6 +387,45 @@ pub fn tool_meta(tool_name: &str) -> Option<Value> {
         })),
         _ => None,
     }
+}
+
+/// Base URL for committed group icons (SEP-973).
+///
+/// Per-group SVGs live under `dxt/icons/<group>.svg` and are served raw from
+/// GitHub `main`. Clients fetch lazily and tolerate a 404, so an unmapped or
+/// not-yet-authored group simply renders without an icon.
+const ICON_BASE_URL: &str = "https://raw.githubusercontent.com/muchini/bridge-mcp/main/dxt/icons";
+
+/// Return the icon for a tool group, or `None` for groups without a curated
+/// icon. The curated subset can grow without touching any test (the tests only
+/// assert mapped groups serialize an icon and unmapped groups omit it).
+#[must_use]
+pub fn group_icon(group: &str) -> Option<crate::mcp::protocol::Icon> {
+    let slug = match group {
+        "docker" | "podman" => "docker",
+        "kubernetes" => "kubernetes",
+        "systemd" | "systemd_timers" => "systemd",
+        "database" | "redis" | "postgresql" | "mysql" | "mongodb" => "database",
+        "nginx" | "apache" => "webserver",
+        "git" => "git",
+        "vault" => "vault",
+        "terraform" => "terraform",
+        "cloud" | "multicloud" => "cloud",
+        _ => return None,
+    };
+    Some(crate::mcp::protocol::Icon {
+        src: format!("{ICON_BASE_URL}/{slug}.svg"),
+        mime_type: Some("image/svg+xml".to_string()),
+        sizes: Some(vec!["any".to_string()]),
+        theme: None,
+    })
+}
+
+/// Return SEP-973 icons for a tool, resolved through its group. Tools whose
+/// group has no curated icon return `None` so the `icons` field is omitted.
+#[must_use]
+pub fn tool_icons(tool_name: &str) -> Option<Vec<crate::mcp::protocol::Icon>> {
+    group_icon(tool_group(tool_name)).map(|icon| vec![icon])
 }
 
 /// Create a registry with the default tool group profile
@@ -2968,5 +3007,34 @@ mod tests {
         assert_eq!(schema["type"], "object");
         let wire = serde_json::to_value(&tools[0]).unwrap();
         assert!(wire.get("outputSchema").is_some());
+    }
+
+    #[test]
+    fn test_group_icon_known_group_has_icon() {
+        let icon = group_icon("docker").expect("docker group must map to an icon");
+        assert!(
+            icon.src.contains("docker"),
+            "docker icon src should reference docker: {}",
+            icon.src
+        );
+        assert_eq!(icon.mime_type.as_deref(), Some("image/svg+xml"));
+    }
+
+    #[test]
+    fn test_group_icon_unknown_group_is_none() {
+        assert!(group_icon("pty").is_none());
+        assert!(group_icon("does_not_exist").is_none());
+    }
+
+    #[test]
+    fn test_tool_icons_maps_via_group() {
+        let icons = tool_icons("ssh_docker_ps").expect("docker tool must carry an icon");
+        assert_eq!(icons.len(), 1);
+        assert!(icons[0].src.contains("docker"));
+    }
+
+    #[test]
+    fn test_tool_icons_uncurated_group_is_none() {
+        assert!(tool_icons("ssh_pty_exec").is_none());
     }
 }
