@@ -15,9 +15,14 @@ use crate::mcp_standard_tool;
 pub struct SshK8sDescribeArgs {
     host: String,
     resource: String,
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     namespace: Option<String>,
+    #[serde(default)]
+    label_selector: Option<String>,
+    #[serde(default)]
+    all_namespaces: Option<bool>,
     #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
@@ -69,6 +74,14 @@ impl StandardTool for K8sDescribeTool {
                 "type": "string",
                 "description": "Kubernetes namespace"
             },
+            "label_selector": {
+                "type": "string",
+                "description": "Label selector to describe multiple resources (e.g. app=nginx). Mutually exclusive with name."
+            },
+            "all_namespaces": {
+                "type": "boolean",
+                "description": "Describe resources across all namespaces (-A)"
+            },
             "kubectl_bin": {
                 "type": "string",
                 "description": "kubectl binary path or command (default: auto-detect k8s/k3s/microk8s)"
@@ -89,21 +102,29 @@ impl StandardTool for K8sDescribeTool {
                 "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool."
             }
         },
-        "required": ["host", "resource", "name"]
+        "required": ["host", "resource"]
     }"#;
 
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshK8sDescribeArgs, _host_config: &HostConfig) -> Result<String> {
+        use crate::error::BridgeError;
+        if args.name.is_none() && args.label_selector.is_none() {
+            return Err(BridgeError::CommandDenied {
+                reason: "Either name or label_selector must be provided".to_string(),
+            });
+        }
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
         Ok(KubernetesCommandBuilder::build_describe_command(
             args.kubectl_bin.as_deref(),
             &args.resource,
-            &args.name,
+            args.name.as_deref(),
             args.namespace.as_deref(),
+            args.label_selector.as_deref(),
+            args.all_namespaces.unwrap_or(false),
         ))
     }
 }
@@ -174,7 +195,6 @@ mod tests {
         let required = schema_json["required"].as_array().unwrap();
         assert!(required.contains(&json!("host")));
         assert!(required.contains(&json!("resource")));
-        assert!(required.contains(&json!("name")));
     }
 
     #[test]
@@ -192,7 +212,7 @@ mod tests {
         let args: SshK8sDescribeArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
         assert_eq!(args.resource, "deployment");
-        assert_eq!(args.name, "my-app");
+        assert_eq!(args.name, Some("my-app".to_string()));
         assert_eq!(args.namespace, Some("production".to_string()));
         assert_eq!(args.kubectl_bin, Some("/usr/local/bin/kubectl".to_string()));
         assert_eq!(args.timeout_seconds, Some(120));
@@ -210,7 +230,7 @@ mod tests {
         let args: SshK8sDescribeArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
         assert_eq!(args.resource, "pod");
-        assert_eq!(args.name, "my-pod");
+        assert_eq!(args.name, Some("my-pod".to_string()));
         assert!(args.namespace.is_none());
         assert!(args.kubectl_bin.is_none());
         assert!(args.timeout_seconds.is_none());
@@ -222,11 +242,10 @@ mod tests {
         let handler = SshK8sDescribeHandler::new();
         let ctx = create_test_context();
 
-        // Missing name field
+        // Missing host field (required)
         let result = handler
             .execute(
                 Some(json!({
-                    "host": "server1",
                     "resource": "pod"
                 })),
                 &ctx,
@@ -258,6 +277,7 @@ mod tests {
     fn test_args_debug() {
         let json = json!({"host": "server1", "resource": "pod", "name": "my-pod"});
         let args: SshK8sDescribeArgs = serde_json::from_value(json).unwrap();
+        assert_eq!(args.name, Some("my-pod".to_string()));
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshK8sDescribeArgs"));
     }
@@ -318,8 +338,10 @@ mod tests {
         let args = SshK8sDescribeArgs {
             host: "server1".to_string(),
             resource: "pod".to_string(),
-            name: "my-pod".to_string(),
+            name: Some("my-pod".to_string()),
             namespace: None,
+            label_selector: None,
+            all_namespaces: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -335,8 +357,10 @@ mod tests {
         let args = SshK8sDescribeArgs {
             host: "server1".to_string(),
             resource: "deployment".to_string(),
-            name: "my-app".to_string(),
+            name: Some("my-app".to_string()),
             namespace: Some("production".to_string()),
+            label_selector: None,
+            all_namespaces: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -353,8 +377,10 @@ mod tests {
         let args = SshK8sDescribeArgs {
             host: "server1".to_string(),
             resource: "service".to_string(),
-            name: "my-svc".to_string(),
+            name: Some("my-svc".to_string()),
             namespace: Some("kube-system".to_string()),
+            label_selector: None,
+            all_namespaces: None,
             kubectl_bin: Some("k3s kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -365,5 +391,66 @@ mod tests {
         // "k3s kubectl" has a space so is_valid_binary_path rejects it; falls back to auto-detect
         assert!(cmd.contains("describe 'service' 'my-svc'"));
         assert!(cmd.contains("-n 'kube-system'"));
+    }
+
+    #[test]
+    fn test_build_command_with_label_selector() {
+        let args = SshK8sDescribeArgs {
+            host: "server1".to_string(),
+            resource: "pods".to_string(),
+            name: None,
+            namespace: Some("default".to_string()),
+            label_selector: Some("app=nginx".to_string()),
+            all_namespaces: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sDescribeTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-l 'app=nginx'"), "cmd: {cmd}");
+        assert!(cmd.contains("-n 'default'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_rejects_no_name_or_selector() {
+        let args = SshK8sDescribeArgs {
+            host: "server1".to_string(),
+            resource: "pod".to_string(),
+            name: None,
+            namespace: None,
+            label_selector: None,
+            all_namespaces: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let result = K8sDescribeTool::build_command(&args, &host_config);
+        assert!(
+            result.is_err(),
+            "expected error when neither name nor label_selector provided"
+        );
+    }
+
+    #[test]
+    fn test_build_command_with_all_namespaces() {
+        let args = SshK8sDescribeArgs {
+            host: "server1".to_string(),
+            resource: "pods".to_string(),
+            name: Some("my-pod".to_string()),
+            namespace: None,
+            label_selector: None,
+            all_namespaces: Some(true),
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sDescribeTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-A"), "cmd: {cmd}");
     }
 }
