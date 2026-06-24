@@ -45,12 +45,16 @@ pub struct K8sWhoCanTool;
 impl StandardTool for K8sWhoCanTool {
     type Args = SshK8sWhoCanArgs;
     const NAME: &'static str = "ssh_k8s_who_can";
+    const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
+        crate::domain::output_kind::OutputKind::Json;
     const DESCRIPTION: &'static str = "Reverse-scan all RBAC RoleBindings and ClusterRoleBindings \
         to find every principal (user, group, or service account) that can perform `<verb>` on \
-        `<resource>`. Read-only; outputs one binding per line in \
-        `namespace|kind|name|roleRefKind|roleRefName` format. \
+        `<resource>`. Read-only; outputs a JSON array of objects with fields \
+        `namespace`, `kind`, `name`, `roleRefKind`, `roleRefName`. \
         Useful for auditing blast radius before granting access or identifying over-privileged \
-        principals. Use `all_namespaces=true` to scan the whole cluster.";
+        principals. Use `all_namespaces=true` to scan the whole cluster. \
+        Heuristic (grep over RBAC rules) — may over-report; use `ssh_k8s_auth_can_i` for an \
+        authoritative yes/no.";
     const SCHEMA: &'static str = r#"{
         "type": "object",
         "properties": {
@@ -298,6 +302,18 @@ mod tests {
         assert!(cmd.contains("rolebindings"), "cmd: {cmd}");
         assert!(cmd.contains("clusterrolebindings"), "cmd: {cmd}");
         assert!(cmd.contains("get"), "cmd: {cmd}");
+        // Must have jq guard and emit JSON array via jq -s
+        assert!(
+            cmd.contains("command -v jq >/dev/null 2>&1"),
+            "jq guard missing: cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains("jq -s '.'"),
+            "JSON array stage missing: cmd: {cmd}"
+        );
+        // Must include JSON field names in the awk stage (backslash-escaped inside raw string)
+        assert!(cmd.contains("namespace"), "namespace field: cmd: {cmd}");
+        assert!(cmd.contains("roleRefKind"), "roleRefKind field: cmd: {cmd}");
     }
 
     #[test]
@@ -317,6 +333,22 @@ mod tests {
         let cmd = K8sWhoCanTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("-A"), "all_namespaces flag: cmd: {cmd}");
         assert!(cmd.contains("east"), "context: cmd: {cmd}");
+        // JSON output stage must still be present
+        assert!(cmd.contains("jq -s '.'"), "JSON stage: cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_description_has_heuristic_caveat() {
+        let handler = SshK8sWhoCanHandler::new();
+        let desc = handler.description();
+        assert!(
+            desc.contains("Heuristic") || desc.contains("heuristic"),
+            "description must warn about heuristic nature: {desc}"
+        );
+        assert!(
+            desc.contains("ssh_k8s_auth_can_i"),
+            "description must reference authoritative tool: {desc}"
+        );
     }
 
     #[test]

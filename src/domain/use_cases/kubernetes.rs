@@ -210,6 +210,40 @@ pub fn validate_jsonpath_key(k: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a generic Kubernetes RBAC resource name.
+///
+/// Non-empty, ≤253 chars, charset `[a-z0-9.-]`, must not start with `'-'`.
+/// Covers roles, clusterroles, rolebindings, clusterrolebindings, and service accounts.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] on invalid name.
+pub fn validate_rbac_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "RBAC resource name must not be empty".to_string(),
+        });
+    }
+    if name.len() > 253 {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("RBAC resource name exceeds 253 chars: {name}"),
+        });
+    }
+    if name.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("RBAC resource name must not start with '-': {name}"),
+        });
+    }
+    if !name
+        .chars()
+        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '.' | '-'))
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("RBAC resource name contains disallowed characters: {name}"),
+        });
+    }
+    Ok(())
+}
+
 /// Validate a Kubernetes service account name.
 ///
 /// Non-empty, ≤253 chars, charset [a-z0-9.-], must not start with '-'.
@@ -2099,6 +2133,10 @@ impl KubernetesCommandBuilder {
     /// Enumerates all `rolebindings` and `clusterrolebindings`, then for each
     /// binding resolves the referenced `Role`/`ClusterRole` and checks whether
     /// its rules cover the requested verb and resource (or `*`).
+    ///
+    /// The final stage emits a JSON array of objects with fields
+    /// `namespace`, `kind`, `name`, `roleRefKind`, `roleRefName`.
+    /// Requires `jq` on the remote host (exits with status 3 if missing).
     #[must_use]
     pub fn build_who_can_command(
         kubectl_bin: Option<&str>,
@@ -2132,14 +2170,18 @@ impl KubernetesCommandBuilder {
         };
 
         format!(
-            r#"{k_val}; CTX="{ctx_flag_trimmed}"; V={v_esc}; R={r_esc}; SCOPE='{scope}'; for B in $($K get rolebindings,clusterrolebindings$SCOPE $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"\n"}}{{end}}' 2>/dev/null); do RNS=$(printf %s "$B"|cut -d'|' -f1); RKIND=$(printf %s "$B"|cut -d'|' -f4); RNAME=$(printf %s "$B"|cut -d'|' -f5); if [ "$RKIND" = ClusterRole ]; then RULES=$($K get clusterrole "$RNAME" $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); else RULES=$($K get role "$RNAME" ${{RNS:+-n "$RNS"}} $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); fi; printf %s "$RULES" | grep -q -e "$V" -e '\*' && printf %s "$RULES" | grep -q -e "$R" -e '\*' && printf '%s\n' "$B"; done"#
+            r#"{k_val}; command -v jq >/dev/null 2>&1 || {{ echo 'jq not installed on host (required for who_can JSON output)' >&2; exit 3; }}; CTX="{ctx_flag_trimmed}"; V={v_esc}; R={r_esc}; SCOPE='{scope}'; MATCHES=''; for B in $($K get rolebindings,clusterrolebindings$SCOPE $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"\n"}}{{end}}' 2>/dev/null); do RNS=$(printf %s "$B"|cut -d'|' -f1); RKIND=$(printf %s "$B"|cut -d'|' -f4); RNAME=$(printf %s "$B"|cut -d'|' -f5); if [ "$RKIND" = ClusterRole ]; then RULES=$($K get clusterrole "$RNAME" $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); else RULES=$($K get role "$RNAME" ${{RNS:+-n "$RNS"}} $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); fi; if printf %s "$RULES" | grep -q -e "$V" -e '\*' && printf %s "$RULES" | grep -q -e "$R" -e '\*'; then MATCHES="${{MATCHES}}$B"$'\n'; fi; done; printf '%s' "$MATCHES" | awk -F'|' 'NF==5 {{printf "{{\"namespace\":%s,\"kind\":%s,\"name\":%s,\"roleRefKind\":%s,\"roleRefName\":%s}}\n", (length($1)?"\""$1"\"":"null"), "\""$2"\"", "\""$3"\"", "\""$4"\"", "\""$5"\""}}' | jq -s '.'"#
         )
     }
 
     /// Build a composite POSIX pipeline that diagnoses RBAC for a service account.
     ///
-    /// Prints the SA identity, runs `auth can-i --list`, and lists all bindings
-    /// that reference the service account.
+    /// Emits a single JSON object with fields:
+    /// - `serviceaccount`: `"ns:name"` identity string
+    /// - `can_i_list`: array of strings from `kubectl auth can-i --list`
+    /// - `granting_bindings`: array of `{namespace,kind,name,roleRefKind,roleRefName}` objects
+    ///
+    /// Requires `jq` on the remote host (exits with status 3 if missing).
     #[must_use]
     pub fn build_rbac_diagnose_command(
         kubectl_bin: Option<&str>,
@@ -2164,9 +2206,7 @@ impl KubernetesCommandBuilder {
         let ns_esc = shell_escape(ns_val);
 
         format!(
-            r#"{k_val}; CTX="{ctx_flag_trimmed}"; SA={sa_esc}; NS={ns_esc}; AS="system:serviceaccount:$NS:$SA"; printf '== identity ==\n%s\n' "$AS"; printf '== can-i --list ==\n'; $K auth can-i --list --as "$AS" -n "$NS" $CTX 2>/dev/null; printf '== granting bindings ==\n'; $K get rolebindings,clusterrolebindings --all-namespaces $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"/"}}{{{roleRef}}}{{"\n"}}{{range .subjects[*]}}{{"  subj:"}}{{.kind}}{{"/"}}{{.namespace}}{{"/"}}{{{name}}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | grep -A1 -e "ServiceAccount/$NS/$SA" -e "serviceaccount/$NS/$SA" || printf '(no direct bindings found)\n'"#,
-            roleRef = ".roleRef.name",
-            name = ".name",
+            r#"{k_val}; command -v jq >/dev/null 2>&1 || {{ echo 'jq not installed on host (required for rbac_diagnose JSON output)' >&2; exit 3; }}; CTX="{ctx_flag_trimmed}"; SA={sa_esc}; NS={ns_esc}; AS="system:serviceaccount:$NS:$SA"; CANI=$($K auth can-i --list --as "$AS" -n "$NS" $CTX 2>/dev/null | tail -n +2); BINDINGS=$($K get rolebindings,clusterrolebindings --all-namespaces $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"|"}}{{range .subjects[*]}}{{.kind}}{{"/"}}{{.namespace}}{{"/"}}{{.name}}{{","}}{{end}}{{"\n"}}{{end}}' 2>/dev/null | grep -i "$SA" | grep -i "$NS"); CANI_JSON=$(printf '%s\n' "$CANI" | jq -Rs '[split("\n")[] | select(length > 0)]'); BIND_JSON=$(printf '%s\n' "$BINDINGS" | awk -F'|' 'NF>=5 {{printf "{{\"namespace\":%s,\"kind\":%s,\"name\":%s,\"roleRefKind\":%s,\"roleRefName\":%s}}\n", (length($1)?"\""$1"\"":"null"), "\""$2"\"", "\""$3"\"", "\""$4"\"", "\""$5"\""}}' | jq -s '.'); jq -n --arg sa "$AS" --argjson cani "${{CANI_JSON:-[]}}" --argjson bindings "${{BIND_JSON:-[]}}" '{{"serviceaccount":$sa,"can_i_list":$cani,"granting_bindings":$bindings}}'"#
         )
     }
 

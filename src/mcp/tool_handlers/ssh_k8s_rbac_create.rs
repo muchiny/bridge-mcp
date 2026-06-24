@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::kubernetes::{
-    KubernetesCommandBuilder, validate_rbac_kind, validate_sa_name,
+    KubernetesCommandBuilder, validate_rbac_kind, validate_rbac_name,
 };
 use crate::error::{BridgeError, Result};
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -174,7 +174,7 @@ impl StandardTool for K8sRbacCreateTool {
                 "serviceaccount",
             ],
         )?;
-        validate_sa_name(&args.name)?;
+        validate_rbac_name(&args.name)?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -511,5 +511,47 @@ mod tests {
         };
         let result = K8sRbacCreateTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_command_invalid_name_uses_generic_message() {
+        // validate_rbac_name must reject uppercase and produce a generic (non-SA-specific) error
+        let args = SshK8sRbacCreateArgs {
+            host: "s1".into(),
+            kind: "role".into(),
+            name: "My-Role-UPPERCASE".into(), // invalid: uppercase
+            namespace: None,
+            verbs: None,
+            resources: None,
+            resource_names: None,
+            clusterrole: None,
+            role: None,
+            serviceaccount: None,
+            user: None,
+            group: None,
+            dry_run: false,
+            output: None,
+            context: None,
+            kubectl_bin: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let result = K8sRbacCreateTool::build_command(&args, &test_host_config());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                // Error must not say "service account" for a generic RBAC name
+                assert!(
+                    !reason.contains("service account"),
+                    "error should be generic, not SA-specific: {reason}"
+                );
+                assert!(
+                    reason.contains("RBAC resource name"),
+                    "error should mention 'RBAC resource name': {reason}"
+                );
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }

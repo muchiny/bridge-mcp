@@ -42,12 +42,15 @@ pub struct K8sRbacDiagnoseTool;
 impl StandardTool for K8sRbacDiagnoseTool {
     type Args = SshK8sRbacDiagnoseArgs;
     const NAME: &'static str = "ssh_k8s_rbac_diagnose";
+    const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
+        crate::domain::output_kind::OutputKind::Json;
     const DESCRIPTION: &'static str = "Composite RBAC diagnostic for a service account: \
-        prints (1) the full SA identity string `system:serviceaccount:<ns>:<sa>`, \
-        (2) `kubectl auth can-i --list --as <identity>` to enumerate effective permissions, \
-        and (3) all RoleBindings and ClusterRoleBindings that reference this SA. \
-        Read-only; produces structured output in three labelled sections. \
-        Use `namespace` to specify the SA's namespace (default: `default`).";
+        returns a JSON object with fields `serviceaccount` (SA identity string), \
+        `can_i_list` (array of effective permissions from `kubectl auth can-i --list --as`), \
+        and `granting_bindings` (array of `{namespace,kind,name,roleRefKind,roleRefName}` \
+        objects for bindings that reference this SA). \
+        Read-only. Use `namespace` to specify the SA's namespace (default: `default`). \
+        Requires `jq` on the remote host.";
     const SCHEMA: &'static str = r#"{
         "type": "object",
         "properties": {
@@ -272,6 +275,27 @@ mod tests {
         assert!(cmd.contains("auth can-i --list"), "cmd: {cmd}");
         assert!(cmd.contains("rolebindings"), "cmd: {cmd}");
         assert!(cmd.contains("east"), "context: cmd: {cmd}");
+        // Must have jq guard and emit a JSON object with the expected fields
+        assert!(
+            cmd.contains("command -v jq >/dev/null 2>&1"),
+            "jq guard missing: cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains("\"serviceaccount\""),
+            "serviceaccount field in JSON: cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains("\"can_i_list\""),
+            "can_i_list field in JSON: cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains("\"granting_bindings\""),
+            "granting_bindings field in JSON: cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains("jq -n"),
+            "jq -n (JSON object assembly) stage missing: cmd: {cmd}"
+        );
     }
 
     #[test]
@@ -291,6 +315,8 @@ mod tests {
             cmd.contains("default"),
             "should have default namespace: cmd: {cmd}"
         );
+        // JSON output must still be present
+        assert!(cmd.contains("jq -n"), "JSON object stage: cmd: {cmd}");
     }
 
     #[test]
