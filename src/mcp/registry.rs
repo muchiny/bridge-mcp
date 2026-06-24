@@ -1327,7 +1327,7 @@ mod tests {
         let config = ToolGroupsConfig { groups };
 
         let registry = create_filtered_registry(&config);
-        // 357 total minus 9 ansible tools = 348
+        // full registry minus the ansible group
         assert_eq!(registry.len(), all_tools_count() - group_size("ansible"));
         assert!(registry.get("ssh_ansible_playbook").is_none());
         assert!(registry.get("ssh_ansible_inventory").is_none());
@@ -1350,7 +1350,7 @@ mod tests {
         let config = ToolGroupsConfig { groups };
 
         let registry = create_filtered_registry(&config);
-        // 357 total minus 13 awx tools = 344
+        // full registry minus the awx group
         assert_eq!(registry.len(), all_tools_count() - group_size("awx"));
         assert!(registry.get("ssh_awx_status").is_none());
         assert!(registry.get("ssh_awx_templates").is_none());
