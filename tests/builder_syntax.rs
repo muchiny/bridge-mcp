@@ -168,7 +168,7 @@ fn docker_ps_subshell_parses() {
 #[test]
 fn kubectl_get_subshell_parses() {
     let cmd = KubernetesCommandBuilder::build_get_command(
-        None, "pods", None, None, false, None, None, None, None,
+        None, "pods", None, None, false, None, None, None, None, false, false, false, None,
     );
     assert_runtime_form_parses(&cmd, "kubectl_get auto-detect");
 }

@@ -149,6 +149,10 @@ fn snapshot_kubectl_get_pods() {
         None,
         Some("wide"),
         None,
+        false,
+        false,
+        false,
+        None,
     ));
 }
 
@@ -164,6 +168,10 @@ fn snapshot_kubectl_get_all_namespaces() {
         None,
         Some("json"),
         None,
+        false,
+        false,
+        false,
+        None,
     ));
 }
 
@@ -178,6 +186,11 @@ fn snapshot_kubectl_logs() {
         Some("1h"),
         false,
         false,
+        None,
+        false,
+        None,
+        false,
+        None,
     ));
 }
 
@@ -186,15 +199,17 @@ fn snapshot_kubectl_describe() {
     assert_snapshot!(KubernetesCommandBuilder::build_describe_command(
         Some("kubectl"),
         "pod",
-        "my-pod",
+        Some("my-pod"),
         Some("production"),
+        None,
+        false,
     ));
 }
 
 #[test]
 fn snapshot_kubectl_auto_detect() {
     assert_snapshot!(KubernetesCommandBuilder::build_get_command(
-        None, "nodes", None, None, false, None, None, None, None,
+        None, "nodes", None, None, false, None, None, None, None, false, false, false, None,
     ));
 }
 

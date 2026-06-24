@@ -246,7 +246,7 @@ proptest! {
     #[test]
     fn kubectl_get_contains_resource(resource in "[a-zA-Z]{1,20}") {
         let cmd = KubernetesCommandBuilder::build_get_command(
-            Some("kubectl"), &resource, None, None, false, None, None, None, None,
+            Some("kubectl"), &resource, None, None, false, None, None, None, None, false, false, false, None,
         );
         prop_assert!(cmd.contains("get"), "Missing 'get': {cmd}");
         prop_assert!(cmd.contains(&resource), "Missing resource: {cmd}");
@@ -260,7 +260,7 @@ proptest! {
     ) {
         let cmd = KubernetesCommandBuilder::build_get_command(
             Some("kubectl"), &resource, None, Some(&namespace),
-            false, None, None, None, None,
+            false, None, None, None, None, false, false, false, None,
         );
         prop_assert!(cmd.contains("-n"), "Missing '-n' flag: {cmd}");
         prop_assert!(cmd.contains(&namespace), "Missing namespace: {cmd}");
