@@ -29,6 +29,16 @@ pub struct SshK8sLogsArgs {
     #[serde(default)]
     timestamps: Option<bool>,
     #[serde(default)]
+    label_selector: Option<String>,
+    #[serde(default)]
+    all_containers: Option<bool>,
+    #[serde(default)]
+    max_log_requests: Option<u64>,
+    #[serde(default)]
+    prefix: Option<bool>,
+    #[serde(default)]
+    since_time: Option<String>,
+    #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
@@ -126,6 +136,11 @@ impl StandardTool for K8sLogsTool {
             args.since.as_deref(),
             args.previous.unwrap_or(false),
             args.timestamps.unwrap_or(false),
+            args.label_selector.as_deref(),
+            args.all_containers.unwrap_or(false),
+            args.max_log_requests,
+            args.prefix.unwrap_or(false),
+            args.since_time.as_deref(),
         ))
     }
 }
@@ -330,6 +345,11 @@ mod tests {
             since: None,
             previous: None,
             timestamps: None,
+            label_selector: None,
+            all_containers: None,
+            max_log_requests: None,
+            prefix: None,
+            since_time: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -351,6 +371,11 @@ mod tests {
             since: None,
             previous: None,
             timestamps: None,
+            label_selector: None,
+            all_containers: None,
+            max_log_requests: None,
+            prefix: None,
+            since_time: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -375,6 +400,11 @@ mod tests {
             since: Some("1h".to_string()),
             previous: Some(true),
             timestamps: Some(true),
+            label_selector: None,
+            all_containers: None,
+            max_log_requests: None,
+            prefix: None,
+            since_time: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -398,6 +428,11 @@ mod tests {
             since: Some("30m".to_string()),
             previous: Some(true),
             timestamps: Some(true),
+            label_selector: None,
+            all_containers: None,
+            max_log_requests: None,
+            prefix: None,
+            since_time: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -412,5 +447,68 @@ mod tests {
         assert!(cmd.contains("--since='30m'"));
         assert!(cmd.contains("-p"));
         assert!(cmd.contains("--timestamps"));
+    }
+
+    #[test]
+    fn test_build_command_with_label_selector() {
+        let args = SshK8sLogsArgs {
+            host: "server1".to_string(),
+            pod: "my-pod".to_string(),
+            namespace: None,
+            container: None,
+            tail: None,
+            since: None,
+            previous: None,
+            timestamps: None,
+            label_selector: Some("app=nginx".to_string()),
+            all_containers: None,
+            max_log_requests: None,
+            prefix: None,
+            since_time: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sLogsTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-l 'app=nginx'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_prefix_since_time() {
+        let args = SshK8sLogsArgs {
+            host: "server1".to_string(),
+            pod: "my-pod".to_string(),
+            namespace: None,
+            container: None,
+            tail: None,
+            since: None,
+            previous: None,
+            timestamps: None,
+            label_selector: None,
+            all_containers: Some(true),
+            max_log_requests: Some(5),
+            prefix: Some(true),
+            since_time: Some("2024-01-01T00:00:00Z".to_string()),
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sLogsTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("--all-containers"), "cmd: {cmd}");
+        assert!(cmd.contains("--max-log-requests=5"), "cmd: {cmd}");
+        assert!(cmd.contains("--prefix"), "cmd: {cmd}");
+        assert!(cmd.contains("--since-time="), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_validate_label_selector_rejects_flag() {
+        use crate::domain::use_cases::kubernetes::KubernetesCommandBuilder;
+        assert!(KubernetesCommandBuilder::validate_label_selector("app=nginx").is_ok());
+        assert!(KubernetesCommandBuilder::validate_label_selector("-flag").is_err());
+        assert!(KubernetesCommandBuilder::validate_label_selector("").is_err());
     }
 }
