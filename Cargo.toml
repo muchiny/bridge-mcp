@@ -71,7 +71,7 @@ russh-sftp = "2.1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde-saphyr = "=0.0.27"
+serde-saphyr = "=0.0.28"
 
 # Error handling
 thiserror = "2"
