@@ -16,17 +16,25 @@ pub struct SshK8sSetArgs {
     host: String,
     subcommand: String,
     target: String,
+    #[serde(default)]
     assignments: Vec<String>,
     #[serde(default)]
     namespace: Option<String>,
     #[serde(default)]
     context: Option<String>,
     #[serde(default)]
+    list: Option<bool>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    env_file: Option<String>,
+    #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
+    #[serde(default)]
     save_output: Option<String>,
 }
 
@@ -76,6 +84,18 @@ impl StandardTool for K8sSetTool {
                 "type": "string",
                 "description": "kubectl context for multi-cluster targeting (e.g. 'east', 'prod-us-east-1')"
             },
+            "list": {
+                "type": "boolean",
+                "description": "List current values (env subcommand only). Mutually exclusive with assignments."
+            },
+            "from": {
+                "type": "string",
+                "description": "Import all env vars from a configmap or secret (format: configmap/NAME or secret/NAME). env subcommand only."
+            },
+            "env_file": {
+                "type": "string",
+                "description": "Import env vars from a file (env subcommand only). Mutually exclusive with from."
+            },
             "kubectl_bin": {
                 "type": "string",
                 "description": "Custom kubectl binary path (default: auto-detect kubectl, k3s kubectl, microk8s kubectl)"
@@ -96,7 +116,7 @@ impl StandardTool for K8sSetTool {
                 "description": "Save full output to a local file (on MCP server). Claude Code can then read this file directly with its Read tool."
             }
         },
-        "required": ["host", "subcommand", "target", "assignments"]
+        "required": ["host", "subcommand", "target"]
     }"#;
 
     fn build_command(args: &SshK8sSetArgs, _host_config: &HostConfig) -> Result<String> {
@@ -114,6 +134,16 @@ impl StandardTool for K8sSetTool {
         if let Some(ctx) = args.context.as_deref() {
             crate::domain::use_cases::kubernetes::validate_context(ctx)?;
         }
+        if let Some(f) = args.from.as_deref() {
+            KubernetesCommandBuilder::validate_set_from(f)?;
+        }
+        KubernetesCommandBuilder::validate_set_invocation(
+            &args.subcommand,
+            &args.assignments,
+            args.list.unwrap_or(false),
+            args.from.as_deref(),
+            args.env_file.as_deref(),
+        )?;
         Ok(KubernetesCommandBuilder::build_set_command(
             args.kubectl_bin.as_deref(),
             &args.subcommand,
@@ -121,6 +151,9 @@ impl StandardTool for K8sSetTool {
             &args.assignments,
             args.namespace.as_deref(),
             args.context.as_deref(),
+            args.list.unwrap_or(false),
+            args.from.as_deref(),
+            args.env_file.as_deref(),
         ))
     }
 }
@@ -215,7 +248,6 @@ mod tests {
         assert!(required.contains(&json!("host")));
         assert!(required.contains(&json!("subcommand")));
         assert!(required.contains(&json!("target")));
-        assert!(required.contains(&json!("assignments")));
     }
 
     #[test]
@@ -239,6 +271,9 @@ mod tests {
         assert_eq!(args.kubectl_bin, Some("k3s kubectl".to_string()));
         assert_eq!(args.timeout_seconds, Some(60));
         assert_eq!(args.max_output, Some(10000));
+        assert!(args.list.is_none());
+        assert!(args.from.is_none());
+        assert!(args.env_file.is_none());
     }
 
     #[test]
@@ -334,6 +369,9 @@ mod tests {
             assignments: vec!["app=nginx:1.27".into()],
             namespace: Some("prod".into()),
             context: Some("east".into()),
+            list: None,
+            from: None,
+            env_file: None,
             kubectl_bin: Some("kubectl".into()),
             timeout_seconds: None,
             max_output: None,
@@ -356,11 +394,104 @@ mod tests {
             assignments: vec!["app=x".into()],
             namespace: None,
             context: None,
+            list: None,
+            from: None,
+            env_file: None,
             kubectl_bin: Some("kubectl".into()),
             timeout_seconds: None,
             max_output: None,
             save_output: None,
         };
         assert!(K8sSetTool::build_command(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_build_command_set_env_list() {
+        let args = SshK8sSetArgs {
+            host: "s1".into(),
+            subcommand: "env".into(),
+            target: "deployment/api".into(),
+            assignments: vec![],
+            namespace: None,
+            context: None,
+            list: Some(true),
+            from: None,
+            env_file: None,
+            kubectl_bin: Some("kubectl".into()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = K8sSetTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--list"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_set_env_from_configmap() {
+        let args = SshK8sSetArgs {
+            host: "s1".into(),
+            subcommand: "env".into(),
+            target: "deployment/api".into(),
+            assignments: vec![],
+            namespace: None,
+            context: None,
+            list: None,
+            from: Some("configmap/my-config".into()),
+            env_file: None,
+            kubectl_bin: Some("kubectl".into()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = K8sSetTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--from='configmap/my-config'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_rejects_from_on_non_env() {
+        let args = SshK8sSetArgs {
+            host: "s1".into(),
+            subcommand: "image".into(),
+            target: "deployment/api".into(),
+            assignments: vec![],
+            namespace: None,
+            context: None,
+            list: None,
+            from: Some("configmap/my-config".into()),
+            env_file: None,
+            kubectl_bin: Some("kubectl".into()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let result = K8sSetTool::build_command(&args, &test_host_config());
+        assert!(
+            result.is_err(),
+            "expected error when from used on non-env subcommand"
+        );
+    }
+
+    #[test]
+    fn test_build_command_rejects_empty_invocation() {
+        let args = SshK8sSetArgs {
+            host: "s1".into(),
+            subcommand: "env".into(),
+            target: "deployment/api".into(),
+            assignments: vec![],
+            namespace: None,
+            context: None,
+            list: None,
+            from: None,
+            env_file: None,
+            kubectl_bin: Some("kubectl".into()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let result = K8sSetTool::build_command(&args, &test_host_config());
+        assert!(
+            result.is_err(),
+            "expected error when no assignments/list/from/env_file"
+        );
     }
 }
