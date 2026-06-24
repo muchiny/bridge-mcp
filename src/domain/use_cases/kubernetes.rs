@@ -145,6 +145,71 @@ pub fn validate_raw_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a Kubernetes secret type.
+///
+/// # Errors
+/// Returns `BridgeError::CommandDenied` if `t` is not one of
+/// `opaque`, `generic`, `tls`, or `docker-registry` (case-insensitive).
+pub fn validate_secret_type(t: &str) -> Result<()> {
+    match t.to_lowercase().as_str() {
+        "opaque" | "generic" | "tls" | "docker-registry" => Ok(()),
+        _ => Err(BridgeError::CommandDenied {
+            reason: format!(
+                "invalid secret type '{t}'; must be one of: Opaque/generic, tls, docker-registry"
+            ),
+        }),
+    }
+}
+
+/// Validate a Kubernetes secret/configmap data key.
+///
+/// Keys must be non-empty, must not start with `-` (flag injection guard),
+/// and may only contain `[-._a-zA-Z0-9]`.
+///
+/// # Errors
+/// Returns `BridgeError::CommandDenied` on invalid keys.
+pub fn validate_secret_key(k: &str) -> Result<()> {
+    if k.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "key must not be empty".to_string(),
+        });
+    }
+    if k.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("key must not start with '-' (flag injection guard): {k}"),
+        });
+    }
+    if !k
+        .chars()
+        .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.'))
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("key contains disallowed characters: {k}"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a key used inside a jsonpath `{.data['KEY']}` expression.
+///
+/// Rejects all characters that could escape the double-quoted jsonpath context:
+/// single quote, double quote, backslash, `$`, and backtick, in addition to
+/// the base [`validate_secret_key`] restrictions.
+///
+/// # Errors
+/// Returns `BridgeError::CommandDenied` on invalid keys.
+pub fn validate_jsonpath_key(k: &str) -> Result<()> {
+    validate_secret_key(k)?;
+    for ch in k.chars() {
+        if matches!(ch, '\'' | '"' | '\\' | '$' | '`') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("key contains character '{ch}' unsafe in jsonpath context: {k}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Build an optional ` --context=<ctx>` flag (leading space, shell-escaped).
 ///
 /// Safe context names (only `[A-Za-z0-9._@:/-]`) are emitted bare; names
@@ -1371,6 +1436,312 @@ impl KubernetesCommandBuilder {
             });
         }
         Ok(())
+    }
+
+    /// Build a `kubectl create secret` command.
+    ///
+    /// Supports generic (`Opaque`), `tls`, and `docker-registry` types.
+    /// Secret values are accepted as `&str` at the boundary (callers must
+    /// extract via `RedactedSecret::as_str()`) — the command string will
+    /// contain plaintext in the host process argv (acceptable for air-gapped
+    /// hosts; prefer `--from-file`/`--from-env-file` in sensitive environments).
+    ///
+    /// # Errors
+    /// Returns `BridgeError::CommandDenied` on validation failure.
+    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_lines)]
+    pub fn build_create_secret_command(
+        kubectl_bin: Option<&str>,
+        name: &str,
+        secret_type: &str,
+        from_literal: &[(String, String)],
+        from_file: &[String],
+        from_env_file: Option<&str>,
+        tls_cert: Option<&str>,
+        tls_key: Option<&str>,
+        docker_server: Option<&str>,
+        docker_username: Option<&str>,
+        docker_password: Option<&str>,
+        docker_email: Option<&str>,
+        namespace: Option<&str>,
+        dry_run: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        validate_secret_type(secret_type)?;
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+
+        // Validate key names in from_literal
+        for (k, _v) in from_literal {
+            validate_secret_key(k)?;
+        }
+
+        // Validate subtype-specific argument combinations
+        let normalized = secret_type.to_lowercase();
+        let subcommand = match normalized.as_str() {
+            "tls" => "tls",
+            "docker-registry" => "docker-registry",
+            _ => "generic", // opaque or generic
+        };
+
+        match subcommand {
+            "tls" => {
+                if tls_cert.is_none() || tls_key.is_none() {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "tls secret requires both tls_cert and tls_key".to_string(),
+                    });
+                }
+                if !from_literal.is_empty() || !from_file.is_empty() {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "tls secret does not accept from_literal or from_file".to_string(),
+                    });
+                }
+            }
+            "docker-registry" => {
+                if docker_server.is_none() || docker_username.is_none() || docker_password.is_none()
+                {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "docker-registry secret requires docker_server, docker_username, and docker_password".to_string(),
+                    });
+                }
+                if !from_literal.is_empty() {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "docker-registry secret does not accept from_literal".to_string(),
+                    });
+                }
+            }
+            _ => {
+                // generic: forbid tls/docker flags
+                if tls_cert.is_some() || tls_key.is_some() {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "generic secret does not accept tls_cert or tls_key".to_string(),
+                    });
+                }
+                if docker_server.is_some()
+                    || docker_username.is_some()
+                    || docker_password.is_some()
+                    || docker_email.is_some()
+                {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "generic secret does not accept docker_* arguments".to_string(),
+                    });
+                }
+            }
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}create secret {subcommand} {}", shell_escape(name));
+
+        for (k, v) in from_literal {
+            // k validated above; v is plaintext at this boundary
+            let _ = write!(
+                cmd,
+                " --from-literal={}={}",
+                shell_escape(k),
+                shell_escape(v)
+            );
+        }
+        for path in from_file {
+            let _ = write!(cmd, " --from-file={}", shell_escape(path));
+        }
+        if let Some(env_path) = from_env_file {
+            let _ = write!(cmd, " --from-env-file={}", shell_escape(env_path));
+        }
+        if let Some(cert) = tls_cert {
+            let _ = write!(cmd, " --cert={}", shell_escape(cert));
+        }
+        if let Some(key) = tls_key {
+            let _ = write!(cmd, " --key={}", shell_escape(key));
+        }
+        if let Some(srv) = docker_server {
+            let _ = write!(cmd, " --docker-server={}", shell_escape(srv));
+        }
+        if let Some(user) = docker_username {
+            let _ = write!(cmd, " --docker-username={}", shell_escape(user));
+        }
+        if let Some(pw) = docker_password {
+            // pw is plaintext at this single audited boundary
+            let _ = write!(cmd, " --docker-password={}", shell_escape(pw));
+        }
+        if let Some(email) = docker_email {
+            let _ = write!(cmd, " --docker-email={}", shell_escape(email));
+        }
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(dr) = dry_run {
+            let _ = write!(cmd, " --dry-run={}", shell_escape(dr));
+        }
+        let ctx_flag = kubectl_context_flag(context);
+        cmd.push_str(&ctx_flag);
+        Ok(cmd)
+    }
+
+    /// Build a `kubectl create configmap` command.
+    ///
+    /// # Errors
+    /// Returns `BridgeError::CommandDenied` when no source is given or keys are invalid.
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_create_configmap_command(
+        kubectl_bin: Option<&str>,
+        name: &str,
+        from_literal: &[(String, String)],
+        from_file: &[String],
+        from_env_file: Option<&str>,
+        namespace: Option<&str>,
+        dry_run: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        if from_literal.is_empty() && from_file.is_empty() && from_env_file.is_none() {
+            return Err(BridgeError::CommandDenied {
+                reason: "at least one of from_literal, from_file, or from_env_file must be set"
+                    .to_string(),
+            });
+        }
+        for (k, _v) in from_literal {
+            validate_secret_key(k)?;
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}create configmap {}", shell_escape(name));
+
+        for (k, v) in from_literal {
+            let _ = write!(
+                cmd,
+                " --from-literal={}={}",
+                shell_escape(k),
+                shell_escape(v)
+            );
+        }
+        for path in from_file {
+            let _ = write!(cmd, " --from-file={}", shell_escape(path));
+        }
+        if let Some(env_path) = from_env_file {
+            let _ = write!(cmd, " --from-env-file={}", shell_escape(env_path));
+        }
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(dr) = dry_run {
+            let _ = write!(cmd, " --dry-run={}", shell_escape(dr));
+        }
+        let ctx_flag = kubectl_context_flag(context);
+        cmd.push_str(&ctx_flag);
+        Ok(cmd)
+    }
+
+    /// Build a `kubectl get secret` command that lists data keys + base64 lengths.
+    ///
+    /// The go-template emits `<key>\t<base64-len>\n` per data entry — it
+    /// NEVER outputs the value bytes, making this safe to log.
+    ///
+    /// # Errors
+    /// Returns `BridgeError::CommandDenied` on namespace/context validation failure.
+    pub fn build_secret_keys_command(
+        kubectl_bin: Option<&str>,
+        name: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}get secret {}", shell_escape(name));
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        let ctx_flag = kubectl_context_flag(context);
+        cmd.push_str(&ctx_flag);
+        // go-template: key TAB base64-length NEWLINE — no value bytes
+        cmd.push_str(
+            r#" -o go-template='{{range $k,$v := .data}}{{$k}}{{"\t"}}{{len $v}}{{"\n"}}{{end}}'"#,
+        );
+        Ok(cmd)
+    }
+
+    /// Build a `kubectl get secret | base64 -d` command (REVEAL-GATED).
+    ///
+    /// The caller MUST check `reveal == true` before calling this function
+    /// and return a `CommandDenied` error if not. The builder itself does NOT
+    /// enforce the reveal gate — that is the handler's responsibility.
+    ///
+    /// # Errors
+    /// Returns `BridgeError::CommandDenied` on key/namespace/context validation failure.
+    pub fn build_secret_decode_command(
+        kubectl_bin: Option<&str>,
+        name: &str,
+        key: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        validate_jsonpath_key(key)?;
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}get secret {}", shell_escape(name));
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        let ctx_flag = kubectl_context_flag(context);
+        cmd.push_str(&ctx_flag);
+        // key is already validated as safe for jsonpath single-quote indexing
+        let _ = write!(cmd, " -o jsonpath=\"{{.data['{key}']}}\" | base64 -d");
+        Ok(cmd)
+    }
+
+    /// Build a `kubectl get secret -o yaml` command that strips cluster-instance metadata.
+    ///
+    /// The output is a re-appliable YAML manifest with `creationTimestamp`,
+    /// `resourceVersion`, `uid`, `selfLink`, `generation`, `managedFields`,
+    /// `last-applied-configuration` annotation, and the `namespace` line removed.
+    /// The `.data` block still contains base64-encoded values — treat as secret.
+    ///
+    /// The caller MUST enforce the reveal gate before calling this builder.
+    ///
+    /// # Errors
+    /// Returns `BridgeError::CommandDenied` on namespace/context validation failure.
+    pub fn build_secret_export_command(
+        kubectl_bin: Option<&str>,
+        name: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}get secret {}", shell_escape(name));
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        let ctx_flag = kubectl_context_flag(context);
+        cmd.push_str(&ctx_flag);
+        // Strip cluster-instance fields so the manifest is re-appliable
+        cmd.push_str(
+            r" -o yaml | grep -v -E '^\s*(creationTimestamp|resourceVersion|uid|selfLink|generation|managedFields):' | grep -v -E '^\s+(kubectl\.kubernetes\.io/last-applied-configuration|namespace):'",
+        );
+        Ok(cmd)
     }
 }
 
@@ -3560,5 +3931,263 @@ mod tests {
     fn test_validate_raw_path_accept_api_paths() {
         assert!(validate_raw_path("/api/v1").is_ok());
         assert!(validate_raw_path("/apis/apps/v1").is_ok());
+    }
+
+    // ============== validate_secret_type Tests ==============
+
+    #[test]
+    fn test_validate_secret_type_accepts_valid() {
+        assert!(validate_secret_type("Opaque").is_ok());
+        assert!(validate_secret_type("opaque").is_ok());
+        assert!(validate_secret_type("generic").is_ok());
+        assert!(validate_secret_type("tls").is_ok());
+        assert!(validate_secret_type("docker-registry").is_ok());
+    }
+
+    #[test]
+    fn test_validate_secret_type_rejects_invalid() {
+        assert!(validate_secret_type("kubernetes.io/service-account-token").is_err());
+        assert!(validate_secret_type("").is_err());
+        assert!(validate_secret_type("basic-auth").is_err());
+    }
+
+    // ============== validate_secret_key Tests ==============
+
+    #[test]
+    fn test_validate_secret_key_accepts_valid() {
+        assert!(validate_secret_key("my-key").is_ok());
+        assert!(validate_secret_key("KEY_123").is_ok());
+        assert!(validate_secret_key("a.b.c").is_ok());
+    }
+
+    #[test]
+    fn test_validate_secret_key_rejects_flag_injection() {
+        assert!(validate_secret_key("-flag").is_err());
+        assert!(validate_secret_key("").is_err());
+    }
+
+    #[test]
+    fn test_validate_secret_key_rejects_bad_charset() {
+        assert!(validate_secret_key("key with space").is_err());
+        assert!(validate_secret_key("key$").is_err());
+        assert!(validate_secret_key("key;rm").is_err());
+    }
+
+    // ============== validate_jsonpath_key Tests ==============
+
+    #[test]
+    fn test_validate_jsonpath_key_rejects_quote_chars() {
+        assert!(validate_jsonpath_key("k'ey").is_err());
+        assert!(validate_jsonpath_key("k\"ey").is_err());
+        assert!(validate_jsonpath_key("k\\ey").is_err());
+        assert!(validate_jsonpath_key("k$ey").is_err());
+    }
+
+    #[test]
+    fn test_validate_jsonpath_key_accepts_safe_key() {
+        assert!(validate_jsonpath_key("my-key").is_ok());
+        assert!(validate_jsonpath_key("TLS_CERT").is_ok());
+    }
+
+    // ============== build_create_secret_command Tests ==============
+
+    #[test]
+    fn test_build_create_secret_command_generic() {
+        let cmd = KubernetesCommandBuilder::build_create_secret_command(
+            Some("kubectl"),
+            "my-secret",
+            "generic",
+            &[("api_key".to_string(), "s3cr3t!".to_string())],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("default"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("create secret generic"), "cmd: {cmd}");
+        assert!(cmd.contains("my-secret"), "cmd: {cmd}");
+        assert!(cmd.contains("--from-literal="), "cmd: {cmd}");
+        assert!(cmd.contains("-n 'default'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_create_secret_command_tls() {
+        let cmd = KubernetesCommandBuilder::build_create_secret_command(
+            Some("kubectl"),
+            "tls-secret",
+            "tls",
+            &[],
+            &[],
+            None,
+            Some("/etc/certs/tls.crt"),
+            Some("/etc/certs/tls.key"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("create secret tls"), "cmd: {cmd}");
+        assert!(cmd.contains("--cert="), "cmd: {cmd}");
+        assert!(cmd.contains("--key="), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_create_secret_command_docker_registry() {
+        let cmd = KubernetesCommandBuilder::build_create_secret_command(
+            Some("kubectl"),
+            "regcred",
+            "docker-registry",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            Some("registry.example.com"),
+            Some("myuser"),
+            Some("mypassword"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("create secret docker-registry"), "cmd: {cmd}");
+        assert!(cmd.contains("--docker-server="), "cmd: {cmd}");
+        assert!(cmd.contains("--docker-username="), "cmd: {cmd}");
+        assert!(cmd.contains("--docker-password="), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_create_secret_command_rejects_tls_missing_key() {
+        let result = KubernetesCommandBuilder::build_create_secret_command(
+            Some("kubectl"),
+            "bad",
+            "tls",
+            &[],
+            &[],
+            None,
+            Some("/cert.pem"),
+            None, // missing key
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============== build_create_configmap_command Tests ==============
+
+    #[test]
+    fn test_build_create_configmap_command_from_literal() {
+        let cmd = KubernetesCommandBuilder::build_create_configmap_command(
+            Some("kubectl"),
+            "my-config",
+            &[
+                ("key1".to_string(), "value1".to_string()),
+                ("key2".to_string(), "value2".to_string()),
+            ],
+            &[],
+            None,
+            Some("default"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("create configmap"), "cmd: {cmd}");
+        assert!(cmd.contains("my-config"), "cmd: {cmd}");
+        assert!(cmd.contains("--from-literal="), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_create_configmap_command_rejects_empty_sources() {
+        let result = KubernetesCommandBuilder::build_create_configmap_command(
+            Some("kubectl"),
+            "empty-config",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err(), "empty sources must be rejected");
+    }
+
+    // ============== build_secret_keys_command Tests ==============
+
+    #[test]
+    fn test_build_secret_keys_command() {
+        let cmd = KubernetesCommandBuilder::build_secret_keys_command(
+            Some("kubectl"),
+            "my-secret",
+            Some("prod"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("get secret"), "cmd: {cmd}");
+        assert!(cmd.contains("my-secret"), "cmd: {cmd}");
+        assert!(cmd.contains("go-template"), "cmd: {cmd}");
+        assert!(!cmd.contains("base64"), "must not decode values: {cmd}");
+    }
+
+    // ============== build_secret_decode_command Tests ==============
+
+    #[test]
+    fn test_build_secret_decode_command() {
+        let cmd = KubernetesCommandBuilder::build_secret_decode_command(
+            Some("kubectl"),
+            "my-secret",
+            "api-key",
+            Some("prod"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("get secret"), "cmd: {cmd}");
+        assert!(cmd.contains("jsonpath"), "cmd: {cmd}");
+        assert!(cmd.contains("base64 -d"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_secret_decode_command_rejects_bad_key() {
+        let result = KubernetesCommandBuilder::build_secret_decode_command(
+            Some("kubectl"),
+            "my-secret",
+            "key'injection",
+            None,
+            None,
+        );
+        assert!(result.is_err(), "single quote in key must be rejected");
+    }
+
+    // ============== build_secret_export_command Tests ==============
+
+    #[test]
+    fn test_build_secret_export_command() {
+        let cmd = KubernetesCommandBuilder::build_secret_export_command(
+            Some("kubectl"),
+            "my-secret",
+            Some("prod"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("get secret"), "cmd: {cmd}");
+        assert!(cmd.contains("-o yaml"), "cmd: {cmd}");
+        assert!(cmd.contains("grep -v"), "cmd: {cmd}");
+        assert!(cmd.contains("managedFields"), "cmd: {cmd}");
     }
 }
