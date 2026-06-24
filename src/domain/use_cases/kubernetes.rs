@@ -176,7 +176,8 @@ impl KubernetesCommandBuilder {
     ///
     /// Constructs: `{kubectl} get {resource} [{name}] [-n {ns}] [-A]
     /// [-l {selector}] [--field-selector {fs}] [-o {output}]
-    /// [--sort-by={sort}]`
+    /// [--sort-by={sort}] [--show-labels] [--show-kind]
+    /// [--chunk-size={N}]`
     #[must_use]
     #[expect(clippy::too_many_arguments)]
     pub fn build_get_command(
@@ -189,6 +190,10 @@ impl KubernetesCommandBuilder {
         field_selector: Option<&str>,
         output: Option<&str>,
         sort_by: Option<&str>,
+        raw: bool,
+        show_labels: bool,
+        show_kind: bool,
+        chunk_size: Option<u64>,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
         let escaped_resource = shell_escape(resource);
@@ -216,10 +221,24 @@ impl KubernetesCommandBuilder {
 
         if let Some(out) = output {
             let _ = write!(cmd, " -o {}", shell_escape(out));
+        } else if raw {
+            cmd.push_str(" -o json");
         }
 
         if let Some(sort) = sort_by {
             let _ = write!(cmd, " --sort-by={}", shell_escape(sort));
+        }
+
+        if show_labels {
+            cmd.push_str(" --show-labels");
+        }
+
+        if show_kind {
+            cmd.push_str(" --show-kind");
+        }
+
+        if let Some(cs) = chunk_size {
+            let _ = write!(cmd, " --chunk-size={cs}");
         }
 
         cmd
@@ -228,13 +247,16 @@ impl KubernetesCommandBuilder {
     /// Build a `kubectl get events` command sorted by last timestamp.
     ///
     /// Constructs: `{kubectl} get events --sort-by=.lastTimestamp [-n {ns}]
-    /// [-A] [--field-selector {fs}]`
+    /// [-A] [--field-selector {fs}] [-l {sel}] [--for {target}] [-o {out}]`
     #[must_use]
     pub fn build_events_command(
         kubectl_bin: Option<&str>,
         namespace: Option<&str>,
         all_namespaces: bool,
         field_selector: Option<&str>,
+        output: Option<&str>,
+        label_selector: Option<&str>,
+        for_target: Option<&str>,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
         let mut cmd = format!("{prefix}get events --sort-by=.lastTimestamp");
@@ -247,13 +269,24 @@ impl KubernetesCommandBuilder {
         if let Some(fs) = field_selector {
             let _ = write!(cmd, " --field-selector {}", shell_escape(fs));
         }
+        if let Some(sel) = label_selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
+        if let Some(ft) = for_target {
+            let _ = write!(cmd, " --for {}", shell_escape(ft));
+        }
+        if let Some(out) = output {
+            let _ = write!(cmd, " -o {}", shell_escape(out));
+        }
         cmd
     }
 
     /// Build a `kubectl logs` command.
     ///
     /// Constructs: `{kubectl} logs {pod} [-n {ns}] [-c {container}]
-    /// [--tail={N}] [--since={dur}] [-p] [--timestamps]`
+    /// [--tail={N}] [--since={dur}] [-p] [--timestamps]
+    /// [-l {selector}] [--all-containers] [--max-log-requests={N}]
+    /// [--prefix] [--since-time={t}]`
     #[must_use]
     #[expect(clippy::too_many_arguments)]
     pub fn build_logs_command(
@@ -265,10 +298,15 @@ impl KubernetesCommandBuilder {
         since: Option<&str>,
         previous: bool,
         timestamps: bool,
+        label_selector: Option<&str>,
+        all_containers: bool,
+        max_log_requests: Option<u64>,
+        prefix: bool,
+        since_time: Option<&str>,
     ) -> String {
-        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let prefix_str = kubectl_detect_prefix(kubectl_bin);
         let escaped_pod = shell_escape(pod);
-        let mut cmd = format!("{prefix}logs {escaped_pod}");
+        let mut cmd = format!("{prefix_str}logs {escaped_pod}");
 
         if let Some(ns) = namespace {
             let _ = write!(cmd, " -n {}", shell_escape(ns));
@@ -294,26 +332,59 @@ impl KubernetesCommandBuilder {
             cmd.push_str(" --timestamps");
         }
 
+        if let Some(sel) = label_selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
+
+        if all_containers {
+            cmd.push_str(" --all-containers");
+        }
+
+        if let Some(n) = max_log_requests {
+            let _ = write!(cmd, " --max-log-requests={n}");
+        }
+
+        if prefix {
+            cmd.push_str(" --prefix");
+        }
+
+        if let Some(t) = since_time {
+            let _ = write!(cmd, " --since-time={}", shell_escape(t));
+        }
+
         cmd
     }
 
     /// Build a `kubectl describe` command.
     ///
-    /// Constructs: `{kubectl} describe {resource} {name} [-n {ns}]`
+    /// Constructs: `{kubectl} describe {resource} [{name}] [-l {sel}] [-n {ns}] [-A]`
     #[must_use]
     pub fn build_describe_command(
         kubectl_bin: Option<&str>,
         resource: &str,
-        name: &str,
+        name: Option<&str>,
         namespace: Option<&str>,
+        label_selector: Option<&str>,
+        all_namespaces: bool,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
         let escaped_resource = shell_escape(resource);
-        let escaped_name = shell_escape(name);
-        let mut cmd = format!("{prefix}describe {escaped_resource} {escaped_name}");
+        let mut cmd = format!("{prefix}describe {escaped_resource}");
+
+        if let Some(n) = name {
+            let _ = write!(cmd, " {}", shell_escape(n));
+        }
+
+        if let Some(sel) = label_selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
 
         if let Some(ns) = namespace {
             let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+
+        if all_namespaces {
+            cmd.push_str(" -A");
         }
 
         cmd
@@ -389,22 +460,42 @@ impl KubernetesCommandBuilder {
 
     /// Build a `kubectl delete` command.
     ///
-    /// Constructs: `{kubectl} delete {resource} {name} [-n {ns}]
+    /// Constructs: `{kubectl} delete {resource} [{name}] [-l {sel}]
+    /// [--field-selector {fs}] [--all] [-n {ns}]
     /// [--grace-period={N}] [--force] [--dry-run={mode}]`
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn build_delete_command(
         kubectl_bin: Option<&str>,
         resource: &str,
-        name: &str,
+        name: Option<&str>,
         namespace: Option<&str>,
         grace_period: Option<u64>,
         force: bool,
         dry_run: Option<&str>,
+        label_selector: Option<&str>,
+        all: bool,
+        field_selector: Option<&str>,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
         let escaped_resource = shell_escape(resource);
-        let escaped_name = shell_escape(name);
-        let mut cmd = format!("{prefix}delete {escaped_resource} {escaped_name}");
+        let mut cmd = format!("{prefix}delete {escaped_resource}");
+
+        if let Some(n) = name {
+            let _ = write!(cmd, " {}", shell_escape(n));
+        }
+
+        if let Some(sel) = label_selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
+
+        if let Some(fs) = field_selector {
+            let _ = write!(cmd, " --field-selector {}", shell_escape(fs));
+        }
+
+        if all {
+            cmd.push_str(" --all");
+        }
 
         if let Some(ns) = namespace {
             let _ = write!(cmd, " -n {}", shell_escape(ns));
@@ -428,7 +519,7 @@ impl KubernetesCommandBuilder {
     /// Build a `kubectl rollout` command.
     ///
     /// Constructs: `{kubectl} rollout {action} {resource} [-n {ns}]
-    /// [--to-revision={N}]`
+    /// [--to-revision={N}] [-l {sel}] [--watch={bool}] [--timeout={t}]`
     #[must_use]
     pub fn build_rollout_command(
         kubectl_bin: Option<&str>,
@@ -436,6 +527,9 @@ impl KubernetesCommandBuilder {
         resource: &str,
         namespace: Option<&str>,
         to_revision: Option<u64>,
+        watch: Option<bool>,
+        timeout: Option<&str>,
+        label_selector: Option<&str>,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
         let escaped_action = shell_escape(action);
@@ -448,6 +542,18 @@ impl KubernetesCommandBuilder {
 
         if let Some(rev) = to_revision {
             let _ = write!(cmd, " --to-revision={rev}");
+        }
+
+        if let Some(sel) = label_selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
+
+        if let Some(w) = watch {
+            let _ = write!(cmd, " --watch={w}");
+        }
+
+        if let Some(t) = timeout {
+            let _ = write!(cmd, " --timeout={}", shell_escape(t));
         }
 
         cmd
@@ -476,19 +582,27 @@ impl KubernetesCommandBuilder {
 
     /// Build a `kubectl exec` command.
     ///
-    /// Constructs: `{kubectl} exec {pod} [-n {ns}] [-c {container}]
-    /// -- {command}`
+    /// Constructs: `{kubectl} exec [-i] {pod} [-n {ns}] [-c {container}]
+    /// -- {argv...}` or `-- sh -c {command}`
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn build_exec_command(
         kubectl_bin: Option<&str>,
         pod: &str,
-        command: &str,
+        command: Option<&str>,
         namespace: Option<&str>,
         container: Option<&str>,
+        argv: Option<&[String]>,
+        stdin: bool,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
-        let escaped_pod = shell_escape(pod);
-        let mut cmd = format!("{prefix}exec {escaped_pod}");
+        let mut cmd = format!("{prefix}exec");
+
+        if stdin {
+            cmd.push_str(" -i");
+        }
+
+        let _ = write!(cmd, " {}", shell_escape(pod));
 
         if let Some(ns) = namespace {
             let _ = write!(cmd, " -n {}", shell_escape(ns));
@@ -498,7 +612,14 @@ impl KubernetesCommandBuilder {
             let _ = write!(cmd, " -c {}", shell_escape(c));
         }
 
-        let _ = write!(cmd, " -- sh -c {}", shell_escape(command));
+        if let Some(args) = argv {
+            cmd.push_str(" --");
+            for arg in args {
+                let _ = write!(cmd, " {}", shell_escape(arg));
+            }
+        } else if let Some(c) = command {
+            let _ = write!(cmd, " -- sh -c {}", shell_escape(c));
+        }
 
         cmd
     }
@@ -741,11 +862,12 @@ impl KubernetesCommandBuilder {
     /// Build a `kubectl set <subcommand> <target> <assignments...>` command.
     ///
     /// Constructs: `{kubectl} set {subcommand} {target} {assignments...}
-    /// [-n {ns}] [--context={ctx}]`
+    /// [--from={from}] [--env-file={ef}] [--list] [-n {ns}] [--context={ctx}]`
     ///
     /// `subcommand` is one of `image`, `env`, `resources` (validated by the
     /// handler before this builder is called).
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn build_set_command(
         kubectl_bin: Option<&str>,
         subcommand: &str,
@@ -753,6 +875,9 @@ impl KubernetesCommandBuilder {
         assignments: &[String],
         namespace: Option<&str>,
         context: Option<&str>,
+        list: bool,
+        from: Option<&str>,
+        env_file: Option<&str>,
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
         let mut cmd = format!(
@@ -762,6 +887,15 @@ impl KubernetesCommandBuilder {
         );
         for a in assignments {
             let _ = write!(cmd, " {}", shell_escape(a));
+        }
+        if let Some(f) = from {
+            let _ = write!(cmd, " --from={}", shell_escape(f));
+        }
+        if let Some(ef) = env_file {
+            let _ = write!(cmd, " --env-file={}", shell_escape(ef));
+        }
+        if list {
+            cmd.push_str(" --list");
         }
         if let Some(ns) = namespace {
             let _ = write!(cmd, " -n {}", shell_escape(ns));
@@ -1049,6 +1183,198 @@ impl KubernetesCommandBuilder {
         format!(
             "P={p}; echo '== APIService =='; $P get apiservice v1beta1.metrics.k8s.io -o jsonpath='{{.status.conditions[?(@.type==\"Available\")].status}}'{context_flag} 2>&1; echo; echo '== Deployment =='; $P get deploy -n kube-system metrics-server -o jsonpath='{{.status.readyReplicas}}/{{.status.replicas}}'{context_flag} 2>&1; echo; echo '== top smoke =='; $P top nodes{context_flag} 2>&1 | head -3"
         )
+    }
+
+    /// Validate a label selector for safety.
+    pub fn validate_label_selector(sel: &str) -> Result<()> {
+        if sel.is_empty() {
+            return Err(BridgeError::CommandDenied {
+                reason: "Label selector cannot be empty".to_string(),
+            });
+        }
+        if sel.starts_with('-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "Label selector '{sel}' rejected: starts with '-' (possible flag injection)"
+                ),
+            });
+        }
+        let valid = sel.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '.' | '_' | '/' | '=' | ',' | '!' | '(' | ')' | '-' | ' ' | '@' | ':'
+                )
+        });
+        if !valid {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("Label selector '{sel}' contains invalid characters"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate output format for `kubectl get events`.
+    pub fn validate_events_output(out: &str) -> Result<()> {
+        let allowed = ["json", "yaml", "wide", "name"];
+        if allowed.contains(&out) {
+            Ok(())
+        } else {
+            Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "Events output format '{out}' is not allowed. Allowed: {allowed:?}"
+                ),
+            })
+        }
+    }
+
+    /// Validate a `--for` target (kind/name) for `kubectl get events`.
+    pub fn validate_for_target(kind: &str, name: &str) -> Result<()> {
+        if kind.is_empty() || name.is_empty() {
+            return Err(BridgeError::CommandDenied {
+                reason: "for_kind and for_name must both be non-empty".to_string(),
+            });
+        }
+        let valid_kind = kind
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+        let valid_name = name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+        if !valid_kind || !valid_name {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "for_kind '{kind}' or for_name '{name}' contains invalid characters"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate that a delete operation has exactly one target specifier.
+    pub fn validate_delete_target(
+        resource: &str,
+        name: Option<&str>,
+        label_selector: Option<&str>,
+        field_selector: Option<&str>,
+        all: bool,
+    ) -> Result<()> {
+        let has_name = name.is_some();
+        let has_selector = label_selector.is_some() || field_selector.is_some();
+        match (has_name, has_selector, all) {
+            (true, false, false) => {}
+            (false, true, false) => {}
+            (false, false, true) => {}
+            (true, _, true) => {
+                return Err(BridgeError::CommandDenied {
+                    reason: "Cannot use both name and --all".to_string(),
+                });
+            }
+            (false, false, false) => {
+                return Err(BridgeError::CommandDenied {
+                    reason: "Must specify at least one of: name, label_selector, field_selector, or all=true".to_string(),
+                });
+            }
+            _ => {}
+        }
+        if all {
+            let lower = resource.to_lowercase();
+            if lower == "namespace" || lower == "ns" {
+                return Err(BridgeError::CommandDenied {
+                    reason: "Cannot use --all with namespace resource (blast-radius guard)"
+                        .to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that exec invocation has exactly one of command or argv.
+    pub fn validate_exec_invocation(command: Option<&str>, argv: Option<&[String]>) -> Result<()> {
+        match (command, argv) {
+            (Some(_), None) => Ok(()),
+            (None, Some(args)) => {
+                if args.is_empty() {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "argv must not be empty".to_string(),
+                    });
+                }
+                if args.iter().any(|a| a.is_empty()) {
+                    return Err(BridgeError::CommandDenied {
+                        reason: "argv elements must not be empty".to_string(),
+                    });
+                }
+                Ok(())
+            }
+            (Some(_), Some(_)) => Err(BridgeError::CommandDenied {
+                reason: "Exactly one of command or argv must be provided, not both".to_string(),
+            }),
+            (None, None) => Err(BridgeError::CommandDenied {
+                reason: "Either command or argv must be provided".to_string(),
+            }),
+        }
+    }
+
+    /// Validate `from` for `kubectl set env --from`.
+    pub fn validate_set_from(from: &str) -> Result<()> {
+        let (prefix, name) = from
+            .split_once('/')
+            .ok_or_else(|| BridgeError::CommandDenied {
+                reason: format!("from '{from}' must be configmap/NAME or secret/NAME"),
+            })?;
+        if prefix != "configmap" && prefix != "secret" {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("from prefix must be 'configmap' or 'secret', got '{prefix}'"),
+            });
+        }
+        if name.is_empty() || name.starts_with('-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("from name '{name}' is empty or starts with '-'"),
+            });
+        }
+        let valid = name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-');
+        if !valid {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "from name '{name}' contains invalid characters (only lowercase, digits, '.', '-')"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate that a `kubectl set` invocation has at least one action.
+    pub fn validate_set_invocation(
+        subcommand: &str,
+        assignments: &[String],
+        list: bool,
+        from: Option<&str>,
+        env_file: Option<&str>,
+    ) -> Result<()> {
+        if assignments.is_empty() && !list && from.is_none() && env_file.is_none() {
+            return Err(BridgeError::CommandDenied {
+                reason: "Must specify at least one of: assignments, list, from, or env_file"
+                    .to_string(),
+            });
+        }
+        if (from.is_some() || env_file.is_some()) && subcommand != "env" {
+            return Err(BridgeError::CommandDenied {
+                reason: "from and env_file are only valid with subcommand=env".to_string(),
+            });
+        }
+        if from.is_some() && env_file.is_some() {
+            return Err(BridgeError::CommandDenied {
+                reason: "from and env_file are mutually exclusive".to_string(),
+            });
+        }
+        if list && !assignments.is_empty() {
+            return Err(BridgeError::CommandDenied {
+                reason: "list=true and assignments are mutually exclusive".to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1538,6 +1864,10 @@ mod tests {
             Some("status.phase=Running"),
             Some("json"),
             Some(".metadata.name"),
+            false,
+            false,
+            false,
+            None,
         );
         assert!(cmd.starts_with("kubectl get 'pods'"));
         assert!(cmd.contains("'nginx'"));
@@ -1560,6 +1890,10 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
+            false,
+            None,
         );
         assert_eq!(cmd, "kubectl get 'pods'");
     }
@@ -1576,6 +1910,10 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
+            false,
+            None,
         );
         assert!(cmd.contains(" -A"));
     }
@@ -1583,7 +1921,7 @@ mod tests {
     #[test]
     fn test_build_get_command_auto_detect() {
         let cmd = KubernetesCommandBuilder::build_get_command(
-            None, "pods", None, None, false, None, None, None, None,
+            None, "pods", None, None, false, None, None, None, None, false, false, false, None,
         );
         assert!(cmd.contains("command -v kubectl"));
         assert!(cmd.contains("get 'pods'"));
@@ -1601,6 +1939,10 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
+            false,
+            None,
         );
         assert!(cmd.contains("-l 'app in (web,api)'"));
     }
@@ -1614,6 +1956,9 @@ mod tests {
             Some("default"),
             false,
             Some("involvedObject.name=p"),
+            None,
+            None,
+            None,
         );
         assert!(cmd.contains("get events --sort-by=.lastTimestamp"));
         assert!(cmd.contains("-n 'default'"));
@@ -1622,7 +1967,15 @@ mod tests {
 
     #[test]
     fn test_build_events_command_all_namespaces() {
-        let cmd = KubernetesCommandBuilder::build_events_command(Some("kubectl"), None, true, None);
+        let cmd = KubernetesCommandBuilder::build_events_command(
+            Some("kubectl"),
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(cmd.contains("get events --sort-by=.lastTimestamp"));
         assert!(cmd.contains("-A"));
         assert!(!cmd.contains("-n "));
@@ -1630,8 +1983,15 @@ mod tests {
 
     #[test]
     fn test_build_events_command_minimal() {
-        let cmd =
-            KubernetesCommandBuilder::build_events_command(Some("kubectl"), None, false, None);
+        let cmd = KubernetesCommandBuilder::build_events_command(
+            Some("kubectl"),
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(cmd, "kubectl get events --sort-by=.lastTimestamp");
     }
 
@@ -1648,6 +2008,11 @@ mod tests {
             Some("1h"),
             true,
             true,
+            None,
+            false,
+            None,
+            false,
+            None,
         );
         assert!(cmd.starts_with("kubectl logs 'nginx-pod'"));
         assert!(cmd.contains("-n 'kube-system'"));
@@ -1669,6 +2034,11 @@ mod tests {
             None,
             false,
             false,
+            None,
+            false,
+            None,
+            false,
+            None,
         );
         assert_eq!(cmd, "kubectl logs 'my-pod'");
     }
@@ -1684,6 +2054,11 @@ mod tests {
             None,
             true,
             false,
+            None,
+            false,
+            None,
+            false,
+            None,
         );
         assert!(cmd.contains(" -p"));
         assert!(!cmd.contains("--timestamps"));
@@ -1700,6 +2075,11 @@ mod tests {
             None,
             false,
             true,
+            None,
+            false,
+            None,
+            false,
+            None,
         );
         assert!(!cmd.contains(" -p"));
         assert!(cmd.contains("--timestamps"));
@@ -1712,8 +2092,10 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_describe_command(
             Some("kubectl"),
             "pod",
-            "nginx-abc123",
+            Some("nginx-abc123"),
             Some("production"),
+            None,
+            false,
         );
         assert!(cmd.starts_with("kubectl describe 'pod' 'nginx-abc123'"));
         assert!(cmd.contains("-n 'production'"));
@@ -1724,8 +2106,10 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_describe_command(
             Some("kubectl"),
             "node",
-            "worker-1",
+            Some("worker-1"),
             None,
+            None,
+            false,
         );
         assert_eq!(cmd, "kubectl describe 'node' 'worker-1'");
     }
@@ -1735,8 +2119,10 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_describe_command(
             Some("kubectl"),
             "pod",
-            "my-pod's-name",
+            Some("my-pod's-name"),
             None,
+            None,
+            false,
         );
         assert!(cmd.contains("'my-pod'\\''s-name'"));
     }
@@ -1871,11 +2257,14 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_delete_command(
             Some("kubectl"),
             "pod",
-            "nginx",
+            Some("nginx"),
             Some("default"),
             Some(0),
             true,
             Some("client"),
+            None,
+            false,
+            None,
         );
         assert!(cmd.starts_with("kubectl delete 'pod' 'nginx'"));
         assert!(cmd.contains("-n 'default'"));
@@ -1889,7 +2278,10 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_delete_command(
             Some("kubectl"),
             "pod",
-            "nginx",
+            Some("nginx"),
+            None,
+            None,
+            false,
             None,
             None,
             false,
@@ -1903,9 +2295,12 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_delete_command(
             Some("kubectl"),
             "pod",
-            "nginx",
+            Some("nginx"),
             None,
             Some(30),
+            false,
+            None,
+            None,
             false,
             None,
         );
@@ -1922,6 +2317,9 @@ mod tests {
             "deployment/nginx",
             Some("production"),
             None,
+            None,
+            None,
+            None,
         );
         assert!(cmd.contains("kubectl rollout 'restart' 'deployment/nginx'"));
         assert!(cmd.contains("-n 'production'"));
@@ -1935,6 +2333,9 @@ mod tests {
             "deployment/nginx",
             None,
             Some(3),
+            None,
+            None,
+            None,
         );
         assert!(cmd.contains("'undo'"));
         assert!(cmd.contains("--to-revision=3"));
@@ -1946,6 +2347,9 @@ mod tests {
             Some("kubectl"),
             "status",
             "deployment/web",
+            None,
+            None,
+            None,
             None,
             None,
         );
@@ -1995,9 +2399,11 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_exec_command(
             Some("kubectl"),
             "nginx-pod",
-            "ls -la /tmp",
+            Some("ls -la /tmp"),
             Some("default"),
             Some("nginx"),
+            None,
+            false,
         );
         assert!(cmd.starts_with("kubectl exec 'nginx-pod'"));
         assert!(cmd.contains("-n 'default'"));
@@ -2010,9 +2416,11 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_exec_command(
             Some("kubectl"),
             "my-pod",
-            "whoami",
+            Some("whoami"),
             None,
             None,
+            None,
+            false,
         );
         assert_eq!(cmd, "kubectl exec 'my-pod' -- sh -c 'whoami'");
     }
@@ -2022,9 +2430,11 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_exec_command(
             Some("kubectl"),
             "my-pod",
-            "date",
+            Some("date"),
             Some("kube-system"),
             None,
+            None,
+            false,
         );
         assert!(cmd.contains("-n 'kube-system'"));
         // No container flag (-c before --), only sh -c after --
@@ -2643,6 +3053,10 @@ mod tests {
             None,
             Some("wide"),
             None,
+            false,
+            false,
+            false,
+            None,
         );
         assert!(cmd.contains("command -v kubectl"));
         assert!(cmd.contains("get 'pods'"));
@@ -2775,9 +3189,11 @@ mod tests {
         let cmd = KubernetesCommandBuilder::build_exec_command(
             Some("kubectl"),
             "my-pod",
-            "ls; rm -rf /",
+            Some("ls; rm -rf /"),
             None,
             None,
+            None,
+            false,
         );
         // Command should be wrapped in sh -c with shell_escape
         assert!(cmd.contains("-- sh -c 'ls; rm -rf /'"));
@@ -2999,6 +3415,9 @@ mod tests {
             &["app=nginx:1.27".to_string()],
             Some("prod"),
             Some("east"),
+            false,
+            None,
+            None,
         );
         assert!(
             cmd.contains("set 'image' 'deployment/api' 'app=nginx:1.27'"),
