@@ -16,17 +16,23 @@ use crate::mcp_standard_tool;
 pub struct SshK8sExecArgs {
     host: String,
     pod: String,
-    command: String,
+    #[serde(default)]
+    command: Option<String>,
     #[serde(default)]
     namespace: Option<String>,
     #[serde(default)]
     container: Option<String>,
+    #[serde(default)]
+    argv: Option<Vec<String>>,
+    #[serde(default)]
+    stdin: Option<bool>,
     #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
+    #[serde(default)]
     save_output: Option<String>,
 }
 
@@ -41,8 +47,8 @@ impl StandardTool for K8sExecTool {
     const NAME: &'static str = "ssh_k8s_exec";
 
     const DESCRIPTION: &'static str = "Execute a command inside a Kubernetes pod via kubectl exec on a remote host. Use \
-        ssh_k8s_get with resource 'pods' first to find pod names. The command is always \
-        wrapped as 'sh -c <command>', so shell syntax (pipes, redirects) is supported. For \
+        ssh_k8s_get with resource 'pods' first to find pod names. Provide either `command` \
+        (wrapped as 'sh -c', supports shell syntax) or `argv` (raw exec, no shell). For \
         reading logs without exec, use ssh_k8s_logs instead. For multi-container pods, \
         specify the container parameter. Auto-detects kubectl binary (k8s, k3s, microk8s). \
         Returns command stdout/stderr.";
@@ -60,7 +66,7 @@ impl StandardTool for K8sExecTool {
             },
             "command": {
                 "type": "string",
-                "description": "Command to execute inside the pod"
+                "description": "Command to execute inside the pod (optional when argv is provided). Wrapped as 'sh -c <command>', so shell syntax (pipes, redirects) is supported."
             },
             "namespace": {
                 "type": "string",
@@ -69,6 +75,15 @@ impl StandardTool for K8sExecTool {
             "container": {
                 "type": "string",
                 "description": "Container name for multi-container pods"
+            },
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Command and arguments as an array (alternative to command). Use this for binary arguments that should not go through sh -c."
+            },
+            "stdin": {
+                "type": "boolean",
+                "description": "Pass stdin to the container (-i flag)"
             },
             "kubectl_bin": {
                 "type": "string",
@@ -86,19 +101,25 @@ impl StandardTool for K8sExecTool {
                 "minimum": 0
             }
         },
-        "required": ["host", "pod", "command"]
+        "required": ["host", "pod"]
     }"#;
 
     fn build_command(args: &SshK8sExecArgs, _host_config: &HostConfig) -> Result<String> {
+        KubernetesCommandBuilder::validate_exec_invocation(
+            args.command.as_deref(),
+            args.argv.as_deref(),
+        )?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
         Ok(KubernetesCommandBuilder::build_exec_command(
             args.kubectl_bin.as_deref(),
             &args.pod,
-            &args.command,
+            args.command.as_deref(),
             args.namespace.as_deref(),
             args.container.as_deref(),
+            args.argv.as_deref(),
+            args.stdin.unwrap_or(false),
         ))
     }
 }
@@ -169,7 +190,7 @@ mod tests {
         let required = schema_json["required"].as_array().unwrap();
         assert!(required.contains(&json!("host")));
         assert!(required.contains(&json!("pod")));
-        assert!(required.contains(&json!("command")));
+        assert!(!required.contains(&json!("command")));
     }
 
     #[test]
@@ -188,7 +209,7 @@ mod tests {
         let args: SshK8sExecArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
         assert_eq!(args.pod, "my-pod");
-        assert_eq!(args.command, "cat /etc/hostname");
+        assert_eq!(args.command, Some("cat /etc/hostname".to_string()));
         assert_eq!(args.namespace, Some("production".to_string()));
         assert_eq!(args.container, Some("app".to_string()));
         assert_eq!(args.kubectl_bin, Some("k3s kubectl".to_string()));
@@ -207,7 +228,7 @@ mod tests {
         let args: SshK8sExecArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
         assert_eq!(args.pod, "my-pod");
-        assert_eq!(args.command, "ls -la");
+        assert_eq!(args.command, Some("ls -la".to_string()));
         assert!(args.namespace.is_none());
         assert!(args.container.is_none());
         assert!(args.kubectl_bin.is_none());
@@ -218,17 +239,17 @@ mod tests {
         let handler = SshK8sExecHandler::new();
         let ctx = create_test_context();
 
-        // Missing command field
+        // Missing pod field
         let result = handler
             .execute(
                 Some(json!({
-                    "host": "server1",
-                    "pod": "my-pod"
+                    "host": "server1"
                 })),
                 &ctx,
             )
             .await;
 
+        // Missing pod - should fail with McpInvalidRequest
         assert!(result.is_err());
         match result.unwrap_err() {
             BridgeError::McpInvalidRequest(_) => {}
@@ -315,9 +336,11 @@ mod tests {
         let args = SshK8sExecArgs {
             host: "server1".to_string(),
             pod: "my-pod".to_string(),
-            command: "ls -la".to_string(),
+            command: Some("ls -la".to_string()),
             namespace: None,
             container: None,
+            argv: None,
+            stdin: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -334,9 +357,11 @@ mod tests {
         let args = SshK8sExecArgs {
             host: "server1".to_string(),
             pod: "my-pod".to_string(),
-            command: "cat /etc/hostname".to_string(),
+            command: Some("cat /etc/hostname".to_string()),
             namespace: Some("production".to_string()),
             container: Some("app".to_string()),
+            argv: None,
+            stdin: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -354,9 +379,11 @@ mod tests {
         let args = SshK8sExecArgs {
             host: "server1".to_string(),
             pod: "my-pod".to_string(),
-            command: "env".to_string(),
+            command: Some("env".to_string()),
             namespace: None,
             container: None,
+            argv: None,
+            stdin: None,
             kubectl_bin: Some("k3s kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -373,9 +400,11 @@ mod tests {
         let args = SshK8sExecArgs {
             host: "server1".to_string(),
             pod: "web-pod".to_string(),
-            command: "cat /var/log/app.log".to_string(),
+            command: Some("cat /var/log/app.log".to_string()),
             namespace: Some("staging".to_string()),
             container: Some("nginx".to_string()),
+            argv: None,
+            stdin: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -387,5 +416,96 @@ mod tests {
         assert!(cmd.contains("-n 'staging'"));
         assert!(cmd.contains("-c 'nginx'"));
         assert!(cmd.contains("-- sh -c 'cat /var/log/app.log'"));
+    }
+
+    #[test]
+    fn test_build_command_with_argv() {
+        let args = SshK8sExecArgs {
+            host: "server1".to_string(),
+            pod: "my-pod".to_string(),
+            command: None,
+            namespace: None,
+            container: None,
+            argv: Some(vec![
+                "ls".to_string(),
+                "-la".to_string(),
+                "/tmp".to_string(),
+            ]),
+            stdin: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sExecTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-- 'ls' '-la' '/tmp'"), "cmd: {cmd}");
+        assert!(!cmd.contains("sh -c"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_stdin() {
+        let args = SshK8sExecArgs {
+            host: "server1".to_string(),
+            pod: "my-pod".to_string(),
+            command: Some("cat".to_string()),
+            namespace: None,
+            container: None,
+            argv: None,
+            stdin: Some(true),
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sExecTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("exec -i"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_rejects_both_command_and_argv() {
+        let args = SshK8sExecArgs {
+            host: "server1".to_string(),
+            pod: "my-pod".to_string(),
+            command: Some("ls".to_string()),
+            namespace: None,
+            container: None,
+            argv: Some(vec!["ls".to_string()]),
+            stdin: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let result = K8sExecTool::build_command(&args, &host_config);
+        assert!(
+            result.is_err(),
+            "expected error when both command and argv provided"
+        );
+    }
+
+    #[test]
+    fn test_build_command_rejects_neither_command_nor_argv() {
+        let args = SshK8sExecArgs {
+            host: "server1".to_string(),
+            pod: "my-pod".to_string(),
+            command: None,
+            namespace: None,
+            container: None,
+            argv: None,
+            stdin: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let result = K8sExecTool::build_command(&args, &host_config);
+        assert!(
+            result.is_err(),
+            "expected error when neither command nor argv provided"
+        );
     }
 }
