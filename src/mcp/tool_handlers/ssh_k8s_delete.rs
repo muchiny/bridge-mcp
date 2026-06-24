@@ -18,7 +18,8 @@ use crate::ports::protocol::ToolCallResult;
 pub struct SshK8sDeleteArgs {
     host: String,
     resource: String,
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     namespace: Option<String>,
     #[serde(default)]
@@ -28,11 +29,18 @@ pub struct SshK8sDeleteArgs {
     #[serde(default)]
     dry_run: Option<String>,
     #[serde(default)]
+    label_selector: Option<String>,
+    #[serde(default)]
+    all: Option<bool>,
+    #[serde(default)]
+    field_selector: Option<String>,
+    #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
+    #[serde(default)]
     save_output: Option<String>,
 }
 
@@ -69,7 +77,7 @@ impl StandardTool for K8sDeleteTool {
             },
             "name": {
                 "type": "string",
-                "description": "Name of the resource to delete"
+                "description": "Name of the resource to delete (optional when using label_selector, field_selector, or all)"
             },
             "namespace": {
                 "type": "string",
@@ -88,6 +96,18 @@ impl StandardTool for K8sDeleteTool {
                 "enum": ["none", "client", "server"],
                 "description": "Dry-run mode: none (actually delete), client (local validation), server (server-side validation)"
             },
+            "label_selector": {
+                "type": "string",
+                "description": "Delete resources matching label selector (e.g. app=nginx). Mutually exclusive with name."
+            },
+            "all": {
+                "type": "boolean",
+                "description": "Delete all resources of the specified type. Cannot be used with name, and not allowed for namespace resources."
+            },
+            "field_selector": {
+                "type": "string",
+                "description": "Delete resources matching field selector"
+            },
             "kubectl_bin": {
                 "type": "string",
                 "description": "Custom kubectl binary path (default: auto-detect kubectl, k3s kubectl, microk8s kubectl)"
@@ -104,26 +124,39 @@ impl StandardTool for K8sDeleteTool {
                 "minimum": 0
             }
         },
-        "required": ["host", "resource", "name"]
+        "required": ["host", "resource"]
     }"#;
 
     fn build_command(args: &SshK8sDeleteArgs, _host_config: &HostConfig) -> Result<String> {
+        KubernetesCommandBuilder::validate_delete_target(
+            &args.resource,
+            args.name.as_deref(),
+            args.label_selector.as_deref(),
+            args.field_selector.as_deref(),
+            args.all.unwrap_or(false),
+        )?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
         Ok(KubernetesCommandBuilder::build_delete_command(
             args.kubectl_bin.as_deref(),
             &args.resource,
-            &args.name,
+            args.name.as_deref(),
             args.namespace.as_deref(),
             args.grace_period,
             args.force.unwrap_or(false),
             args.dry_run.as_deref(),
+            args.label_selector.as_deref(),
+            args.all.unwrap_or(false),
+            args.field_selector.as_deref(),
         ))
     }
 
     fn validate(args: &SshK8sDeleteArgs, _host_config: &HostConfig) -> Result<()> {
-        KubernetesCommandBuilder::validate_delete(&args.resource, &args.name)?;
+        KubernetesCommandBuilder::validate_delete(
+            &args.resource,
+            args.name.as_deref().unwrap_or(""),
+        )?;
         Ok(())
     }
 
@@ -133,10 +166,20 @@ impl StandardTool for K8sDeleteTool {
     /// global `security.require_elicitation_on_destructive` gate still
     /// applies in that case.
     async fn pre_execute(args: &Self::Args, ctx: &ToolContext) -> Result<Option<ToolCallResult>> {
+        let name_or_selector = args
+            .name
+            .as_deref()
+            .map(|n| format!("`{n}`"))
+            .or_else(|| {
+                args.label_selector
+                    .as_ref()
+                    .map(|l| format!("selector={l}"))
+            })
+            .unwrap_or_else(|| "--all".to_string());
         let summary = format!(
-            "Delete kubernetes {} `{}` (namespace=`{}`) on host `{}`",
+            "Delete kubernetes {} {} (namespace=`{}`) on host `{}`",
             args.resource,
-            args.name,
+            name_or_selector,
             args.namespace.as_deref().unwrap_or("default"),
             args.host,
         );
@@ -215,7 +258,6 @@ mod tests {
         let required = schema_json["required"].as_array().unwrap();
         assert!(required.contains(&json!("host")));
         assert!(required.contains(&json!("resource")));
-        assert!(required.contains(&json!("name")));
     }
 
     #[test]
@@ -236,7 +278,7 @@ mod tests {
         let args: SshK8sDeleteArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
         assert_eq!(args.resource, "deployment");
-        assert_eq!(args.name, "my-app");
+        assert_eq!(args.name, Some("my-app".to_string()));
         assert_eq!(args.namespace, Some("production".to_string()));
         assert_eq!(args.grace_period, Some(30));
         assert_eq!(args.force, Some(true));
@@ -255,7 +297,7 @@ mod tests {
         let args: SshK8sDeleteArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "server1");
         assert_eq!(args.resource, "pod");
-        assert_eq!(args.name, "my-pod");
+        assert_eq!(args.name, Some("my-pod".to_string()));
         assert!(args.namespace.is_none());
         assert!(args.grace_period.is_none());
         assert!(args.force.is_none());
@@ -267,17 +309,17 @@ mod tests {
         let handler = SshK8sDeleteHandler::new();
         let ctx = create_test_context();
 
-        // Missing name field
+        // Missing resource field
         let result = handler
             .execute(
                 Some(json!({
-                    "host": "server1",
-                    "resource": "pod"
+                    "host": "server1"
                 })),
                 &ctx,
             )
             .await;
 
+        // resource is still required
         assert!(result.is_err());
         match result.unwrap_err() {
             BridgeError::McpInvalidRequest(_) => {}
@@ -391,11 +433,14 @@ mod tests {
         let args = SshK8sDeleteArgs {
             host: "server1".to_string(),
             resource: "pod".to_string(),
-            name: "my-pod".to_string(),
+            name: Some("my-pod".to_string()),
             namespace: None,
             grace_period: None,
             force: None,
             dry_run: None,
+            label_selector: None,
+            all: None,
+            field_selector: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -411,11 +456,14 @@ mod tests {
         let args = SshK8sDeleteArgs {
             host: "server1".to_string(),
             resource: "deployment".to_string(),
-            name: "my-app".to_string(),
+            name: Some("my-app".to_string()),
             namespace: Some("production".to_string()),
             grace_period: Some(30),
             force: None,
             dry_run: None,
+            label_selector: None,
+            all: None,
+            field_selector: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -432,11 +480,14 @@ mod tests {
         let args = SshK8sDeleteArgs {
             host: "server1".to_string(),
             resource: "pod".to_string(),
-            name: "stuck-pod".to_string(),
+            name: Some("stuck-pod".to_string()),
             namespace: None,
             grace_period: Some(0),
             force: Some(true),
             dry_run: None,
+            label_selector: None,
+            all: None,
+            field_selector: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -453,11 +504,14 @@ mod tests {
         let args = SshK8sDeleteArgs {
             host: "server1".to_string(),
             resource: "service".to_string(),
-            name: "my-svc".to_string(),
+            name: Some("my-svc".to_string()),
             namespace: Some("staging".to_string()),
             grace_period: Some(60),
             force: Some(true),
             dry_run: Some("client".to_string()),
+            label_selector: None,
+            all: None,
+            field_selector: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -470,5 +524,100 @@ mod tests {
         assert!(cmd.contains("--grace-period=60"));
         assert!(cmd.contains("--force"));
         assert!(cmd.contains("--dry-run='client'"));
+    }
+
+    #[test]
+    fn test_build_command_with_label_selector() {
+        let args = SshK8sDeleteArgs {
+            host: "server1".to_string(),
+            resource: "pod".to_string(),
+            name: None,
+            namespace: None,
+            grace_period: None,
+            force: None,
+            dry_run: None,
+            label_selector: Some("app=nginx".to_string()),
+            all: None,
+            field_selector: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sDeleteTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-l 'app=nginx'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_all_flag() {
+        let args = SshK8sDeleteArgs {
+            host: "server1".to_string(),
+            resource: "pod".to_string(),
+            name: None,
+            namespace: None,
+            grace_period: None,
+            force: None,
+            dry_run: None,
+            label_selector: None,
+            all: Some(true),
+            field_selector: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sDeleteTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("--all"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_rejects_no_target() {
+        let args = SshK8sDeleteArgs {
+            host: "server1".to_string(),
+            resource: "pod".to_string(),
+            name: None,
+            namespace: None,
+            grace_period: None,
+            force: None,
+            dry_run: None,
+            label_selector: None,
+            all: None,
+            field_selector: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let result = K8sDeleteTool::build_command(&args, &host_config);
+        assert!(result.is_err(), "expected error when no target specified");
+    }
+
+    #[test]
+    fn test_build_command_all_namespace_blast_radius_guard() {
+        let args = SshK8sDeleteArgs {
+            host: "server1".to_string(),
+            resource: "namespace".to_string(),
+            name: None,
+            namespace: None,
+            grace_period: None,
+            force: None,
+            dry_run: None,
+            label_selector: None,
+            all: Some(true),
+            field_selector: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let result = K8sDeleteTool::build_command(&args, &host_config);
+        assert!(
+            result.is_err(),
+            "expected error when --all used on namespace"
+        );
     }
 }
