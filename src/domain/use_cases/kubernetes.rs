@@ -668,6 +668,38 @@ impl KubernetesCommandBuilder {
             })
         }
     }
+
+    /// Build a `kubectl set <subcommand> <target> <assignments...>` command.
+    ///
+    /// Constructs: `{kubectl} set {subcommand} {target} {assignments...}
+    /// [-n {ns}] [--context={ctx}]`
+    ///
+    /// `subcommand` is one of `image`, `env`, `resources` (validated by the
+    /// handler before this builder is called).
+    #[must_use]
+    pub fn build_set_command(
+        kubectl_bin: Option<&str>,
+        subcommand: &str,
+        target: &str,
+        assignments: &[String],
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!(
+            "{prefix}set {} {}",
+            shell_escape(subcommand),
+            shell_escape(target)
+        );
+        for a in assignments {
+            let _ = write!(cmd, " {}", shell_escape(a));
+        }
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
 }
 
 /// Builds helm CLI commands for remote execution.
@@ -2606,5 +2638,23 @@ mod tests {
         // In-charset / space values stay valid.
         assert!(validate_context("prod").is_ok());
         assert!(validate_context("my ctx").is_ok());
+    }
+
+    #[test]
+    fn test_build_set_command_image() {
+        let cmd = KubernetesCommandBuilder::build_set_command(
+            Some("kubectl"),
+            "image",
+            "deployment/api",
+            &["app=nginx:1.27".to_string()],
+            Some("prod"),
+            Some("east"),
+        );
+        assert!(
+            cmd.contains("set 'image' 'deployment/api' 'app=nginx:1.27'"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
+        assert!(cmd.contains("--context=east"), "cmd: {cmd}");
     }
 }
