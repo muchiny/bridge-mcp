@@ -517,7 +517,12 @@ impl Sanitizer {
             // (and `[JWT_TOKEN_REDACTED]` no longer matches this token charset).
             // This closes the leak when `entropy_detection: false` is configured.
             PatternDef {
-                pattern: r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}",
+                // `['"]?` tolerates a leading shell quote: AwxCommandBuilder
+                // emits `Bearer 'token'` (shell::escape wraps the token in
+                // single quotes), so without the optional quote the match would
+                // never fire and the token would leak. Floor lowered to {8,} so
+                // short opaque tokens are also redacted.
+                pattern: r#"(?i)bearer\s+['"]?[A-Za-z0-9._~+/=-]{8,}"#,
                 replacement: "Bearer [BEARER_TOKEN_REDACTED]",
                 description: "Opaque Authorization Bearer token",
                 category: "generic",
@@ -1264,6 +1269,23 @@ Done";
         assert!(
             !out.contains("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"),
             "opaque bearer token leaked: {out}"
+        );
+        assert!(out.contains("[BEARER_TOKEN_REDACTED]"));
+    }
+
+    #[test]
+    fn test_bearer_token_redacted_when_shell_quoted() {
+        // Mirrors real AwxCommandBuilder output: shell::escape (Posix) wraps the
+        // token in single quotes, so the audited command contains
+        // `Bearer 'token'` (a leading quote between "Bearer " and the token).
+        // The generic bearer pattern must still redact it — otherwise the AWX
+        // OAuth2 token leaks verbatim into the audit log / tool result.
+        let sanitizer = Sanitizer::with_defaults();
+        let input = "curl -s -H 'Authorization: Bearer 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6'' https://awx/api/v2/ping/";
+        let out = sanitizer.sanitize(input);
+        assert!(
+            !out.contains("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"),
+            "shell-quoted bearer token leaked: {out}"
         );
         assert!(out.contains("[BEARER_TOKEN_REDACTED]"));
     }

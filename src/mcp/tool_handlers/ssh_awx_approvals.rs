@@ -135,7 +135,7 @@ impl ToolHandler for SshAwxApprovalsHandler {
         let mut query_params: Vec<(&str, &str)> = vec![("page_size", &page_size_str)];
         query_params.push(("status", args.status.as_str()));
 
-        let cmd = AwxCommandBuilder::build_api_call(
+        let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
             "/api/v2/workflow_approvals/",
@@ -160,11 +160,11 @@ impl ToolHandler for SshAwxApprovalsHandler {
             .await?;
         let output = conn.exec(&cmd, &limits).await?;
 
-        let stdout = ctx
+        let raw = ctx
             .execute_use_case
             .process_success(host, &cmd, &output.into())
             .stdout;
-        let mut stdout = stdout;
+        let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction(&mut stdout, &dr, OutputKind::Json)?;
         Ok(ToolCallResult::text(stdout))
     }

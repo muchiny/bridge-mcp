@@ -90,7 +90,7 @@ impl ToolHandler for SshAwxJobCancelHandler {
 
         let endpoint = format!("/api/v2/jobs/{}/cancel/", args.job_id);
 
-        let cmd = AwxCommandBuilder::build_api_call(
+        let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
             &endpoint,
@@ -115,11 +115,11 @@ impl ToolHandler for SshAwxJobCancelHandler {
             .await?;
         let output = conn.exec(&cmd, &limits).await?;
 
-        let stdout = ctx
+        let raw = ctx
             .execute_use_case
             .process_success(host, &cmd, &output.into())
             .stdout;
-        let mut stdout = stdout;
+        let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction(
             &mut stdout,
             &dr,

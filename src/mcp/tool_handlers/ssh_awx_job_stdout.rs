@@ -104,7 +104,7 @@ impl ToolHandler for SshAwxJobStdoutHandler {
         let fmt = args.output_format.as_deref().unwrap_or("txt");
         let query_params = [("format", fmt)];
 
-        let cmd = AwxCommandBuilder::build_api_call(
+        let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
             &endpoint,
@@ -129,10 +129,11 @@ impl ToolHandler for SshAwxJobStdoutHandler {
             .await?;
         let output = conn.exec(&cmd, &limits).await?;
 
-        let stdout = ctx
+        let raw = ctx
             .execute_use_case
             .process_success(host, &cmd, &output.into())
             .stdout;
+        let stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         Ok(ToolCallResult::text(stdout))
     }
 }

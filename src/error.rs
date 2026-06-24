@@ -119,6 +119,15 @@ pub enum BridgeError {
     #[error("Request cancelled by client")]
     Cancelled,
 
+    /// AWX/AAP REST API returned a non-2xx HTTP status.
+    ///
+    /// Surfaced by `AwxCommandBuilder::parse_checked_response` so a 4xx/5xx from
+    /// AWX (expired token → 401, RBAC → 403, bad id → 404, validation → 400) is
+    /// reported as an error instead of being handed to the model as an opaque
+    /// success. `detail` carries the AWX `detail`/`__all__` message when present.
+    #[error("AWX API error: HTTP {status} - {detail}")]
+    AwxApi { status: u16, detail: String },
+
     // IO errors
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

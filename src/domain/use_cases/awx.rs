@@ -12,6 +12,66 @@ fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
 }
 
+/// Percent-encode a query-string component per RFC 3986 (unreserved set kept
+/// verbatim, everything else `%XX`).
+///
+/// Applied to query keys and values in [`AwxCommandBuilder::build_api_call`] so
+/// a filter value containing `&`, `=`, space, `#` or `+` cannot corrupt the
+/// query or inject an extra AWX parameter (HTTP parameter injection).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Extract a human-readable error message from an AWX JSON error body.
+///
+/// AWX surfaces errors as `{"detail": "..."}` (auth/404) or as field maps like
+/// `{"<field>": ["msg", ...]}` / `{"__all__": ["msg"]}` (400 validation). Falls
+/// back to the trimmed body (capped) when the shape is unrecognized.
+fn extract_detail(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(d) = v.get("detail").and_then(serde_json::Value::as_str) {
+            return d.to_string();
+        }
+        if let Some(obj) = v.as_object() {
+            let mut parts = Vec::new();
+            for (k, val) in obj {
+                match val {
+                    serde_json::Value::Array(arr) => {
+                        for item in arr {
+                            if let Some(s) = item.as_str() {
+                                parts.push(format!("{k}: {s}"));
+                            }
+                        }
+                    }
+                    serde_json::Value::String(s) => parts.push(format!("{k}: {s}")),
+                    _ => {}
+                }
+            }
+            if !parts.is_empty() {
+                return parts.join("; ");
+            }
+        }
+    }
+    let trimmed = body.trim();
+    let capped: String = trimmed.chars().take(300).collect();
+    if trimmed.chars().count() > 300 {
+        format!("{capped}…")
+    } else {
+        capped
+    }
+}
+
 /// HTTP methods for AWX API calls.
 #[derive(Debug, Clone, Copy)]
 pub enum HttpMethod {
@@ -96,13 +156,89 @@ impl AwxCommandBuilder {
                 if i > 0 {
                     full_url.push('&');
                 }
-                let _ = write!(full_url, "{key}={value}");
+                let _ = write!(
+                    full_url,
+                    "{}={}",
+                    percent_encode(key),
+                    percent_encode(value)
+                );
             }
         }
 
         let _ = write!(cmd, " {}", shell_escape(&full_url));
 
         cmd
+    }
+
+    /// Marker prefixing the HTTP status that [`Self::build_api_call_checked`]
+    /// asks `curl` to append to stdout.
+    const STATUS_MARKER: &'static str = "HTTP_STATUS:";
+
+    /// Like [`Self::build_api_call`] but appends a `curl -w` write-out so the
+    /// HTTP status code can be recovered from stdout and classified by
+    /// [`Self::parse_checked_response`].
+    ///
+    /// Plain `build_api_call` uses `curl -s`, which exits 0 on any HTTP
+    /// response, so a 4xx/5xx would otherwise reach the model as an opaque
+    /// success. Use this variant for handlers where a non-2xx must be an error
+    /// (launch, relaunch, cancel, approvals, project sync).
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_api_call_checked(
+        url: &str,
+        token: &str,
+        endpoint: &str,
+        method: HttpMethod,
+        body: Option<&str>,
+        verify_ssl: bool,
+        query_params: &[(&str, &str)],
+        timeout: u32,
+    ) -> String {
+        let mut cmd = Self::build_api_call(
+            url,
+            token,
+            endpoint,
+            method,
+            body,
+            verify_ssl,
+            query_params,
+            timeout,
+        );
+        // `\n` is interpreted by curl (not the shell, inside single quotes), so
+        // the status lands on its own trailing line: `<body>\nHTTP_STATUS:200`.
+        let _ = write!(cmd, " -w '\\n{}%{{http_code}}'", Self::STATUS_MARKER);
+        cmd
+    }
+
+    /// Split the `curl -w` status line written by [`Self::build_api_call_checked`]
+    /// from the response body.
+    ///
+    /// Returns the body on a 2xx/3xx status, and a [`BridgeError::AwxApi`]
+    /// carrying the status and AWX `detail` message on a status `>= 400`. If the
+    /// marker is absent (e.g. curl failed at the transport level before the
+    /// write-out), the raw text is returned unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::AwxApi`] when AWX responded with HTTP `>= 400`.
+    pub fn parse_checked_response(raw: &str) -> Result<String> {
+        let Some(idx) = raw.rfind(Self::STATUS_MARKER) else {
+            return Ok(raw.to_string());
+        };
+        let status: u16 = raw[idx + Self::STATUS_MARKER.len()..]
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        // Body is everything before the marker; drop the newline curl inserted.
+        let body = raw[..idx].trim_end_matches(['\n', '\r']).to_string();
+        if status >= 400 {
+            Err(BridgeError::AwxApi {
+                status,
+                detail: extract_detail(&body),
+            })
+        } else {
+            Ok(body)
+        }
     }
 
     /// Validate an AWX API endpoint path.
@@ -207,6 +343,32 @@ mod tests {
     }
 
     #[test]
+    fn test_query_param_values_are_url_encoded() {
+        // A `search` value containing URL-significant chars must be
+        // percent-encoded, otherwise `&` injects a spurious AWX query param and
+        // a space breaks the request (HTTP parameter injection / corrupt filter).
+        let cmd = AwxCommandBuilder::build_api_call(
+            "https://awx.internal",
+            "tok",
+            "/api/v2/job_templates/",
+            HttpMethod::Get,
+            None,
+            true,
+            &[("search", "deploy prod&order_by=-id")],
+            30,
+        );
+        assert!(
+            cmd.contains("search=deploy%20prod%26order_by%3D-id"),
+            "query value not percent-encoded: {cmd}"
+        );
+        // The injected parameter must not survive as a real query parameter.
+        assert!(
+            !cmd.contains("&order_by=-id"),
+            "query parameter injection not prevented: {cmd}"
+        );
+    }
+
+    #[test]
     fn test_build_api_call_no_trailing_slash_on_url() {
         let cmd = AwxCommandBuilder::build_api_call(
             "https://awx.internal/",
@@ -291,5 +453,77 @@ mod tests {
     #[test]
     fn test_validate_id_zero() {
         assert!(AwxCommandBuilder::validate_id(0).is_err());
+    }
+
+    // ============== Checked-response (HTTP status) Tests ==============
+
+    #[test]
+    fn test_build_api_call_checked_appends_status_writeout() {
+        let cmd = AwxCommandBuilder::build_api_call_checked(
+            "https://awx.internal",
+            "tok",
+            "/api/v2/ping/",
+            HttpMethod::Get,
+            None,
+            true,
+            &[],
+            30,
+        );
+        // curl -w must request the HTTP status so the response can be classified.
+        assert!(cmd.contains("-w "), "missing -w write-out: {cmd}");
+        assert!(
+            cmd.contains("HTTP_STATUS:%{http_code}"),
+            "missing status marker: {cmd}"
+        );
+        // Still a valid GET to the endpoint.
+        assert!(cmd.contains("https://awx.internal/api/v2/ping/"));
+    }
+
+    #[test]
+    fn test_parse_checked_response_ok_strips_marker() {
+        let raw = "{\"version\":\"23.0.0\"}\nHTTP_STATUS:200";
+        let body = AwxCommandBuilder::parse_checked_response(raw).unwrap();
+        assert_eq!(body, "{\"version\":\"23.0.0\"}");
+        assert!(!body.contains("HTTP_STATUS"));
+    }
+
+    #[test]
+    fn test_parse_checked_response_201_is_ok() {
+        // AWX returns 201 Created on a successful job launch.
+        let raw = "{\"job\":42}\nHTTP_STATUS:201";
+        let body = AwxCommandBuilder::parse_checked_response(raw).unwrap();
+        assert_eq!(body, "{\"job\":42}");
+    }
+
+    #[test]
+    fn test_parse_checked_response_4xx_is_error_with_detail() {
+        let raw = "{\"detail\":\"Not found.\"}\nHTTP_STATUS:404";
+        let err = AwxCommandBuilder::parse_checked_response(raw).unwrap_err();
+        match err {
+            BridgeError::AwxApi { status, detail } => {
+                assert_eq!(status, 404);
+                assert!(
+                    detail.contains("Not found."),
+                    "detail not extracted: {detail}"
+                );
+            }
+            other => panic!("expected AwxApi error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_checked_response_401_is_error() {
+        let raw = "{\"detail\":\"Authentication credentials were not provided.\"}\nHTTP_STATUS:401";
+        let err = AwxCommandBuilder::parse_checked_response(raw).unwrap_err();
+        assert!(matches!(err, BridgeError::AwxApi { status: 401, .. }));
+    }
+
+    #[test]
+    fn test_parse_checked_response_no_marker_returns_body() {
+        // If curl never emitted the marker (e.g. transport-level failure before
+        // write-out), fall back to returning the raw body unchanged.
+        let raw = "some raw output without a status line";
+        let body = AwxCommandBuilder::parse_checked_response(raw).unwrap();
+        assert_eq!(body, raw);
     }
 }
