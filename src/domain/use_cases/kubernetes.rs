@@ -74,6 +74,49 @@ pub fn kubeconfig_env_prefix(kubeconfig: Option<&str>) -> String {
     }
 }
 
+/// Validate a kubectl context name: non-empty, not flag-like, shell-safe charset.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the context is empty or starts
+/// with `-` (flag-like values such as `--kubeconfig=/etc/x`).
+pub fn validate_context(context: &str) -> Result<()> {
+    if context.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "context must not be empty".to_string(),
+        });
+    }
+    if context.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("context must not look like a flag: {context}"),
+        });
+    }
+    Ok(())
+}
+
+/// Build an optional ` --context=<ctx>` flag (leading space, shell-escaped).
+///
+/// Safe context names (only `[A-Za-z0-9._@:/-]`) are emitted bare; names
+/// containing spaces or other special characters are single-quoted.
+///
+/// Returns an empty string when no context is supplied.
+#[must_use]
+pub fn kubectl_context_flag(context: Option<&str>) -> String {
+    match context {
+        Some(ctx) => {
+            let needs_quoting = ctx
+                .chars()
+                .any(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '@' | ':' | '/' | '-'));
+            if needs_quoting {
+                format!(" --context={}", shell_escape(ctx))
+            } else {
+                format!(" --context={ctx}")
+            }
+        }
+        None => String::new(),
+    }
+}
+
 /// Builds kubectl CLI commands for remote execution.
 pub struct KubernetesCommandBuilder;
 
@@ -2543,5 +2586,19 @@ mod tests {
             }
             e => panic!("Expected CommandDenied, got: {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_kubectl_context_flag() {
+        assert_eq!(kubectl_context_flag(None), "");
+        assert_eq!(kubectl_context_flag(Some("prod")), " --context=prod");
+        assert_eq!(kubectl_context_flag(Some("my ctx")), " --context='my ctx'");
+    }
+
+    #[test]
+    fn test_validate_context_rejects_flag_like() {
+        assert!(validate_context("--kubeconfig=/etc/x").is_err());
+        assert!(validate_context("good-ctx").is_ok());
+        assert!(validate_context("").is_err());
     }
 }
