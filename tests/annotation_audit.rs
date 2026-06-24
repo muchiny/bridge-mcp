@@ -60,6 +60,7 @@ const ALLOWLIST: &[(&str, ToolAnnotationKind)] = &[
     ("ssh_win_process_kill", ToolAnnotationKind::Destructive),
     ("ssh_storage_umount", ToolAnnotationKind::Mutating),
     ("ssh_storage_mount", ToolAnnotationKind::Mutating),
+    ("ssh_crictl_rmi", ToolAnnotationKind::Destructive), // crictl rmi: image deletion — irreversible, _rmi suffix not in auto list
 ];
 
 fn allowed(name: &str, kind: ToolAnnotationKind) -> bool {
@@ -161,6 +162,7 @@ const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
     "ssh_vault_write",    // overwrites a secret (KV v1 has no versioning)
     "ssh_pkg_update",     // full system upgrade can remove/replace packages
     "ssh_k8s_drain", // kubectl drain evicts all pods from a node — irreversible workload disruption
+    "ssh_crictl_rmi", // crictl rmi: image deletion is irreversible without a fresh pull
 ];
 
 #[test]
