@@ -104,6 +104,53 @@ pub fn validate_context(context: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate an API server raw path for `kubectl get --raw`.
+///
+/// # Rules
+/// - Non-empty
+/// - Must start with `/`
+/// - No leading `-` (flag-like)
+/// - Charset: `[A-Za-z0-9._~/?=&%-]` (allows query strings with `?` and `%xx`)
+/// - No `..` segments (path traversal)
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] with the offending path.
+pub fn validate_raw_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("raw path must not be empty: {path}"),
+        });
+    }
+    if !path.starts_with('/') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("raw path must start with '/': {path}"),
+        });
+    }
+    if path.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("raw path must not look like a flag: {path}"),
+        });
+    }
+    // Check for path traversal
+    for segment in path.split('/') {
+        if segment == ".." {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("raw path contains path traversal: {path}"),
+            });
+        }
+    }
+    // Validate charset - only allow [A-Za-z0-9._~/?=&%-]
+    for ch in path.chars() {
+        if !matches!(ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '~' | '/' | '?' | '=' | '&' | '%' | '-')
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("raw path contains disallowed character '{ch}': {path}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Build an optional ` --context=<ctx>` flag (leading space, shell-escaped).
 ///
 /// Safe context names (only `[A-Za-z0-9._@:/-]`) are emitted bare; names
@@ -818,6 +865,179 @@ impl KubernetesCommandBuilder {
         }
         cmd.push_str(&kubectl_context_flag(context));
         cmd
+    }
+
+    /// Build a `kubectl get --raw <path>` command.
+    ///
+    /// Constructs: `{kubectl} get --raw={path} [--context={ctx}]`
+    ///
+    /// Use this for direct API server access (e.g. `/readyz?verbose`,
+    /// `/livez`, `/healthz`, custom endpoints). The path must be
+    /// validated with [`validate_raw_path`] before calling this builder.
+    #[must_use]
+    pub fn build_get_raw_command(
+        kubectl_bin: Option<&str>,
+        path: &str,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let escaped_path = shell_escape(path);
+        let context_flag = kubectl_context_flag(context);
+        format!("{prefix}get --raw={escaped_path}{context_flag}")
+    }
+
+    /// Build a `kubectl cluster-info [dump]` command.
+    ///
+    /// Constructs: `{kubectl} cluster-info [dump] [--context={ctx}]`
+    ///
+    /// Without `dump`: prints control-plane and `CoreDNS` addresses.
+    /// With `dump`: produces a verbose diagnostic dump (much larger output).
+    #[must_use]
+    pub fn build_cluster_info_command(
+        kubectl_bin: Option<&str>,
+        dump: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let context_flag = kubectl_context_flag(context);
+        if dump {
+            format!("{prefix}cluster-info dump{context_flag}")
+        } else {
+            format!("{prefix}cluster-info{context_flag}")
+        }
+    }
+
+    /// Build a `kubectl version -o json [--client]` command.
+    ///
+    /// Constructs: `{kubectl} version -o json [--client] [--context={ctx}]`
+    ///
+    /// Use `client_only = true` to skip the server version check (useful
+    /// when the API server may be temporarily unavailable).
+    #[must_use]
+    pub fn build_version_command(
+        kubectl_bin: Option<&str>,
+        client_only: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let context_flag = kubectl_context_flag(context);
+        if client_only {
+            format!("{prefix}version -o json --client{context_flag}")
+        } else {
+            format!("{prefix}version -o json{context_flag}")
+        }
+    }
+
+    /// Build a `kubectl api-resources` command.
+    ///
+    /// Constructs: `{kubectl} api-resources [--namespaced={bool}]
+    /// [--api-group={g}] [--verbs={v}] [-o {fmt}] [--context={ctx}]`
+    #[must_use]
+    pub fn build_api_resources_command(
+        kubectl_bin: Option<&str>,
+        namespaced: Option<bool>,
+        api_group: Option<&str>,
+        verbs: Option<&str>,
+        output: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let context_flag = kubectl_context_flag(context);
+        let mut cmd = format!("{prefix}api-resources");
+        if let Some(ns) = namespaced {
+            let _ = write!(cmd, " --namespaced={ns}");
+        }
+        if let Some(grp) = api_group {
+            let _ = write!(cmd, " --api-group={}", shell_escape(grp));
+        }
+        if let Some(v) = verbs {
+            let _ = write!(cmd, " --verbs={}", shell_escape(v));
+        }
+        if let Some(o) = output {
+            let _ = write!(cmd, " -o {}", shell_escape(o));
+        }
+        cmd.push_str(&context_flag);
+        cmd
+    }
+
+    /// Build a `kubectl api-versions` command.
+    ///
+    /// Constructs: `{kubectl} api-versions [--context={ctx}]`
+    #[must_use]
+    pub fn build_api_versions_command(kubectl_bin: Option<&str>, context: Option<&str>) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let context_flag = kubectl_context_flag(context);
+        format!("{prefix}api-versions{context_flag}")
+    }
+
+    /// Build a `kubectl get nodes` command that emits per-node condition rows.
+    ///
+    /// Constructs: `{kubectl} get nodes [{node}] -o jsonpath='{range...}'
+    /// [--context={ctx}]`
+    ///
+    /// Output format: `<node>\t<Type>=<Status>;<Type>=<Status>;...\n` per node.
+    /// Use an optional `node` name to scope to a single node.
+    #[must_use]
+    pub fn build_node_conditions_command(
+        kubectl_bin: Option<&str>,
+        node: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let context_flag = kubectl_context_flag(context);
+        let node_arg = if let Some(n) = node {
+            format!(" {}", shell_escape(n))
+        } else {
+            String::new()
+        };
+        format!(
+            "{prefix}get nodes{node_arg} -o jsonpath='{{range .items[*]}}{{.metadata.name}}{{\"\\t\"}}{{range .status.conditions[*]}}{{.type}}={{.status}}{{\";\"}}{{end}}{{\"\\n\"}}{{end}}'{context_flag}"
+        )
+    }
+
+    /// Build a compound command that prints allocatable capacity per node and
+    /// summarises running container CPU requests.
+    ///
+    /// Uses `jq` on the remote host; emits TSV rows (name, cpu, memory, pods)
+    /// followed by a `---REQUESTS---` section with a count of running containers
+    /// that declare CPU requests.
+    #[must_use]
+    pub fn build_node_capacity_command(
+        kubectl_bin: Option<&str>,
+        node: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let p = prefix.trim_end();
+        let context_flag = kubectl_context_flag(context);
+        let node_arg = if let Some(n) = node {
+            format!(" {}", shell_escape(n))
+        } else {
+            String::new()
+        };
+        format!(
+            "P={p}; $P get nodes{node_arg} -o json{context_flag} | jq -r '.items[] | [.metadata.name, .status.allocatable.cpu, .status.allocatable.memory, .status.allocatable.pods] | @tsv' && echo '---REQUESTS---' && $P get pods -A --field-selector=status.phase=Running -o json{context_flag} | jq -r '[.items[].spec.containers[].resources.requests.cpu // empty] | length as $n | \"running_containers_with_cpu_requests=\\($n)\"'"
+        )
+    }
+
+    /// Build a compound command that checks whether the metrics-server is
+    /// available and functioning.
+    ///
+    /// Checks three things in sequence:
+    /// 1. `APIService v1beta1.metrics.k8s.io` availability condition
+    /// 2. `metrics-server` Deployment ready replica count
+    /// 3. `kubectl top nodes` smoke test (first 3 lines)
+    #[must_use]
+    pub fn build_metrics_server_check_command(
+        kubectl_bin: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let p = prefix.trim_end();
+        let context_flag = kubectl_context_flag(context);
+        format!(
+            "P={p}; echo '== APIService =='; $P get apiservice v1beta1.metrics.k8s.io -o jsonpath='{{.status.conditions[?(@.type==\"Available\")].status}}'{context_flag} 2>&1; echo; echo '== Deployment =='; $P get deploy -n kube-system metrics-server -o jsonpath='{{.status.readyReplicas}}/{{.status.replicas}}'{context_flag} 2>&1; echo; echo '== top smoke =='; $P top nodes{context_flag} 2>&1 | head -3"
+        )
     }
 }
 
