@@ -78,8 +78,10 @@ pub fn kubeconfig_env_prefix(kubeconfig: Option<&str>) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`BridgeError::CommandDenied`] if the context is empty or starts
-/// with `-` (flag-like values such as `--kubeconfig=/etc/x`).
+/// Returns [`BridgeError::CommandDenied`] if the context is empty, starts
+/// with `-` (flag-like values such as `--kubeconfig=/etc/x`), or contains
+/// characters outside `[A-Za-z0-9._@:/-]` plus space (rejecting injection
+/// payloads such as `prod$(kubectl delete pods --all)`).
 pub fn validate_context(context: &str) -> Result<()> {
     if context.is_empty() {
         return Err(BridgeError::CommandDenied {
@@ -89,6 +91,14 @@ pub fn validate_context(context: &str) -> Result<()> {
     if context.starts_with('-') {
         return Err(BridgeError::CommandDenied {
             reason: format!("context must not look like a flag: {context}"),
+        });
+    }
+    if !context.chars().all(|c| {
+        matches!(c,
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '@' | ':' | '/' | '-' | ' ')
+    }) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("context contains disallowed characters: {context}"),
         });
     }
     Ok(())
@@ -2600,5 +2610,11 @@ mod tests {
         assert!(validate_context("--kubeconfig=/etc/x").is_err());
         assert!(validate_context("good-ctx").is_ok());
         assert!(validate_context("").is_err());
+        // Injection payloads must be rejected by the charset guard.
+        assert!(validate_context("prod$(evil)").is_err());
+        assert!(validate_context("prod;rm -rf /").is_err());
+        // In-charset / space values stay valid.
+        assert!(validate_context("prod").is_ok());
+        assert!(validate_context("my ctx").is_ok());
     }
 }
