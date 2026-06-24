@@ -160,6 +160,7 @@ const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
     "ssh_ldap_modify",    // LDIF `changetype: delete` removes entries
     "ssh_vault_write",    // overwrites a secret (KV v1 has no versioning)
     "ssh_pkg_update",     // full system upgrade can remove/replace packages
+    "ssh_k8s_drain", // kubectl drain evicts all pods from a node — irreversible workload disruption
 ];
 
 #[test]

@@ -74,6 +74,59 @@ pub fn kubeconfig_env_prefix(kubeconfig: Option<&str>) -> String {
     }
 }
 
+/// Validate a kubectl context name: non-empty, not flag-like, shell-safe charset.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the context is empty, starts
+/// with `-` (flag-like values such as `--kubeconfig=/etc/x`), or contains
+/// characters outside `[A-Za-z0-9._@:/-]` plus space (rejecting injection
+/// payloads such as `prod$(kubectl delete pods --all)`).
+pub fn validate_context(context: &str) -> Result<()> {
+    if context.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "context must not be empty".to_string(),
+        });
+    }
+    if context.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("context must not look like a flag: {context}"),
+        });
+    }
+    if !context.chars().all(|c| {
+        matches!(c,
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '@' | ':' | '/' | '-' | ' ')
+    }) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("context contains disallowed characters: {context}"),
+        });
+    }
+    Ok(())
+}
+
+/// Build an optional ` --context=<ctx>` flag (leading space, shell-escaped).
+///
+/// Safe context names (only `[A-Za-z0-9._@:/-]`) are emitted bare; names
+/// containing spaces or other special characters are single-quoted.
+///
+/// Returns an empty string when no context is supplied.
+#[must_use]
+pub fn kubectl_context_flag(context: Option<&str>) -> String {
+    match context {
+        Some(ctx) => {
+            let needs_quoting = ctx
+                .chars()
+                .any(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '@' | ':' | '/' | '-'));
+            if needs_quoting {
+                format!(" --context={}", shell_escape(ctx))
+            } else {
+                format!(" --context={ctx}")
+            }
+        }
+        None => String::new(),
+    }
+}
+
 /// Builds kubectl CLI commands for remote execution.
 pub struct KubernetesCommandBuilder;
 
@@ -474,14 +527,14 @@ impl KubernetesCommandBuilder {
 
     /// Validate a rollout action.
     ///
-    /// Only allows: `status`, `restart`, `undo`, `history`.
+    /// Only allows: `status`, `restart`, `undo`, `history`, `pause`, `resume`.
     ///
     /// # Errors
     ///
     /// Returns `BridgeError::CommandDenied` if the action is not in
     /// the allowed list.
     pub fn validate_rollout_action(action: &str) -> Result<()> {
-        let allowed = ["status", "restart", "undo", "history"];
+        let allowed = ["status", "restart", "undo", "history", "pause", "resume"];
         let lower = action.to_lowercase();
 
         if allowed.contains(&lower.as_str()) {
@@ -614,6 +667,157 @@ impl KubernetesCommandBuilder {
                 ),
             })
         }
+    }
+
+    /// Build a `kubectl patch <target> --type=<type> -p <patch>` command.
+    ///
+    /// Applies a strategic, merge, or JSON patch to a live resource.
+    /// `patch_type` is one of `strategic`, `merge`, `json` (validated by the
+    /// handler before this builder is called).
+    #[must_use]
+    pub fn build_patch_command(
+        kubectl_bin: Option<&str>,
+        target: &str,
+        patch: &str,
+        patch_type: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!(
+            "{prefix}patch {} --type={} -p {}",
+            shell_escape(target),
+            shell_escape(patch_type),
+            shell_escape(patch)
+        );
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build a `kubectl set <subcommand> <target> <assignments...>` command.
+    ///
+    /// Constructs: `{kubectl} set {subcommand} {target} {assignments...}
+    /// [-n {ns}] [--context={ctx}]`
+    ///
+    /// `subcommand` is one of `image`, `env`, `resources` (validated by the
+    /// handler before this builder is called).
+    #[must_use]
+    pub fn build_set_command(
+        kubectl_bin: Option<&str>,
+        subcommand: &str,
+        target: &str,
+        assignments: &[String],
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!(
+            "{prefix}set {} {}",
+            shell_escape(subcommand),
+            shell_escape(target)
+        );
+        for a in assignments {
+            let _ = write!(cmd, " {}", shell_escape(a));
+        }
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build a `kubectl cordon|uncordon <node>` command.
+    ///
+    /// Constructs: `{kubectl} cordon|uncordon {node} [--context={ctx}]`
+    ///
+    /// Pass `cordon = true` to mark a node unschedulable; `false` to mark it
+    /// schedulable again (`kubectl uncordon`). Both are idempotent — running
+    /// the same verb twice converges to the same state.
+    #[must_use]
+    pub fn build_cordon_command(
+        kubectl_bin: Option<&str>,
+        node: &str,
+        cordon: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let verb = if cordon { "cordon" } else { "uncordon" };
+        let mut cmd = format!("{prefix}{verb} {}", shell_escape(node));
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build `kubectl drain <node>` with safety flags.
+    ///
+    /// Constructs: `{kubectl} drain {node} [--ignore-daemonsets]
+    /// [--delete-emptydir-data] [--force] [--context={ctx}]`
+    ///
+    /// **DESTRUCTIVE** — evicting pods from a node causes workload disruption
+    /// that is not automatically reversed when the node returns.
+    /// Always cordon first; use `--force` only when stuck on pods that do not
+    /// have a controller (bare pods will be lost permanently).
+    ///
+    /// `ignore_daemonsets` defaults to `true` in the handler — `DaemonSet` pods
+    /// cannot be evicted and must be skipped for the drain to proceed.
+    /// `delete_emptydir` permanently deletes emptyDir volume data.
+    #[must_use]
+    pub fn build_drain_command(
+        kubectl_bin: Option<&str>,
+        node: &str,
+        ignore_daemonsets: bool,
+        delete_emptydir: bool,
+        force: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!("{prefix}drain {}", shell_escape(node));
+        if ignore_daemonsets {
+            cmd.push_str(" --ignore-daemonsets");
+        }
+        if delete_emptydir {
+            cmd.push_str(" --delete-emptydir-data");
+        }
+        if force {
+            cmd.push_str(" --force");
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
+    }
+
+    /// Build a `kubectl auth can-i <verb> <resource>` command (RBAC preflight).
+    ///
+    /// Constructs: `{kubectl} auth can-i {verb} {resource} [-n {ns}]
+    /// [--as {user}] [--context={ctx}]`
+    ///
+    /// Use this before a mutating change to fail fast on permission errors.
+    /// Pass `as_user` to impersonate a user or service account (maps to `kubectl --as`).
+    /// Use `context` for multi-cluster targeting.
+    #[must_use]
+    pub fn build_auth_can_i_command(
+        kubectl_bin: Option<&str>,
+        verb: &str,
+        resource: &str,
+        namespace: Option<&str>,
+        as_user: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let mut cmd = format!(
+            "{prefix}auth can-i {} {}",
+            shell_escape(verb),
+            shell_escape(resource)
+        );
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(u) = as_user {
+            let _ = write!(cmd, " --as {}", shell_escape(u));
+        }
+        cmd.push_str(&kubectl_context_flag(context));
+        cmd
     }
 }
 
@@ -1809,21 +2013,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rollout_action_pause_denied() {
-        let result = KubernetesCommandBuilder::validate_rollout_action("pause");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            BridgeError::CommandDenied { reason } => {
-                assert!(reason.contains("pause"));
-                assert!(reason.contains("not allowed"));
-            }
-            e => panic!("Expected CommandDenied, got: {e:?}"),
-        }
-    }
-
-    #[test]
-    fn test_validate_rollout_action_resume_denied() {
-        assert!(KubernetesCommandBuilder::validate_rollout_action("resume").is_err());
+    fn test_validate_rollout_allows_pause_resume() {
+        assert!(KubernetesCommandBuilder::validate_rollout_action("pause").is_ok());
+        assert!(KubernetesCommandBuilder::validate_rollout_action("resume").is_ok());
+        assert!(KubernetesCommandBuilder::validate_rollout_action("status").is_ok());
+        assert!(KubernetesCommandBuilder::validate_rollout_action("bogus").is_err());
     }
 
     #[test]
@@ -2543,5 +2737,124 @@ mod tests {
             }
             e => panic!("Expected CommandDenied, got: {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_kubectl_context_flag() {
+        assert_eq!(kubectl_context_flag(None), "");
+        assert_eq!(kubectl_context_flag(Some("prod")), " --context=prod");
+        assert_eq!(kubectl_context_flag(Some("my ctx")), " --context='my ctx'");
+    }
+
+    #[test]
+    fn test_validate_context_rejects_flag_like() {
+        assert!(validate_context("--kubeconfig=/etc/x").is_err());
+        assert!(validate_context("good-ctx").is_ok());
+        assert!(validate_context("").is_err());
+        // Injection payloads must be rejected by the charset guard.
+        assert!(validate_context("prod$(evil)").is_err());
+        assert!(validate_context("prod;rm -rf /").is_err());
+        // In-charset / space values stay valid.
+        assert!(validate_context("prod").is_ok());
+        assert!(validate_context("my ctx").is_ok());
+    }
+
+    #[test]
+    fn test_build_set_command_image() {
+        let cmd = KubernetesCommandBuilder::build_set_command(
+            Some("kubectl"),
+            "image",
+            "deployment/api",
+            &["app=nginx:1.27".to_string()],
+            Some("prod"),
+            Some("east"),
+        );
+        assert!(
+            cmd.contains("set 'image' 'deployment/api' 'app=nginx:1.27'"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
+        assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    // ============== build_cordon_command Tests ==============
+
+    #[test]
+    fn test_build_cordon_command() {
+        assert!(
+            KubernetesCommandBuilder::build_cordon_command(Some("kubectl"), "node-1", true, None)
+                .contains("cordon 'node-1'")
+        );
+        let unc = KubernetesCommandBuilder::build_cordon_command(
+            Some("kubectl"),
+            "node-1",
+            false,
+            Some("east"),
+        );
+        assert!(
+            unc.contains("uncordon 'node-1' --context=east"),
+            "cmd: {unc}"
+        );
+    }
+
+    // ============== build_patch_command Tests ==============
+
+    #[test]
+    fn test_build_patch_command_merge() {
+        let cmd = KubernetesCommandBuilder::build_patch_command(
+            Some("kubectl"),
+            "deployment/api",
+            r#"{"spec":{"replicas":3}}"#,
+            "merge",
+            Some("prod"),
+            None,
+        );
+        assert!(
+            cmd.contains("patch 'deployment/api' --type='merge' -p"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
+    }
+
+    // ============== build_drain_command Tests ==============
+
+    #[test]
+    fn test_build_drain_command() {
+        let cmd = KubernetesCommandBuilder::build_drain_command(
+            Some("kubectl"),
+            "node-1",
+            true,
+            true,
+            false,
+            Some("east"),
+        );
+        assert!(cmd.contains("drain 'node-1'"), "cmd: {cmd}");
+        assert!(cmd.contains("--ignore-daemonsets"), "cmd: {cmd}");
+        assert!(cmd.contains("--delete-emptydir-data"), "cmd: {cmd}");
+        assert!(!cmd.contains("--force"), "cmd: {cmd}");
+        assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    // ============== build_auth_can_i_command Tests ==============
+
+    #[test]
+    fn test_build_auth_can_i_command() {
+        let cmd = KubernetesCommandBuilder::build_auth_can_i_command(
+            Some("kubectl"),
+            "create",
+            "deployments",
+            Some("prod"),
+            Some("system:serviceaccount:ci:deployer"),
+            None,
+        );
+        assert!(
+            cmd.contains("auth can-i 'create' 'deployments'"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("-n 'prod'"), "cmd: {cmd}");
+        assert!(
+            cmd.contains("--as 'system:serviceaccount:ci:deployer'"),
+            "cmd: {cmd}"
+        );
     }
 }
