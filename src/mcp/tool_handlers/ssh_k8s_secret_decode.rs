@@ -90,6 +90,7 @@ impl StandardTool for K8sSecretDecodeTool {
             &args.key,
             args.namespace.as_deref(),
             args.context.as_deref(),
+            args.reveal,
         )
     }
 }

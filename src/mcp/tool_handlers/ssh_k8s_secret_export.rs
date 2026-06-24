@@ -89,6 +89,7 @@ impl StandardTool for K8sSecretExportTool {
             &args.name,
             args.namespace.as_deref(),
             args.context.as_deref(),
+            args.reveal,
         )
     }
 }

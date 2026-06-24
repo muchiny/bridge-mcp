@@ -1677,17 +1677,26 @@ impl KubernetesCommandBuilder {
     ///
     /// The caller MUST check `reveal == true` before calling this function
     /// and return a `CommandDenied` error if not. The builder itself does NOT
-    /// enforce the reveal gate — that is the handler's responsibility.
+    /// enforce the reveal gate — the builder enforces it as a second layer
+    /// (defence in depth). The handler must still gate on `reveal` before
+    /// calling this function.
     ///
     /// # Errors
-    /// Returns `BridgeError::CommandDenied` on key/namespace/context validation failure.
+    /// Returns `BridgeError::CommandDenied` when `reveal` is `false`, or on
+    /// key/namespace/context validation failure.
     pub fn build_secret_decode_command(
         kubectl_bin: Option<&str>,
         name: &str,
         key: &str,
         namespace: Option<&str>,
         context: Option<&str>,
+        reveal: bool,
     ) -> Result<String> {
+        if !reveal {
+            return Err(crate::error::BridgeError::CommandDenied {
+                reason: "secret decode requires reveal=true".into(),
+            });
+        }
         validate_jsonpath_key(key)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
@@ -1714,16 +1723,25 @@ impl KubernetesCommandBuilder {
     /// `last-applied-configuration` annotation, and the `namespace` line removed.
     /// The `.data` block still contains base64-encoded values — treat as secret.
     ///
-    /// The caller MUST enforce the reveal gate before calling this builder.
+    /// The builder enforces the reveal gate as a second layer (defence in
+    /// depth). The handler must still gate on `reveal` before calling this
+    /// function.
     ///
     /// # Errors
-    /// Returns `BridgeError::CommandDenied` on namespace/context validation failure.
+    /// Returns `BridgeError::CommandDenied` when `reveal` is `false`, or on
+    /// namespace/context validation failure.
     pub fn build_secret_export_command(
         kubectl_bin: Option<&str>,
         name: &str,
         namespace: Option<&str>,
         context: Option<&str>,
+        reveal: bool,
     ) -> Result<String> {
+        if !reveal {
+            return Err(crate::error::BridgeError::CommandDenied {
+                reason: "secret export requires reveal=true".into(),
+            });
+        }
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -4155,6 +4173,7 @@ mod tests {
             "api-key",
             Some("prod"),
             None,
+            true,
         )
         .unwrap();
         assert!(cmd.contains("get secret"), "cmd: {cmd}");
@@ -4170,8 +4189,35 @@ mod tests {
             "key'injection",
             None,
             None,
+            true,
         );
         assert!(result.is_err(), "single quote in key must be rejected");
+    }
+
+    #[test]
+    fn test_build_secret_decode_command_requires_reveal() {
+        let result = KubernetesCommandBuilder::build_secret_decode_command(
+            Some("kubectl"),
+            "my-secret",
+            "api-key",
+            None,
+            None,
+            false,
+        );
+        match result {
+            Err(crate::error::BridgeError::CommandDenied { reason }) => {
+                assert!(
+                    !reason.contains("api-key"),
+                    "error must NOT contain key plaintext: {reason}"
+                );
+                assert!(
+                    !reason.contains("my-secret"),
+                    "error must NOT contain secret name: {reason}"
+                );
+            }
+            Ok(cmd) => panic!("reveal=false must return Err, got: {cmd}"),
+            Err(e) => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 
     // ============== build_secret_export_command Tests ==============
@@ -4183,11 +4229,33 @@ mod tests {
             "my-secret",
             Some("prod"),
             None,
+            true,
         )
         .unwrap();
         assert!(cmd.contains("get secret"), "cmd: {cmd}");
         assert!(cmd.contains("-o yaml"), "cmd: {cmd}");
         assert!(cmd.contains("grep -v"), "cmd: {cmd}");
         assert!(cmd.contains("managedFields"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_secret_export_command_requires_reveal() {
+        let result = KubernetesCommandBuilder::build_secret_export_command(
+            Some("kubectl"),
+            "my-secret",
+            None,
+            None,
+            false,
+        );
+        match result {
+            Err(crate::error::BridgeError::CommandDenied { reason }) => {
+                assert!(
+                    !reason.contains("my-secret"),
+                    "error must NOT contain secret name: {reason}"
+                );
+            }
+            Ok(cmd) => panic!("reveal=false must return Err, got: {cmd}"),
+            Err(e) => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }
