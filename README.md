@@ -11,6 +11,7 @@
 [![Downloads](https://img.shields.io/crates/d/bridge-mcp?style=flat-square)](https://crates.io/crates/bridge-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
+[![SafeSkill 50/100](https://img.shields.io/badge/SafeSkill-50%2F100_Use%20with%20Caution-orange)](https://safeskill.dev/scan/muchiny-mcp-ssh-bridge)
 
 **A Rust MCP server for secure remote infrastructure management — 357 tools, 9 protocols.**
 
