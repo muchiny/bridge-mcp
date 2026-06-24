@@ -14,6 +14,7 @@ pub mod chatops;
 pub mod cloud;
 pub mod compliance;
 pub mod container_logs;
+pub mod crictl;
 pub mod cron;
 pub mod cron_analysis;
 pub mod database;

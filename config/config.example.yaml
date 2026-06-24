@@ -390,7 +390,7 @@ audit:
 #       kubernetes: true   # opt in to kubectl + helm
 #       sessions: false    # remove tmux sessions from the default profile
 #
-# Available groups (75 groups, 357 tools):
+# Available groups (76 groups, 399 tools):
 #
 #   --- Linux (59 groups) ---
 #   core              - ssh_exec, ssh_exec_multi, ssh_status, ssh_health, ssh_history,
@@ -443,6 +443,7 @@ audit:
 #                       ssh_docker_volume_inspect, ssh_docker_network_inspect
 #   podman            - ssh_podman_ps, ssh_podman_logs, ssh_podman_inspect, ssh_podman_exec,
 #                       ssh_podman_images, ssh_podman_compose
+#   cri               - ssh_crictl_ps (CRI container listing via crictl; works when apiserver is down)
 #   kubernetes        - ssh_k8s_get, ssh_k8s_logs, ssh_k8s_describe, ssh_k8s_apply,
 #                       ssh_k8s_delete, ssh_k8s_rollout, ssh_k8s_scale, ssh_k8s_exec,
 #                       ssh_k8s_top, ssh_helm_list, ssh_helm_status, ssh_helm_upgrade,
@@ -555,6 +556,7 @@ tool_groups:
     # mongodb: true            # Enable MongoDB tools
     # docker: true             # Enable Docker tools
     # podman: true             # Enable Podman tools
+    # cri: true                # Enable crictl/CRI debug tools (K3s embedded containerd)
     # kubernetes: true         # Enable kubectl/helm tools
     # esxi: true               # Enable VMware ESXi tools
     # nginx: true              # Enable Nginx tools

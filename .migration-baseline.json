@@ -14,6 +14,7 @@
     "config",
     "container_logs",
     "core",
+    "cri",
     "cron",
     "cron_analysis",
     "database",
@@ -76,6 +77,6 @@
     "windows_services",
     "windows_updates"
   ],
-  "groups_count": 75,
-  "total": 398
+  "groups_count": 76,
+  "total": 399
 }

@@ -2833,6 +2833,7 @@ mod tests {
             "chatops",
             "templates",
             "pty",
+            "cri",
         ];
         let registry = create_all_enabled_registry();
         for tool in registry.list_tools() {
