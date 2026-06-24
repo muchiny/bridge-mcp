@@ -21,11 +21,20 @@ pub struct SshK8sEventsArgs {
     #[serde(default)]
     field_selector: Option<String>,
     #[serde(default)]
+    output: Option<String>,
+    #[serde(default)]
+    label_selector: Option<String>,
+    #[serde(default)]
+    for_kind: Option<String>,
+    #[serde(default)]
+    for_name: Option<String>,
+    #[serde(default)]
     kubectl_bin: Option<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     max_output: Option<u64>,
+    #[serde(default)]
     save_output: Option<String>,
 }
 
@@ -67,6 +76,23 @@ impl StandardTool for K8sEventsTool {
                 "type": "string",
                 "description": "Field selector to scope events, e.g. involvedObject.name=my-pod"
             },
+            "output": {
+                "type": "string",
+                "enum": ["json", "yaml", "wide", "name"],
+                "description": "Output format for events"
+            },
+            "label_selector": {
+                "type": "string",
+                "description": "Filter events by label selector (e.g. app=nginx)"
+            },
+            "for_kind": {
+                "type": "string",
+                "description": "Filter events for a specific resource kind (use with for_name)"
+            },
+            "for_name": {
+                "type": "string",
+                "description": "Filter events for a specific resource name (use with for_kind)"
+            },
             "kubectl_bin": {
                 "type": "string",
                 "description": "Path to kubectl (default: auto-detect kubectl/k3s/microk8s)"
@@ -97,11 +123,29 @@ impl StandardTool for K8sEventsTool {
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
+        if let Some(out) = args.output.as_deref() {
+            KubernetesCommandBuilder::validate_events_output(out)?;
+        }
+        let for_target = match (args.for_kind.as_deref(), args.for_name.as_deref()) {
+            (Some(kind), Some(name)) => {
+                KubernetesCommandBuilder::validate_for_target(kind, name)?;
+                Some(format!("{kind}/{name}"))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(crate::error::BridgeError::CommandDenied {
+                    reason: "for_kind and for_name must both be provided together".to_string(),
+                });
+            }
+        };
         Ok(KubernetesCommandBuilder::build_events_command(
             args.kubectl_bin.as_deref(),
             args.namespace.as_deref(),
             args.all_namespaces.unwrap_or(false),
             args.field_selector.as_deref(),
+            args.output.as_deref(),
+            args.label_selector.as_deref(),
+            for_target.as_deref(),
         ))
     }
 }
@@ -279,6 +323,10 @@ mod tests {
             namespace: None,
             all_namespaces: None,
             field_selector: None,
+            output: None,
+            label_selector: None,
+            for_kind: None,
+            for_name: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -298,6 +346,10 @@ mod tests {
             namespace: Some("kube-system".to_string()),
             all_namespaces: None,
             field_selector: None,
+            output: None,
+            label_selector: None,
+            for_kind: None,
+            for_name: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -316,6 +368,10 @@ mod tests {
             namespace: None,
             all_namespaces: Some(true),
             field_selector: None,
+            output: None,
+            label_selector: None,
+            for_kind: None,
+            for_name: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -334,6 +390,10 @@ mod tests {
             namespace: Some("default".to_string()),
             all_namespaces: None,
             field_selector: Some("involvedObject.name=my-pod".to_string()),
+            output: None,
+            label_selector: None,
+            for_kind: None,
+            for_name: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -353,6 +413,10 @@ mod tests {
             namespace: Some("--all-namespaces".to_string()),
             all_namespaces: None,
             field_selector: None,
+            output: None,
+            label_selector: None,
+            for_kind: None,
+            for_name: None,
             kubectl_bin: Some("kubectl".to_string()),
             timeout_seconds: None,
             max_output: None,
@@ -364,5 +428,92 @@ mod tests {
             result.is_err(),
             "expected rejection for flag-like namespace"
         );
+    }
+
+    #[test]
+    fn test_build_command_with_label_selector() {
+        let args = SshK8sEventsArgs {
+            host: "server1".to_string(),
+            namespace: None,
+            all_namespaces: None,
+            field_selector: None,
+            output: None,
+            label_selector: Some("app=nginx".to_string()),
+            for_kind: None,
+            for_name: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sEventsTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-l 'app=nginx'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_with_for_target() {
+        let args = SshK8sEventsArgs {
+            host: "server1".to_string(),
+            namespace: Some("default".to_string()),
+            all_namespaces: None,
+            field_selector: None,
+            output: None,
+            label_selector: None,
+            for_kind: Some("pod".to_string()),
+            for_name: Some("my-pod".to_string()),
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sEventsTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("--for 'pod/my-pod'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_command_rejects_partial_for_target() {
+        let args = SshK8sEventsArgs {
+            host: "server1".to_string(),
+            namespace: None,
+            all_namespaces: None,
+            field_selector: None,
+            output: None,
+            label_selector: None,
+            for_kind: Some("pod".to_string()),
+            for_name: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let result = K8sEventsTool::build_command(&args, &host_config);
+        assert!(
+            result.is_err(),
+            "expected error when only for_kind provided"
+        );
+    }
+
+    #[test]
+    fn test_build_command_with_output_format() {
+        let args = SshK8sEventsArgs {
+            host: "server1".to_string(),
+            namespace: None,
+            all_namespaces: None,
+            field_selector: None,
+            output: Some("json".to_string()),
+            label_selector: None,
+            for_kind: None,
+            for_name: None,
+            kubectl_bin: Some("kubectl".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let host_config = test_host_config();
+        let cmd = K8sEventsTool::build_command(&args, &host_config).unwrap();
+        assert!(cmd.contains("-o 'json'"), "cmd: {cmd}");
     }
 }
