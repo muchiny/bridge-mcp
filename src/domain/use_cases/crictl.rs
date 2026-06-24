@@ -115,6 +115,184 @@ pub fn validate_inspect_kind(kind: &str) -> Result<()> {
 pub struct CrictlCommandBuilder;
 
 impl CrictlCommandBuilder {
+    /// Build a `crictl pods` command (lists pods/sandboxes).
+    #[must_use]
+    pub fn build_pods_command(
+        crictl_bin: Option<&str>,
+        state: Option<&str>,
+        name: Option<&str>,
+        label: Option<&str>,
+        namespace: Option<&str>,
+        output: Option<&str>,
+    ) -> String {
+        use std::fmt::Write;
+        let prefix = crictl_detect_prefix(crictl_bin);
+        let mut cmd = format!("{prefix}pods");
+        if let Some(s) = state {
+            let _ = write!(cmd, " --state {}", shell_escape(s));
+        }
+        if let Some(n) = name {
+            let _ = write!(cmd, " --name {}", shell_escape(n));
+        }
+        if let Some(l) = label {
+            let _ = write!(cmd, " --label {}", shell_escape(l));
+        }
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " --namespace {}", shell_escape(ns));
+        }
+        let _ = write!(cmd, " -o {}", shell_escape(output.unwrap_or("json")));
+        cmd
+    }
+
+    /// Build a `crictl stats` command (one-shot container resource stats).
+    #[must_use]
+    pub fn build_stats_command(
+        crictl_bin: Option<&str>,
+        all: bool,
+        id: Option<&str>,
+        output: Option<&str>,
+    ) -> String {
+        use std::fmt::Write;
+        let prefix = crictl_detect_prefix(crictl_bin);
+        let mut cmd = format!("{prefix}stats");
+        if all {
+            cmd.push_str(" -a");
+        }
+        if let Some(c) = id {
+            let _ = write!(cmd, " --id {}", shell_escape(c));
+        }
+        let _ = write!(cmd, " -o {}", shell_escape(output.unwrap_or("json")));
+        cmd
+    }
+
+    /// Build a `crictl images` command (list container images).
+    #[must_use]
+    pub fn build_images_command(crictl_bin: Option<&str>, output: Option<&str>) -> String {
+        use std::fmt::Write;
+        let prefix = crictl_detect_prefix(crictl_bin);
+        let mut cmd = format!("{prefix}images");
+        let _ = write!(cmd, " -o {}", shell_escape(output.unwrap_or("json")));
+        cmd
+    }
+
+    /// Build a `crictl info` command (CRI runtime/node info).
+    #[must_use]
+    pub fn build_info_command(crictl_bin: Option<&str>, output: Option<&str>) -> String {
+        use std::fmt::Write;
+        let prefix = crictl_detect_prefix(crictl_bin);
+        let mut cmd = format!("{prefix}info");
+        let _ = write!(cmd, " -o {}", shell_escape(output.unwrap_or("json")));
+        cmd
+    }
+
+    /// Build a `crictl logs` command (stream/dump container logs).
+    #[must_use]
+    pub fn build_logs_command(
+        crictl_bin: Option<&str>,
+        container_id: &str,
+        tail: Option<u64>,
+        since: Option<&str>,
+        previous: bool,
+        timestamps: bool,
+    ) -> String {
+        use std::fmt::Write;
+        let prefix = crictl_detect_prefix(crictl_bin);
+        let mut cmd = format!("{prefix}logs");
+        if previous {
+            cmd.push_str(" -p");
+        }
+        if let Some(n) = tail {
+            let _ = write!(cmd, " --tail {n}");
+        }
+        if let Some(s) = since {
+            let _ = write!(cmd, " --since {}", shell_escape(s));
+        }
+        if timestamps {
+            cmd.push_str(" -t");
+        }
+        let _ = write!(cmd, " {}", shell_escape(container_id));
+        cmd
+    }
+
+    /// Build a `crictl inspect`/`inspectp`/`inspecti` command.
+    #[must_use]
+    pub fn build_inspect_command(
+        crictl_bin: Option<&str>,
+        kind: &str,
+        id: &str,
+        output: Option<&str>,
+    ) -> String {
+        use std::fmt::Write;
+        let subcmd = match kind {
+            "container" => "inspect",
+            "pod" => "inspectp",
+            "image" => "inspecti",
+            _ => unreachable!(), // already validated by validate_inspect_kind
+        };
+        let prefix = crictl_detect_prefix(crictl_bin);
+        let mut cmd = format!("{prefix}{subcmd}");
+        let _ = write!(
+            cmd,
+            " {} -o {}",
+            shell_escape(id),
+            shell_escape(output.unwrap_or("json"))
+        );
+        cmd
+    }
+
+    /// Build a `crictl rmi` command (remove image or prune all unused images).
+    ///
+    /// # Errors
+    /// Returns [`crate::error::BridgeError::CommandDenied`] if both `image` and
+    /// `prune` are set, or if neither is set.
+    pub fn build_rmi_command(
+        crictl_bin: Option<&str>,
+        image: Option<&str>,
+        prune: bool,
+    ) -> crate::error::Result<String> {
+        use crate::error::BridgeError;
+        match (image, prune) {
+            (Some(_), true) => Err(BridgeError::CommandDenied {
+                reason: "cannot specify both image and prune".to_string(),
+            }),
+            (None, false) => Err(BridgeError::CommandDenied {
+                reason: "must specify either image or prune".to_string(),
+            }),
+            (Some(img), false) => {
+                validate_image_ref(img)?;
+                let prefix = crictl_detect_prefix(crictl_bin);
+                Ok(format!("{prefix}rmi {}", shell_escape(img)))
+            }
+            (None, true) => {
+                let prefix = crictl_detect_prefix(crictl_bin);
+                Ok(format!("{prefix}rmi --prune"))
+            }
+        }
+    }
+
+    /// Build a `crictl exec` command (run a command inside a container).
+    #[must_use]
+    pub fn build_exec_command(
+        crictl_bin: Option<&str>,
+        container_id: &str,
+        command: &str,
+        sync: bool,
+    ) -> String {
+        use std::fmt::Write;
+        let prefix = crictl_detect_prefix(crictl_bin);
+        let mut cmd = format!("{prefix}exec");
+        if sync {
+            cmd.push_str(" -s");
+        }
+        let _ = write!(
+            cmd,
+            " {} sh -c {}",
+            shell_escape(container_id),
+            shell_escape(command)
+        );
+        cmd
+    }
+
     /// Build a `crictl ps` command (defaults to JSON output for reduction).
     #[must_use]
     pub fn build_ps_command(
@@ -339,6 +517,203 @@ mod tests {
             None,
         );
         assert!(cmd.contains("--label 'app=frontend'"), "cmd: {cmd}");
+    }
+
+    // ── build_pods_command ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_pods_command_defaults() {
+        let cmd =
+            CrictlCommandBuilder::build_pods_command(Some("crictl"), None, None, None, None, None);
+        assert!(cmd.contains("crictl pods"), "cmd: {cmd}");
+        assert!(cmd.contains("-o 'json'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_pods_command_with_all_filters() {
+        let cmd = CrictlCommandBuilder::build_pods_command(
+            Some("crictl"),
+            Some("ready"),
+            Some("mypod"),
+            Some("app=web"),
+            Some("kube-system"),
+            Some("table"),
+        );
+        assert!(cmd.contains("--state 'ready'"), "cmd: {cmd}");
+        assert!(cmd.contains("--name 'mypod'"), "cmd: {cmd}");
+        assert!(cmd.contains("--label 'app=web'"), "cmd: {cmd}");
+        assert!(cmd.contains("--namespace 'kube-system'"), "cmd: {cmd}");
+        assert!(cmd.contains("-o 'table'"), "cmd: {cmd}");
+    }
+
+    // ── build_stats_command ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_stats_command_defaults() {
+        let cmd = CrictlCommandBuilder::build_stats_command(Some("crictl"), false, None, None);
+        assert!(cmd.contains("crictl stats"), "cmd: {cmd}");
+        assert!(cmd.contains("-o 'json'"), "cmd: {cmd}");
+        assert!(!cmd.contains("-a"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_stats_command_all_with_id() {
+        let cmd =
+            CrictlCommandBuilder::build_stats_command(Some("crictl"), true, Some("abc123"), None);
+        assert!(cmd.contains("crictl stats -a"), "cmd: {cmd}");
+        assert!(cmd.contains("--id 'abc123'"), "cmd: {cmd}");
+    }
+
+    // ── build_images_command ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_images_command_defaults() {
+        let cmd = CrictlCommandBuilder::build_images_command(Some("crictl"), None);
+        assert!(cmd.contains("crictl images"), "cmd: {cmd}");
+        assert!(cmd.contains("-o 'json'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_images_command_table_output() {
+        let cmd = CrictlCommandBuilder::build_images_command(Some("crictl"), Some("table"));
+        assert!(cmd.contains("-o 'table'"), "cmd: {cmd}");
+    }
+
+    // ── build_info_command ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_info_command_defaults() {
+        let cmd = CrictlCommandBuilder::build_info_command(Some("crictl"), None);
+        assert!(cmd.contains("crictl info"), "cmd: {cmd}");
+        assert!(cmd.contains("-o 'json'"), "cmd: {cmd}");
+    }
+
+    // ── build_logs_command ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_logs_command_minimal() {
+        let cmd = CrictlCommandBuilder::build_logs_command(
+            Some("crictl"),
+            "abc123",
+            None,
+            None,
+            false,
+            false,
+        );
+        assert!(cmd.contains("crictl logs"), "cmd: {cmd}");
+        assert!(cmd.contains("'abc123'"), "cmd: {cmd}");
+        assert!(!cmd.contains("-p"), "cmd: {cmd}");
+        assert!(!cmd.contains("-t"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_logs_command_all_flags() {
+        let cmd = CrictlCommandBuilder::build_logs_command(
+            Some("crictl"),
+            "abc123",
+            Some(100),
+            Some("5m"),
+            true,
+            true,
+        );
+        assert!(cmd.contains("-p"), "cmd: {cmd}");
+        assert!(cmd.contains("--tail 100"), "cmd: {cmd}");
+        assert!(cmd.contains("--since '5m'"), "cmd: {cmd}");
+        assert!(cmd.contains("-t"), "cmd: {cmd}");
+        assert!(cmd.contains("'abc123'"), "cmd: {cmd}");
+    }
+
+    // ── build_inspect_command ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_inspect_command_container() {
+        let cmd = CrictlCommandBuilder::build_inspect_command(
+            Some("crictl"),
+            "container",
+            "abc123",
+            None,
+        );
+        assert!(cmd.contains("crictl inspect"), "cmd: {cmd}");
+        assert!(cmd.contains("'abc123'"), "cmd: {cmd}");
+        assert!(cmd.contains("-o 'json'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_inspect_command_pod() {
+        let cmd =
+            CrictlCommandBuilder::build_inspect_command(Some("crictl"), "pod", "pod123", None);
+        assert!(cmd.contains("crictl inspectp"), "cmd: {cmd}");
+        assert!(cmd.contains("'pod123'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_inspect_command_image() {
+        let cmd = CrictlCommandBuilder::build_inspect_command(
+            Some("crictl"),
+            "image",
+            "ubuntu",
+            Some("yaml"),
+        );
+        assert!(cmd.contains("crictl inspecti"), "cmd: {cmd}");
+        assert!(cmd.contains("'ubuntu'"), "cmd: {cmd}");
+        assert!(cmd.contains("-o 'yaml'"), "cmd: {cmd}");
+    }
+
+    // ── build_rmi_command ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_rmi_command_with_image() {
+        let result =
+            CrictlCommandBuilder::build_rmi_command(Some("crictl"), Some("ubuntu:latest"), false);
+        let cmd = result.unwrap();
+        assert!(cmd.contains("crictl rmi"), "cmd: {cmd}");
+        assert!(cmd.contains("'ubuntu:latest'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_rmi_command_prune() {
+        let result = CrictlCommandBuilder::build_rmi_command(Some("crictl"), None, true);
+        let cmd = result.unwrap();
+        assert!(cmd.contains("crictl rmi --prune"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_rmi_command_both_image_and_prune_rejected() {
+        let result = CrictlCommandBuilder::build_rmi_command(Some("crictl"), Some("ubuntu"), true);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            BridgeError::CommandDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn test_build_rmi_command_neither_rejected() {
+        let result = CrictlCommandBuilder::build_rmi_command(Some("crictl"), None, false);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            BridgeError::CommandDenied { .. }
+        ));
+    }
+
+    // ── build_exec_command ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_exec_command_sync() {
+        let cmd =
+            CrictlCommandBuilder::build_exec_command(Some("crictl"), "abc123", "ls /tmp", true);
+        assert!(cmd.contains("crictl exec -s"), "cmd: {cmd}");
+        assert!(cmd.contains("'abc123'"), "cmd: {cmd}");
+        assert!(cmd.contains("sh -c 'ls /tmp'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_exec_command_no_sync() {
+        let cmd = CrictlCommandBuilder::build_exec_command(Some("crictl"), "abc123", "date", false);
+        assert!(cmd.contains("crictl exec"), "cmd: {cmd}");
+        assert!(!cmd.contains("-s"), "no -s flag: {cmd}");
+        assert!(cmd.contains("sh -c 'date'"), "cmd: {cmd}");
     }
 
     #[test]
