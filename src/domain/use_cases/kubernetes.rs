@@ -3873,6 +3873,75 @@ pub fn validate_abs_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a Kubernetes storage size string (e.g. `100Mi`, `2Gi`, `500M`).
+///
+/// Accepts digits optionally followed by one standard K8s suffix:
+/// `Ki | Mi | Gi | Ti | Pi | Ei | K | M | G | T | P | E | m`.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the size is empty or does not match
+/// the expected pattern.
+pub fn validate_storage_size(size: &str) -> Result<()> {
+    // ^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E|m)?$
+    const SUFFIXES: &[&str] = &[
+        "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "K", "M", "G", "T", "P", "E", "m",
+    ];
+    if size.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "storage size must not be empty".to_string(),
+        });
+    }
+    let bytes = size.as_bytes();
+    let mut i = 0;
+    // Must start with at least one digit
+    if i >= bytes.len() || !bytes[i].is_ascii_digit() {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("invalid storage size (must start with digits): {size}"),
+        });
+    }
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    // Optional suffix
+    if i < bytes.len() {
+        let suffix = &size[i..];
+        if !SUFFIXES.contains(&suffix) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "invalid storage size suffix '{suffix}' in '{size}'; \
+                     expected one of: Ki Mi Gi Ti Pi Ei K M G T P E m"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a filesystem path suitable for use as the local-path-provisioner
+/// storage root.
+///
+/// In addition to the checks in [`validate_abs_path`], the path must contain
+/// at least 3 non-empty segments after splitting on `/` so that dangerously
+/// shallow roots like `/var` or `/var/lib` are rejected (minimum accepted
+/// depth: `/var/lib/something`).
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the path is invalid or too shallow.
+pub fn validate_storage_root(path: &str) -> Result<()> {
+    validate_abs_path(path)?;
+    let depth = path.split('/').filter(|s| !s.is_empty()).count();
+    if depth < 3 {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "storage root path is too shallow (must have ≥3 segments, got {depth}): {path}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 // ============================================================
 // Wave-9b: Networking command builders (6 new tools)
 // ============================================================
@@ -4266,6 +4335,274 @@ FAILED:.status.failed'{ctx_flag} 2>/dev/null \
             ctx_flag = ctx_flag,
         );
         Ok(cmd)
+    }
+
+    pub fn build_pvc_status_command(
+        kubectl_bin: Option<&str>,
+        pvc: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_flag = match namespace {
+            Some(ns) => format!(" -n {}", shell_escape(ns)),
+            None => String::new(),
+        };
+        let pvc_esc = shell_escape(pvc);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "PFX={prefix_esc}; \
+             echo '=== PVC ==='; \
+             $PFX get pvc {pvc_esc}{ns_flag}{ctx_flag} \
+               -o custom-columns=\
+'NAME:.metadata.name,\
+STATUS:.status.phase,\
+VOLUME:.spec.volumeName,\
+CAPACITY:.status.capacity.storage,\
+REQUEST:.spec.resources.requests.storage,\
+SC:.spec.storageClassName,\
+ACCESSMODES:.spec.accessModes[*]' 2>&1; \
+             PV=$($PFX get pvc {pvc_esc}{ns_flag}{ctx_flag} \
+               -o jsonpath='{{.spec.volumeName}}' 2>/dev/null); \
+             echo '=== PV ==='; \
+             if [ -n \"$PV\" ]; then \
+               $PFX get pv \"$PV\"{ctx_flag} \
+                 -o custom-columns=\
+'NAME:.metadata.name,\
+STATUS:.status.phase,\
+RECLAIM:.spec.persistentVolumeReclaimPolicy,\
+NODE:.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0],\
+PATH:.spec.hostPath.path,\
+LOCALPATH:.spec.local.path' 2>&1; \
+             else \
+               echo '(PVC not yet bound to a PV)'; \
+             fi; \
+             echo '=== Provisioning Events ==='; \
+             $PFX get events{ns_flag}{ctx_flag} \
+               --field-selector involvedObject.name={pvc_esc},involvedObject.kind=PersistentVolumeClaim \
+               --sort-by=.lastTimestamp \
+               -o custom-columns=\
+'LAST:.lastTimestamp,\
+TYPE:.type,\
+REASON:.reason,\
+MSG:.message' 2>&1 | tail -n 25",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            pvc_esc = pvc_esc,
+            ns_flag = ns_flag,
+            ctx_flag = ctx_flag,
+        );
+        cmd
+    }
+
+    pub fn build_localpath_inspect_command(
+        kubectl_bin: Option<&str>,
+        pv: &str,
+        context: Option<&str>,
+        provisioner_log_lines: u64,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let pv_esc = shell_escape(pv);
+        let lines = provisioner_log_lines.to_string();
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "PFX={prefix_esc}; \
+             echo '=== PV hostPath / local + nodeAffinity ==='; \
+             $PFX get pv {pv_esc}{ctx_flag} \
+               -o custom-columns=\
+'NAME:.metadata.name,\
+HOSTPATH:.spec.hostPath.path,\
+LOCALPATH:.spec.local.path,\
+NODE:.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0],\
+RECLAIM:.spec.persistentVolumeReclaimPolicy,\
+STATUS:.status.phase' 2>&1; \
+             DIR=$($PFX get pv {pv_esc}{ctx_flag} \
+               -o jsonpath='{{.spec.local.path}}{{.spec.hostPath.path}}' 2>/dev/null); \
+             echo '=== Host directory (du -sh / df -h / ls) ==='; \
+             if [ -n \"$DIR\" ] && [ -d \"$DIR\" ]; then \
+               du -sh \"$DIR\" 2>&1; \
+               df -h \"$DIR\" 2>&1; \
+               ls -la \"$DIR\" 2>&1 | head -n 20; \
+             else \
+               echo \"(host dir not found on this node: ${{DIR:-<unset>}} - PV may be bound to another node)\"; \
+             fi; \
+             echo '=== local-path-provisioner logs ==='; \
+             $PFX -n kube-system logs deploy/local-path-provisioner{ctx_flag} --tail={lines} 2>&1 \
+               | grep -F \"$DIR\" \
+               || $PFX -n kube-system logs deploy/local-path-provisioner{ctx_flag} --tail={lines} 2>&1 \
+               | tail -n 25",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            pv_esc = pv_esc,
+            ctx_flag = ctx_flag,
+            lines = lines,
+        );
+        cmd
+    }
+
+    pub fn build_pvc_usage_command(
+        kubectl_bin: Option<&str>,
+        namespace: Option<&str>,
+        all_namespaces: bool,
+        context: Option<&str>,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_flag = if all_namespaces {
+            " -A".to_string()
+        } else {
+            match namespace {
+                Some(ns) => format!(" -n {}", shell_escape(ns)),
+                None => String::new(),
+            }
+        };
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "PFX={prefix_esc}; \
+             echo '=== kubelet_volume_stats scrape (per node) ==='; \
+             FOUND=0; \
+             for N in $($PFX get nodes{ctx_flag} \
+               -o jsonpath='{{.items[*].metadata.name}}' 2>/dev/null); do \
+               M=$($PFX get --raw \"/api/v1/nodes/$N/proxy/metrics\" 2>/dev/null \
+                 | grep -E '^kubelet_volume_stats_(used|capacity|available)_bytes'); \
+               if [ -n \"$M\" ]; then \
+                 FOUND=1; \
+                 echo \"# node=$N\"; \
+                 echo \"$M\"; \
+               fi; \
+             done; \
+             if [ \"$FOUND\" = 0 ]; then \
+               echo '=== metrics unavailable - du fallback over bound PVCs ==='; \
+               $PFX get pvc{ns_flag}{ctx_flag} \
+                 -o custom-columns=\
+'NS:.metadata.namespace,\
+PVC:.metadata.name,\
+PV:.spec.volumeName,\
+REQUEST:.spec.resources.requests.storage,\
+PHASE:.status.phase' 2>&1; \
+               for D in /var/lib/rancher/k3s/storage/*/; do \
+                 [ -d \"$D\" ] && du -sh \"$D\" 2>/dev/null; \
+               done; \
+             fi",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ctx_flag = ctx_flag,
+            ns_flag = ns_flag,
+        );
+        cmd
+    }
+
+    /// Build a shell command that expands a PVC's storage request.
+    ///
+    /// Checks `allowVolumeExpansion` on the `StorageClass` first and aborts if
+    /// the SC does not permit online expansion (K3s `local-path` does NOT
+    /// support it). On success, patches the PVC spec via `kubectl patch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, or storage size validation fails.
+    pub fn build_volume_expand_command(
+        kubectl_bin: Option<&str>,
+        pvc: &str,
+        size: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_storage_size(size)?;
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_flag = match namespace {
+            Some(ns) => format!(" -n {}", shell_escape(ns)),
+            None => String::new(),
+        };
+        let pvc_esc = shell_escape(pvc);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "PFX={prefix_esc}; \
+             SC=$($PFX get pvc {pvc_esc}{ns_flag}{ctx_flag} \
+               -o jsonpath='{{.spec.storageClassName}}' 2>/dev/null); \
+             AVE=$($PFX get sc \"$SC\"{ctx_flag} \
+               -o jsonpath='{{.allowVolumeExpansion}}' 2>/dev/null); \
+             if [ \"$AVE\" != true ]; then \
+               echo \"StorageClass ${{SC:-<none>}} does not allow volume expansion \
+(allowVolumeExpansion=${{AVE:-false}}). \
+K3s local-path does NOT support online expansion - aborting.\" >&2; \
+               exit 1; \
+             fi; \
+             $PFX patch pvc {pvc_esc}{ns_flag}{ctx_flag} \
+               --type=merge \
+               -p '{{\"spec\":{{\"resources\":{{\"requests\":{{\"storage\":\"{size}\"}}}}}}}}' ",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            pvc_esc = pvc_esc,
+            ns_flag = ns_flag,
+            ctx_flag = ctx_flag,
+            size = size,
+        );
+        Ok(cmd)
+    }
+
+    pub fn build_localpath_gc_command(
+        kubectl_bin: Option<&str>,
+        storage_root: &str,
+        context: Option<&str>,
+        apply: bool,
+    ) -> String {
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let root_esc = shell_escape(storage_root);
+        let apply_str = if apply { "true" } else { "false" };
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "PFX={prefix_esc}; \
+             ROOT={root_esc}; \
+             APPLY={apply_str}; \
+             LIVE=$($PFX get pv{ctx_flag} \
+               -o jsonpath='{{range .items[*]}}{{.spec.local.path}}{{\"\\n\"}}{{.spec.hostPath.path}}{{\"\\n\"}}{{end}}' \
+               2>/dev/null \
+               | grep -F \"$ROOT/\" \
+               | sed 's#/*$##' \
+               | sort -u); \
+             echo '=== Live PV host dirs ==='; \
+             echo \"${{LIVE:-<none>}}\"; \
+             echo '=== On-disk dirs under root ==='; \
+             ON=$(find \"$ROOT\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -u); \
+             echo \"${{ON:-<none>}}\"; \
+             echo '=== Orphans (on-disk minus live) ==='; \
+             ORPH=$(comm -23 <(echo \"$ON\") <(echo \"$LIVE\")); \
+             echo \"${{ORPH:-<none>}}\"; \
+             if [ \"$APPLY\" = true ] && [ -n \"$ORPH\" ]; then \
+               echo '=== Removing orphans ==='; \
+               echo \"$ORPH\" | while IFS= read -r d; do \
+                 case \"$d\" in \
+                   \"$ROOT\"/*) rm -rf -- \"$d\" && echo \"removed $d\";; \
+                   *) echo \"refusing (outside root): $d\" >&2;; \
+                 esac; \
+               done; \
+             else \
+               echo '(dry-run - pass apply=true to delete; nothing removed)'; \
+             fi",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            root_esc = root_esc,
+            ctx_flag = ctx_flag,
+            apply_str = apply_str,
+        );
+        cmd
     }
 }
 
@@ -7473,5 +7810,313 @@ mod tests {
             None,
         );
         assert!(result.is_err());
+    }
+
+    // ============== build_pvc_status_command Tests ==============
+
+    #[test]
+    fn test_build_pvc_status_basic() {
+        let cmd = KubernetesCommandBuilder::build_pvc_status_command(
+            Some("kubectl"),
+            "my-pvc",
+            None,
+            None,
+        );
+        assert!(cmd.contains("get pvc"), "cmd: {cmd}");
+        assert!(cmd.contains("'my-pvc'"), "cmd: {cmd}");
+        assert!(cmd.contains("=== PVC ==="), "cmd: {cmd}");
+        assert!(cmd.contains("=== PV ==="), "cmd: {cmd}");
+        assert!(cmd.contains("=== Provisioning Events ==="), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_pvc_status_with_namespace() {
+        let cmd = KubernetesCommandBuilder::build_pvc_status_command(
+            Some("kubectl"),
+            "my-pvc",
+            Some("staging"),
+            None,
+        );
+        assert!(cmd.contains("-n 'staging'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_pvc_status_with_context() {
+        let cmd = KubernetesCommandBuilder::build_pvc_status_command(
+            Some("kubectl"),
+            "my-pvc",
+            None,
+            Some("prod"),
+        );
+        assert!(cmd.contains("--context=prod"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_pvc_status_pvc_escaped() {
+        let cmd = KubernetesCommandBuilder::build_pvc_status_command(
+            None,
+            "my pvc with spaces",
+            None,
+            None,
+        );
+        assert!(cmd.contains("'my pvc with spaces'"), "cmd: {cmd}");
+    }
+
+    // ============== build_localpath_inspect_command Tests ==============
+
+    #[test]
+    fn test_build_localpath_inspect_basic() {
+        let cmd = KubernetesCommandBuilder::build_localpath_inspect_command(
+            Some("kubectl"),
+            "pvc-abc123",
+            None,
+            50,
+        );
+        assert!(cmd.contains("get pv"), "cmd: {cmd}");
+        assert!(cmd.contains("'pvc-abc123'"), "cmd: {cmd}");
+        assert!(cmd.contains("=== PV hostPath"), "cmd: {cmd}");
+        assert!(cmd.contains("local-path-provisioner"), "cmd: {cmd}");
+        assert!(cmd.contains("--tail=50"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_localpath_inspect_with_context() {
+        let cmd = KubernetesCommandBuilder::build_localpath_inspect_command(
+            Some("kubectl"),
+            "pvc-abc123",
+            Some("prod"),
+            100,
+        );
+        assert!(cmd.contains("--context"), "cmd: {cmd}");
+        assert!(cmd.contains("--tail=100"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_localpath_inspect_pv_escaped() {
+        let cmd = KubernetesCommandBuilder::build_localpath_inspect_command(
+            None,
+            "pvc with spaces",
+            None,
+            50,
+        );
+        assert!(cmd.contains("'pvc with spaces'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_localpath_inspect_log_lines_clamped_via_handler() {
+        // Builder takes lines as-is; clamping is handler's responsibility
+        let cmd = KubernetesCommandBuilder::build_localpath_inspect_command(
+            Some("kubectl"),
+            "pv-test",
+            None,
+            1000,
+        );
+        assert!(cmd.contains("--tail=1000"), "cmd: {cmd}");
+    }
+
+    // ============== build_pvc_usage_command Tests ==============
+
+    #[test]
+    fn test_build_pvc_usage_basic() {
+        let cmd =
+            KubernetesCommandBuilder::build_pvc_usage_command(Some("kubectl"), None, false, None);
+        assert!(cmd.contains("kubelet_volume_stats"), "cmd: {cmd}");
+        assert!(cmd.contains("du fallback"), "cmd: {cmd}");
+        assert!(cmd.contains("rancher/k3s/storage"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_pvc_usage_with_namespace() {
+        let cmd = KubernetesCommandBuilder::build_pvc_usage_command(
+            Some("kubectl"),
+            Some("production"),
+            false,
+            None,
+        );
+        assert!(cmd.contains("-n 'production'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_pvc_usage_all_namespaces() {
+        let cmd =
+            KubernetesCommandBuilder::build_pvc_usage_command(Some("kubectl"), None, true, None);
+        assert!(cmd.contains(" -A"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_pvc_usage_with_context() {
+        let cmd = KubernetesCommandBuilder::build_pvc_usage_command(
+            Some("kubectl"),
+            None,
+            false,
+            Some("prod"),
+        );
+        assert!(cmd.contains("--context"), "cmd: {cmd}");
+    }
+
+    // ============== validate_storage_size Tests ==============
+
+    #[test]
+    fn test_validate_storage_size_accepts_valid() {
+        assert!(validate_storage_size("100Mi").is_ok());
+        assert!(validate_storage_size("2Gi").is_ok());
+        assert!(validate_storage_size("500M").is_ok());
+        assert!(validate_storage_size("1Ki").is_ok());
+        assert!(validate_storage_size("10").is_ok());
+        assert!(validate_storage_size("1Ti").is_ok());
+    }
+
+    #[test]
+    fn test_validate_storage_size_rejects_empty() {
+        assert!(validate_storage_size("").is_err());
+    }
+
+    #[test]
+    fn test_validate_storage_size_rejects_invalid_suffix() {
+        assert!(validate_storage_size("100MB").is_err());
+        assert!(validate_storage_size("2GB").is_err());
+        assert!(validate_storage_size("1TB").is_err());
+        assert!(validate_storage_size("100Mii").is_err());
+    }
+
+    #[test]
+    fn test_validate_storage_size_rejects_non_numeric_start() {
+        assert!(validate_storage_size("Gi").is_err());
+        assert!(validate_storage_size("abc").is_err());
+        assert!(validate_storage_size("-1Gi").is_err());
+    }
+
+    // ============== build_volume_expand_command Tests ==============
+
+    #[test]
+    fn test_build_volume_expand_basic() {
+        let cmd = KubernetesCommandBuilder::build_volume_expand_command(
+            Some("kubectl"),
+            "data-pvc",
+            "2Gi",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("get pvc"), "cmd: {cmd}");
+        assert!(cmd.contains("'data-pvc'"), "cmd: {cmd}");
+        assert!(cmd.contains("allowVolumeExpansion"), "cmd: {cmd}");
+        assert!(cmd.contains("patch pvc"), "cmd: {cmd}");
+        assert!(cmd.contains("2Gi"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_volume_expand_with_namespace() {
+        let cmd = KubernetesCommandBuilder::build_volume_expand_command(
+            Some("kubectl"),
+            "data-pvc",
+            "10Gi",
+            Some("production"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("-n 'production'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_volume_expand_rejects_bad_size() {
+        let err = KubernetesCommandBuilder::build_volume_expand_command(
+            Some("kubectl"),
+            "data-pvc",
+            "2GB",
+            None,
+            None,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_build_volume_expand_rejects_bad_namespace() {
+        let err = KubernetesCommandBuilder::build_volume_expand_command(
+            Some("kubectl"),
+            "data-pvc",
+            "2Gi",
+            Some("--bad-ns"),
+            None,
+        );
+        assert!(err.is_err());
+    }
+
+    // ============== validate_storage_root Tests ==============
+
+    #[test]
+    fn test_validate_storage_root_accepts_valid() {
+        assert!(validate_storage_root("/var/lib/rancher/k3s/storage").is_ok());
+        assert!(validate_storage_root("/data/k3s/volumes").is_ok());
+        assert!(validate_storage_root("/opt/local/storage").is_ok());
+    }
+
+    #[test]
+    fn test_validate_storage_root_rejects_shallow() {
+        assert!(validate_storage_root("/var").is_err());
+        assert!(validate_storage_root("/var/lib").is_err());
+        assert!(validate_storage_root("/").is_err());
+    }
+
+    #[test]
+    fn test_validate_storage_root_rejects_invalid_abs_path() {
+        assert!(validate_storage_root("var/lib/rancher").is_err()); // not absolute
+        assert!(validate_storage_root("/var/lib/../etc/storage").is_err()); // traversal
+    }
+
+    #[test]
+    fn test_validate_storage_root_three_segments_ok() {
+        // exactly 3 segments: ok
+        assert!(validate_storage_root("/a/b/c").is_ok());
+    }
+
+    // ============== build_localpath_gc_command Tests ==============
+
+    #[test]
+    fn test_build_localpath_gc_dry_run() {
+        let cmd = KubernetesCommandBuilder::build_localpath_gc_command(
+            Some("kubectl"),
+            "/var/lib/rancher/k3s/storage",
+            None,
+            false,
+        );
+        assert!(cmd.contains("dry-run"), "cmd: {cmd}");
+        assert!(cmd.contains("Live PV host dirs"), "cmd: {cmd}");
+        assert!(cmd.contains("Orphans"), "cmd: {cmd}");
+        assert!(cmd.contains("APPLY=false"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_localpath_gc_apply() {
+        let cmd = KubernetesCommandBuilder::build_localpath_gc_command(
+            Some("kubectl"),
+            "/var/lib/rancher/k3s/storage",
+            None,
+            true,
+        );
+        assert!(cmd.contains("APPLY=true"), "cmd: {cmd}");
+        assert!(cmd.contains("rm -rf"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_localpath_gc_with_context() {
+        let cmd = KubernetesCommandBuilder::build_localpath_gc_command(
+            Some("kubectl"),
+            "/var/lib/rancher/k3s/storage",
+            Some("prod"),
+            false,
+        );
+        assert!(cmd.contains("--context"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_localpath_gc_root_escaped() {
+        let cmd = KubernetesCommandBuilder::build_localpath_gc_command(
+            None,
+            "/var/lib/my storage",
+            None,
+            false,
+        );
+        assert!(cmd.contains("'/var/lib/my storage'"), "cmd: {cmd}");
     }
 }
