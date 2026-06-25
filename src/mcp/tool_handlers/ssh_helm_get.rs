@@ -21,6 +21,8 @@ pub struct SshHelmGetArgs {
     #[serde(default)]
     revision: Option<u64>,
     #[serde(default)]
+    output: Option<String>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -55,8 +57,8 @@ impl StandardTool for HelmGetTool {
             },
             "subcommand": {
                 "type": "string",
-                "enum": ["all", "values", "manifest", "hooks", "notes"],
-                "description": "What to fetch: all | values | manifest | hooks | notes"
+                "enum": ["all", "values", "manifest", "hooks", "notes", "metadata"],
+                "description": "What to fetch: all | values | manifest | hooks | notes | metadata"
             },
             "release": {
                 "type": "string",
@@ -70,6 +72,11 @@ impl StandardTool for HelmGetTool {
                 "type": "integer",
                 "description": "Inspect a specific release revision",
                 "minimum": 1
+            },
+            "output": {
+                "type": "string",
+                "enum": ["json", "yaml"],
+                "description": "Output format (json or yaml)"
             },
             "helm_bin": {
                 "type": "string",
@@ -109,6 +116,7 @@ impl StandardTool for HelmGetTool {
             &args.release,
             args.namespace.as_deref(),
             args.revision,
+            args.output.as_deref(),
         ))
     }
 }
@@ -334,6 +342,7 @@ mod tests {
             release: "rel".to_string(),
             namespace: None,
             revision: None,
+            output: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -353,6 +362,7 @@ mod tests {
             release: "my-release".to_string(),
             namespace: Some("staging".to_string()),
             revision: Some(5),
+            output: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -374,6 +384,7 @@ mod tests {
             release: "rel".to_string(),
             namespace: None,
             revision: None,
+            output: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -389,5 +400,45 @@ mod tests {
             }
             e => panic!("Expected CommandDenied, got: {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_build_command_with_output() {
+        let args = SshHelmGetArgs {
+            host: "server1".to_string(),
+            subcommand: "values".to_string(),
+            release: "rel".to_string(),
+            namespace: None,
+            revision: None,
+            output: Some("json".to_string()),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmGetTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("-o 'json'"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_command_metadata_subcommand() {
+        let args = SshHelmGetArgs {
+            host: "server1".to_string(),
+            subcommand: "metadata".to_string(),
+            release: "rel".to_string(),
+            namespace: None,
+            revision: None,
+            output: None,
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmGetTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("get 'metadata' 'rel'"), "cmd={cmd}");
     }
 }
