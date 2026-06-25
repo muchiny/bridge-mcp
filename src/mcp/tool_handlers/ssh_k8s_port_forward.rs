@@ -127,8 +127,8 @@ impl StandardTool for K8sPortForward {
         "required": ["host", "target", "ports"]
     }"#;
 
-    // port-forward output is freeform text — use RawText (omit the const entirely
-    // since OutputKind::Auto is the default; no OutputKind constant emitted)
+    // port-forward output is freeform probe text — RawText (the trait default),
+    // declared explicitly here for clarity.
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::RawText;
 
