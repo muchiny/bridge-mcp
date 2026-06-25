@@ -1,6 +1,6 @@
-//! SSH Traefik IngressRoute Tool Handler
+//! SSH Traefik `IngressRoute` Tool Handler
 //!
-//! Inspects a Traefik IngressRoute CRD: shows the YAML, routes
+//! Inspects a Traefik `IngressRoute` CRD: shows the YAML, routes
 //! (match → service:port + middlewares), referenced middleware details,
 //! and backend service endpoints.
 
@@ -16,7 +16,7 @@ use crate::mcp_standard_tool;
 #[derive(Debug, Deserialize)]
 pub struct SshTraefikIngressrouteArgs {
     host: String,
-    /// IngressRoute name.
+    /// `IngressRoute` name.
     route: String,
     #[serde(default)]
     namespace: Option<String>,

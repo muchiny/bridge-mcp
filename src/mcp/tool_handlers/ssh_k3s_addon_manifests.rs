@@ -1,7 +1,7 @@
 //! SSH K3s Addon Manifests Tool Handler
 //!
-//! Lists the K3s auto-deploy manifests directory, HelmChart CRDs,
-//! HelmChart job status, and helm-install jobs in kube-system.
+//! Lists the K3s auto-deploy manifests directory, `HelmChart` CRDs,
+//! `HelmChart` job status, and helm-install jobs in kube-system.
 
 use serde::Deserialize;
 

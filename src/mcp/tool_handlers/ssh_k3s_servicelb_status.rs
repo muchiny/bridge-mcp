@@ -1,4 +1,4 @@
-//! SSH K3s ServiceLB Status Tool Handler
+//! SSH K3s `ServiceLB` Status Tool Handler
 //!
 //! Shows all `type=LoadBalancer` services cluster-wide, klipper svclb
 //! daemonsets, and svclb pods with their node/hostPort mappings.

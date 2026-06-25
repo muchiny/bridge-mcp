@@ -3882,7 +3882,7 @@ impl KubernetesCommandBuilder {
     ///
     /// Shows service overview, spec (type/clusterIP/ports/selector),
     /// endpoints (ready addresses), and klipper svclb pods for K3s
-    /// LoadBalancer services.
+    /// `LoadBalancer` services.
     ///
     /// # Errors
     ///
@@ -4088,7 +4088,7 @@ PORTS:.subsets[*].ports[*].port'{ctx_flag}; \
 
     /// Build a Traefik `IngressRoute` inspection command.
     ///
-    /// Shows the IngressRoute YAML, routes (match → service:port + middlewares),
+    /// Shows the `IngressRoute` YAML, routes (match → service:port + middlewares),
     /// referenced middleware details, and backend service endpoints.
     ///
     /// # Errors
@@ -4152,7 +4152,7 @@ PORTS:.subsets[*].ports[*].port'{ctx_flag} 2>/dev/null || echo 'no endpoints'; \
         Ok(cmd)
     }
 
-    /// Build a K3s ServiceLB status command.
+    /// Build a K3s `ServiceLB` status command.
     ///
     /// Shows all `type=LoadBalancer` services cluster-wide, klipper svclb
     /// daemonsets, and svclb pods with their host port mappings.
@@ -4211,12 +4211,12 @@ STATUS:.status.phase'{ctx_flag} 2>/dev/null \
 
     /// Build a K3s addon manifests inspection command.
     ///
-    /// Lists the auto-deploy manifests directory, HelmChart CRDs (k3s addon
-    /// installs), HelmChart job status, and helm-install jobs in kube-system.
+    /// Lists the auto-deploy manifests directory, `HelmChart` CRDs (k3s addon
+    /// installs), `HelmChart` job status, and helm-install jobs in kube-system.
     ///
     /// # Errors
     ///
-    /// Returns an error if manifests_dir or context validation fails.
+    /// Returns an error if `manifests_dir` or context validation fails.
     pub fn build_addon_manifests_command(
         kubectl_bin: Option<&str>,
         manifests_dir: Option<&str>,

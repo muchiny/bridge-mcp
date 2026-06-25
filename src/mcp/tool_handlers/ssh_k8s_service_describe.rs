@@ -1,7 +1,7 @@
 //! SSH Kubernetes Service Describe Tool Handler
 //!
 //! Shows service overview, spec (type/clusterIP/ports/selector), endpoints
-//! (ready addresses), and klipper svclb pods for K3s LoadBalancer services.
+//! (ready addresses), and klipper svclb pods for K3s `LoadBalancer` services.
 
 use serde::Deserialize;
 
