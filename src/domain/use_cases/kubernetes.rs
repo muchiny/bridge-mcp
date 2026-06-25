@@ -2659,12 +2659,12 @@ impl HelmCommandBuilder {
         }
         if name.starts_with('-') {
             return Err(BridgeError::CommandDenied {
-                reason: format!("repo name must not start with '-': '{name}'").into(),
+                reason: format!("repo name must not start with '-': '{name}'"),
             });
         }
         if name.len() > 253 {
             return Err(BridgeError::CommandDenied {
-                reason: format!("repo name exceeds 253 characters: '{name}'").into(),
+                reason: format!("repo name exceeds 253 characters: '{name}'"),
             });
         }
         if !name
@@ -2672,7 +2672,7 @@ impl HelmCommandBuilder {
             .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
         {
             return Err(BridgeError::CommandDenied {
-                reason: format!("repo name contains invalid characters: '{name}'").into(),
+                reason: format!("repo name contains invalid characters: '{name}'"),
             });
         }
         Ok(())
@@ -2687,19 +2687,18 @@ impl HelmCommandBuilder {
         }
         if url.starts_with('-') {
             return Err(BridgeError::CommandDenied {
-                reason: format!("repo URL must not start with '-': '{url}'").into(),
+                reason: format!("repo URL must not start with '-': '{url}'"),
             });
         }
         if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("oci://")
         {
             return Err(BridgeError::CommandDenied {
-                reason: format!("repo URL must start with https://, http://, or oci://: '{url}'")
-                    .into(),
+                reason: format!("repo URL must start with https://, http://, or oci://: '{url}'"),
             });
         }
-        if url.chars().any(|c| c.is_whitespace()) {
+        if url.chars().any(char::is_whitespace) {
             return Err(BridgeError::CommandDenied {
-                reason: format!("repo URL must not contain whitespace: '{url}'").into(),
+                reason: format!("repo URL must not contain whitespace: '{url}'"),
             });
         }
         if url
@@ -2707,7 +2706,7 @@ impl HelmCommandBuilder {
             .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>'))
         {
             return Err(BridgeError::CommandDenied {
-                reason: format!("repo URL contains shell meta-characters: '{url}'").into(),
+                reason: format!("repo URL contains shell meta-characters: '{url}'"),
             });
         }
         Ok(())
@@ -2717,8 +2716,7 @@ impl HelmCommandBuilder {
     pub fn validate_helm_output(output: &str) -> Result<()> {
         if output.starts_with('-') || !["table", "json", "yaml"].contains(&output) {
             return Err(BridgeError::CommandDenied {
-                reason: format!("invalid output format: '{output}' (expected: table, json, yaml)")
-                    .into(),
+                reason: format!("invalid output format: '{output}' (expected: table, json, yaml)"),
             });
         }
         Ok(())
@@ -2730,8 +2728,7 @@ impl HelmCommandBuilder {
             return Err(BridgeError::CommandDenied {
                 reason: format!(
                     "invalid show subcommand: '{sub}' (expected: all, chart, readme, values, crds)"
-                )
-                .into(),
+                ),
             });
         }
         Ok(())
@@ -2743,8 +2740,7 @@ impl HelmCommandBuilder {
             return Err(BridgeError::CommandDenied {
                 reason: format!(
                     "invalid dependency subcommand: '{sub}' (expected: build, update, list)"
-                )
-                .into(),
+                ),
             });
         }
         Ok(())
@@ -2756,8 +2752,7 @@ impl HelmCommandBuilder {
             return Err(BridgeError::CommandDenied {
                 reason: format!(
                     "invalid diff subcommand: '{sub}' (expected: upgrade, rollback, release, revision)"
-                )
-                .into(),
+                ),
             });
         }
         Ok(())

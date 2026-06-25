@@ -156,21 +156,22 @@ fn destructive_suffix_implies_destructive() {
 /// `require_elicitation_on_destructive` gate can confirm before they run.
 /// (Audit 2026-06-20.)
 const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
-    "ssh_exec",            // arbitrary shell (rm -rf, mkfs, dd)
-    "ssh_aws_cli",         // raw AWS passthrough (ec2 terminate, s3 rm, iam delete)
-    "ssh_ansible_adhoc",   // arbitrary module exec (shell -a "rm ...")
-    "ssh_db_restore",      // overwrites the target database
-    "ssh_backup_restore",  // overwrites files at the restore destination
-    "ssh_docker_compose",  // `down` removes containers + networks
-    "ssh_esxi_snapshot",   // `remove_all` permanently deletes snapshots
-    "ssh_ldap_modify",     // LDIF `changetype: delete` removes entries
-    "ssh_vault_write",     // overwrites a secret (KV v1 has no versioning)
-    "ssh_pkg_update",      // full system upgrade can remove/replace packages
+    "ssh_exec",             // arbitrary shell (rm -rf, mkfs, dd)
+    "ssh_aws_cli",          // raw AWS passthrough (ec2 terminate, s3 rm, iam delete)
+    "ssh_ansible_adhoc",    // arbitrary module exec (shell -a "rm ...")
+    "ssh_db_restore",       // overwrites the target database
+    "ssh_backup_restore",   // overwrites files at the restore destination
+    "ssh_docker_compose",   // `down` removes containers + networks
+    "ssh_esxi_snapshot",    // `remove_all` permanently deletes snapshots
+    "ssh_ldap_modify",      // LDIF `changetype: delete` removes entries
+    "ssh_vault_write",      // overwrites a secret (KV v1 has no versioning)
+    "ssh_pkg_update",       // full system upgrade can remove/replace packages
     "ssh_k8s_drain", // kubectl drain evicts all pods from a node — irreversible workload disruption
     "ssh_crictl_rmi", // crictl rmi: image deletion is irreversible without a fresh pull
     "ssh_k3s_cert_rotate", // regenerates TLS certs; botched rotate can lock the API server
     "ssh_k3s_killall", // kills ALL k3s processes + containers + network namespaces
     "ssh_k3s_upgrade", // re-runs installer, swaps binary, can break the node
+    "ssh_helm_repo_remove", // removes repo registration from local config — irreversible without re-adding
 ];
 
 #[test]
