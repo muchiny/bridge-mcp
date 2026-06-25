@@ -25,6 +25,14 @@ pub struct SshHelmUninstallArgs {
     #[serde(default)]
     keep_history: Option<bool>,
     #[serde(default)]
+    no_hooks: Option<bool>,
+    #[serde(default)]
+    wait: Option<bool>,
+    #[serde(default)]
+    cascade: Option<String>,
+    #[serde(default)]
+    timeout: Option<String>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -77,6 +85,23 @@ impl StandardTool for HelmUninstallTool {
                 "type": "boolean",
                 "description": "Retain release history after uninstall"
             },
+            "no_hooks": {
+                "type": "boolean",
+                "description": "Prevent hooks from running during uninstall"
+            },
+            "wait": {
+                "type": "boolean",
+                "description": "Wait for all resources to be deleted before returning"
+            },
+            "cascade": {
+                "type": "string",
+                "enum": ["background", "orphan", "foreground"],
+                "description": "Cascade deletion strategy: background | orphan | foreground"
+            },
+            "timeout": {
+                "type": "string",
+                "description": "Helm --timeout: Go duration to wait for Kubernetes operations (e.g. '5m0s', '10m')"
+            },
             "helm_bin": {
                 "type": "string",
                 "description": "Custom helm binary path (default: auto-detect)"
@@ -104,6 +129,9 @@ impl StandardTool for HelmUninstallTool {
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
+        if let Some(c) = args.cascade.as_deref() {
+            HelmCommandBuilder::validate_cascade(c)?;
+        }
         Ok(HelmCommandBuilder::build_uninstall_command(
             args.helm_bin.as_deref(),
             args.kubeconfig.as_deref(),
@@ -111,6 +139,10 @@ impl StandardTool for HelmUninstallTool {
             args.namespace.as_deref(),
             args.dry_run.unwrap_or(false),
             args.keep_history.unwrap_or(false),
+            args.no_hooks.unwrap_or(false),
+            args.wait.unwrap_or(false),
+            args.cascade.as_deref(),
+            args.timeout.as_deref(),
         ))
     }
 
@@ -331,6 +363,10 @@ mod tests {
             namespace: None,
             dry_run: None,
             keep_history: None,
+            no_hooks: None,
+            wait: None,
+            cascade: None,
+            timeout: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -351,6 +387,10 @@ mod tests {
             namespace: Some("production".to_string()),
             dry_run: None,
             keep_history: None,
+            no_hooks: None,
+            wait: None,
+            cascade: None,
+            timeout: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -370,6 +410,10 @@ mod tests {
             namespace: None,
             dry_run: Some(true),
             keep_history: Some(true),
+            no_hooks: None,
+            wait: None,
+            cascade: None,
+            timeout: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -380,5 +424,54 @@ mod tests {
         let cmd = HelmUninstallTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("--dry-run"));
         assert!(cmd.contains("--keep-history"));
+    }
+
+    #[test]
+    fn test_build_command_no_hooks_wait_cascade_timeout() {
+        let args = SshHelmUninstallArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            namespace: None,
+            dry_run: None,
+            keep_history: None,
+            no_hooks: Some(true),
+            wait: Some(true),
+            cascade: Some("foreground".to_string()),
+            timeout: Some("5m".to_string()),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmUninstallTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--no-hooks"), "cmd={cmd}");
+        assert!(cmd.contains("--wait"), "cmd={cmd}");
+        assert!(cmd.contains("--cascade 'foreground'"), "cmd={cmd}");
+        assert!(cmd.contains("--timeout '5m'"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_build_command_cascade_invalid_rejected() {
+        let args = SshHelmUninstallArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            namespace: None,
+            dry_run: None,
+            keep_history: None,
+            no_hooks: None,
+            wait: None,
+            cascade: Some("--evil".to_string()),
+            timeout: None,
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let result = HelmUninstallTool::build_command(&args, &test_host_config());
+        assert!(result.is_err());
     }
 }
