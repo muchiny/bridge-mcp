@@ -3248,6 +3248,591 @@ impl HelmCommandBuilder {
     }
 }
 
+// ============================================================
+// Wave-9a: Networking validators (shared across the 6 net tools)
+// ============================================================
+
+/// Validate a TCP port number (1–65535; 0 is rejected).
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if `port` is 0.
+pub fn validate_port(port: u16) -> Result<()> {
+    if port == 0 {
+        return Err(BridgeError::CommandDenied {
+            reason: "port must be in range 1–65535 (got 0)".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate an HTTP probe/proxy path.
+///
+/// The path must start with `/`, allow URL-safe characters
+/// `[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]`, and must not contain
+/// newline, space, backtick, or `$(` (shell injection guards).
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the path is invalid.
+pub fn validate_probe_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "probe path must not be empty".to_string(),
+        });
+    }
+    if !path.starts_with('/') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("probe path must start with '/': {path}"),
+        });
+    }
+    // Explicit rejection of shell-injection characters
+    for ch in path.chars() {
+        if matches!(ch, '\n' | '\r' | ' ' | '`') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("probe path contains disallowed character '{ch}': {path}"),
+            });
+        }
+    }
+    if path.contains("$(") {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("probe path contains shell substitution: {path}"),
+        });
+    }
+    // Check for path traversal segments
+    for segment in path.split('/') {
+        if segment == ".." {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("probe path contains path traversal: {path}"),
+            });
+        }
+    }
+    // Validate charset — URL-safe + reserved chars
+    for ch in path.chars() {
+        if !matches!(ch,
+            'A'..='Z' | 'a'..='z' | '0'..='9'
+            | '.' | '_' | '~' | ':' | '/' | '?' | '#' | '@'
+            | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+'
+            | ',' | ';' | '=' | '%' | '-')
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("probe path contains disallowed character '{ch}': {path}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a DNS name / service name (RFC 1123 label rules).
+///
+/// Rules: non-empty, ≤253 chars, chars `[a-z0-9.-]`, starts and ends
+/// with alphanumeric, no leading `-`.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the name is invalid.
+pub fn validate_dns_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "DNS name must not be empty".to_string(),
+        });
+    }
+    if name.len() > 253 {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("DNS name exceeds 253 chars: {name}"),
+        });
+    }
+    if name.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("DNS name must not start with '-': {name}"),
+        });
+    }
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("DNS name must start with alphanumeric: {name}"),
+        });
+    }
+    if !name
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("DNS name must end with alphanumeric: {name}"),
+        });
+    }
+    for ch in name.chars() {
+        if !matches!(ch, 'a'..='z' | '0'..='9' | '.' | '-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("DNS name contains disallowed character '{ch}': {name}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate an ephemeral probe pod image reference.
+///
+/// Allowed chars: `[A-Za-z0-9._/:@-]`. Must be non-empty and must not
+/// start with `-`.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the image is invalid.
+pub fn validate_probe_image(img: &str) -> Result<()> {
+    if img.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "probe image must not be empty".to_string(),
+        });
+    }
+    if img.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("probe image must not start with '-': {img}"),
+        });
+    }
+    for ch in img.chars() {
+        if !matches!(ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '/' | ':' | '@' | '-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("probe image contains disallowed character '{ch}': {img}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a bounded sleep/wait duration in seconds.
+///
+/// Reject 0 and values above 300 (5 minutes).
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if `secs` is 0 or > 300.
+pub fn validate_duration_secs(secs: u64) -> Result<()> {
+    if secs == 0 {
+        return Err(BridgeError::CommandDenied {
+            reason: "wait duration must be at least 1 second".to_string(),
+        });
+    }
+    if secs > 300 {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("wait duration exceeds 300 s cap (got {secs})"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate the proxy resource type for `kubectl get --raw`.
+///
+/// Only `services` and `pods` are accepted (the common Kubernetes API
+/// proxy paths).
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] for any other value.
+pub fn validate_proxy_resource(resource: &str) -> Result<()> {
+    match resource {
+        "services" | "pods" => Ok(()),
+        _ => Err(BridgeError::CommandDenied {
+            reason: format!("proxy resource must be 'services' or 'pods', got '{resource}'"),
+        }),
+    }
+}
+
+// ============================================================
+// Wave-9a: Networking command builders (KubernetesCommandBuilder impl)
+// ============================================================
+
+impl KubernetesCommandBuilder {
+    /// Build a **bounded** port-forward run-and-probe command.
+    ///
+    /// Starts `kubectl port-forward` in the background, waits `wait_secs`,
+    /// optionally probes via `curl`, then unconditionally kills the
+    /// background process and cleans up the tmp log file.
+    ///
+    /// # Parameters
+    ///
+    /// * `kubectl_bin` — Optional explicit kubectl binary path.
+    /// * `target` — Resource target, e.g. `svc/myapp` or `pod/mypod-xyz`.
+    /// * `ports` — Port mapping string, e.g. `8080:80` or `9090`.
+    /// * `probe_path` — Optional HTTP path to curl after the forward is up, e.g. `/healthz`.
+    /// * `wait_secs` — Bounded sleep window (1–30 s).
+    /// * `namespace` — Optional Kubernetes namespace.
+    /// * `address` — Optional `--address` bind address (default 127.0.0.1).
+    /// * `context` — Optional kubeconfig context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, `probe_path`, `wait_secs`, or
+    /// port extraction fails validation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_port_forward_command(
+        kubectl_bin: Option<&str>,
+        target: &str,
+        ports: &str,
+        probe_path: Option<&str>,
+        wait_secs: u64,
+        namespace: Option<&str>,
+        address: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        if let Some(pp) = probe_path {
+            validate_probe_path(pp)?;
+        }
+        // wait_secs bounded to 1–30 for port-forward (tighter than the 300 s global cap)
+        if wait_secs == 0 || wait_secs > 30 {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("port-forward wait_secs must be 1–30 (got {wait_secs})"),
+            });
+        }
+
+        // Extract the local port from "local:remote" or bare "port"
+        let local_port = ports.split(':').next().unwrap_or(ports).trim();
+        // Validate it is a valid port number
+        let local_port_num: u16 = local_port.parse().map_err(|_| BridgeError::CommandDenied {
+            reason: format!("invalid local port in mapping '{ports}'"),
+        })?;
+        validate_port(local_port_num)?;
+        // Validate remote port if present
+        if let Some(remote_raw) = ports.split(':').nth(1) {
+            let remote_num: u16 =
+                remote_raw
+                    .trim()
+                    .parse()
+                    .map_err(|_| BridgeError::CommandDenied {
+                        reason: format!("invalid remote port in mapping '{ports}'"),
+                    })?;
+            validate_port(remote_num)?;
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_flag = namespace
+            .map(|ns| format!(" -n {}", shell_escape(ns)))
+            .unwrap_or_default();
+        let addr_flag = address
+            .map(|a| format!(" --address {}", shell_escape(a)))
+            .unwrap_or_default();
+        let ports_esc = shell_escape(ports);
+        let target_esc = shell_escape(target);
+        let wait_esc = shell_escape(&wait_secs.to_string());
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "{prefix}port-forward {target_esc} {ports_esc}{ns_flag}{addr_flag}{ctx_flag} \
+             >/tmp/pf.$$ 2>&1 & PF=$!; \
+             sleep {wait_esc}; \
+             if kill -0 $PF 2>/dev/null; then \
+               echo '=== port-forward UP ==='; cat /tmp/pf.$$;"
+        );
+        if let Some(pp) = probe_path {
+            let local_port_esc = shell_escape(local_port);
+            let pp_esc = shell_escape(pp);
+            let _ = write!(
+                cmd,
+                " echo '=== probe ==='; \
+                 curl -sS -m 5 -o /dev/null -w 'HTTP %{{http_code}} in %{{time_total}}s\\n' \
+                 'http://127.0.0.1:{local_port_esc}{pp_esc}' || echo 'probe FAILED';"
+            );
+        }
+        let _ = write!(
+            cmd,
+            " else echo '=== port-forward DIED ==='; cat /tmp/pf.$$; fi; \
+             kill $PF 2>/dev/null; wait $PF 2>/dev/null; rm -f /tmp/pf.$$"
+        );
+        Ok(cmd)
+    }
+
+    /// Build an endpoints inspection command — selector ↔ pod readiness JOIN.
+    ///
+    /// Returns a composite pipeline showing the service selector, pods
+    /// matching that selector (with readiness), and the `EndpointSlice`
+    /// ready/notReady addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, or service name validation fails.
+    pub fn build_endpoints_command(
+        kubectl_bin: Option<&str>,
+        service: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_dns_name(service)?;
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+        let svc_esc = shell_escape(service);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; NS={ns_esc}; \
+             echo '=== Selector ==='; \
+             $K get svc {svc_esc} -n $NS -o jsonpath='{{.spec.selector}}'{ctx_flag}; \
+             echo; \
+             echo '=== Pods matching selector (readiness) ==='; \
+             SEL=$($K get svc {svc_esc} -n $NS \
+               -o jsonpath='{{range $k,$v := .spec.selector}}{{$k}}={{$v}},{{end}}'{ctx_flag} \
+               | sed 's/,$//'); \
+             $K get pods -n $NS -l \"$SEL\" \
+               -o custom-columns='POD:.metadata.name,READY:.status.containerStatuses[*].ready,\
+IP:.status.podIP,PHASE:.status.phase'{ctx_flag}; \
+             echo '=== EndpointSlice ready/notReady ==='; \
+             $K get endpoints {svc_esc} -n $NS \
+               -o custom-columns='READY:.subsets[*].addresses[*].ip,\
+NOTREADY:.subsets[*].notReadyAddresses[*].ip,\
+PORTS:.subsets[*].ports[*].port'{ctx_flag}",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ns_esc = ns_esc,
+            svc_esc = svc_esc,
+            ctx_flag = ctx_flag,
+        );
+        Ok(cmd)
+    }
+
+    /// Build an ingress describe command — host/path → backend svc:port + TLS + ADDRESS.
+    ///
+    /// Returns a composite pipeline showing the ingress overview, the
+    /// host/path-to-backend mapping, and the endpoints of each backend
+    /// service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, or ingress name validation fails.
+    pub fn build_ingress_describe_command(
+        kubectl_bin: Option<&str>,
+        ingress: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_dns_name(ingress)?;
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+        let ing_esc = shell_escape(ingress);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; NS={ns_esc}; \
+             echo '=== Ingress {ing_esc} ADDRESS/class ==='; \
+             $K get ingress {ing_esc} -n $NS \
+               -o custom-columns='NAME:.metadata.name,CLASS:.spec.ingressClassName,\
+HOSTS:.spec.rules[*].host,ADDRESS:.status.loadBalancer.ingress[*].ip'{ctx_flag}; \
+             echo '=== host/path -> backend svc:port ==='; \
+             $K get ingress {ing_esc} -n $NS \
+               -o jsonpath='{{range .spec.rules[*]}}{{.host}}{{\"\\n\"}}\
+{{range .http.paths[*]}}  {{.path}} -> {{.backend.service.name}}:{{.backend.service.port.number}}{{\"\\n\"}}{{end}}{{end}}'{ctx_flag}; \
+             echo; \
+             echo '=== backend service endpoints ==='; \
+             for s in $($K get ingress {ing_esc} -n $NS \
+               -o jsonpath='{{.spec.rules[*].http.paths[*].backend.service.name}}'{ctx_flag}); do \
+               echo \"-- $s --\"; \
+               $K get endpoints $s -n $NS \
+                 -o custom-columns='ADDRS:.subsets[*].addresses[*].ip,\
+PORTS:.subsets[*].ports[*].port'{ctx_flag} 2>/dev/null || echo 'no endpoints'; \
+             done",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ns_esc = ns_esc,
+            ing_esc = ing_esc,
+            ctx_flag = ctx_flag,
+        );
+        Ok(cmd)
+    }
+
+    /// Build a `NetworkPolicy` inspection command.
+    ///
+    /// Shows the policy YAML, matched pods (via `podSelector`), and a
+    /// CNI enforcement caveat for flannel-based K3s clusters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, or policy name validation fails.
+    pub fn build_networkpolicy_command(
+        kubectl_bin: Option<&str>,
+        policy: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_dns_name(policy)?;
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+        let pol_esc = shell_escape(policy);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; NS={ns_esc}; \
+             echo '=== NetworkPolicy {pol_esc} ==='; \
+             $K get networkpolicy {pol_esc} -n $NS -o yaml{ctx_flag}; \
+             echo '=== podSelector -> matched pods ==='; \
+             SEL=$($K get networkpolicy {pol_esc} -n $NS \
+               -o jsonpath='{{range $k,$v := .spec.podSelector.matchLabels}}{{$k}}={{$v}},{{end}}'{ctx_flag} \
+               | sed 's/,$//'); \
+             if [ -n \"$SEL\" ]; then \
+               $K get pods -n $NS -l \"$SEL\" \
+                 -o custom-columns='POD:.metadata.name,IP:.status.podIP,PHASE:.status.phase'{ctx_flag}; \
+             else \
+               echo 'empty podSelector = selects ALL pods in namespace'; \
+               $K get pods -n $NS \
+                 -o custom-columns='POD:.metadata.name,IP:.status.podIP'{ctx_flag}; \
+             fi; \
+             echo '=== CNI enforcement caveat ==='; \
+             if $K get pods -n kube-system -l app=flannel -o name{ctx_flag} 2>/dev/null | grep -q .; then \
+               echo 'WARNING: flannel (default k3s CNI) does NOT enforce NetworkPolicy. \
+Install Calico/Cilium or k3s --flannel-backend=none for enforcement.'; \
+             else \
+               echo 'flannel not detected -- verify your CNI supports NetworkPolicy enforcement.'; \
+             fi",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ns_esc = ns_esc,
+            pol_esc = pol_esc,
+            ctx_flag = ctx_flag,
+        );
+        Ok(cmd)
+    }
+
+    /// Build a `kubectl get --raw` proxy-get command.
+    ///
+    /// Proxies an HTTP request through the Kubernetes API server to a
+    /// service or pod.  The proxy path is validated to prevent injection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, resource, name, proxy path,
+    /// or port validation fails.
+    pub fn build_proxy_get_command(
+        kubectl_bin: Option<&str>,
+        resource: &str,
+        name: &str,
+        proxy_path: &str,
+        port: Option<u16>,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_proxy_resource(resource)?;
+        validate_dns_name(name)?;
+        validate_probe_path(proxy_path)?;
+        if let Some(p) = port {
+            validate_port(p)?;
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("default");
+
+        // Build the raw API path: /api/v1/namespaces/<ns>/<resource>/<name>[:<port>]/proxy<path>
+        let port_suffix = port.map(|p| format!(":{p}")).unwrap_or_default();
+        let raw_path =
+            format!("/api/v1/namespaces/{ns_val}/{resource}/{name}{port_suffix}/proxy{proxy_path}");
+        let raw_path_esc = shell_escape(&raw_path);
+
+        let mut cmd = String::new();
+        let _ = write!(cmd, "{prefix}get --raw {raw_path_esc}{ctx_flag}");
+        Ok(cmd)
+    }
+
+    /// Build a `CoreDNS` health-check composite command.
+    ///
+    /// Shows `CoreDNS` pods, service, endpoints, Corefile, and optionally
+    /// resolves a DNS name via a short-lived busybox pod.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, or resolve name validation fails.
+    pub fn build_dns_check_command(
+        kubectl_bin: Option<&str>,
+        resolve_name: Option<&str>,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        if let Some(rn) = resolve_name {
+            validate_dns_name(rn)?;
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_flag = namespace
+            .map(|ns| format!(" -n {}", shell_escape(ns)))
+            .unwrap_or_default();
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; \
+             echo '=== CoreDNS Pods ==='; \
+             $K get pods -n kube-system -l k8s-app=kube-dns -o wide{ctx_flag}; \
+             echo '=== CoreDNS Service + Endpoints ==='; \
+             $K get svc,endpoints -n kube-system -l k8s-app=kube-dns{ctx_flag}; \
+             echo '=== Corefile ==='; \
+             $K get configmap coredns -n kube-system \
+               -o jsonpath='{{.data.Corefile}}'{ctx_flag}; \
+             echo",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ctx_flag = ctx_flag,
+        );
+        if let Some(rn) = resolve_name {
+            let rn_esc = shell_escape(rn);
+            let _ = write!(
+                cmd,
+                "; echo '=== Resolve {rn_esc} ==='; \
+                 $K run dns-probe-$${ns_flag}{ctx_flag} \
+                   --image=busybox:1.36 --restart=Never --command --attach --rm \
+                   --timeout=20s -- nslookup {rn_esc}"
+            );
+        }
+        Ok(cmd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5650,5 +6235,469 @@ mod tests {
     #[test]
     fn test_validate_diff_subcommand_invalid() {
         assert!(HelmCommandBuilder::validate_diff_subcommand("bad").is_err());
+    }
+
+    // ============================================================
+    // Wave-9a: Networking validator tests
+    // ============================================================
+
+    // --- validate_port ---
+
+    #[test]
+    fn test_validate_port_accepts_valid_range() {
+        assert!(validate_port(1).is_ok());
+        assert!(validate_port(80).is_ok());
+        assert!(validate_port(8080).is_ok());
+        assert!(validate_port(65535).is_ok());
+    }
+
+    #[test]
+    fn test_validate_port_rejects_zero() {
+        let err = validate_port(0).unwrap_err();
+        match err {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("1–65535")),
+            e => panic!("expected CommandDenied, got {e:?}"),
+        }
+    }
+
+    // --- validate_probe_path ---
+
+    #[test]
+    fn test_validate_probe_path_accepts_valid() {
+        assert!(validate_probe_path("/").is_ok());
+        assert!(validate_probe_path("/healthz").is_ok());
+        assert!(validate_probe_path("/api/v1?foo=bar").is_ok());
+        assert!(validate_probe_path("/metrics").is_ok());
+    }
+
+    #[test]
+    fn test_validate_probe_path_rejects_empty() {
+        assert!(validate_probe_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_probe_path_rejects_no_leading_slash() {
+        assert!(validate_probe_path("healthz").is_err());
+    }
+
+    #[test]
+    fn test_validate_probe_path_rejects_traversal() {
+        assert!(validate_probe_path("/../etc/passwd").is_err());
+        assert!(validate_probe_path("/foo/../bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_probe_path_rejects_injection() {
+        assert!(validate_probe_path("/foo\nbar").is_err());
+        assert!(validate_probe_path("/foo bar").is_err());
+        assert!(validate_probe_path("/foo`bar").is_err());
+        assert!(validate_probe_path("/$(ls)").is_err());
+    }
+
+    // --- validate_dns_name ---
+
+    #[test]
+    fn test_validate_dns_name_accepts_valid() {
+        assert!(validate_dns_name("myservice").is_ok());
+        assert!(validate_dns_name("my-service").is_ok());
+        assert!(validate_dns_name("svc.ns").is_ok());
+        assert!(validate_dns_name("web-01").is_ok());
+    }
+
+    #[test]
+    fn test_validate_dns_name_rejects_empty() {
+        assert!(validate_dns_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_dns_name_rejects_leading_dash() {
+        assert!(validate_dns_name("-bad").is_err());
+    }
+
+    #[test]
+    fn test_validate_dns_name_rejects_trailing_dash() {
+        assert!(validate_dns_name("bad-").is_err());
+    }
+
+    #[test]
+    fn test_validate_dns_name_rejects_uppercase() {
+        assert!(validate_dns_name("MyService").is_err());
+    }
+
+    // --- validate_probe_image ---
+
+    #[test]
+    fn test_validate_probe_image_accepts_valid() {
+        assert!(validate_probe_image("busybox:1.36").is_ok());
+        assert!(validate_probe_image("registry.example.com/myimage:latest").is_ok());
+        assert!(validate_probe_image("my-image@sha256:abc123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_probe_image_rejects_empty() {
+        assert!(validate_probe_image("").is_err());
+    }
+
+    #[test]
+    fn test_validate_probe_image_rejects_leading_dash() {
+        assert!(validate_probe_image("-bad").is_err());
+    }
+
+    #[test]
+    fn test_validate_probe_image_rejects_injection() {
+        assert!(validate_probe_image("busybox;rm -rf").is_err());
+    }
+
+    // --- validate_duration_secs ---
+
+    #[test]
+    fn test_validate_duration_secs_accepts_valid() {
+        assert!(validate_duration_secs(1).is_ok());
+        assert!(validate_duration_secs(30).is_ok());
+        assert!(validate_duration_secs(300).is_ok());
+    }
+
+    #[test]
+    fn test_validate_duration_secs_rejects_zero() {
+        assert!(validate_duration_secs(0).is_err());
+    }
+
+    #[test]
+    fn test_validate_duration_secs_rejects_above_cap() {
+        assert!(validate_duration_secs(301).is_err());
+        assert!(validate_duration_secs(3600).is_err());
+    }
+
+    // --- validate_proxy_resource ---
+
+    #[test]
+    fn test_validate_proxy_resource_accepts_valid() {
+        assert!(validate_proxy_resource("services").is_ok());
+        assert!(validate_proxy_resource("pods").is_ok());
+    }
+
+    #[test]
+    fn test_validate_proxy_resource_rejects_invalid() {
+        assert!(validate_proxy_resource("deployments").is_err());
+        assert!(validate_proxy_resource("").is_err());
+        assert!(validate_proxy_resource("nodes").is_err());
+    }
+
+    // ============================================================
+    // Wave-9a: build_port_forward_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_port_forward_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/myapp",
+            "8080:80",
+            None,
+            5,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("kubectl port-forward"), "cmd: {cmd}");
+        assert!(cmd.contains("'svc/myapp'"), "cmd: {cmd}");
+        assert!(cmd.contains("'8080:80'"), "cmd: {cmd}");
+        assert!(cmd.contains("sleep '5'"), "cmd: {cmd}");
+        assert!(cmd.contains("kill $PF"), "cmd: {cmd}");
+        assert!(cmd.contains("rm -f /tmp/pf.$$"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_port_forward_command_with_probe() {
+        let cmd = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            Some("/healthz"),
+            10,
+            Some("default"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("curl"), "cmd: {cmd}");
+        assert!(cmd.contains("/healthz"), "cmd: {cmd}");
+        assert!(cmd.contains("-n 'default'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_port_forward_command_rejects_zero_wait() {
+        let result = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            None,
+            0,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_port_forward_command_rejects_wait_above_30() {
+        let result = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            None,
+            31,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_port_forward_command_rejects_invalid_probe_path() {
+        let result = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            Some("/../evil"),
+            5,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_port_forward_command_self_terminates() {
+        // Verify the command always contains kill + wait + rm cleanup
+        let cmd = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "pod/mypod",
+            "9090",
+            None,
+            3,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("kill $PF 2>/dev/null"), "cmd: {cmd}");
+        assert!(cmd.contains("wait $PF 2>/dev/null"), "cmd: {cmd}");
+        assert!(cmd.contains("rm -f /tmp/pf.$$"), "cmd: {cmd}");
+    }
+
+    // ============================================================
+    // Wave-9a: build_endpoints_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_endpoints_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_endpoints_command(
+            Some("kubectl"),
+            "my-svc",
+            Some("default"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("'my-svc'"), "cmd: {cmd}");
+        assert!(cmd.contains("'default'"), "cmd: {cmd}");
+        assert!(cmd.contains("Selector"), "cmd: {cmd}");
+        assert!(cmd.contains("EndpointSlice"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_endpoints_command_rejects_invalid_svc() {
+        let result = KubernetesCommandBuilder::build_endpoints_command(
+            Some("kubectl"),
+            "BadService",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_endpoints_command_with_context() {
+        let cmd = KubernetesCommandBuilder::build_endpoints_command(
+            Some("kubectl"),
+            "api",
+            None,
+            Some("prod"),
+        )
+        .unwrap();
+        assert!(cmd.contains("--context=prod"), "cmd: {cmd}");
+    }
+
+    // ============================================================
+    // Wave-9a: build_ingress_describe_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_ingress_describe_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_ingress_describe_command(
+            Some("kubectl"),
+            "my-ingress",
+            Some("production"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("'my-ingress'"), "cmd: {cmd}");
+        assert!(cmd.contains("'production'"), "cmd: {cmd}");
+        assert!(cmd.contains("backend"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_ingress_describe_command_rejects_invalid_name() {
+        let result = KubernetesCommandBuilder::build_ingress_describe_command(
+            Some("kubectl"),
+            "My-Ingress",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Wave-9a: build_networkpolicy_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_networkpolicy_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_networkpolicy_command(
+            Some("kubectl"),
+            "allow-web",
+            Some("default"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("'allow-web'"), "cmd: {cmd}");
+        assert!(cmd.contains("networkpolicy"), "cmd: {cmd}");
+        assert!(cmd.contains("flannel"), "cmd: {cmd}");
+        assert!(cmd.contains("podSelector"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_networkpolicy_command_rejects_invalid_policy() {
+        let result = KubernetesCommandBuilder::build_networkpolicy_command(
+            Some("kubectl"),
+            "Bad Policy",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Wave-9a: build_proxy_get_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_proxy_get_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_proxy_get_command(
+            Some("kubectl"),
+            "services",
+            "myservice",
+            "/healthz",
+            None,
+            Some("default"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("get --raw"), "cmd: {cmd}");
+        assert!(
+            cmd.contains("/api/v1/namespaces/default/services/myservice/proxy/healthz"),
+            "cmd: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_proxy_get_command_with_port() {
+        let cmd = KubernetesCommandBuilder::build_proxy_get_command(
+            Some("kubectl"),
+            "services",
+            "myservice",
+            "/metrics",
+            Some(9090),
+            Some("monitoring"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains("/api/v1/namespaces/monitoring/services/myservice:9090/proxy/metrics"),
+            "cmd: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_proxy_get_command_rejects_bad_path() {
+        let result = KubernetesCommandBuilder::build_proxy_get_command(
+            Some("kubectl"),
+            "services",
+            "myservice",
+            "/../etc/passwd",
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_proxy_get_command_rejects_bad_resource() {
+        let result = KubernetesCommandBuilder::build_proxy_get_command(
+            Some("kubectl"),
+            "deployments",
+            "myapp",
+            "/healthz",
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Wave-9a: build_dns_check_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_dns_check_command_basic() {
+        let cmd =
+            KubernetesCommandBuilder::build_dns_check_command(Some("kubectl"), None, None, None)
+                .unwrap();
+        assert!(cmd.contains("CoreDNS"), "cmd: {cmd}");
+        assert!(cmd.contains("coredns"), "cmd: {cmd}");
+        assert!(cmd.contains("Corefile"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_dns_check_command_with_resolve() {
+        let cmd = KubernetesCommandBuilder::build_dns_check_command(
+            Some("kubectl"),
+            Some("kubernetes.default.svc.cluster.local"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains("kubernetes.default.svc.cluster.local"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("nslookup"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_dns_check_command_rejects_invalid_resolve_name() {
+        let result = KubernetesCommandBuilder::build_dns_check_command(
+            Some("kubectl"),
+            Some("Bad Name!"),
+            None,
+            None,
+        );
+        assert!(result.is_err());
     }
 }
