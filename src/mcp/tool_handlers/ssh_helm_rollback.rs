@@ -27,6 +27,14 @@ pub struct SshHelmRollbackArgs {
     #[serde(default)]
     wait: Option<bool>,
     #[serde(default)]
+    cleanup_on_fail: Option<bool>,
+    #[serde(default)]
+    wait_for_jobs: Option<bool>,
+    #[serde(default)]
+    timeout: Option<String>,
+    #[serde(default)]
+    force: Option<bool>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -84,6 +92,22 @@ impl StandardTool for HelmRollbackTool {
                 "type": "boolean",
                 "description": "Wait for resources to be ready before marking rollback as successful"
             },
+            "cleanup_on_fail": {
+                "type": "boolean",
+                "description": "Allow deletion of new resources created during rollback when it fails"
+            },
+            "wait_for_jobs": {
+                "type": "boolean",
+                "description": "Wait for Jobs to complete before marking rollback as successful"
+            },
+            "timeout": {
+                "type": "string",
+                "description": "Helm --timeout: Go duration to wait for Kubernetes operations (e.g. '5m0s', '10m')"
+            },
+            "force": {
+                "type": "boolean",
+                "description": "Force resource update through delete/recreate if needed"
+            },
             "helm_bin": {
                 "type": "string",
                 "description": "Custom helm binary path (default: auto-detect)"
@@ -119,6 +143,10 @@ impl StandardTool for HelmRollbackTool {
             args.namespace.as_deref(),
             args.dry_run.as_deref(),
             args.wait.unwrap_or(false),
+            args.cleanup_on_fail.unwrap_or(false),
+            args.wait_for_jobs.unwrap_or(false),
+            args.timeout.as_deref(),
+            args.force.unwrap_or(false),
         ))
     }
 
@@ -382,6 +410,10 @@ mod tests {
             namespace: None,
             dry_run: None,
             wait: None,
+            cleanup_on_fail: None,
+            wait_for_jobs: None,
+            timeout: None,
+            force: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -403,6 +435,10 @@ mod tests {
             namespace: None,
             dry_run: None,
             wait: None,
+            cleanup_on_fail: None,
+            wait_for_jobs: None,
+            timeout: None,
+            force: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -423,6 +459,10 @@ mod tests {
             namespace: Some("production".to_string()),
             dry_run: Some("server".to_string()),
             wait: Some(true),
+            cleanup_on_fail: None,
+            wait_for_jobs: None,
+            timeout: None,
+            force: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -434,5 +474,32 @@ mod tests {
         assert!(cmd.contains("-n 'production'"));
         assert!(cmd.contains("--dry-run='server'"));
         assert!(cmd.contains("--wait"));
+    }
+
+    #[test]
+    fn test_build_command_cleanup_wait_for_jobs_force_timeout() {
+        let args = SshHelmRollbackArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            revision: None,
+            namespace: None,
+            dry_run: None,
+            wait: None,
+            cleanup_on_fail: Some(true),
+            wait_for_jobs: Some(true),
+            timeout: Some("10m".to_string()),
+            force: Some(true),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmRollbackTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--cleanup-on-fail"), "cmd={cmd}");
+        assert!(cmd.contains("--wait-for-jobs"), "cmd={cmd}");
+        assert!(cmd.contains("--timeout '10m'"), "cmd={cmd}");
+        assert!(cmd.contains("--force"), "cmd={cmd}");
     }
 }
