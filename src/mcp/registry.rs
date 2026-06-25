@@ -2834,6 +2834,7 @@ mod tests {
             "templates",
             "pty",
             "cri",
+            "k3s",
         ];
         let registry = create_all_enabled_registry();
         for tool in registry.list_tools() {

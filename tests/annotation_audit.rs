@@ -61,6 +61,8 @@ const ALLOWLIST: &[(&str, ToolAnnotationKind)] = &[
     ("ssh_storage_umount", ToolAnnotationKind::Mutating),
     ("ssh_storage_mount", ToolAnnotationKind::Mutating),
     ("ssh_crictl_rmi", ToolAnnotationKind::Destructive), // crictl rmi: image deletion — irreversible, _rmi suffix not in auto list
+    ("ssh_k3s_etcd_snapshot_save", ToolAnnotationKind::Mutating), // etcd snapshot save: _save suffix not in MUTATION_SUFFIXES
+    ("ssh_k3s_ctr_images", ToolAnnotationKind::Mutating), // ctr images: _images suffix not in any auto list; import mutates containerd image store
 ];
 
 fn allowed(name: &str, kind: ToolAnnotationKind) -> bool {

@@ -557,6 +557,7 @@ tool_groups:
     # docker: true             # Enable Docker tools
     # podman: true             # Enable Podman tools
     # cri: true                # Enable crictl/CRI debug tools (K3s embedded containerd)
+    # k3s: true                # Enable k3s lifecycle tools (etcd-snapshot, check-config, ctr, kubeconfig)
     # kubernetes: true         # Enable kubectl/helm tools
     # esxi: true               # Enable VMware ESXi tools
     # nginx: true              # Enable Nginx tools

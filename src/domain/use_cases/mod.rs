@@ -32,6 +32,7 @@ pub mod iis;
 pub mod incident;
 pub mod inventory;
 pub mod journald;
+pub mod k3s;
 pub mod k8s_triage;
 pub mod key_management;
 pub mod kubernetes;

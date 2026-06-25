@@ -32,6 +32,7 @@
     "incident",
     "inventory",
     "journald",
+    "k3s",
     "key_management",
     "kubernetes",
     "ldap",
@@ -77,6 +78,6 @@
     "windows_services",
     "windows_updates"
   ],
-  "groups_count": 76,
-  "total": 434
+  "groups_count": 77,
+  "total": 442
 }
