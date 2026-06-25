@@ -98,6 +98,9 @@ impl StandardTool for HelmShowTool {
 
     fn build_command(args: &SshHelmShowArgs, _host_config: &HostConfig) -> Result<String> {
         HelmCommandBuilder::validate_show_subcommand(&args.subcommand)?;
+        if let Some(r) = args.repo.as_deref() {
+            HelmCommandBuilder::validate_repo_url(r)?;
+        }
         Ok(HelmCommandBuilder::build_show_command(
             args.helm_bin.as_deref(),
             &args.subcommand,
@@ -323,5 +326,26 @@ mod tests {
         };
         let result = HelmShowTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_command_rejects_bad_repo_url() {
+        let args = SshHelmShowArgs {
+            host: "server1".to_string(),
+            subcommand: "values".to_string(),
+            chart: "nginx".to_string(),
+            version: None,
+            repo: Some("http://x.com|evil".to_string()),
+            devel: None,
+            helm_bin: Some("helm".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let result = HelmShowTool::build_command(&args, &test_host_config());
+        assert!(
+            result.is_err(),
+            "expected error for repo URL with shell metachar"
+        );
     }
 }

@@ -5,7 +5,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::kubernetes::HelmCommandBuilder;
+use crate::domain::use_cases::kubernetes::{HelmCommandBuilder, KubernetesCommandBuilder};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -100,6 +100,9 @@ impl StandardTool for HelmTestTool {
     }"#;
 
     fn build_command(args: &SshHelmTestArgs, _host_config: &HostConfig) -> Result<String> {
+        if let Some(ns) = args.namespace.as_deref() {
+            KubernetesCommandBuilder::validate_namespace(ns)?;
+        }
         Ok(HelmCommandBuilder::build_test_command(
             args.helm_bin.as_deref(),
             args.kubeconfig.as_deref(),
@@ -311,5 +314,27 @@ mod tests {
         assert!(cmd.contains("-n 'production'"));
         assert!(cmd.contains("--logs"));
         assert!(cmd.contains("--timeout '5m0s'"));
+    }
+
+    #[test]
+    fn test_build_command_rejects_bad_namespace() {
+        let args = SshHelmTestArgs {
+            host: "server1".to_string(),
+            release: "myapp".to_string(),
+            namespace: Some("--all-namespaces".to_string()),
+            logs: None,
+            timeout: None,
+            filter: None,
+            kubeconfig: None,
+            helm_bin: Some("helm".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let result = HelmTestTool::build_command(&args, &test_host_config());
+        assert!(
+            result.is_err(),
+            "expected error for flag-like namespace value"
+        );
     }
 }

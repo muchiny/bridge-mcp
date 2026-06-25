@@ -109,6 +109,9 @@ impl StandardTool for HelmPullTool {
     }"#;
 
     fn build_command(args: &SshHelmPullArgs, _host_config: &HostConfig) -> Result<String> {
+        if let Some(r) = args.repo.as_deref() {
+            HelmCommandBuilder::validate_repo_url(r)?;
+        }
         Ok(HelmCommandBuilder::build_pull_command(
             args.helm_bin.as_deref(),
             &args.chart,
@@ -326,5 +329,28 @@ mod tests {
         assert!(cmd.contains("--version '1.0.0'"));
         assert!(cmd.contains("--untar"));
         assert!(cmd.contains("--destination '/tmp/charts'"));
+    }
+
+    #[test]
+    fn test_build_command_rejects_bad_repo_url() {
+        let args = SshHelmPullArgs {
+            host: "server1".to_string(),
+            chart: "nginx".to_string(),
+            version: None,
+            repo: Some("http://x.com|evil".to_string()),
+            untar: None,
+            destination: None,
+            devel: None,
+            verify: None,
+            helm_bin: Some("helm".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let result = HelmPullTool::build_command(&args, &test_host_config());
+        assert!(
+            result.is_err(),
+            "expected error for repo URL with shell metachar"
+        );
     }
 }
