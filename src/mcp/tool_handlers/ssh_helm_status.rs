@@ -23,6 +23,10 @@ pub struct SshHelmStatusArgs {
     #[serde(default)]
     revision: Option<u64>,
     #[serde(default)]
+    show_resources: Option<bool>,
+    #[serde(default)]
+    show_desc: Option<bool>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -75,6 +79,14 @@ impl StandardTool for HelmStatusTool {
                 "type": "integer",
                 "description": "Show status for specific revision"
             },
+            "show_resources": {
+                "type": "boolean",
+                "description": "Show the resources in the release"
+            },
+            "show_desc": {
+                "type": "boolean",
+                "description": "Show the description of the release"
+            },
             "helm_bin": {
                 "type": "string",
                 "description": "Custom helm binary path (default: auto-detect)"
@@ -112,6 +124,8 @@ impl StandardTool for HelmStatusTool {
             args.namespace.as_deref(),
             args.output.as_deref(),
             args.revision,
+            args.show_resources.unwrap_or(false),
+            args.show_desc.unwrap_or(false),
         ))
     }
 }
@@ -312,6 +326,8 @@ mod tests {
             namespace: None,
             output: None,
             revision: None,
+            show_resources: None,
+            show_desc: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -332,6 +348,8 @@ mod tests {
             namespace: Some("production".to_string()),
             output: None,
             revision: None,
+            show_resources: None,
+            show_desc: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -351,6 +369,8 @@ mod tests {
             namespace: None,
             output: Some("json".to_string()),
             revision: Some(3),
+            show_resources: None,
+            show_desc: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -361,5 +381,27 @@ mod tests {
         let cmd = HelmStatusTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("-o 'json'"));
         assert!(cmd.contains("--revision 3"));
+    }
+
+    #[test]
+    fn test_build_command_show_resources_show_desc() {
+        let args = SshHelmStatusArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            namespace: None,
+            output: None,
+            revision: None,
+            show_resources: Some(true),
+            show_desc: Some(true),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmStatusTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--show-resources"), "cmd={cmd}");
+        assert!(cmd.contains("--show-desc"), "cmd={cmd}");
     }
 }
