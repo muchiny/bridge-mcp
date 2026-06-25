@@ -2649,6 +2649,428 @@ impl HelmCommandBuilder {
         }
         cmd
     }
+
+    /// Validate a Helm repository name.
+    pub fn validate_repo_name(name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(BridgeError::CommandDenied {
+                reason: "repo name must not be empty".into(),
+            });
+        }
+        if name.starts_with('-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("repo name must not start with '-': '{name}'").into(),
+            });
+        }
+        if name.len() > 253 {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("repo name exceeds 253 characters: '{name}'").into(),
+            });
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("repo name contains invalid characters: '{name}'").into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a Helm repository URL.
+    pub fn validate_repo_url(url: &str) -> Result<()> {
+        if url.is_empty() {
+            return Err(BridgeError::CommandDenied {
+                reason: "repo URL must not be empty".into(),
+            });
+        }
+        if url.starts_with('-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("repo URL must not start with '-': '{url}'").into(),
+            });
+        }
+        if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("oci://")
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("repo URL must start with https://, http://, or oci://: '{url}'")
+                    .into(),
+            });
+        }
+        if url.chars().any(|c| c.is_whitespace()) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("repo URL must not contain whitespace: '{url}'").into(),
+            });
+        }
+        if url
+            .chars()
+            .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>'))
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("repo URL contains shell meta-characters: '{url}'").into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a Helm output format.
+    pub fn validate_helm_output(output: &str) -> Result<()> {
+        if output.starts_with('-') || !["table", "json", "yaml"].contains(&output) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("invalid output format: '{output}' (expected: table, json, yaml)")
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a `helm show` subcommand.
+    pub fn validate_show_subcommand(sub: &str) -> Result<()> {
+        if !["all", "chart", "readme", "values", "crds"].contains(&sub) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "invalid show subcommand: '{sub}' (expected: all, chart, readme, values, crds)"
+                )
+                .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a `helm dependency` subcommand.
+    pub fn validate_dependency_subcommand(sub: &str) -> Result<()> {
+        if !["build", "update", "list"].contains(&sub) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "invalid dependency subcommand: '{sub}' (expected: build, update, list)"
+                )
+                .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a `helm diff` subcommand (requires helm-diff plugin).
+    pub fn validate_diff_subcommand(sub: &str) -> Result<()> {
+        if !["upgrade", "rollback", "release", "revision"].contains(&sub) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "invalid diff subcommand: '{sub}' (expected: upgrade, rollback, release, revision)"
+                )
+                .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Build a `helm repo add` command.
+    #[must_use]
+    pub fn build_repo_add_command(
+        helm_bin: Option<&str>,
+        name: &str,
+        url: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+        force_update: bool,
+        pass_credentials: bool,
+    ) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!(
+            "{prefix}repo add {} {}",
+            shell_escape(name),
+            shell_escape(url)
+        );
+        if let Some(u) = username {
+            let _ = write!(cmd, " --username {}", shell_escape(u));
+        }
+        if let Some(p) = password {
+            let _ = write!(cmd, " --password {}", shell_escape(p));
+        }
+        if force_update {
+            cmd.push_str(" --force-update");
+        }
+        if pass_credentials {
+            cmd.push_str(" --pass-credentials");
+        }
+        cmd
+    }
+
+    /// Build a `helm repo update` command.
+    #[must_use]
+    pub fn build_repo_update_command(helm_bin: Option<&str>, repos: Option<&[String]>) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!("{prefix}repo update");
+        if let Some(repos) = repos {
+            for r in repos {
+                let _ = write!(cmd, " {}", shell_escape(r));
+            }
+        }
+        cmd
+    }
+
+    /// Build a `helm repo list` command.
+    #[must_use]
+    pub fn build_repo_list_command(helm_bin: Option<&str>, output: Option<&str>) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!("{prefix}repo list");
+        if let Some(out) = output {
+            let _ = write!(cmd, " -o {}", shell_escape(out));
+        }
+        cmd
+    }
+
+    /// Build a `helm repo remove` command.
+    pub fn build_repo_remove_command(helm_bin: Option<&str>, names: &[String]) -> Result<String> {
+        if names.is_empty() {
+            return Err(BridgeError::CommandDenied {
+                reason: "at least one repo name is required for repo remove".into(),
+            });
+        }
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!("{prefix}repo remove");
+        for name in names {
+            let _ = write!(cmd, " {}", shell_escape(name));
+        }
+        Ok(cmd)
+    }
+
+    /// Build a `helm show` command.
+    #[must_use]
+    pub fn build_show_command(
+        helm_bin: Option<&str>,
+        subcommand: &str,
+        chart: &str,
+        version: Option<&str>,
+        repo: Option<&str>,
+        devel: bool,
+    ) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!(
+            "{prefix}show {} {}",
+            shell_escape(subcommand),
+            shell_escape(chart)
+        );
+        if let Some(v) = version {
+            let _ = write!(cmd, " --version {}", shell_escape(v));
+        }
+        if let Some(r) = repo {
+            let _ = write!(cmd, " --repo {}", shell_escape(r));
+        }
+        if devel {
+            cmd.push_str(" --devel");
+        }
+        cmd
+    }
+
+    /// Build a `helm pull` command.
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_pull_command(
+        helm_bin: Option<&str>,
+        chart: &str,
+        version: Option<&str>,
+        repo: Option<&str>,
+        untar: bool,
+        destination: Option<&str>,
+        devel: bool,
+        verify: bool,
+    ) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!("{prefix}pull {}", shell_escape(chart));
+        if let Some(v) = version {
+            let _ = write!(cmd, " --version {}", shell_escape(v));
+        }
+        if let Some(r) = repo {
+            let _ = write!(cmd, " --repo {}", shell_escape(r));
+        }
+        if untar {
+            cmd.push_str(" --untar");
+        }
+        if let Some(d) = destination {
+            let _ = write!(cmd, " --destination {}", shell_escape(d));
+        }
+        if devel {
+            cmd.push_str(" --devel");
+        }
+        if verify {
+            cmd.push_str(" --verify");
+        }
+        cmd
+    }
+
+    /// Build a `helm lint` command.
+    #[must_use]
+    pub fn build_lint_command(
+        helm_bin: Option<&str>,
+        chart_path: &str,
+        strict: bool,
+        values_files: Option<&[String]>,
+        set_values: Option<&HashMap<String, String>>,
+        quiet: bool,
+    ) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!("{prefix}lint {}", shell_escape(chart_path));
+        if strict {
+            cmd.push_str(" --strict");
+        }
+        if let Some(files) = values_files {
+            for file in files {
+                let _ = write!(cmd, " -f {}", shell_escape(file));
+            }
+        }
+        if let Some(vals) = set_values {
+            let mut keys: Vec<&String> = vals.keys().collect();
+            keys.sort();
+            for key in keys {
+                let val = &vals[key];
+                let _ = write!(cmd, " --set {}={}", shell_escape(key), shell_escape(val));
+            }
+        }
+        if quiet {
+            cmd.push_str(" --quiet");
+        }
+        cmd
+    }
+
+    /// Build a `helm dependency` command.
+    #[must_use]
+    pub fn build_dependency_command(
+        helm_bin: Option<&str>,
+        subcommand: &str,
+        chart_path: &str,
+        skip_refresh: bool,
+        verify: bool,
+    ) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!(
+            "{prefix}dependency {} {}",
+            shell_escape(subcommand),
+            shell_escape(chart_path)
+        );
+        if skip_refresh {
+            cmd.push_str(" --skip-refresh");
+        }
+        if verify {
+            cmd.push_str(" --verify");
+        }
+        cmd
+    }
+
+    /// Build a `helm diff` command (requires helm-diff plugin).
+    #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    pub fn build_diff_command(
+        helm_bin: Option<&str>,
+        subcommand: &str,
+        release: &str,
+        chart: Option<&str>,
+        namespace: Option<&str>,
+        values_files: Option<&[String]>,
+        set_values: Option<&HashMap<String, String>>,
+        version: Option<&str>,
+        detailed_exitcode: bool,
+    ) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let guard = format!(
+            "{prefix}plugin list | grep -q diff || {{ echo 'helm-diff plugin not installed' >&2; exit 4; }}; "
+        );
+        let escaped_sub = shell_escape(subcommand);
+        let escaped_release = shell_escape(release);
+        let mut cmd = format!("{guard}{prefix}diff {escaped_sub} {escaped_release}");
+        if let Some(c) = chart {
+            let _ = write!(cmd, " {}", shell_escape(c));
+        }
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if let Some(files) = values_files {
+            for file in files {
+                let _ = write!(cmd, " -f {}", shell_escape(file));
+            }
+        }
+        if let Some(vals) = set_values {
+            let mut keys: Vec<&String> = vals.keys().collect();
+            keys.sort();
+            for key in keys {
+                let val = &vals[key];
+                let _ = write!(cmd, " --set {}={}", shell_escape(key), shell_escape(val));
+            }
+        }
+        if let Some(v) = version {
+            let _ = write!(cmd, " --version {}", shell_escape(v));
+        }
+        if detailed_exitcode {
+            cmd.push_str(" --detailed-exitcode");
+        }
+        cmd
+    }
+
+    /// Build a `helm test` command.
+    #[must_use]
+    pub fn build_test_command(
+        helm_bin: Option<&str>,
+        kubeconfig: Option<&str>,
+        release: &str,
+        namespace: Option<&str>,
+        logs: bool,
+        timeout: Option<&str>,
+        filter: Option<&str>,
+    ) -> String {
+        let kube_env = kubeconfig_env_prefix(kubeconfig);
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!("{kube_env}{prefix}test {}", shell_escape(release));
+        if let Some(ns) = namespace {
+            let _ = write!(cmd, " -n {}", shell_escape(ns));
+        }
+        if logs {
+            cmd.push_str(" --logs");
+        }
+        if let Some(t) = timeout {
+            let _ = write!(cmd, " --timeout {}", shell_escape(t));
+        }
+        if let Some(f) = filter {
+            let _ = write!(cmd, " --filter {}", shell_escape(f));
+        }
+        cmd
+    }
+
+    /// Build a `helm search repo` command.
+    #[must_use]
+    pub fn build_search_repo_command(
+        helm_bin: Option<&str>,
+        keyword: &str,
+        version: Option<&str>,
+        versions: bool,
+        devel: bool,
+        output: Option<&str>,
+        regexp: bool,
+    ) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        let mut cmd = format!("{prefix}search repo {}", shell_escape(keyword));
+        if let Some(v) = version {
+            let _ = write!(cmd, " --version {}", shell_escape(v));
+        }
+        if versions {
+            cmd.push_str(" --versions");
+        }
+        if devel {
+            cmd.push_str(" --devel");
+        }
+        if let Some(out) = output {
+            let _ = write!(cmd, " -o {}", shell_escape(out));
+        }
+        if regexp {
+            cmd.push_str(" --regexp");
+        }
+        cmd
+    }
+
+    /// Build a `helm plugin list` command.
+    #[must_use]
+    pub fn build_plugin_list_command(helm_bin: Option<&str>) -> String {
+        let prefix = helm_detect_prefix(helm_bin);
+        format!("{prefix}plugin list")
+    }
 }
 
 #[cfg(test)]
@@ -4749,5 +5171,225 @@ mod tests {
             Ok(cmd) => panic!("reveal=false must return Err, got: {cmd}"),
             Err(e) => panic!("Expected CommandDenied, got: {e:?}"),
         }
+    }
+
+    // ============== HelmCommandBuilder New Tests ==============
+
+    #[test]
+    fn test_build_repo_add_command() {
+        let cmd = HelmCommandBuilder::build_repo_add_command(
+            Some("helm"),
+            "myrepo",
+            "https://charts.example.com/",
+            None,
+            None,
+            false,
+            false,
+        );
+        assert!(cmd.contains("helm repo add 'myrepo' 'https://charts.example.com/'"));
+    }
+
+    #[test]
+    fn test_build_repo_update_command() {
+        let cmd = HelmCommandBuilder::build_repo_update_command(Some("helm"), None);
+        assert!(cmd.contains("helm repo update"));
+    }
+
+    #[test]
+    fn test_build_repo_list_command() {
+        let cmd = HelmCommandBuilder::build_repo_list_command(Some("helm"), None);
+        assert!(cmd.contains("helm repo list"));
+    }
+
+    #[test]
+    fn test_build_repo_remove_command() {
+        let names = vec!["myrepo".to_string()];
+        let cmd = HelmCommandBuilder::build_repo_remove_command(Some("helm"), &names).unwrap();
+        assert!(cmd.contains("helm repo remove 'myrepo'"));
+    }
+
+    #[test]
+    fn test_build_repo_remove_command_empty_fails() {
+        let result = HelmCommandBuilder::build_repo_remove_command(Some("helm"), &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_show_command() {
+        let cmd = HelmCommandBuilder::build_show_command(
+            Some("helm"),
+            "values",
+            "stable/nginx",
+            None,
+            None,
+            false,
+        );
+        assert!(cmd.contains("helm show 'values' 'stable/nginx'"));
+    }
+
+    #[test]
+    fn test_build_pull_command() {
+        let cmd = HelmCommandBuilder::build_pull_command(
+            Some("helm"),
+            "stable/nginx",
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+        );
+        assert!(cmd.contains("helm pull 'stable/nginx'"));
+    }
+
+    #[test]
+    fn test_build_lint_command() {
+        let cmd = HelmCommandBuilder::build_lint_command(
+            Some("helm"),
+            "/path/to/chart",
+            false,
+            None,
+            None,
+            false,
+        );
+        assert!(cmd.contains("helm lint '/path/to/chart'"));
+    }
+
+    #[test]
+    fn test_build_dependency_command() {
+        let cmd = HelmCommandBuilder::build_dependency_command(
+            Some("helm"),
+            "build",
+            "/path/to/chart",
+            false,
+            false,
+        );
+        assert!(cmd.contains("helm dependency 'build' '/path/to/chart'"));
+    }
+
+    #[test]
+    fn test_build_diff_command() {
+        let cmd = HelmCommandBuilder::build_diff_command(
+            Some("helm"),
+            "upgrade",
+            "myrelease",
+            Some("stable/nginx"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert!(cmd.contains("helm diff 'upgrade' 'myrelease'"));
+        assert!(cmd.contains("helm-diff plugin not installed"));
+    }
+
+    #[test]
+    fn test_build_test_command() {
+        let cmd = HelmCommandBuilder::build_test_command(
+            Some("helm"),
+            None,
+            "myrelease",
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(cmd.contains("helm test 'myrelease'"));
+    }
+
+    #[test]
+    fn test_build_search_repo_command() {
+        let cmd = HelmCommandBuilder::build_search_repo_command(
+            Some("helm"),
+            "nginx",
+            None,
+            false,
+            false,
+            None,
+            false,
+        );
+        assert!(cmd.contains("helm search repo 'nginx'"));
+    }
+
+    #[test]
+    fn test_build_plugin_list_command() {
+        let cmd = HelmCommandBuilder::build_plugin_list_command(Some("helm"));
+        assert!(cmd.contains("helm plugin list"));
+    }
+
+    #[test]
+    fn test_validate_repo_name_valid() {
+        assert!(HelmCommandBuilder::validate_repo_name("my-repo").is_ok());
+        assert!(HelmCommandBuilder::validate_repo_name("repo.1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_repo_name_invalid() {
+        assert!(HelmCommandBuilder::validate_repo_name("").is_err());
+        assert!(HelmCommandBuilder::validate_repo_name("-bad").is_err());
+        assert!(HelmCommandBuilder::validate_repo_name("bad name").is_err());
+    }
+
+    #[test]
+    fn test_validate_repo_url_valid() {
+        assert!(HelmCommandBuilder::validate_repo_url("https://charts.example.com/").is_ok());
+        assert!(HelmCommandBuilder::validate_repo_url("oci://registry.example.com/charts").is_ok());
+    }
+
+    #[test]
+    fn test_validate_repo_url_invalid() {
+        assert!(HelmCommandBuilder::validate_repo_url("").is_err());
+        assert!(HelmCommandBuilder::validate_repo_url("ftp://bad.com").is_err());
+        assert!(HelmCommandBuilder::validate_repo_url("https://bad;cmd").is_err());
+    }
+
+    #[test]
+    fn test_validate_helm_output_valid() {
+        assert!(HelmCommandBuilder::validate_helm_output("json").is_ok());
+        assert!(HelmCommandBuilder::validate_helm_output("yaml").is_ok());
+        assert!(HelmCommandBuilder::validate_helm_output("table").is_ok());
+    }
+
+    #[test]
+    fn test_validate_helm_output_invalid() {
+        assert!(HelmCommandBuilder::validate_helm_output("xml").is_err());
+        assert!(HelmCommandBuilder::validate_helm_output("--flag").is_err());
+    }
+
+    #[test]
+    fn test_validate_show_subcommand_valid() {
+        for sub in &["all", "chart", "readme", "values", "crds"] {
+            assert!(HelmCommandBuilder::validate_show_subcommand(sub).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_show_subcommand_invalid() {
+        assert!(HelmCommandBuilder::validate_show_subcommand("bad").is_err());
+    }
+
+    #[test]
+    fn test_validate_dependency_subcommand_valid() {
+        for sub in &["build", "update", "list"] {
+            assert!(HelmCommandBuilder::validate_dependency_subcommand(sub).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_dependency_subcommand_invalid() {
+        assert!(HelmCommandBuilder::validate_dependency_subcommand("bad").is_err());
+    }
+
+    #[test]
+    fn test_validate_diff_subcommand_valid() {
+        for sub in &["upgrade", "rollback", "release", "revision"] {
+            assert!(HelmCommandBuilder::validate_diff_subcommand(sub).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_diff_subcommand_invalid() {
+        assert!(HelmCommandBuilder::validate_diff_subcommand("bad").is_err());
     }
 }
