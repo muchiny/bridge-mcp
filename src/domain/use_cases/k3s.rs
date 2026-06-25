@@ -251,6 +251,67 @@ pub fn validate_cert_service(svc: &str) -> Result<()> {
     }
 }
 
+/// Validate a k3s version string.
+///
+/// Accepts pinned k3s tags (`v1.30.2+k3s1`) or plain semver (`v1.30.2`).
+/// Rejects empty strings, channel names (`latest`, `stable`, `testing`),
+/// leading `-`, and any character outside `[A-Za-z0-9.+-]`.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] for any invalid input.
+pub fn validate_k3s_version(v: &str) -> Result<()> {
+    if v.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "version must not be empty".to_string(),
+        });
+    }
+    if v.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("version must not start with '-': {v}"),
+        });
+    }
+    // Reject unpinned channels used as version (prevent surprise upgrades)
+    if matches!(v, "latest" | "stable" | "testing") {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "version '{v}' is a channel name, not a pinned version; \
+                 use validate_channel instead"
+            ),
+        });
+    }
+    // Charset: [A-Za-z0-9.+-] only
+    if !v
+        .chars()
+        .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '+' | '-'))
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("version contains disallowed characters: {v}"),
+        });
+    }
+    // Must look like a version (contain at least one digit and one dot)
+    if !v.contains('.') || !v.chars().any(|c| c.is_ascii_digit()) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("version does not look like a version string: {v}"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a k3s release channel name.
+///
+/// Only `stable`, `latest`, and `testing` are accepted.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] for any other value.
+pub fn validate_channel(c: &str) -> Result<()> {
+    match c {
+        "stable" | "latest" | "testing" => Ok(()),
+        _ => Err(BridgeError::CommandDenied {
+            reason: format!("invalid channel '{c}': must be one of 'stable', 'latest', 'testing'"),
+        }),
+    }
+}
+
 /// Builds k3s CLI commands.
 pub struct K3sCommandBuilder;
 
@@ -446,6 +507,78 @@ s#server: https://0\\.0\\.0\\.0:6443#server: https://{ip}:6443#'"
             "for f in {primary} /etc/rancher/k3s/config.yaml.d/*.yaml; \
 do [ -f \"$f\" ] && echo \"== $f ==\" && sudo cat \"$f\"; done 2>/dev/null"
         )
+    }
+
+    /// Build a `certificate rotate` command.
+    ///
+    /// Appends `--service <svc>` for each entry in `service` (each pre-validated
+    /// by the caller via [`validate_cert_service`]).
+    #[must_use]
+    pub fn build_cert_rotate_command(k3s_bin: Option<&str>, service: Option<&[String]>) -> String {
+        use std::fmt::Write;
+        let prefix = k3s_detect_prefix(k3s_bin);
+        let mut cmd = format!("sudo {prefix}certificate rotate");
+        if let Some(services) = service {
+            for svc in services {
+                let _ = write!(cmd, " --service {}", shell_escape(svc));
+            }
+        }
+        cmd
+    }
+
+    /// Build a `k3s-killall.sh` execution command.
+    ///
+    /// Uses `/usr/local/bin/k3s-killall.sh` by default. If `script_path` is
+    /// supplied, the caller MUST have already validated it via
+    /// [`validate_script_path`].
+    #[must_use]
+    pub fn build_killall_command(script_path: Option<&str>) -> String {
+        let path = script_path.unwrap_or("/usr/local/bin/k3s-killall.sh");
+        format!("sudo {}", shell_escape(path))
+    }
+
+    /// Build a k3s uninstall command (server or agent).
+    ///
+    /// # Errors
+    /// Returns `CommandDenied` if `script_path` validation fails.
+    pub fn build_uninstall_command(agent: bool, script_path: Option<&str>) -> Result<String> {
+        let default_path = if agent {
+            "/usr/local/bin/k3s-agent-uninstall.sh"
+        } else {
+            "/usr/local/bin/k3s-uninstall.sh"
+        };
+        let path = if let Some(p) = script_path {
+            validate_script_path(p)?;
+            p
+        } else {
+            default_path
+        };
+        Ok(format!("sudo {}", shell_escape(path)))
+    }
+
+    /// Build a k3s upgrade command using the official installer.
+    ///
+    /// The installer URL `https://get.k3s.io` is a fixed literal — never
+    /// interpolated. Only `version` and optionally `channel` are injected,
+    /// both shell-escaped after validation.
+    ///
+    /// # Errors
+    /// Returns `CommandDenied` if `version` or `channel` fails validation.
+    pub fn build_upgrade_command(version: &str, channel: Option<&str>) -> Result<String> {
+        use std::fmt::Write;
+        validate_k3s_version(version)?;
+        if let Some(c) = channel {
+            validate_channel(c)?;
+        }
+        let mut cmd = format!(
+            "curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION={}",
+            shell_escape(version)
+        );
+        if let Some(c) = channel {
+            let _ = write!(cmd, " INSTALL_K3S_CHANNEL={}", shell_escape(c));
+        }
+        cmd.push_str(" sh -");
+        Ok(cmd)
     }
 }
 
@@ -843,5 +976,150 @@ mod tests {
             cmd.contains("'/etc/rancher/k3s/config-custom.yaml'"),
             "cmd: {cmd}"
         );
+    }
+
+    // ── validate_k3s_version ────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_k3s_version_valid_k3s_tag() {
+        assert!(validate_k3s_version("v1.30.2+k3s1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_k3s_version_valid_plain_semver() {
+        assert!(validate_k3s_version("v1.30.2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_k3s_version_empty_rejected() {
+        assert!(validate_k3s_version("").is_err());
+    }
+
+    #[test]
+    fn test_validate_k3s_version_leading_dash_rejected() {
+        assert!(validate_k3s_version("-v1.30.2").is_err());
+    }
+
+    #[test]
+    fn test_validate_k3s_version_channel_names_rejected() {
+        assert!(validate_k3s_version("latest").is_err());
+        assert!(validate_k3s_version("stable").is_err());
+        assert!(validate_k3s_version("testing").is_err());
+    }
+
+    #[test]
+    fn test_validate_k3s_version_no_dot_rejected() {
+        assert!(validate_k3s_version("v130").is_err());
+    }
+
+    #[test]
+    fn test_validate_k3s_version_disallowed_chars_rejected() {
+        assert!(validate_k3s_version("v1.30.2;rm -rf /").is_err());
+    }
+
+    // ── validate_channel ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_channel_stable_ok() {
+        assert!(validate_channel("stable").is_ok());
+    }
+
+    #[test]
+    fn test_validate_channel_latest_ok() {
+        assert!(validate_channel("latest").is_ok());
+    }
+
+    #[test]
+    fn test_validate_channel_testing_ok() {
+        assert!(validate_channel("testing").is_ok());
+    }
+
+    #[test]
+    fn test_validate_channel_invalid_rejected() {
+        assert!(validate_channel("edge").is_err());
+        assert!(validate_channel("").is_err());
+    }
+
+    // ── build_cert_rotate_command ────────────────────────────────────────────
+
+    #[test]
+    fn test_build_cert_rotate_no_service() {
+        let cmd = K3sCommandBuilder::build_cert_rotate_command(Some("k3s"), None);
+        assert!(cmd.contains("sudo k3s certificate rotate"), "cmd: {cmd}");
+        assert!(!cmd.contains("--service"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_cert_rotate_with_services() {
+        let services = vec!["etcd".to_string(), "api-server".to_string()];
+        let cmd = K3sCommandBuilder::build_cert_rotate_command(Some("k3s"), Some(&services));
+        assert!(cmd.contains("--service 'etcd'"), "cmd: {cmd}");
+        assert!(cmd.contains("--service 'api-server'"), "cmd: {cmd}");
+    }
+
+    // ── build_killall_command ────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_killall_default_path() {
+        let cmd = K3sCommandBuilder::build_killall_command(None);
+        assert!(cmd.contains("/usr/local/bin/k3s-killall.sh"), "cmd: {cmd}");
+        assert!(cmd.starts_with("sudo "), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_killall_custom_path() {
+        let cmd = K3sCommandBuilder::build_killall_command(Some("/opt/k3s/k3s-killall.sh"));
+        assert!(cmd.contains("/opt/k3s/k3s-killall.sh"), "cmd: {cmd}");
+    }
+
+    // ── build_uninstall_command ──────────────────────────────────────────────
+
+    #[test]
+    fn test_build_uninstall_server() {
+        let cmd = K3sCommandBuilder::build_uninstall_command(false, None).unwrap();
+        assert!(cmd.contains("k3s-uninstall.sh"), "cmd: {cmd}");
+        assert!(!cmd.contains("agent"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_uninstall_agent() {
+        let cmd = K3sCommandBuilder::build_uninstall_command(true, None).unwrap();
+        assert!(cmd.contains("k3s-agent-uninstall.sh"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_uninstall_invalid_script_rejected() {
+        let result = K3sCommandBuilder::build_uninstall_command(false, Some("/tmp/evil.sh"));
+        assert!(result.is_err());
+    }
+
+    // ── build_upgrade_command ────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_upgrade_k3s_version_tag() {
+        let cmd = K3sCommandBuilder::build_upgrade_command("v1.30.2+k3s1", None).unwrap();
+        assert!(cmd.contains("https://get.k3s.io"), "cmd: {cmd}");
+        assert!(cmd.contains("INSTALL_K3S_VERSION="), "cmd: {cmd}");
+        assert!(cmd.contains("v1.30.2"), "cmd: {cmd}");
+        assert!(cmd.ends_with("sh -"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_upgrade_with_channel() {
+        let cmd = K3sCommandBuilder::build_upgrade_command("v1.30.2+k3s1", Some("stable")).unwrap();
+        assert!(cmd.contains("INSTALL_K3S_CHANNEL="), "cmd: {cmd}");
+        assert!(cmd.contains("stable"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_upgrade_invalid_version_rejected() {
+        let result = K3sCommandBuilder::build_upgrade_command("latest", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_upgrade_invalid_channel_rejected() {
+        let result = K3sCommandBuilder::build_upgrade_command("v1.30.2+k3s1", Some("edge"));
+        assert!(result.is_err());
     }
 }

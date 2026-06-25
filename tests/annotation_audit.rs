@@ -63,6 +63,9 @@ const ALLOWLIST: &[(&str, ToolAnnotationKind)] = &[
     ("ssh_crictl_rmi", ToolAnnotationKind::Destructive), // crictl rmi: image deletion — irreversible, _rmi suffix not in auto list
     ("ssh_k3s_etcd_snapshot_save", ToolAnnotationKind::Mutating), // etcd snapshot save: _save suffix not in MUTATION_SUFFIXES
     ("ssh_k3s_ctr_images", ToolAnnotationKind::Mutating), // ctr images: _images suffix not in any auto list; import mutates containerd image store
+    ("ssh_k3s_cert_rotate", ToolAnnotationKind::Destructive), // cert rotate: irreversible cert regen, _rotate not auto-detected
+    ("ssh_k3s_killall", ToolAnnotationKind::Destructive), // killall: kills all k3s processes+containers, _killall not auto-detected
+    ("ssh_k3s_upgrade", ToolAnnotationKind::Destructive), // upgrade: re-runs installer, can break node, _upgrade not auto-detected
 ];
 
 fn allowed(name: &str, kind: ToolAnnotationKind) -> bool {
@@ -153,18 +156,21 @@ fn destructive_suffix_implies_destructive() {
 /// `require_elicitation_on_destructive` gate can confirm before they run.
 /// (Audit 2026-06-20.)
 const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
-    "ssh_exec",           // arbitrary shell (rm -rf, mkfs, dd)
-    "ssh_aws_cli",        // raw AWS passthrough (ec2 terminate, s3 rm, iam delete)
-    "ssh_ansible_adhoc",  // arbitrary module exec (shell -a "rm ...")
-    "ssh_db_restore",     // overwrites the target database
-    "ssh_backup_restore", // overwrites files at the restore destination
-    "ssh_docker_compose", // `down` removes containers + networks
-    "ssh_esxi_snapshot",  // `remove_all` permanently deletes snapshots
-    "ssh_ldap_modify",    // LDIF `changetype: delete` removes entries
-    "ssh_vault_write",    // overwrites a secret (KV v1 has no versioning)
-    "ssh_pkg_update",     // full system upgrade can remove/replace packages
+    "ssh_exec",            // arbitrary shell (rm -rf, mkfs, dd)
+    "ssh_aws_cli",         // raw AWS passthrough (ec2 terminate, s3 rm, iam delete)
+    "ssh_ansible_adhoc",   // arbitrary module exec (shell -a "rm ...")
+    "ssh_db_restore",      // overwrites the target database
+    "ssh_backup_restore",  // overwrites files at the restore destination
+    "ssh_docker_compose",  // `down` removes containers + networks
+    "ssh_esxi_snapshot",   // `remove_all` permanently deletes snapshots
+    "ssh_ldap_modify",     // LDIF `changetype: delete` removes entries
+    "ssh_vault_write",     // overwrites a secret (KV v1 has no versioning)
+    "ssh_pkg_update",      // full system upgrade can remove/replace packages
     "ssh_k8s_drain", // kubectl drain evicts all pods from a node — irreversible workload disruption
     "ssh_crictl_rmi", // crictl rmi: image deletion is irreversible without a fresh pull
+    "ssh_k3s_cert_rotate", // regenerates TLS certs; botched rotate can lock the API server
+    "ssh_k3s_killall", // kills ALL k3s processes + containers + network namespaces
+    "ssh_k3s_upgrade", // re-runs installer, swaps binary, can break the node
 ];
 
 #[test]
