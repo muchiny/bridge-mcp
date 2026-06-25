@@ -37,6 +37,14 @@ pub struct SshHelmInstallArgs {
     #[serde(default)]
     version: Option<String>,
     #[serde(default)]
+    atomic: Option<bool>,
+    #[serde(default)]
+    set_string: Option<HashMap<String, String>>,
+    #[serde(default)]
+    wait_for_jobs: Option<bool>,
+    #[serde(default)]
+    timeout: Option<String>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -112,6 +120,23 @@ impl StandardTool for HelmInstallTool {
                 "type": "string",
                 "description": "Chart version constraint"
             },
+            "atomic": {
+                "type": "boolean",
+                "description": "If set, installation rolls back changes on failure (implies --wait)"
+            },
+            "set_string": {
+                "type": "object",
+                "description": "Key-value pairs for --set-string (values treated as strings)",
+                "additionalProperties": { "type": "string" }
+            },
+            "wait_for_jobs": {
+                "type": "boolean",
+                "description": "Wait for Jobs to complete before marking release as successful"
+            },
+            "timeout": {
+                "type": "string",
+                "description": "Helm --timeout: Go duration to wait for Kubernetes operations (e.g. '5m0s', '10m')"
+            },
             "helm_bin": {
                 "type": "string",
                 "description": "Custom helm binary path (default: auto-detect)"
@@ -151,6 +176,10 @@ impl StandardTool for HelmInstallTool {
             args.wait.unwrap_or(false),
             args.create_namespace.unwrap_or(false),
             args.version.as_deref(),
+            args.atomic.unwrap_or(false),
+            args.set_string.as_ref(),
+            args.wait_for_jobs.unwrap_or(false),
+            args.timeout.as_deref(),
         ))
     }
 
@@ -451,6 +480,10 @@ mod tests {
             wait: None,
             create_namespace: None,
             version: None,
+            atomic: None,
+            set_string: None,
+            wait_for_jobs: None,
+            timeout: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -480,6 +513,10 @@ mod tests {
             wait: None,
             create_namespace: None,
             version: None,
+            atomic: None,
+            set_string: None,
+            wait_for_jobs: None,
+            timeout: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -504,6 +541,10 @@ mod tests {
             wait: Some(true),
             create_namespace: None,
             version: None,
+            atomic: None,
+            set_string: None,
+            wait_for_jobs: None,
+            timeout: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -532,6 +573,10 @@ mod tests {
             wait: Some(true),
             create_namespace: Some(true),
             version: Some("1.2.3".to_string()),
+            atomic: None,
+            set_string: None,
+            wait_for_jobs: None,
+            timeout: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -547,5 +592,39 @@ mod tests {
         assert!(cmd.contains("--wait"));
         assert!(cmd.contains("--create-namespace"));
         assert!(cmd.contains("--version '1.2.3'"));
+    }
+
+    #[test]
+    fn test_build_command_atomic_set_string_wait_for_jobs() {
+        let mut set_string = HashMap::new();
+        set_string.insert("image.tag".to_string(), "v1.0".to_string());
+
+        let args = SshHelmInstallArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            chart: "stable/nginx".to_string(),
+            namespace: None,
+            set_values: None,
+            values_files: None,
+            dry_run: None,
+            wait: None,
+            create_namespace: None,
+            version: None,
+            atomic: Some(true),
+            set_string: Some(set_string),
+            wait_for_jobs: Some(true),
+            timeout: Some("5m".to_string()),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmInstallTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--atomic"), "cmd={cmd}");
+        assert!(cmd.contains("--set-string 'image.tag'='v1.0'"), "cmd={cmd}");
+        assert!(cmd.contains("--wait-for-jobs"), "cmd={cmd}");
+        assert!(cmd.contains("--timeout '5m'"), "cmd={cmd}");
     }
 }
