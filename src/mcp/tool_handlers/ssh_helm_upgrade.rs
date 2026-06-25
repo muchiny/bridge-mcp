@@ -41,6 +41,14 @@ pub struct SshHelmUpgradeArgs {
     #[serde(default)]
     create_namespace: Option<bool>,
     #[serde(default)]
+    atomic: Option<bool>,
+    #[serde(default)]
+    reuse_values: Option<bool>,
+    #[serde(default)]
+    set_string: Option<HashMap<String, String>>,
+    #[serde(default)]
+    wait_for_jobs: Option<bool>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -124,6 +132,23 @@ impl StandardTool for HelmUpgradeTool {
                 "type": "boolean",
                 "description": "Create namespace if it doesn't exist"
             },
+            "atomic": {
+                "type": "boolean",
+                "description": "If set, upgrade rolls back changes on failure (implies --wait)"
+            },
+            "reuse_values": {
+                "type": "boolean",
+                "description": "Reuse the last release's values and merge in any overrides"
+            },
+            "set_string": {
+                "type": "object",
+                "description": "Key-value pairs for --set-string (values treated as strings)",
+                "additionalProperties": { "type": "string" }
+            },
+            "wait_for_jobs": {
+                "type": "boolean",
+                "description": "Wait for Jobs to complete before marking release as successful"
+            },
             "helm_bin": {
                 "type": "string",
                 "description": "Custom helm binary path (default: auto-detect)"
@@ -165,6 +190,10 @@ impl StandardTool for HelmUpgradeTool {
             args.install.unwrap_or(false),
             args.version.as_deref(),
             args.create_namespace.unwrap_or(false),
+            args.atomic.unwrap_or(false),
+            args.reuse_values.unwrap_or(false),
+            args.set_string.as_ref(),
+            args.wait_for_jobs.unwrap_or(false),
         ))
     }
 
@@ -483,6 +512,10 @@ mod tests {
             install: None,
             version: None,
             create_namespace: None,
+            atomic: None,
+            reuse_values: None,
+            set_string: None,
+            wait_for_jobs: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -514,6 +547,10 @@ mod tests {
             install: None,
             version: None,
             create_namespace: None,
+            atomic: None,
+            reuse_values: None,
+            set_string: None,
+            wait_for_jobs: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -540,6 +577,10 @@ mod tests {
             install: None,
             version: None,
             create_namespace: None,
+            atomic: None,
+            reuse_values: None,
+            set_string: None,
+            wait_for_jobs: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -569,6 +610,10 @@ mod tests {
             install: Some(true),
             version: Some("1.2.3".to_string()),
             create_namespace: Some(true),
+            atomic: None,
+            reuse_values: None,
+            set_string: None,
+            wait_for_jobs: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -586,5 +631,44 @@ mod tests {
         assert!(cmd.contains("--install"));
         assert!(cmd.contains("--version '1.2.3'"));
         assert!(cmd.contains("--create-namespace"));
+    }
+
+    #[test]
+    fn test_build_command_atomic_reuse_values_set_string_wait_for_jobs() {
+        let mut set_string = HashMap::new();
+        set_string.insert("app.version".to_string(), "1.0.0".to_string());
+
+        let args = SshHelmUpgradeArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            chart: "stable/nginx".to_string(),
+            namespace: None,
+            set_values: None,
+            values_files: None,
+            dry_run: None,
+            wait: None,
+            timeout: None,
+            install: None,
+            version: None,
+            create_namespace: None,
+            atomic: Some(true),
+            reuse_values: Some(true),
+            set_string: Some(set_string),
+            wait_for_jobs: Some(true),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmUpgradeTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--atomic"), "cmd={cmd}");
+        assert!(cmd.contains("--reuse-values"), "cmd={cmd}");
+        assert!(
+            cmd.contains("--set-string 'app.version'='1.0.0'"),
+            "cmd={cmd}"
+        );
+        assert!(cmd.contains("--wait-for-jobs"), "cmd={cmd}");
     }
 }
