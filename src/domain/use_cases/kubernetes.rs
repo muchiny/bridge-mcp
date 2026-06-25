@@ -3833,6 +3833,442 @@ Install Calico/Cilium or k3s --flannel-backend=none for enforcement.'; \
     }
 }
 
+// ============================================================
+// Wave-9b: validate_abs_path (for addon_manifests)
+// ============================================================
+
+/// Validate an absolute filesystem path.
+///
+/// Rules: non-empty, must start with `/`, must not contain `..` segments,
+/// charset `[A-Za-z0-9._/-]`.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the path is invalid.
+pub fn validate_abs_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "path must not be empty".to_string(),
+        });
+    }
+    if !path.starts_with('/') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("path must be absolute (start with '/'): {path}"),
+        });
+    }
+    for segment in path.split('/') {
+        if segment == ".." {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("path contains path traversal '..': {path}"),
+            });
+        }
+    }
+    for ch in path.chars() {
+        if !matches!(ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '/' | '-') {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("path contains disallowed character '{ch}': {path}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+// ============================================================
+// Wave-9b: Networking command builders (6 new tools)
+// ============================================================
+
+impl KubernetesCommandBuilder {
+    /// Build a comprehensive service describe command.
+    ///
+    /// Shows service overview, spec (type/clusterIP/ports/selector),
+    /// endpoints (ready addresses), and klipper svclb pods for K3s
+    /// LoadBalancer services.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, or service name validation fails.
+    pub fn build_service_describe_command(
+        kubectl_bin: Option<&str>,
+        service: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_dns_name(service)?;
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+        let svc_esc = shell_escape(service);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; NS={ns_esc}; \
+             echo '=== Service {svc_esc} ==='; \
+             $K get svc {svc_esc} -n $NS -o wide{ctx_flag}; \
+             echo '=== Spec (type/clusterIP/ports/selector) ==='; \
+             $K get svc {svc_esc} -n $NS \
+               -o jsonpath='type={{.spec.type}} clusterIP={{.spec.clusterIP}} \
+ports={{.spec.ports[*].port}}/{{.spec.ports[*].targetPort}} \
+selector={{.spec.selector}}'{ctx_flag}; \
+             echo; \
+             echo '=== Endpoints (ready addresses) ==='; \
+             $K get endpoints {svc_esc} -n $NS \
+               -o custom-columns='ENDPOINT:.metadata.name,\
+ADDRS:.subsets[*].addresses[*].ip,\
+PORTS:.subsets[*].ports[*].port'{ctx_flag}; \
+             echo '=== klipper svclb (k3s LoadBalancer) ==='; \
+             $K get pods -n kube-system \
+               -l 'svccontroller.k3s.cattle.io/svcname={svc_esc}' \
+               -o wide{ctx_flag} 2>/dev/null \
+               || echo 'no svclb pods (not type=LoadBalancer or non-k3s)'",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ns_esc = ns_esc,
+            svc_esc = svc_esc,
+            ctx_flag = ctx_flag,
+        );
+        Ok(cmd)
+    }
+
+    /// Build an ephemeral connectivity test command.
+    ///
+    /// Runs a short-lived pod using `nc -z` to test reachability of
+    /// `target_host:target_port`. The pod is cleaned up by both `--rm`
+    /// and an explicit `kubectl delete pod` for safety.
+    ///
+    /// # Parameters
+    ///
+    /// * `kubectl_bin` — Optional explicit kubectl binary path.
+    /// * `target_host` — DNS name or IP to test connectivity to.
+    /// * `target_port` — TCP port to test (1–65535).
+    /// * `namespace` — Optional Kubernetes namespace (default: `default`).
+    /// * `image` — Optional container image (default: `busybox:1.36`).
+    /// * `wait_secs` — Bounded wait duration in seconds (1–300, default 15).
+    /// * `context` — Optional kubeconfig context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any input validation fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_connectivity_test_command(
+        kubectl_bin: Option<&str>,
+        target_host: &str,
+        target_port: u16,
+        namespace: Option<&str>,
+        image: Option<&str>,
+        wait_secs: u64,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_dns_name(target_host)?;
+        validate_port(target_port)?;
+        if let Some(img) = image {
+            validate_probe_image(img)?;
+        }
+        validate_duration_secs(wait_secs)?;
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+        let image_val = image.unwrap_or("busybox:1.36");
+        let image_esc = shell_escape(image_val);
+        let host_esc = shell_escape(target_host);
+        let port_str = target_port.to_string();
+        let port_esc = shell_escape(&port_str);
+        let wait_esc = shell_escape(&wait_secs.to_string());
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "POD=conn-probe-$$; K={prefix_esc}; \
+             $K run $POD -n {ns_esc}{ctx_flag} \
+               --image={image_esc} --restart=Never --command --attach --rm \
+               --timeout={wait_esc}s -- sh -c \
+               'nc -z -w 5 {host_esc} {port_esc} \
+                && echo REACHABLE:{host_esc}:{port_esc} \
+                || (echo UNREACHABLE:{host_esc}:{port_esc}; exit 1)'; \
+             RC=$?; \
+             $K delete pod $POD -n {ns_esc}{ctx_flag} --ignore-not-found --grace-period=1 \
+               >/dev/null 2>&1; \
+             exit $RC",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ns_esc = ns_esc,
+            ctx_flag = ctx_flag,
+            image_esc = image_esc,
+            wait_esc = wait_esc,
+            host_esc = host_esc,
+            port_esc = port_esc,
+        );
+        Ok(cmd)
+    }
+
+    /// Build a bounded Traefik API introspection command.
+    ///
+    /// Discovers the Traefik pod by label, starts a bounded port-forward,
+    /// curls `/api<api_path>`, then unconditionally kills the background
+    /// process and cleans up the tmp log file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any input validation fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_traefik_introspect_command(
+        kubectl_bin: Option<&str>,
+        api_path: &str,
+        namespace: Option<&str>,
+        api_port: u16,
+        wait_secs: u64,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_probe_path(api_path)?;
+        validate_port(api_port)?;
+        // wait_secs bounded to 1–30 for port-forward (same constraint as build_port_forward_command)
+        if wait_secs == 0 || wait_secs > 30 {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("traefik introspect wait_secs must be 1–30 (got {wait_secs})"),
+            });
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("kube-system");
+        let ns_esc = shell_escape(ns_val);
+        let port_str = api_port.to_string();
+        let port_esc = shell_escape(&port_str);
+        let path_esc = shell_escape(api_path);
+        let wait_esc = shell_escape(&wait_secs.to_string());
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; NS={ns_esc}; \
+             POD=$($K get pods -n $NS -l 'app.kubernetes.io/name=traefik' \
+               -o jsonpath='{{.items[0].metadata.name}}'{ctx_flag} 2>/dev/null); \
+             if [ -z \"$POD\" ]; then echo 'ERROR: no traefik pod found in '$NS; exit 1; fi; \
+             echo 'traefik pod: '$POD; \
+             $K port-forward $POD -n $NS {port_esc}:{port_esc}{ctx_flag} \
+               >/tmp/tpf.$$ 2>&1 & PF=$!; \
+             sleep {wait_esc}; \
+             if kill -0 $PF 2>/dev/null; then \
+               echo '=== GET /api{path_esc} ==='; \
+               curl -sS -m 8 'http://127.0.0.1:{port_esc}/api{path_esc}' \
+                 || echo 'curl FAILED'; \
+             else \
+               echo '=== port-forward DIED ==='; cat /tmp/tpf.$$; \
+             fi; \
+             kill $PF 2>/dev/null; wait $PF 2>/dev/null; rm -f /tmp/tpf.$$",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ns_esc = ns_esc,
+            port_esc = port_esc,
+            ctx_flag = ctx_flag,
+            wait_esc = wait_esc,
+            path_esc = path_esc,
+        );
+        Ok(cmd)
+    }
+
+    /// Build a Traefik `IngressRoute` inspection command.
+    ///
+    /// Shows the IngressRoute YAML, routes (match → service:port + middlewares),
+    /// referenced middleware details, and backend service endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace, context, or route name validation fails.
+    pub fn build_traefik_ingressroute_command(
+        kubectl_bin: Option<&str>,
+        route: &str,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        validate_dns_name(route)?;
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let ns_val = namespace.unwrap_or("default");
+        let ns_esc = shell_escape(ns_val);
+        let route_esc = shell_escape(route);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; NS={ns_esc}; \
+             echo '=== IngressRoute {route_esc} ==='; \
+             $K get ingressroute.traefik.io {route_esc} -n $NS -o yaml{ctx_flag} 2>/dev/null \
+               || $K get ingressroute.traefik.containo.us {route_esc} -n $NS -o yaml{ctx_flag}; \
+             echo '=== routes: match -> service:port (+ middlewares) ==='; \
+             $K get ingressroute.traefik.io {route_esc} -n $NS \
+               -o jsonpath='{{range .spec.routes[*]}}match={{.match}} \
+services={{range .services[*]}}{{.name}}:{{.port}}{{end}} \
+middlewares={{range .middlewares[*]}}{{.name}}{{end}}{{\"\\n\"}}{{end}}'{ctx_flag} \
+               2>/dev/null || echo '(v1alpha1 group)'; \
+             echo; \
+             echo '=== referenced Middlewares ==='; \
+             for m in $($K get ingressroute.traefik.io {route_esc} -n $NS \
+               -o jsonpath='{{.spec.routes[*].middlewares[*].name}}'{ctx_flag} 2>/dev/null); do \
+               echo \"-- $m --\"; \
+               $K get middleware.traefik.io $m -n $NS -o yaml{ctx_flag} 2>/dev/null \
+                 || $K get middleware.traefik.containo.us $m -n $NS -o yaml{ctx_flag} 2>/dev/null \
+                 || echo 'not found'; \
+             done; \
+             echo '=== backend service endpoints ==='; \
+             for s in $($K get ingressroute.traefik.io {route_esc} -n $NS \
+               -o jsonpath='{{.spec.routes[*].services[*].name}}'{ctx_flag} 2>/dev/null); do \
+               echo \"-- $s --\"; \
+               $K get endpoints $s -n $NS \
+                 -o custom-columns='ADDRS:.subsets[*].addresses[*].ip,\
+PORTS:.subsets[*].ports[*].port'{ctx_flag} 2>/dev/null || echo 'no endpoints'; \
+             done",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ns_esc = ns_esc,
+            route_esc = route_esc,
+            ctx_flag = ctx_flag,
+        );
+        Ok(cmd)
+    }
+
+    /// Build a K3s ServiceLB status command.
+    ///
+    /// Shows all `type=LoadBalancer` services cluster-wide, klipper svclb
+    /// daemonsets, and svclb pods with their host port mappings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if namespace or context validation fails.
+    pub fn build_servicelb_status_command(
+        kubectl_bin: Option<&str>,
+        namespace: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ns) = namespace {
+            Self::validate_namespace(ns)?;
+        }
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; \
+             echo '=== type=LoadBalancer services ==='; \
+             $K get svc -A --field-selector spec.type=LoadBalancer \
+               -o custom-columns='NS:.metadata.namespace,\
+NAME:.metadata.name,\
+CLUSTER-IP:.spec.clusterIP,\
+EXTERNAL-IP:.status.loadBalancer.ingress[*].ip,\
+PORTS:.spec.ports[*].port'{ctx_flag}; \
+             echo '=== klipper svclb daemonsets ==='; \
+             $K get ds -n kube-system \
+               -l 'svccontroller.k3s.cattle.io/svcname' \
+               -o custom-columns='DS:.metadata.name,\
+SVC:.metadata.labels.svccontroller\\.k3s\\.cattle\\.io/svcname,\
+DESIRED:.status.desiredNumberScheduled,\
+READY:.status.numberReady'{ctx_flag} 2>/dev/null \
+               || echo 'no klipper svclb daemonsets (servicelb disabled or non-k3s)'; \
+             echo '=== svclb pods -> node + hostPort ==='; \
+             $K get pods -n kube-system \
+               -l 'svccontroller.k3s.cattle.io/svcname' \
+               -o custom-columns='POD:.metadata.name,\
+SVC:.metadata.labels.svccontroller\\.k3s\\.cattle\\.io/svcname,\
+NODE:.spec.nodeName,\
+HOSTPORTS:.spec.containers[*].ports[*].hostPort,\
+STATUS:.status.phase'{ctx_flag} 2>/dev/null \
+               || echo 'no svclb pods'",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            ctx_flag = ctx_flag,
+        );
+        Ok(cmd)
+    }
+
+    /// Build a K3s addon manifests inspection command.
+    ///
+    /// Lists the auto-deploy manifests directory, HelmChart CRDs (k3s addon
+    /// installs), HelmChart job status, and helm-install jobs in kube-system.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if manifests_dir or context validation fails.
+    pub fn build_addon_manifests_command(
+        kubectl_bin: Option<&str>,
+        manifests_dir: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<String> {
+        if let Some(ctx) = context {
+            validate_context(ctx)?;
+        }
+        if let Some(dir) = manifests_dir {
+            validate_abs_path(dir)?;
+        }
+
+        let prefix = kubectl_detect_prefix(kubectl_bin);
+        let ctx_flag = kubectl_context_flag(context);
+        let dir_val = manifests_dir.unwrap_or("/var/lib/rancher/k3s/server/manifests");
+        let dir_esc = shell_escape(dir_val);
+
+        let mut cmd = String::new();
+        let _ = write!(
+            cmd,
+            "K={prefix_esc}; DIR={dir_esc}; \
+             echo '=== auto-deploy manifests ('$DIR') ==='; \
+             ls -la \"$DIR\" 2>/dev/null \
+               || echo 'manifests dir not present (need root/sudo or non-k3s host)'; \
+             echo '=== HelmChart CRDs (k3s addon installs) ==='; \
+             $K get helmchart -A \
+               -o custom-columns='NS:.metadata.namespace,\
+NAME:.metadata.name,\
+CHART:.spec.chart,\
+VERSION:.spec.version,\
+REPO:.spec.repo,\
+TARGETNS:.spec.targetNamespace'{ctx_flag} 2>/dev/null \
+               || echo 'no HelmChart CRDs (helm-controller absent)'; \
+             echo '=== HelmChart job status ==='; \
+             $K get helmchart -A \
+               -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}/{{.metadata.name}}: \
+jobName={{.status.jobName}}{{\"\\n\"}}{{end}}'{ctx_flag} 2>/dev/null; \
+             echo '=== helm-install jobs ==='; \
+             $K get jobs -n kube-system \
+               -l 'helmcharts.helm.cattle.io/chart' \
+               -o custom-columns='JOB:.metadata.name,\
+COMPLETIONS:.status.succeeded,\
+FAILED:.status.failed'{ctx_flag} 2>/dev/null \
+               || echo 'no helm-install jobs'",
+            prefix_esc = shell_escape(prefix.trim_end()),
+            dir_esc = dir_esc,
+            ctx_flag = ctx_flag,
+        );
+        Ok(cmd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6696,6 +7132,344 @@ mod tests {
             Some("kubectl"),
             Some("Bad Name!"),
             None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Wave-9b: validate_abs_path tests
+    // ============================================================
+
+    #[test]
+    fn test_validate_abs_path_accepts_valid() {
+        assert!(validate_abs_path("/var/lib/rancher/k3s/server/manifests").is_ok());
+        assert!(validate_abs_path("/tmp").is_ok());
+        assert!(validate_abs_path("/etc/k3s").is_ok());
+        assert!(validate_abs_path("/data/k3s-manifests").is_ok());
+    }
+
+    #[test]
+    fn test_validate_abs_path_rejects_empty() {
+        assert!(validate_abs_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_abs_path_rejects_relative() {
+        assert!(validate_abs_path("var/lib/manifests").is_err());
+        assert!(validate_abs_path("./manifests").is_err());
+    }
+
+    #[test]
+    fn test_validate_abs_path_rejects_traversal() {
+        assert!(validate_abs_path("/var/lib/../etc/passwd").is_err());
+        assert!(validate_abs_path("/../etc").is_err());
+    }
+
+    #[test]
+    fn test_validate_abs_path_rejects_injection() {
+        assert!(validate_abs_path("/tmp; rm -rf /").is_err());
+        assert!(validate_abs_path("/tmp$(whoami)").is_err());
+    }
+
+    // ============================================================
+    // Wave-9b: build_service_describe_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_service_describe_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_service_describe_command(
+            Some("kubectl"),
+            "my-svc",
+            Some("default"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("'my-svc'"), "cmd: {cmd}");
+        assert!(cmd.contains("'default'"), "cmd: {cmd}");
+        assert!(cmd.contains("=== Service"), "cmd: {cmd}");
+        assert!(cmd.contains("=== Endpoints"), "cmd: {cmd}");
+        assert!(cmd.contains("klipper svclb"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_service_describe_command_rejects_invalid_svc() {
+        let result = KubernetesCommandBuilder::build_service_describe_command(
+            Some("kubectl"),
+            "BadService",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_service_describe_command_with_context() {
+        let cmd = KubernetesCommandBuilder::build_service_describe_command(
+            Some("kubectl"),
+            "api",
+            None,
+            Some("prod"),
+        )
+        .unwrap();
+        assert!(cmd.contains("--context=prod"), "cmd: {cmd}");
+    }
+
+    // ============================================================
+    // Wave-9b: build_connectivity_test_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_connectivity_test_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_connectivity_test_command(
+            Some("kubectl"),
+            "my-service",
+            8080,
+            Some("default"),
+            None,
+            15,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("conn-probe-$$"), "cmd: {cmd}");
+        assert!(cmd.contains("'my-service'"), "cmd: {cmd}");
+        assert!(cmd.contains("'8080'"), "cmd: {cmd}");
+        assert!(cmd.contains("nc -z -w 5"), "cmd: {cmd}");
+        assert!(cmd.contains("REACHABLE"), "cmd: {cmd}");
+        assert!(cmd.contains("--ignore-not-found"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_connectivity_test_command_has_double_cleanup() {
+        // Both --rm and explicit delete must be present
+        let cmd = KubernetesCommandBuilder::build_connectivity_test_command(
+            Some("kubectl"),
+            "redis",
+            6379,
+            None,
+            None,
+            10,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("--rm"), "cmd must have --rm: {cmd}");
+        assert!(
+            cmd.contains("delete pod"),
+            "cmd must have explicit delete: {cmd}"
+        );
+        assert!(cmd.contains("--ignore-not-found"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_connectivity_test_command_rejects_zero_port() {
+        let result = KubernetesCommandBuilder::build_connectivity_test_command(
+            Some("kubectl"),
+            "my-service",
+            0,
+            None,
+            None,
+            15,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_connectivity_test_command_rejects_invalid_host() {
+        let result = KubernetesCommandBuilder::build_connectivity_test_command(
+            Some("kubectl"),
+            "BadHost",
+            80,
+            None,
+            None,
+            15,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Wave-9b: build_traefik_introspect_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_traefik_introspect_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_traefik_introspect_command(
+            Some("kubectl"),
+            "/rawdata",
+            None,
+            8080,
+            5,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("app.kubernetes.io/name=traefik"), "cmd: {cmd}");
+        assert!(cmd.contains("port-forward"), "cmd: {cmd}");
+        assert!(cmd.contains(">/tmp/tpf.$$"), "cmd: {cmd}");
+        assert!(cmd.contains("kill $PF 2>/dev/null"), "cmd: {cmd}");
+        assert!(cmd.contains("wait $PF 2>/dev/null"), "cmd: {cmd}");
+        assert!(cmd.contains("rm -f /tmp/tpf.$$"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_traefik_introspect_command_self_terminates() {
+        let cmd = KubernetesCommandBuilder::build_traefik_introspect_command(
+            Some("kubectl"),
+            "/rawdata",
+            Some("kube-system"),
+            8080,
+            5,
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("kill $PF 2>/dev/null"), "cmd: {cmd}");
+        assert!(cmd.contains("wait $PF 2>/dev/null"), "cmd: {cmd}");
+        assert!(cmd.contains("rm -f /tmp/tpf.$$"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_traefik_introspect_command_rejects_wait_above_30() {
+        let result = KubernetesCommandBuilder::build_traefik_introspect_command(
+            Some("kubectl"),
+            "/rawdata",
+            None,
+            8080,
+            31,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_traefik_introspect_command_rejects_zero_port() {
+        let result = KubernetesCommandBuilder::build_traefik_introspect_command(
+            Some("kubectl"),
+            "/rawdata",
+            None,
+            0,
+            5,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Wave-9b: build_traefik_ingressroute_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_traefik_ingressroute_command_basic() {
+        let cmd = KubernetesCommandBuilder::build_traefik_ingressroute_command(
+            Some("kubectl"),
+            "my-route",
+            Some("default"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("'my-route'"), "cmd: {cmd}");
+        assert!(cmd.contains("IngressRoute"), "cmd: {cmd}");
+        assert!(cmd.contains("Middlewares"), "cmd: {cmd}");
+        assert!(cmd.contains("backend service endpoints"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_traefik_ingressroute_command_rejects_invalid_route() {
+        let result = KubernetesCommandBuilder::build_traefik_ingressroute_command(
+            Some("kubectl"),
+            "BadRoute",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_traefik_ingressroute_command_with_context() {
+        let cmd = KubernetesCommandBuilder::build_traefik_ingressroute_command(
+            Some("kubectl"),
+            "web-route",
+            None,
+            Some("prod"),
+        )
+        .unwrap();
+        assert!(cmd.contains("--context=prod"), "cmd: {cmd}");
+    }
+
+    // ============================================================
+    // Wave-9b: build_servicelb_status_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_servicelb_status_command_basic() {
+        let cmd =
+            KubernetesCommandBuilder::build_servicelb_status_command(Some("kubectl"), None, None)
+                .unwrap();
+        assert!(cmd.contains("type=LoadBalancer"), "cmd: {cmd}");
+        assert!(cmd.contains("klipper svclb daemonsets"), "cmd: {cmd}");
+        assert!(cmd.contains("svclb pods"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_servicelb_status_command_with_context() {
+        let cmd = KubernetesCommandBuilder::build_servicelb_status_command(
+            Some("kubectl"),
+            None,
+            Some("prod"),
+        )
+        .unwrap();
+        assert!(cmd.contains("--context=prod"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_servicelb_status_command_rejects_invalid_namespace() {
+        let result = KubernetesCommandBuilder::build_servicelb_status_command(
+            Some("kubectl"),
+            Some("--all-namespaces"),
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Wave-9b: build_addon_manifests_command tests
+    // ============================================================
+
+    #[test]
+    fn test_build_addon_manifests_command_basic() {
+        let cmd =
+            KubernetesCommandBuilder::build_addon_manifests_command(Some("kubectl"), None, None)
+                .unwrap();
+        assert!(cmd.contains("rancher/k3s/server/manifests"), "cmd: {cmd}");
+        assert!(cmd.contains("HelmChart CRDs"), "cmd: {cmd}");
+        assert!(cmd.contains("helm-install jobs"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_addon_manifests_command_custom_dir() {
+        let cmd = KubernetesCommandBuilder::build_addon_manifests_command(
+            Some("kubectl"),
+            Some("/custom/manifests"),
+            None,
+        )
+        .unwrap();
+        assert!(cmd.contains("'/custom/manifests'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_build_addon_manifests_command_rejects_relative_dir() {
+        let result = KubernetesCommandBuilder::build_addon_manifests_command(
+            Some("kubectl"),
+            Some("relative/path"),
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_addon_manifests_command_rejects_traversal() {
+        let result = KubernetesCommandBuilder::build_addon_manifests_command(
+            Some("kubectl"),
+            Some("/var/lib/../etc"),
             None,
         );
         assert!(result.is_err());
