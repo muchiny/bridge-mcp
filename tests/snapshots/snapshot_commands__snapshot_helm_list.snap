@@ -1,5 +1,5 @@
 ---
 source: tests/snapshot_commands.rs
-expression: "HelmCommandBuilder::build_list_command(Some(\"helm\"), None, Some(\"production\"),\ntrue, false, None, None,)"
+expression: "HelmCommandBuilder::build_list_command(Some(\"helm\"), None, Some(\"production\"),\ntrue, false, None, None, false, false, None, None,)"
 ---
 helm list -n 'production' -A

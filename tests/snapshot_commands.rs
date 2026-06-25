@@ -225,6 +225,10 @@ fn snapshot_helm_list() {
         false,
         None,
         None,
+        false,
+        false,
+        None,
+        None,
     ));
 }
 
@@ -237,6 +241,8 @@ fn snapshot_helm_status() {
         Some("production"),
         None,
         None,
+        false,
+        false,
     ));
 }
 

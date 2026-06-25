@@ -1,5 +1,5 @@
 ---
 source: tests/snapshot_commands.rs
-expression: "HelmCommandBuilder::build_status_command(Some(\"helm\"), None, \"my-release\",\nSome(\"production\"), None, None,)"
+expression: "HelmCommandBuilder::build_status_command(Some(\"helm\"), None, \"my-release\",\nSome(\"production\"), None, None, false, false,)"
 ---
 helm status 'my-release' -n 'production'

@@ -1043,7 +1043,7 @@ impl KubernetesCommandBuilder {
     /// Returns `BridgeError::CommandDenied` if `subcommand` is not one of
     /// all/values/manifest/hooks/notes.
     pub fn validate_helm_get_subcommand(subcommand: &str) -> Result<()> {
-        let allowed = ["all", "values", "manifest", "hooks", "notes"];
+        let allowed = ["all", "values", "manifest", "hooks", "notes", "metadata"];
         if allowed.contains(&subcommand) {
             Ok(())
         } else {
@@ -2262,8 +2262,10 @@ impl HelmCommandBuilder {
     /// Build a `helm list` command.
     ///
     /// Constructs: `{helm} list [-n {ns}] [-A] [-a] [--filter {f}]
-    /// [-o {output}]`
+    /// [-o {output}] [--failed] [--pending] [-l {selector}] [--max {max}]`
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub fn build_list_command(
         helm_bin: Option<&str>,
         kubeconfig: Option<&str>,
@@ -2272,6 +2274,10 @@ impl HelmCommandBuilder {
         all: bool,
         filter: Option<&str>,
         output: Option<&str>,
+        failed: bool,
+        pending: bool,
+        selector: Option<&str>,
+        max: Option<u64>,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2297,14 +2303,31 @@ impl HelmCommandBuilder {
             let _ = write!(cmd, " -o {}", shell_escape(out));
         }
 
+        if failed {
+            cmd.push_str(" --failed");
+        }
+
+        if pending {
+            cmd.push_str(" --pending");
+        }
+
+        if let Some(sel) = selector {
+            let _ = write!(cmd, " -l {}", shell_escape(sel));
+        }
+
+        if let Some(m) = max {
+            let _ = write!(cmd, " --max {m}");
+        }
+
         cmd
     }
 
     /// Build a `helm status` command.
     ///
     /// Constructs: `{helm} status {release} [-n {ns}] [-o {output}]
-    /// [--revision {N}]`
+    /// [--revision {N}] [--show-resources] [--show-desc]`
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn build_status_command(
         helm_bin: Option<&str>,
         kubeconfig: Option<&str>,
@@ -2312,6 +2335,8 @@ impl HelmCommandBuilder {
         namespace: Option<&str>,
         output: Option<&str>,
         revision: Option<u64>,
+        show_resources: bool,
+        show_desc: bool,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2330,6 +2355,14 @@ impl HelmCommandBuilder {
             let _ = write!(cmd, " --revision {rev}");
         }
 
+        if show_resources {
+            cmd.push_str(" --show-resources");
+        }
+
+        if show_desc {
+            cmd.push_str(" --show-desc");
+        }
+
         cmd
     }
 
@@ -2339,7 +2372,7 @@ impl HelmCommandBuilder {
     /// (`KubernetesCommandBuilder::validate_helm_get_subcommand`).
     ///
     /// Constructs: `[KUBECONFIG=…] {helm} get {subcommand} {release}
-    /// [-n {ns}] [--revision {N}]`
+    /// [-n {ns}] [--revision {N}] [-o {output}]`
     #[must_use]
     pub fn build_get_command(
         helm_bin: Option<&str>,
@@ -2348,6 +2381,7 @@ impl HelmCommandBuilder {
         release: &str,
         namespace: Option<&str>,
         revision: Option<u64>,
+        output: Option<&str>,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2360,6 +2394,9 @@ impl HelmCommandBuilder {
         if let Some(rev) = revision {
             let _ = write!(cmd, " --revision {rev}");
         }
+        if let Some(out) = output {
+            let _ = write!(cmd, " -o {}", shell_escape(out));
+        }
         cmd
     }
 
@@ -2368,9 +2405,11 @@ impl HelmCommandBuilder {
     /// Constructs: `{helm} upgrade {release} {chart} [-n {ns}]
     /// [--set k=v ...] [-f values.yaml ...] [--dry-run={mode}]
     /// [--wait] [--timeout {t}] [--install] [--version {v}]
-    /// [--create-namespace]`
+    /// [--create-namespace] [--atomic] [--reuse-values]
+    /// [--set-string k=v ...] [--wait-for-jobs]`
     #[must_use]
     #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub fn build_upgrade_command(
         helm_bin: Option<&str>,
         kubeconfig: Option<&str>,
@@ -2385,6 +2424,10 @@ impl HelmCommandBuilder {
         install: bool,
         version: Option<&str>,
         create_namespace: bool,
+        atomic: bool,
+        reuse_values: bool,
+        set_string: Option<&HashMap<String, String>>,
+        wait_for_jobs: bool,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2435,6 +2478,32 @@ impl HelmCommandBuilder {
             cmd.push_str(" --create-namespace");
         }
 
+        if atomic {
+            cmd.push_str(" --atomic");
+        }
+
+        if reuse_values {
+            cmd.push_str(" --reuse-values");
+        }
+
+        if let Some(ss) = set_string {
+            let mut keys: Vec<&String> = ss.keys().collect();
+            keys.sort();
+            for key in keys {
+                let val = &ss[key];
+                let _ = write!(
+                    cmd,
+                    " --set-string {}={}",
+                    shell_escape(key),
+                    shell_escape(val)
+                );
+            }
+        }
+
+        if wait_for_jobs {
+            cmd.push_str(" --wait-for-jobs");
+        }
+
         cmd
     }
 
@@ -2442,9 +2511,11 @@ impl HelmCommandBuilder {
     ///
     /// Constructs: `{helm} install {release} {chart} [-n {ns}]
     /// [--set k=v ...] [-f values.yaml ...] [--dry-run={mode}]
-    /// [--wait] [--create-namespace] [--version {v}]`
+    /// [--wait] [--create-namespace] [--version {v}]
+    /// [--atomic] [--set-string k=v ...] [--wait-for-jobs] [--timeout {t}]`
     #[must_use]
     #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub fn build_install_command(
         helm_bin: Option<&str>,
         kubeconfig: Option<&str>,
@@ -2457,6 +2528,10 @@ impl HelmCommandBuilder {
         wait: bool,
         create_namespace: bool,
         version: Option<&str>,
+        atomic: bool,
+        set_string: Option<&HashMap<String, String>>,
+        wait_for_jobs: bool,
+        timeout: Option<&str>,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2499,14 +2574,43 @@ impl HelmCommandBuilder {
             let _ = write!(cmd, " --version {}", shell_escape(v));
         }
 
+        if atomic {
+            cmd.push_str(" --atomic");
+        }
+
+        if let Some(ss) = set_string {
+            let mut keys: Vec<&String> = ss.keys().collect();
+            keys.sort();
+            for key in keys {
+                let val = &ss[key];
+                let _ = write!(
+                    cmd,
+                    " --set-string {}={}",
+                    shell_escape(key),
+                    shell_escape(val)
+                );
+            }
+        }
+
+        if wait_for_jobs {
+            cmd.push_str(" --wait-for-jobs");
+        }
+
+        if let Some(t) = timeout {
+            let _ = write!(cmd, " --timeout {}", shell_escape(t));
+        }
+
         cmd
     }
 
     /// Build a `helm rollback` command.
     ///
     /// Constructs: `{helm} rollback {release} [{revision}] [-n {ns}]
-    /// [--dry-run={mode}] [--wait]`
+    /// [--dry-run={mode}] [--wait] [--cleanup-on-fail] [--wait-for-jobs]
+    /// [--timeout {t}] [--force]`
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub fn build_rollback_command(
         helm_bin: Option<&str>,
         kubeconfig: Option<&str>,
@@ -2515,6 +2619,10 @@ impl HelmCommandBuilder {
         namespace: Option<&str>,
         dry_run: Option<&str>,
         wait: bool,
+        cleanup_on_fail: bool,
+        wait_for_jobs: bool,
+        timeout: Option<&str>,
+        force: bool,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2535,6 +2643,22 @@ impl HelmCommandBuilder {
 
         if wait {
             cmd.push_str(" --wait");
+        }
+
+        if cleanup_on_fail {
+            cmd.push_str(" --cleanup-on-fail");
+        }
+
+        if wait_for_jobs {
+            cmd.push_str(" --wait-for-jobs");
+        }
+
+        if let Some(t) = timeout {
+            let _ = write!(cmd, " --timeout {}", shell_escape(t));
+        }
+
+        if force {
+            cmd.push_str(" --force");
         }
 
         cmd
@@ -2570,8 +2694,11 @@ impl HelmCommandBuilder {
     /// Build a `helm uninstall` command.
     ///
     /// Constructs: `{helm} uninstall {release} [-n {ns}] [--dry-run]
-    /// [--keep-history]`
+    /// [--keep-history] [--no-hooks] [--wait] [--cascade {mode}]
+    /// [--timeout {t}]`
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::fn_params_excessive_bools)]
     pub fn build_uninstall_command(
         helm_bin: Option<&str>,
         kubeconfig: Option<&str>,
@@ -2579,6 +2706,10 @@ impl HelmCommandBuilder {
         namespace: Option<&str>,
         dry_run: bool,
         keep_history: bool,
+        no_hooks: bool,
+        wait: bool,
+        cascade: Option<&str>,
+        timeout: Option<&str>,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2597,6 +2728,22 @@ impl HelmCommandBuilder {
             cmd.push_str(" --keep-history");
         }
 
+        if no_hooks {
+            cmd.push_str(" --no-hooks");
+        }
+
+        if wait {
+            cmd.push_str(" --wait");
+        }
+
+        if let Some(c) = cascade {
+            let _ = write!(cmd, " --cascade {}", shell_escape(c));
+        }
+
+        if let Some(t) = timeout {
+            let _ = write!(cmd, " --timeout {}", shell_escape(t));
+        }
+
         cmd
     }
 
@@ -2604,7 +2751,8 @@ impl HelmCommandBuilder {
     ///
     /// Constructs: `[KUBECONFIG=…] {helm} template {release} {chart}
     /// [-n {ns}] [--set k=v …] [-f values.yaml …] [--version {v}]
-    /// [--show-only {tpl} …]`
+    /// [--show-only {tpl} …] [--include-crds] [--kube-version {v}]
+    /// [--api-versions {v} …] [--validate]`
     #[must_use]
     #[expect(clippy::too_many_arguments)]
     pub fn build_template_command(
@@ -2617,6 +2765,10 @@ impl HelmCommandBuilder {
         values_files: Option<&[String]>,
         version: Option<&str>,
         show_only: Option<&[String]>,
+        include_crds: bool,
+        kube_version: Option<&str>,
+        api_versions: Option<&[String]>,
+        validate: bool,
     ) -> String {
         let kube_env = kubeconfig_env_prefix(kubeconfig);
         let prefix = helm_detect_prefix(helm_bin);
@@ -2646,6 +2798,20 @@ impl HelmCommandBuilder {
             for tpl in only {
                 let _ = write!(cmd, " --show-only {}", shell_escape(tpl));
             }
+        }
+        if include_crds {
+            cmd.push_str(" --include-crds");
+        }
+        if let Some(kv) = kube_version {
+            let _ = write!(cmd, " --kube-version {}", shell_escape(kv));
+        }
+        if let Some(avs) = api_versions {
+            for av in avs {
+                let _ = write!(cmd, " --api-versions {}", shell_escape(av));
+            }
+        }
+        if validate {
+            cmd.push_str(" --validate");
         }
         cmd
     }
@@ -2707,6 +2873,20 @@ impl HelmCommandBuilder {
         {
             return Err(BridgeError::CommandDenied {
                 reason: format!("repo URL contains shell meta-characters: '{url}'"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a `helm uninstall --cascade` value.
+    ///
+    /// Allowed values: `background`, `orphan`, `foreground`.
+    pub fn validate_cascade(cascade: &str) -> Result<()> {
+        if cascade.starts_with('-') || !["background", "orphan", "foreground"].contains(&cascade) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "invalid cascade value: '{cascade}' (expected: background, orphan, foreground)"
+                ),
             });
         }
         Ok(())
@@ -4008,6 +4188,10 @@ mod tests {
             true,
             Some("nginx"),
             Some("json"),
+            false,
+            false,
+            None,
+            None,
         );
         assert!(cmd.starts_with("helm list"));
         assert!(cmd.contains("-n 'production'"));
@@ -4027,14 +4211,19 @@ mod tests {
             false,
             None,
             None,
+            false,
+            false,
+            None,
+            None,
         );
         assert_eq!(cmd, "helm list");
     }
 
     #[test]
     fn test_helm_build_list_auto_detect() {
-        let cmd =
-            HelmCommandBuilder::build_list_command(None, None, None, false, false, None, None);
+        let cmd = HelmCommandBuilder::build_list_command(
+            None, None, None, false, false, None, None, false, false, None, None,
+        );
         assert!(cmd.contains("command -v helm"));
         assert!(cmd.contains("list"));
     }
@@ -4050,6 +4239,8 @@ mod tests {
             Some("staging"),
             Some("json"),
             Some(5),
+            false,
+            false,
         );
         assert!(cmd.starts_with("helm status 'my-release'"));
         assert!(cmd.contains("-n 'staging'"));
@@ -4066,6 +4257,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
         );
         assert_eq!(cmd, "helm status 'my-release'");
     }
@@ -4096,6 +4289,10 @@ mod tests {
             true,
             Some("1.2.3"),
             true,
+            false,
+            false,
+            None,
+            false,
         );
         assert!(cmd.starts_with("helm upgrade 'my-release' 'my-chart'"));
         assert!(cmd.contains("-n 'production'"));
@@ -4127,6 +4324,10 @@ mod tests {
             false,
             None,
             false,
+            false,
+            false,
+            None,
+            false,
         );
         assert_eq!(cmd, "helm upgrade 'my-release' 'my-chart'");
     }
@@ -4147,6 +4348,10 @@ mod tests {
             None,
             false,
             None,
+            false,
+            None,
+            false,
+            false,
             false,
             None,
             false,
@@ -4174,6 +4379,10 @@ mod tests {
             true,
             true,
             Some("3.0.0"),
+            false,
+            None,
+            false,
+            None,
         );
         assert!(cmd.starts_with("helm install 'my-release' 'my-chart'"));
         assert!(cmd.contains("-n 'production'"));
@@ -4199,6 +4408,10 @@ mod tests {
             false,
             false,
             None,
+            false,
+            None,
+            false,
+            None,
         );
         assert_eq!(cmd, "helm install 'my-release' 'my-chart'");
     }
@@ -4215,6 +4428,10 @@ mod tests {
             Some("production"),
             Some("client"),
             true,
+            false,
+            false,
+            None,
+            false,
         );
         assert!(cmd.starts_with("helm rollback 'my-release'"));
         assert!(cmd.contains(" 2"));
@@ -4233,6 +4450,10 @@ mod tests {
             None,
             None,
             false,
+            false,
+            false,
+            None,
+            false,
         );
         assert_eq!(cmd, "helm rollback 'my-release'");
     }
@@ -4245,6 +4466,10 @@ mod tests {
             "my-release",
             Some(1),
             None,
+            None,
+            false,
+            false,
+            false,
             None,
             false,
         );
@@ -4285,6 +4510,10 @@ mod tests {
             Some("production"),
             true,
             true,
+            false,
+            false,
+            None,
+            None,
         );
         assert!(cmd.starts_with("helm uninstall 'my-release'"));
         assert!(cmd.contains("-n 'production'"));
@@ -4301,6 +4530,10 @@ mod tests {
             None,
             false,
             false,
+            false,
+            false,
+            None,
+            None,
         );
         assert_eq!(cmd, "helm uninstall 'my-release'");
     }
@@ -4314,6 +4547,10 @@ mod tests {
             None,
             true,
             false,
+            false,
+            false,
+            None,
+            None,
         );
         assert!(cmd.contains("--dry-run"));
         assert!(!cmd.contains("--keep-history"));
@@ -4328,6 +4565,10 @@ mod tests {
             None,
             false,
             true,
+            false,
+            false,
+            None,
+            None,
         );
         assert!(!cmd.contains("--dry-run"));
         assert!(cmd.contains("--keep-history"));
@@ -4362,6 +4603,7 @@ mod tests {
     fn test_helm_upgrade_with_auto_detect() {
         let cmd = HelmCommandBuilder::build_upgrade_command(
             None, None, "rel", "chart", None, None, None, None, false, None, false, None, false,
+            false, false, None, false,
         );
         assert!(cmd.contains("command -v helm"));
         assert!(cmd.contains("upgrade 'rel' 'chart'"));
@@ -4402,6 +4644,10 @@ mod tests {
             false,
             None,
             false,
+            false,
+            false,
+            None,
+            false,
         );
         // Empty set_values should not add any --set flags
         assert!(!cmd.contains("--set"));
@@ -4421,6 +4667,10 @@ mod tests {
             None,
             None,
             false,
+            false,
+            None,
+            false,
+            None,
             false,
             None,
         );
@@ -4526,6 +4776,10 @@ mod tests {
             false,
             None,
             None,
+            false,
+            false,
+            None,
+            None,
         );
         assert!(cmd.starts_with("KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm"));
         assert!(cmd.contains("list"));
@@ -4536,6 +4790,10 @@ mod tests {
         let cmd = HelmCommandBuilder::build_list_command(
             None,
             Some("/etc/rancher/k3s/k3s.yaml"),
+            None,
+            false,
+            false,
+            None,
             None,
             false,
             false,
@@ -4634,6 +4892,10 @@ mod tests {
             Some(&values_files),
             Some("1.2.3"),
             Some(&show_only),
+            false,
+            None,
+            None,
+            false,
         );
 
         assert!(cmd.contains("template 'rel' 'repo/chart'"), "cmd={cmd}");
@@ -4657,6 +4919,7 @@ mod tests {
             "rel",
             Some("prod"),
             Some(2),
+            None,
         );
         assert!(cmd.contains("get 'values' 'rel'"), "cmd={cmd}");
         assert!(cmd.contains("-n 'prod'"), "cmd={cmd}");
@@ -4670,6 +4933,7 @@ mod tests {
         assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("manifest").is_ok());
         assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("hooks").is_ok());
         assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("notes").is_ok());
+        assert!(KubernetesCommandBuilder::validate_helm_get_subcommand("metadata").is_ok());
 
         let err = KubernetesCommandBuilder::validate_helm_get_subcommand("delete").unwrap_err();
         match err {
