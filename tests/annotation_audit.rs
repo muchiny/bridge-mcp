@@ -66,6 +66,7 @@ const ALLOWLIST: &[(&str, ToolAnnotationKind)] = &[
     ("ssh_k3s_cert_rotate", ToolAnnotationKind::Destructive), // cert rotate: irreversible cert regen, _rotate not auto-detected
     ("ssh_k3s_killall", ToolAnnotationKind::Destructive), // killall: kills all k3s processes+containers, _killall not auto-detected
     ("ssh_k3s_upgrade", ToolAnnotationKind::Destructive), // upgrade: re-runs installer, can break node, _upgrade not auto-detected
+    ("ssh_k8s_localpath_gc", ToolAnnotationKind::Destructive), // _gc suffix not in DESTRUCTIVE_SUFFIXES; apply=true runs rm -rf on host dirs
 ];
 
 fn allowed(name: &str, kind: ToolAnnotationKind) -> bool {
@@ -172,6 +173,7 @@ const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
     "ssh_k3s_killall", // kills ALL k3s processes + containers + network namespaces
     "ssh_k3s_upgrade", // re-runs installer, swaps binary, can break the node
     "ssh_helm_repo_remove", // removes repo registration from local config — irreversible without re-adding
+    "ssh_k8s_localpath_gc", // apply=true runs rm -rf on orphaned PV host dirs — data cannot be recovered
 ];
 
 #[test]
