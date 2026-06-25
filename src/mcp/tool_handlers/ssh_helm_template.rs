@@ -29,6 +29,14 @@ pub struct SshHelmTemplateArgs {
     #[serde(default)]
     show_only: Option<Vec<String>>,
     #[serde(default)]
+    include_crds: Option<bool>,
+    #[serde(default)]
+    kube_version: Option<String>,
+    #[serde(default)]
+    api_versions: Option<Vec<String>>,
+    #[serde(default)]
+    validate: Option<bool>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -96,6 +104,23 @@ impl StandardTool for HelmTemplateTool {
                 "items": { "type": "string" },
                 "description": "Only render listed templates, e.g. templates/deployment.yaml"
             },
+            "include_crds": {
+                "type": "boolean",
+                "description": "Include CRDs in the chart output"
+            },
+            "kube_version": {
+                "type": "string",
+                "description": "Kubernetes version used for capability checks (e.g. '1.28.0')"
+            },
+            "api_versions": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Kubernetes API versions used for capability checks (e.g. ['apps/v1', 'batch/v1'])"
+            },
+            "validate": {
+                "type": "boolean",
+                "description": "Validate rendered templates against cluster's Kubernetes API"
+            },
             "helm_bin": {
                 "type": "string",
                 "description": "Custom helm binary path (default: auto-detect)"
@@ -136,6 +161,10 @@ impl StandardTool for HelmTemplateTool {
             args.values_files.as_deref(),
             args.version.as_deref(),
             args.show_only.as_deref(),
+            args.include_crds.unwrap_or(false),
+            args.kube_version.as_deref(),
+            args.api_versions.as_deref(),
+            args.validate.unwrap_or(false),
         ))
     }
 }
@@ -386,6 +415,10 @@ mod tests {
             values_files: None,
             version: None,
             show_only: None,
+            include_crds: None,
+            kube_version: None,
+            api_versions: None,
+            validate: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -411,6 +444,10 @@ mod tests {
             values_files: Some(vec!["/tmp/v.yaml".to_string()]),
             version: None,
             show_only: None,
+            include_crds: None,
+            kube_version: None,
+            api_versions: None,
+            validate: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -436,6 +473,10 @@ mod tests {
             values_files: None,
             version: Some("1.2.3".to_string()),
             show_only: Some(vec!["templates/deployment.yaml".to_string()]),
+            include_crds: None,
+            kube_version: None,
+            api_versions: None,
+            validate: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -449,5 +490,35 @@ mod tests {
             cmd.contains("--show-only 'templates/deployment.yaml'"),
             "cmd={cmd}"
         );
+    }
+
+    #[test]
+    fn test_build_command_include_crds_kube_version_api_versions_validate() {
+        let args = SshHelmTemplateArgs {
+            host: "server1".to_string(),
+            release: "rel".to_string(),
+            chart: "repo/chart".to_string(),
+            namespace: None,
+            set_values: None,
+            values_files: None,
+            version: None,
+            show_only: None,
+            include_crds: Some(true),
+            kube_version: Some("1.28.0".to_string()),
+            api_versions: Some(vec!["apps/v1".to_string(), "batch/v1".to_string()]),
+            validate: Some(true),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmTemplateTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--include-crds"), "cmd={cmd}");
+        assert!(cmd.contains("--kube-version '1.28.0'"), "cmd={cmd}");
+        assert!(cmd.contains("--api-versions 'apps/v1'"), "cmd={cmd}");
+        assert!(cmd.contains("--api-versions 'batch/v1'"), "cmd={cmd}");
+        assert!(cmd.contains("--validate"), "cmd={cmd}");
     }
 }
