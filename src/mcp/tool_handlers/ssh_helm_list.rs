@@ -29,6 +29,14 @@ pub struct SshHelmListArgs {
     #[serde(default)]
     output: Option<String>,
     #[serde(default)]
+    failed: Option<bool>,
+    #[serde(default)]
+    pending: Option<bool>,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    max: Option<u64>,
+    #[serde(default)]
     helm_bin: Option<String>,
     #[serde(default)]
     kubeconfig: Option<String>,
@@ -81,6 +89,23 @@ impl StandardTool for HelmListTool {
                 "enum": ["table", "json", "yaml"],
                 "description": "Output format (default: table)"
             },
+            "failed": {
+                "type": "boolean",
+                "description": "Show only releases with status: failed"
+            },
+            "pending": {
+                "type": "boolean",
+                "description": "Show only releases with status: pending"
+            },
+            "selector": {
+                "type": "string",
+                "description": "Filter by label selector (-l flag, e.g. 'app=nginx')"
+            },
+            "max": {
+                "type": "integer",
+                "description": "Maximum number of releases to return",
+                "minimum": 1
+            },
             "helm_bin": {
                 "type": "string",
                 "description": "Custom helm binary path (default: auto-detect)"
@@ -119,6 +144,10 @@ impl StandardTool for HelmListTool {
             args.all.unwrap_or(false),
             args.filter.as_deref(),
             args.output.as_deref(),
+            args.failed.unwrap_or(false),
+            args.pending.unwrap_or(false),
+            args.selector.as_deref(),
+            args.max,
         ))
     }
 
@@ -356,6 +385,10 @@ mod tests {
             all: None,
             filter: None,
             output: None,
+            failed: None,
+            pending: None,
+            selector: None,
+            max: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -376,6 +409,10 @@ mod tests {
             all: None,
             filter: None,
             output: None,
+            failed: None,
+            pending: None,
+            selector: None,
+            max: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -396,6 +433,10 @@ mod tests {
             all: Some(true),
             filter: Some("my-app.*".to_string()),
             output: Some("json".to_string()),
+            failed: None,
+            pending: None,
+            selector: None,
+            max: None,
             helm_bin: Some("helm".to_string()),
             kubeconfig: None,
             timeout_seconds: None,
@@ -408,5 +449,32 @@ mod tests {
         assert!(cmd.contains(" -a"));
         assert!(cmd.contains("--filter 'my-app.*'"));
         assert!(cmd.contains("-o 'json'"));
+    }
+
+    #[test]
+    fn test_build_command_failed_pending_selector_max() {
+        let args = SshHelmListArgs {
+            host: "server1".to_string(),
+            namespace: None,
+            all_namespaces: None,
+            all: None,
+            filter: None,
+            output: None,
+            failed: Some(true),
+            pending: Some(true),
+            selector: Some("app=nginx".to_string()),
+            max: Some(10),
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+
+        let cmd = HelmListTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--failed"), "cmd={cmd}");
+        assert!(cmd.contains("--pending"), "cmd={cmd}");
+        assert!(cmd.contains("-l 'app=nginx'"), "cmd={cmd}");
+        assert!(cmd.contains("--max 10"), "cmd={cmd}");
     }
 }
