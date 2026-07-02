@@ -2647,8 +2647,6 @@ mod tests {
             "ssh_helm_uninstall",
             "ssh_process_kill",
             "ssh_cron_remove",
-            "ssh_session_close",
-            "ssh_tunnel_close",
             "ssh_firewall_deny",
             "ssh_service_stop",
             // Behaviorally-destructive despite benign names (audit 2026-06-20).
@@ -2697,6 +2695,10 @@ mod tests {
             "ssh_terraform_apply",
             "ssh_upload",
             "ssh_db_query",
+            // Cleanup ops: release a resource, non-idempotent, NOT destructive
+            // to the host (re-annotated from destructive 2026-07-03).
+            "ssh_session_close",
+            "ssh_tunnel_close",
         ];
         for name in &mutating {
             let ann = tool_annotations(name);
