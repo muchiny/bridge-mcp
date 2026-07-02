@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
 
-**A Rust MCP server for secure remote infrastructure management — 357 tools, 9 protocols.**
+**A Rust MCP server for secure remote infrastructure management — 476 tools, 9 protocols.**
 
 ```
 Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──►  Your Infrastructure
@@ -41,12 +41,12 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 
 ## Features
 
-- **357 tools, 75 groups** — manage Linux, Windows, Docker, Kubernetes, Podman, AWX, databases, LDAP, network equipment, certificates, and more
+- **476 tools, 77 groups** — manage Linux, Windows, Docker, Kubernetes, Podman, AWX, databases, LDAP, network equipment, certificates, and more
 - **9 protocol adapters** — SSH, WinRM, PSRP (PowerShell Remoting), Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP
 - **Security-first** — command whitelist/blacklist, 62 secret-redaction patterns + entropy detection, tamper-proof session recording, opt-in MCP elicitation confirmation for destructive operations
 - **Auto-discovery** — reads `~/.ssh/config` automatically, merges with YAML config
 - **Smart output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV mode (60-80% token savings), pagination via `ssh_output_fetch`, per-client size limits (see [Token-efficient output](#token-efficient-output))
-- **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 357 schemas up front
+- **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 476 schemas up front
 - **MCP Tasks support** — every tool advertises `taskSupport: "optional"`, enabling async cancellation and progress notifications for long-running operations
 - **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
 - **Daemon mode** — Unix-socket transport for multi-client local usage; built-in `WinRmPool` (120 s TTL) and `K8sExecPool` (300 s TTL) amortize TLS handshakes across calls
@@ -56,7 +56,7 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 
 ## Hero Workflows
 
-Four end-to-end recipes that show why this exists. Every command runs through one CLI binary; all 357 tools sit behind the same flag conventions (`--jq`, `--columns`, `--limit`, `--output-format`).
+Four end-to-end recipes that show why this exists. Every command runs through one CLI binary; all 476 tools sit behind the same flag conventions (`--jq`, `--columns`, `--limit`, `--output-format`).
 
 ### 1. Diagnose a Linux service in 4 commands
 
@@ -418,14 +418,17 @@ recording:
 
 ## Tool Groups
 
-357 tools organized in 75 groups — all enabled by default. Disable groups you don't need:
+476 tools organized in 77 groups. Secure by default: only the eight core groups
+(`core`, `file_ops`, `directory`, `process`, `monitoring`, `network`, `systemd`,
+`sessions`) are enabled out of the box — everything else (containers, K8s,
+Windows, cloud, …) is opt-in. Enable the groups you need, or disable defaults:
 
 ```yaml
 tool_groups:
   groups:
-    sessions: false
-    tunnels: false
-    database: false
+    docker: true       # opt in to a non-default group
+    kubernetes: true
+    sessions: false    # opt out of a default group
 ```
 
 <details>
@@ -578,7 +581,7 @@ bridge-mcp validate                     # Validate config file
 bridge-mcp config-diff                  # Compare config vs defaults
 ```
 
-### Tool invocation (all 357 MCP tools)
+### Tool invocation (all 476 MCP tools)
 
 ```bash
 # Invoke any tool with key=value pairs
@@ -597,17 +600,17 @@ bridge-mcp --json tool ssh_docker_ps host=prod
 From the CLI:
 
 ```bash
-bridge-mcp list-tools --groups-only       # 75 groups (~2K tokens)
+bridge-mcp list-tools --groups-only       # 77 groups (~2K tokens)
 bridge-mcp list-tools --group docker      # Tools in a group (~500 tokens)
 bridge-mcp list-tools --search kubernetes # Keyword search
 bridge-mcp describe-tool ssh_docker_ps    # Full schema for 1 tool (~200 tokens)
 ```
 
-From an MCP client (Claude Desktop / Claude Code), the same progressive-discovery pattern is available as three top-level tools so the model can walk the registry without loading all 357 schemas up front:
+From an MCP client (Claude Desktop / Claude Code), the same progressive-discovery pattern is available as three top-level tools so the model can walk the registry without loading all 476 schemas up front:
 
 | Tool | Purpose | Typical cost |
 |---|---|---|
-| `mcp_list_tool_groups` | List the 75 groups with counts | ~2 K tokens |
+| `mcp_list_tool_groups` | List the 77 groups with counts | ~2 K tokens |
 | `mcp_search_tools` | Keyword search (`query`, `group?`, `limit=20`) | ~3 K tokens / page |
 | `mcp_describe_tool` | Full schema + reduction strategy for one tool | ~500 tokens |
 

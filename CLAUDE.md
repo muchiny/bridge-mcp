@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-MCP SSH Bridge is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **422 tools** across **76 groups** (60 Linux, 13 Windows, 2 cross-platform).
+MCP SSH Bridge is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **476 tools** across **77 groups** (62 Linux, 13 Windows, 2 cross-platform). Count source of truth: `.migration-baseline.json` (`python3 scripts/validate_baseline.py`).
 
 ## CLI-as-Tool Mode (Alternative to MCP)
 
-All 422 MCP tools are accessible directly via CLI, enabling **10-32x token savings** compared to MCP mode. Use CLI for dev workflows, MCP for enterprise integration.
+All 476 MCP tools are accessible directly via CLI, enabling **10-32x token savings** compared to MCP mode. Use CLI for dev workflows, MCP for enterprise integration.
 
 ### Quick Reference
 
@@ -17,7 +17,7 @@ bridge-mcp tool ssh_exec host=prod command="df -h" --json
 bridge-mcp tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
 
 # Progressive discovery (token-efficient for AI agents)
-bridge-mcp list-tools --groups-only          # 76 groups (~2K tokens)
+bridge-mcp list-tools --groups-only          # 77 groups (~2K tokens)
 bridge-mcp list-tools --group docker          # tools in group (~500 tokens)
 bridge-mcp list-tools --search kubernetes     # keyword search
 bridge-mcp describe-tool ssh_docker_ps        # full schema + Reduction Strategy (~200 tokens)
@@ -136,7 +136,7 @@ dxt/                              # DXT packaging (Claude Desktop extension)
 
 ## Tool Groups Reference
 
-76 groups, 422 tools (60 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `bridge-mcp list-tools --groups-only`.
+77 groups, 476 tools (62 Linux, 13 Windows, 2 cross-platform). Full reference loaded automatically when editing registry or handlers (see `.claude/rules/tool-groups-reference.md`). Quick overview: `bridge-mcp list-tools --groups-only`.
 
 ## Feature Flags
 
@@ -170,12 +170,16 @@ Key sections: `hosts`, `security`, `limits`, `audit`, `tool_groups`, `recording`
 
 ## Known Advisories
 
-1 advisory actively ignored in `deny.toml` (transitive, no upstream fix):
+6 advisories actively ignored in `deny.toml` + `.cargo/audit.toml` (keep both files in sync):
 
-- RUSTSEC-2023-0071 — Marvin Attack on RSA (russh)
+- RUSTSEC-2023-0071 — Marvin Attack on RSA (transitive via russh, no upstream fix)
+- RUSTSEC-2026-0098 / 0099 / 0104 — rustls-webpki 0.101, pinned by the aws-smithy
+  stack (re-triggered by the v1.19.0 dep bumps; `ssm`/`cloud` features only)
+- RUSTSEC-2026-0194 / 0195 — quick-xml 0.36 DoS (transitive via psrp-rs;
+  `psrp`/`all-protocols` features only). Remove once psrp-rs bumps quick-xml >=0.41.
 
-Previously ignored (now resolved — no longer triggered after dep-updates-2026-05-30):
-RUSTSEC-2025-0134, RUSTSEC-2026-0049, RUSTSEC-2026-0074, RUSTSEC-2026-0098, RUSTSEC-2026-0099, RUSTSEC-2026-0104
+Previously ignored (resolved after dep-updates-2026-05-30):
+RUSTSEC-2025-0134, RUSTSEC-2026-0049, RUSTSEC-2026-0074
 
 ## Path-Scoped Rules
 
@@ -191,11 +195,11 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 - `mcp-protocol.md` — JSON-RPC, McpServer, protocol versioning
 - `ports.md` — Traits, mock patterns, ToolContext, ExecutorRouter
 - `cli.md` — Clap derive, global flags, runner pattern, exit codes
-- `tool-groups-reference.md` — Full 75-group tool reference table
+- `tool-groups-reference.md` — Full 77-group tool reference table
 
 ## Active Technologies
 
-- Rust 2024 edition, MSRV 1.94 + winrm-rs 1.0, psrp-rs 1.0, russh 0.60, tokio, serde, clap 4
+- Rust 2024 edition, MSRV 1.94 + winrm-rs 1.0, psrp-rs 1.0, russh 0.61, tokio, serde, clap 4
 
 ## Recent Changes
 

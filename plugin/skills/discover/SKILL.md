@@ -6,7 +6,7 @@ description: |
   "what tools are available", "list bridge tools", "find a tool for X", "show
   docker / kubernetes / systemd / network tools", "search tools for logs /
   firewall / packages / databases", "which tool groups exist", "what can the
-  bridge do". Progressive discovery across the 357 tools and 75 groups, with
+  bridge do". Progressive discovery across the 476 tools and 77 groups, with
   token-efficient describe-tool output.
 user-invocable: true
 argument-hint: "[group-name|search-term]"
@@ -14,7 +14,7 @@ argument-hint: "[group-name|search-term]"
 
 # Tool Discovery -- Progressive Exploration
 
-Explore the 357 tools across 75 groups available in bridge-mcp.
+Explore the 476 tools across 77 groups available in bridge-mcp.
 
 ## No arguments -- show all groups
 
@@ -38,6 +38,6 @@ telling you which params (jq_filter, columns, limit, etc.) apply for token-effic
 
 ## Tips for the user
 
-- **75 groups**: docker, kubernetes, systemd, networking, firewall, packages, users, cron, logs, files, etc.
+- **77 groups**: docker, kubernetes, systemd, networking, firewall, packages, users, cron, logs, files, etc.
 - **Token-efficient**: always use `columns`, `limit`, or `jq_filter` params to reduce output
 - **9 protocols**: SSH, WinRM, PSRP, Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP

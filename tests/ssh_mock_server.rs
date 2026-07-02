@@ -384,11 +384,15 @@ impl ServerHandler for MockSession {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: russh::server::ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         let mut chans = self.channels.lock().await;
         chans.insert(channel.id(), channel);
-        Ok(true)
+        // russh 0.62: the open request must be explicitly accepted —
+        // dropping the handle rejects the channel.
+        reply.accept().await;
+        Ok(())
     }
 
     async fn exec_request(

@@ -1,7 +1,7 @@
 {
   "name": "bridge-mcp",
-  "version": "1.19.1",
-  "description": "357-tool SSH bridge for secure remote server management. Execute commands on air-gapped Linux, Windows, Docker, Kubernetes hosts via SSH from Claude Code.",
+  "version": "1.20.0",
+  "description": "476-tool SSH bridge for secure remote server management. Execute commands on air-gapped Linux, Windows, Docker, Kubernetes hosts via SSH from Claude Code.",
   "author": {
     "name": "muchiny",
     "url": "https://github.com/muchiny"
