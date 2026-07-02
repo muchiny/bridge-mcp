@@ -169,7 +169,13 @@ git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp && make release
 ```bash
 mkdir -p ~/.config/bridge-mcp
 cp config/config.example.yaml ~/.config/bridge-mcp/config.yaml
+chmod 600 ~/.config/bridge-mcp/config.yaml   # required — the server rejects
+                                             # group/other-readable config (it may hold secrets)
 ```
+
+> The config may contain SSH keys, sudo passwords and tokens, so bridge-mcp
+> refuses to start if `config.yaml` is group- or world-accessible (max `0640`).
+> A fresh `cp` usually lands at `0644` — run the `chmod` above.
 
 Edit `~/.config/bridge-mcp/config.yaml` with your hosts:
 
@@ -186,6 +192,22 @@ hosts:
 ```
 
 > **Tip:** Hosts from `~/.ssh/config` are auto-discovered — you may not need to configure anything.
+
+**Recommended safe defaults** — add these so Claude confirms before anything
+irreversible and every action is logged:
+
+```yaml
+security:
+  mode: standard                             # blacklist + whitelist for ssh_exec
+  require_elicitation_on_destructive: true   # confirm before any destructive tool runs
+audit:
+  enabled: true
+  path: ~/.local/share/bridge-mcp/audit.log  # ~ expands to $HOME; absolute paths also fine
+```
+
+Only the 8 core tool groups are enabled by default (secure-by-default) — opt
+into the rest under `tool_groups` (see [Tool Groups](#tool-groups); the example
+config ships ready-to-use K3s and Docker profiles).
 
 ### 3. Add to Claude Code
 
