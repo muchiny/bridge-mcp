@@ -323,6 +323,10 @@ limits:
 
 audit:
   enabled: true
+  # A leading ~ is expanded to your home directory at load time. An absolute
+  # path (e.g. /var/log/bridge-mcp/audit.log) is also fine and avoids any
+  # ambiguity about which user's home is used when the server runs as a
+  # daemon or under systemd — prefer absolute paths for shared/system installs.
   path: ~/.local/share/bridge-mcp/audit.log
   max_size_mb: 100
   retain_days: 30
@@ -330,30 +334,12 @@ audit:
 # =============================================================================
 # 🎥 SESSION RECORDING (v1.5.0)
 # =============================================================================
-# Record all SSH sessions for compliance (SOC2, HIPAA, PCI-DSS) and audit.
-# Recordings are tamper-proof with hash-chain integrity verification.
-
-# recording:
-#   # Enable/disable session recording (default: false)
-#   enabled: false
-#
-#   # Directory to store recordings (default: ~/.local/share/bridge-mcp/recordings/)
-#   path: ~/.local/share/bridge-mcp/recordings/
-#
-#   # Recording format: "asciinema" (v2) or "json" (structured)
-#   format: asciinema
-#
-#   # Enable hash-chain integrity for tamper-proof recordings (default: true)
-#   hash_chain: true
-#
-#   # Environment variable containing the HMAC key for hash-chain (default: MCP_RECORDING_KEY)
-#   hash_key_env: MCP_RECORDING_KEY
-#
-#   # Maximum recording duration in seconds (default: 3600 = 1 hour)
-#   max_duration_seconds: 3600
-#
-#   # Automatically mask secrets in recordings (default: true)
-#   auto_mask_secrets: true
+# Record SSH sessions for compliance (SOC2, HIPAA, PCI-DSS) with tamper-proof
+# hash-chain integrity. NOTE: recording is NOT a YAML config section — the
+# top-level config schema rejects a `recording:` key (deny_unknown_fields).
+# It is driven at runtime by the `ssh_recording_*` tools (enable the
+# `recording` tool group) and the `MCP_RECORDING_KEY` env var for the
+# hash-chain HMAC. Recordings are written as `.cast` files.
 
 # =============================================================================
 # 🔧 TOOL GROUPS
@@ -525,8 +511,27 @@ audit:
 
 tool_groups:
   # FIND-024: empty map -> default profile (the 8 groups listed in the doc
-  # block above). Add `groupname: true` to OPT IN to a non-default group;
-  # `groupname: false` to OPT OUT of a default-profile group.
+  # block above: core, file_ops, directory, process, monitoring, network,
+  # systemd, sessions). Add `groupname: true` to OPT IN to a non-default
+  # group; `groupname: false` to OPT OUT of a default-profile group.
+  #
+  # Enable only what a host actually runs — a smaller surface is safer and
+  # loads fewer tool schemas. Example ready-to-use profiles:
+  #
+  #   # A K3s / single-node Kubernetes host (e.g. a Raspberry Pi):
+  #   groups:
+  #     cri: true            # crictl — works even when the apiserver is down
+  #     k3s: true            # k3s lifecycle: etcd snapshots, status, ctr images
+  #     kubernetes: true     # kubectl + helm
+  #     journald: true       # systemd journal queries
+  #     storage: true        # df/lsblk/mounts
+  #     certificates: true   # TLS cert inspection
+  #
+  #   # A Docker host:
+  #   groups:
+  #     docker: true
+  #     container_logs: true
+  #     package: true
   groups: {}
     # --- Default-profile groups (already enabled — uncomment with `false` to OPT OUT) ---
     # core: false              # ⚠️ removes ssh_exec — every diagnostic command depends on it

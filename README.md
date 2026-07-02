@@ -102,11 +102,14 @@ bridge-mcp tool ssh_win_event_query    host=appsrv log=System level=Error since=
 # config.yaml
 security:
   require_elicitation_on_destructive: true   # MCP elicitation/create before any destructive_hint:true tool
-  recording:
-    enabled: true                            # tamper-proof asciinema recordings
 audit:
-  log_path: /var/log/bridge-mcp/audit.jsonl
+  enabled: true
+  path: /var/log/bridge-mcp/audit.log        # absolute, or ~/… (expanded to $HOME)
 ```
+
+Session recording (tamper-proof asciinema/JSON) is driven at runtime by the
+`ssh_recording_*` tools plus the `MCP_RECORDING_KEY` env var — not a config
+section.
 
 ```bash
 bridge-mcp tool ssh_helm_rollback host=k8s release=api revision=7

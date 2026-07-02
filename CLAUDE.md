@@ -166,7 +166,10 @@ dxt/                              # DXT packaging (Claude Desktop extension)
 ## Configuration
 
 YAML config at `~/.config/bridge-mcp/config.yaml`. See `config/config.example.yaml`.
-Key sections: `hosts`, `security`, `limits`, `audit`, `tool_groups`, `recording`.
+Key sections: `hosts`, `security`, `limits`, `audit`, `sessions`, `tool_groups`,
+`ssh_config`, `http`, `rbac`, `awx` (full schema: `Config` in `src/config/types.rs`,
+`deny_unknown_fields`). Session recording is not a YAML section — it is runtime/
+tool-driven (`ssh_recording_*` + `MCP_RECORDING_KEY`).
 
 ## Known Advisories
 
