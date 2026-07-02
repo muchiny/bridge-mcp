@@ -31,6 +31,15 @@ ignore = [
     "RUSTSEC-2026-0098",   # webpki URI name constraints — transitive via aws-smithy rustls 0.21
     "RUSTSEC-2026-0099",   # webpki wildcard name constraint — transitive via aws-smithy rustls 0.21
     "RUSTSEC-2026-0104",   # webpki CRL IssuingDistributionPoint panic — transitive via aws-smithy rustls 0.21
+    # quick-xml 0.36 DoS advisories (published 2026-06-29): unbounded
+    # namespace-declaration allocation + quadratic duplicate-attribute check.
+    # Transitive via the OPTIONAL psrp-rs 1.0 dep — only compiled under the
+    # `psrp`/`all-protocols` features; default and air-gapped builds never
+    # include it. Both are fixed in quick-xml >=0.41: proper remediation is
+    # bumping quick-xml inside psrp-rs (our crate), releasing, then updating
+    # the dep here and removing these two entries. Same list as audit.toml.
+    "RUSTSEC-2026-0194",   # quick-xml quadratic duplicate-attribute check — transitive via psrp-rs
+    "RUSTSEC-2026-0195",   # quick-xml unbounded namespace alloc (DoS) — transitive via psrp-rs
     # Verified no longer matched (kept here as historical context):
     # - RUSTSEC-2025-0134 (rustls-pemfile unmaintained)
     # - RUSTSEC-2026-0049 (rustls-webpki CRL matching)

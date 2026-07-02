@@ -72,6 +72,23 @@ pub fn build_instructions(config: &Config, tool_count: usize) -> String {
         );
     }
 
+    // --- Progressive Discovery ---
+    // Total compiled-in registry size (all groups, enabled or not) from the
+    // proc-macro inventory — never hardcode tool counts, they drift.
+    let total_registered = inventory::iter::<super::registry::ToolRegistryEntry>().count();
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "DISCOVERY: {tool_count} of {total_registered} registered tools are enabled. \
+         Navigate them progressively instead of scanning the full tool list: \
+         mcp_list_tool_groups shows enabled groups with counts, \
+         mcp_search_tools finds tools by keyword, and mcp_describe_tool returns \
+         one full schema plus its output-reduction strategy. Groups not enabled \
+         in the tool_groups config (containers, K8s, Windows, cloud, \u{2026}) are \
+         hidden from both the tool list and these meta-tools \u{2014} they must be \
+         opted in via config.yaml."
+    );
+
     // --- Key Limits ---
     let _ = writeln!(out);
     let _ = writeln!(
@@ -194,6 +211,8 @@ mod tests {
         let out = build_instructions(&config, 337);
 
         assert!(out.contains("337 tools"));
+        // Dynamic discovery line: enabled count out of the real inventory total.
+        assert!(out.contains("DISCOVERY: 337 of"));
         assert!(out.contains("HOSTS: None configured"));
         assert!(out.contains("standard mode"));
         assert!(!out.contains("DISABLED GROUPS"));
@@ -282,6 +301,10 @@ mod tests {
         let config = default_config();
         let out = build_instructions(&config, 337);
 
+        assert!(out.contains("DISCOVERY:"));
+        assert!(out.contains("mcp_list_tool_groups"));
+        assert!(out.contains("mcp_search_tools"));
+        assert!(out.contains("mcp_describe_tool"));
         assert!(out.contains("WORKFLOW: Call ssh_status"));
         assert!(out.contains("PREFER SPECIALIZED TOOLS"));
         assert!(out.contains("ANNOTATIONS:"));

@@ -19,10 +19,14 @@ struct SshSessionCloseArgs {
 }
 
 /// SSH Session Close tool handler
+// Closing a session releases the SSH connection + server-side shell — a
+// non-idempotent cleanup, not a destructive host mutation. `destructive`
+// wrongly triggered the elicitation guard on routine teardown (and
+// disagreed with tests/annotation_audit.rs, which lists it as Mutating).
 #[mcp_tool(
     name = "ssh_session_close",
     group = "sessions",
-    annotation = "destructive"
+    annotation = "mutating"
 )]
 pub struct SshSessionCloseHandler;
 

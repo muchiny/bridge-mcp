@@ -4,12 +4,12 @@
 
 | Version | Supported |
 |---------|-----------|
-| 1.8.x   | Yes       |
-| < 1.8   | No        |
+| 1.20.x  | Yes       |
+| < 1.20  | No        |
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in MCP SSH Bridge, please report it responsibly.
+If you discover a security vulnerability in Bridge MCP, please report it responsibly.
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
@@ -36,7 +36,7 @@ If you discover a security vulnerability in MCP SSH Bridge, please report it res
 
 ## Security Model
 
-MCP SSH Bridge acts as a security boundary between an AI client (Claude Code) and remote SSH hosts. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat analysis.
+Bridge MCP acts as a security boundary between an AI client (Claude Code) and remote SSH hosts.
 
 ### Key Security Controls
 
@@ -44,7 +44,7 @@ MCP SSH Bridge acts as a security boundary between an AI client (Claude Code) an
 |---------|-------------|
 | Command Validation | Whitelist/blacklist with regex patterns (`CommandValidator`) |
 | Shell Escaping | Single-quote wrapping for all user-supplied parameters |
-| Output Sanitization | 56 patterns masking secrets in command output (`Sanitizer`) |
+| Output Sanitization | 63 patterns masking secrets in command output (`Sanitizer`) |
 | Rate Limiting | Per-host token bucket rate limiter (`RateLimiter`) |
 | Destructive-op Confirmation | Opt-in `security.require_elicitation_on_destructive` asks the client via MCP `elicitation/create` before any tool annotated `destructive_hint: true` executes. Fail-closed when the client does not advertise the elicitation capability. |
 | Audit Logging | Async JSON-lines audit trail (`AuditLogger`) |
@@ -55,7 +55,9 @@ MCP SSH Bridge acts as a security boundary between an AI client (Claude Code) an
 
 ### Security Modes
 
-- **Strict** (default): Only explicitly whitelisted commands are allowed
+- **Standard** (default): `ssh_exec` is checked against the whitelist; built-in
+  typed tools check the blacklist only
+- **Strict**: Only explicitly whitelisted commands are allowed (safest)
 - **Permissive**: All commands except blacklisted patterns
 
 ### What This Project Does NOT Protect Against

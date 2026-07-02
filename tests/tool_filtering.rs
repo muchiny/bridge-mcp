@@ -231,6 +231,8 @@ fn test_every_tool_maps_to_a_known_group() {
         "esxi",
         "git",
         "kubernetes",
+        "cri",
+        "k3s",
         "ansible",
         "systemd",
         "network",

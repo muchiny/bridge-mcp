@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
 
-**A Rust MCP server for secure remote infrastructure management — 357 tools, 9 protocols.**
+**A Rust MCP server for secure remote infrastructure management — 476 tools, 9 protocols.**
 
 ```
 Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──►  Your Infrastructure
@@ -41,22 +41,22 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 
 ## Features
 
-- **357 tools, 75 groups** — manage Linux, Windows, Docker, Kubernetes, Podman, AWX, databases, LDAP, network equipment, certificates, and more
+- **476 tools, 77 groups** — manage Linux, Windows, Docker, Kubernetes, Podman, AWX, databases, LDAP, network equipment, certificates, and more
 - **9 protocol adapters** — SSH, WinRM, PSRP (PowerShell Remoting), Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP
-- **Security-first** — command whitelist/blacklist, 62 secret-redaction patterns + entropy detection, tamper-proof session recording, opt-in MCP elicitation confirmation for destructive operations
+- **Security-first** — command whitelist/blacklist, 63 secret-redaction patterns + entropy detection, tamper-proof session recording, opt-in MCP elicitation confirmation for destructive operations
 - **Auto-discovery** — reads `~/.ssh/config` automatically, merges with YAML config
 - **Smart output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV mode (60-80% token savings), pagination via `ssh_output_fetch`, per-client size limits (see [Token-efficient output](#token-efficient-output))
-- **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 357 schemas up front
+- **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 476 schemas up front
 - **MCP Tasks support** — every tool advertises `taskSupport: "optional"`, enabling async cancellation and progress notifications for long-running operations
 - **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
 - **Daemon mode** — Unix-socket transport for multi-client local usage; built-in `WinRmPool` (120 s TTL) and `K8sExecPool` (300 s TTL) amortize TLS handshakes across calls
-- **7500+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
+- **8700+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
 
 ---
 
 ## Hero Workflows
 
-Four end-to-end recipes that show why this exists. Every command runs through one CLI binary; all 357 tools sit behind the same flag conventions (`--jq`, `--columns`, `--limit`, `--output-format`).
+Four end-to-end recipes that show why this exists. Every command runs through one CLI binary; all 476 tools sit behind the same flag conventions (`--jq`, `--columns`, `--limit`, `--output-format`).
 
 ### 1. Diagnose a Linux service in 4 commands
 
@@ -67,7 +67,7 @@ bridge-mcp tool ssh_service_logs   host=web1 service=nginx lines=200
 bridge-mcp tool ssh_journal_query  host=web1 unit=nginx priority=err since="-1h"
 ```
 
-Built-in validation rejects unknown hosts before any SSH bytes leave your machine; outputs are sanitized through 62 secret-redaction patterns + entropy detection.
+Built-in validation rejects unknown hosts before any SSH bytes leave your machine; outputs are sanitized through 63 secret-redaction patterns + entropy detection.
 
 ### 2. Inspect Kubernetes with 80% fewer tokens
 
@@ -102,11 +102,14 @@ bridge-mcp tool ssh_win_event_query    host=appsrv log=System level=Error since=
 # config.yaml
 security:
   require_elicitation_on_destructive: true   # MCP elicitation/create before any destructive_hint:true tool
-  recording:
-    enabled: true                            # tamper-proof asciinema recordings
 audit:
-  log_path: /var/log/bridge-mcp/audit.jsonl
+  enabled: true
+  path: /var/log/bridge-mcp/audit.log        # absolute, or ~/… (expanded to $HOME)
 ```
+
+Session recording (tamper-proof asciinema/JSON) is driven at runtime by the
+`ssh_recording_*` tools plus the `MCP_RECORDING_KEY` env var — not a config
+section.
 
 ```bash
 bridge-mcp tool ssh_helm_rollback host=k8s release=api revision=7
@@ -166,7 +169,13 @@ git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp && make release
 ```bash
 mkdir -p ~/.config/bridge-mcp
 cp config/config.example.yaml ~/.config/bridge-mcp/config.yaml
+chmod 600 ~/.config/bridge-mcp/config.yaml   # required — the server rejects
+                                             # group/other-readable config (it may hold secrets)
 ```
+
+> The config may contain SSH keys, sudo passwords and tokens, so bridge-mcp
+> refuses to start if `config.yaml` is group- or world-accessible (max `0640`).
+> A fresh `cp` usually lands at `0644` — run the `chmod` above.
 
 Edit `~/.config/bridge-mcp/config.yaml` with your hosts:
 
@@ -183,6 +192,22 @@ hosts:
 ```
 
 > **Tip:** Hosts from `~/.ssh/config` are auto-discovered — you may not need to configure anything.
+
+**Recommended safe defaults** — add these so Claude confirms before anything
+irreversible and every action is logged:
+
+```yaml
+security:
+  mode: standard                             # blacklist + whitelist for ssh_exec
+  require_elicitation_on_destructive: true   # confirm before any destructive tool runs
+audit:
+  enabled: true
+  path: ~/.local/share/bridge-mcp/audit.log  # ~ expands to $HOME; absolute paths also fine
+```
+
+Only the 8 core tool groups are enabled by default (secure-by-default) — opt
+into the rest under `tool_groups` (see [Tool Groups](#tool-groups); the example
+config ships ready-to-use K3s and Docker profiles).
 
 ### 3. Add to Claude Code
 
@@ -319,7 +344,9 @@ hosts:
 
 > `proxy_jump` and `socks_proxy` are mutually exclusive on the same host.
 
-**Windows servers** — add `os_type: windows` to enable 74 Windows-specific tools:
+**Windows servers** — set `os_type: windows` so tools use Windows/PowerShell
+command semantics (the 74 Windows-specific tools live in the 13 Windows groups;
+enable them under `tool_groups` like any other group):
 
 ```yaml
 hosts:
@@ -372,7 +399,7 @@ limits:
 
 Truncated outputs include an `output_id` — use `ssh_output_fetch` to retrieve the full content page by page.
 
-**Output sanitization** — 56 built-in regex patterns + Shannon entropy detection for secrets:
+**Output sanitization** — 63 built-in regex patterns + Shannon entropy detection for secrets:
 
 ```yaml
 security:
@@ -402,15 +429,12 @@ audit:
   retain_days: 30
 ```
 
-**Session recording** — asciinema v2 format with HMAC-SHA256 hash-chain (SOC2, HIPAA, PCI-DSS):
-
-```yaml
-recording:
-  enabled: true
-  path: ~/.local/share/bridge-mcp/recordings/
-  hash_chain: true
-  hash_key_env: MCP_RECORDING_KEY
-```
+**Session recording** — asciinema v2 format with HMAC-SHA256 hash-chain (SOC2,
+HIPAA, PCI-DSS). This is **not** a YAML config section (the schema rejects
+unknown keys); it is driven at runtime by the `ssh_recording_*` tools (enable
+the `recording` tool group) with the HMAC key supplied via the
+`MCP_RECORDING_KEY` environment variable. Recordings are written as `.cast`
+files.
 
 </details>
 
@@ -418,25 +442,32 @@ recording:
 
 ## Tool Groups
 
-357 tools organized in 75 groups — all enabled by default. Disable groups you don't need:
+476 tools organized in 77 groups. Secure by default: only the eight core groups
+(`core`, `file_ops`, `directory`, `process`, `monitoring`, `network`, `systemd`,
+`sessions`) are enabled out of the box — everything else (containers, K8s,
+Windows, cloud, …) is opt-in. Enable the groups you need, or disable defaults:
 
 ```yaml
 tool_groups:
   groups:
-    sessions: false
-    tunnels: false
-    database: false
+    docker: true       # opt in to a non-default group
+    kubernetes: true
+    sessions: false    # opt out of a default group
 ```
 
 <details>
-<summary><strong>Linux & cross-platform groups (41 groups)</strong></summary>
+<summary><strong>Linux & cross-platform groups (43 groups)</strong></summary>
+
+Representative tools per group — larger groups (e.g. `kubernetes` has 83,
+`awx` 43) list only the common ones. For the full set of any group, run
+`bridge-mcp list-tools --group <name>`.
 
 | Group | Tools |
 |-------|-------|
 | `core` | ssh_exec, ssh_exec_multi (with `diff` / `diff_baseline` / `normalize` for cross-host drift detection), ssh_status, ssh_health, ssh_history, ssh_output_fetch |
 | `config` | ssh_config_get, ssh_config_set |
 | `file_transfer` | ssh_upload, ssh_download, ssh_sync |
-| `file_ops` | ssh_file_read, ssh_file_write, ssh_file_chmod, ssh_file_chown, ssh_file_stat, ssh_file_diff, ssh_file_patch, ssh_file_template |
+| `file_ops` | ssh_file_read, ssh_file_write, ssh_files_write, ssh_file_chmod, ssh_file_chown, ssh_file_stat, ssh_file_diff, ssh_file_patch, ssh_file_template |
 | `sessions` | ssh_session_create, ssh_session_exec, ssh_session_list, ssh_session_close |
 | `monitoring` | ssh_metrics, ssh_metrics_multi, ssh_tail, ssh_disk_usage |
 | `tunnels` | ssh_tunnel_create, ssh_tunnel_list, ssh_tunnel_close |
@@ -450,10 +481,12 @@ tool_groups:
 | `docker` | ssh_docker_ps, ssh_docker_logs, ssh_docker_inspect, ssh_docker_exec, ssh_docker_compose, ssh_docker_images, ssh_docker_stats, ssh_docker_volume_ls, ssh_docker_network_ls, ssh_docker_volume_inspect, ssh_docker_network_inspect |
 | `podman` | ssh_podman_ps, ssh_podman_logs, ssh_podman_inspect, ssh_podman_exec, ssh_podman_images, ssh_podman_compose |
 | `esxi` | ssh_esxi_vm_list, ssh_esxi_vm_info, ssh_esxi_vm_power, ssh_esxi_snapshot, ssh_esxi_host_info, ssh_esxi_datastore_list, ssh_esxi_network_list |
-| `kubernetes` | ssh_k8s_get, ssh_k8s_logs, ssh_k8s_describe, ssh_k8s_apply, ssh_k8s_delete, ssh_k8s_rollout, ssh_k8s_scale, ssh_k8s_exec, ssh_k8s_top, ssh_helm_list, ssh_helm_status, ssh_helm_upgrade, ssh_helm_install, ssh_helm_rollback, ssh_helm_history, ssh_helm_uninstall |
+| `cri` | ssh_crictl_ps, ssh_crictl_pods, ssh_crictl_images, ssh_crictl_logs, ssh_crictl_inspect, ssh_crictl_stats, ssh_crictl_info, ssh_crictl_exec, ssh_crictl_rmi (works when the apiserver is down) |
+| `k3s` | ssh_k3s_status, ssh_k3s_check_config, ssh_k3s_etcd_status, ssh_k3s_etcd_snapshot_save/list/restore, ssh_k3s_ctr_images, ssh_k3s_kubeconfig_get, ssh_k3s_config_get, ssh_k3s_servicelb_status, ssh_k3s_addon_manifests, ssh_k3s_upgrade, ssh_k3s_uninstall, ssh_k3s_killall, ssh_k3s_cert_rotate |
+| `kubernetes` | ssh_k8s_get, ssh_k8s_logs, ssh_k8s_describe, ssh_k8s_apply, ssh_k8s_delete, ssh_k8s_rollout, ssh_k8s_scale, ssh_k8s_exec, ssh_k8s_top, ssh_helm_list, ssh_helm_status, ssh_helm_upgrade, ssh_helm_install, ssh_helm_rollback, ssh_helm_history, ssh_helm_uninstall, … (83 total — `list-tools --group kubernetes`) |
 | `git` | ssh_git_status, ssh_git_log, ssh_git_diff, ssh_git_pull, ssh_git_clone, ssh_git_branch, ssh_git_checkout |
 | `ansible` | ssh_ansible_playbook, ssh_ansible_inventory, ssh_ansible_adhoc |
-| `awx` | ssh_awx_status, ssh_awx_inventories, ssh_awx_inventory_hosts, ssh_awx_templates, ssh_awx_template_detail, ssh_awx_job_launch, ssh_awx_job_status, ssh_awx_job_summary, ssh_awx_job_stdout, ssh_awx_job_events, ssh_awx_job_follow, ssh_awx_job_cancel, ssh_awx_project_sync |
+| `awx` | ssh_awx_status, ssh_awx_inventories, ssh_awx_inventory_hosts, ssh_awx_templates, ssh_awx_template_detail, ssh_awx_job_launch, ssh_awx_job_status, ssh_awx_job_summary, ssh_awx_job_stdout, ssh_awx_job_events, ssh_awx_job_follow, ssh_awx_job_cancel, ssh_awx_project_sync, … (43 total — workflows, approvals, relaunch) |
 | `terraform` | ssh_terraform_init, ssh_terraform_plan, ssh_terraform_apply, ssh_terraform_state, ssh_terraform_output |
 | `vault` | ssh_vault_status, ssh_vault_read, ssh_vault_list, ssh_vault_write |
 | `systemd` | ssh_service_status, ssh_service_start, ssh_service_stop, ssh_service_restart, ssh_service_list, ssh_service_logs, ssh_service_enable, ssh_service_disable, ssh_service_daemon_reload |
@@ -578,7 +611,7 @@ bridge-mcp validate                     # Validate config file
 bridge-mcp config-diff                  # Compare config vs defaults
 ```
 
-### Tool invocation (all 357 MCP tools)
+### Tool invocation (all 476 MCP tools)
 
 ```bash
 # Invoke any tool with key=value pairs
@@ -597,17 +630,17 @@ bridge-mcp --json tool ssh_docker_ps host=prod
 From the CLI:
 
 ```bash
-bridge-mcp list-tools --groups-only       # 75 groups (~2K tokens)
+bridge-mcp list-tools --groups-only       # 77 groups (~2K tokens)
 bridge-mcp list-tools --group docker      # Tools in a group (~500 tokens)
 bridge-mcp list-tools --search kubernetes # Keyword search
 bridge-mcp describe-tool ssh_docker_ps    # Full schema for 1 tool (~200 tokens)
 ```
 
-From an MCP client (Claude Desktop / Claude Code), the same progressive-discovery pattern is available as three top-level tools so the model can walk the registry without loading all 357 schemas up front:
+From an MCP client (Claude Desktop / Claude Code), the same progressive-discovery pattern is available as three top-level tools so the model can walk the registry without loading all 476 schemas up front:
 
 | Tool | Purpose | Typical cost |
 |---|---|---|
-| `mcp_list_tool_groups` | List the 75 groups with counts | ~2 K tokens |
+| `mcp_list_tool_groups` | List the 77 groups with counts | ~2 K tokens |
 | `mcp_search_tools` | Keyword search (`query`, `group?`, `limit=20`) | ~3 K tokens / page |
 | `mcp_describe_tool` | Full schema + reduction strategy for one tool | ~500 tokens |
 
@@ -702,11 +735,14 @@ This enables:
 In addition to the default stdio transport, the bridge can run as a long-lived daemon listening on a Unix socket. Multiple local clients (Claude Code, Claude Desktop, scripts) can connect concurrently to the same daemon, each getting an isolated MCP session that shares the same audit log, output cache, and connection pools.
 
 ```bash
-# Start the daemon (foreground)
-bridge-mcp --daemon /tmp/bridge-mcp.sock
+# Start the daemon (foreground; Ctrl-C to stop). Socket defaults to
+# $XDG_RUNTIME_DIR/bridge-mcp.sock — override with --socket-path.
+bridge-mcp daemon start --socket-path /tmp/bridge-mcp.sock
+bridge-mcp daemon status          # check whether a daemon is running
+bridge-mcp daemon stop            # SIGTERM a running daemon
 
-# Connect a client to the socket via the standard MCP `--transport unix` flag,
-# or any tool that speaks JSON-RPC over a Unix socket.
+# Regular CLI invocations auto-detect the socket and forward their tool
+# calls to the daemon, skipping the SSH handshake on subsequent calls.
 ```
 
 **Built-in connection pools** kick in automatically when you build with the corresponding feature flags:
@@ -759,7 +795,7 @@ make ci-full            # Full CI (ci + hack + geiger)
 make dxt                # Build DXT package for Claude Desktop
 ```
 
-Rust edition 2024, MSRV 1.94+. `#![forbid(unsafe_code)]`. 7500+ tests.
+Rust edition 2024, MSRV 1.94+. `#![forbid(unsafe_code)]`. 8700+ tests.
 
 **Adding a new tool — 3 steps:** annotate the struct with `#[mcp_tool]` (or `#[mcp_standard_tool]`), add the `mod` + `pub use` line, and (only if introducing a new group) update `ToolGroupsConfig`. The `inventory` crate auto-registers the handler at compile time — no test-count assertions to update.
 

@@ -1,6 +1,6 @@
 //! K8s Secret Export Tool Handler
 //!
-//! REVEAL-GATED: exports a Secret as re-appliable YAML (cluster-instance fields
+//! REVEAL-GATED: exports a Secret as re-applicable YAML (cluster-instance fields
 //! stripped) via `kubectl get secret -o yaml | grep -v ...`. The `.data` block
 //! still contains base64-encoded values (trivially decodable), so this tool
 //! requires explicit `reveal=true`.
@@ -48,7 +48,7 @@ impl StandardTool for K8sSecretExportTool {
     type Args = SshK8sSecretExportArgs;
     const NAME: &'static str = "ssh_k8s_secret_export";
     const DESCRIPTION: &'static str = "REVEAL-GATED: Export a Kubernetes Secret as a \
-        re-appliable YAML manifest with cluster-instance fields stripped \
+        re-applicable YAML manifest with cluster-instance fields stripped \
         (creationTimestamp, resourceVersion, uid, managedFields, etc.). \
         The .data block contains base64-encoded values (trivially decodable — \
         treat as plaintext secret). Set `reveal=true` to proceed. \

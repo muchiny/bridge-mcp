@@ -15,9 +15,29 @@ env:
   BINARY_NAME: bridge-mcp
 
 jobs:
+  # Tags can land on commits that never went through ci.yml (which only
+  # triggers on push-to-main/PRs) — run the test suite before shipping
+  # binaries, packages and provenance attestations.
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --all-targets --all-features
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    needs: test
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -86,6 +106,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -103,9 +124,12 @@ jobs:
         with:
           subject-path: "artifacts/${{ env.BINARY_NAME }}-*"
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+
       - name: Generate SBOM
         run: |
-          cargo install cargo-cyclonedx --locked
           cargo cyclonedx --format json
           find . -maxdepth 1 -name '*.cdx.json' -o -name 'bom.json' | head -1 | xargs -I{} cp {} artifacts/${{ env.BINARY_NAME }}-sbom.cdx.json
 

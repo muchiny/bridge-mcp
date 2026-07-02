@@ -163,7 +163,15 @@ fn all_tools_have_valid_json_schema() {
     let registry = bridge_mcp::mcp::registry::create_all_enabled_registry();
     let tools = registry.list_tools();
 
-    assert_eq!(tools.len(), 398, "Expected 398 tools in default registry");
+    // Counts are dynamic (see .claude/rules/registry.md): adding a tool must
+    // never require touching a test. Guard the failure mode that matters — an
+    // empty or wrong (minimal-default) registry — with a generous lower bound
+    // rather than a brittle exact count that goes stale on every tool add.
+    assert!(
+        tools.len() >= 300,
+        "all-enabled registry should expose the full handler set, got {}",
+        tools.len()
+    );
 
     for tool in &tools {
         // Name must be non-empty and snake_case

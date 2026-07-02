@@ -5,6 +5,9 @@ on:
     - cron: "0 8 * * 1" # Weekly Monday 8am UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,6 +15,7 @@ jobs:
   check-deps:
     name: Check dependencies
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -21,8 +25,12 @@ jobs:
         with:
           key: deps
 
-      - name: Install tools
-        run: cargo install cargo-outdated cargo-machete --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      # cargo-outdated is not distributed via install-action — build from source
+      - name: Install cargo-outdated
+        run: cargo install cargo-outdated --locked
 
       - name: Check outdated dependencies
         run: |

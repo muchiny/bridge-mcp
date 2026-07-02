@@ -7,14 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-07-02
+
+### Added
+
+- **K3s / K8s triage expansion** (2026-06-24 audit follow-up) — the registry
+  grows to **476 tools across 77 groups**:
+  - New `cri` group (`ssh_crictl_ps`) and `k3s` group covering the full K3s
+    lifecycle: etcd snapshot save/list/restore, `k3s_status`, `check_config`,
+    `ctr_images`, `kubeconfig_get`/`config_get`, plus destructive-gated
+    `upgrade`, `uninstall`, `killall`, `cert_rotate`.
+  - K8s storage & network triage: `pvc_status`, `pvc_usage`,
+    `localpath_inspect`, `localpath_gc`, `volume_expand`,
+    `connectivity_test`, `dns_check`, `service_describe`, `endpoints`,
+    `ingress_describe`, `networkpolicy`, `proxy_get`, `port_forward`.
+  - Traefik: `ingressroute`, `introspect` (bounded port-forward to
+    `/api/rawdata`).
+  - Helm: 12 new tools (repo, show, pull, lint, dependency, diff, test,
+    search, plugin) and parameter extensions on the 9 existing ones
+    (`atomic`, `wait_for_jobs`, `set_string`, `include_crds`, …).
+- **MSRV job in CI** — `cargo check --all-targets --all-features` on the
+  declared MSRV (1.94) so `rust-version` can no longer silently regress.
+- **Test gates before publishing** — `release.yml` and `docker.yml` now run
+  the full nextest suite before building binaries, images, SBOM and
+  provenance attestations (tags previously shipped un-CI'd commits).
+- **RUSTSEC ignore-list sync guard** — the Security workflow fails if
+  `deny.toml` and `.cargo/audit.toml` ignore lists diverge.
+
 ### Changed
 
-- **Plugin 1.19.1** (binary unchanged): enriched the `bridge` and `discover`
-  skill `description` frontmatter with concrete trigger phrases (docker,
-  kubernetes, systemd, logs, metrics, ports, host names) so Claude auto-invokes
-  them more reliably, per Anthropic's skill-authoring guidance. Fixed stale
-  counts in the `discover` skill (75 groups, 9 protocols — dropped the removed
-  ZeroMQ/NATS/MQTT/SNMP/NETCONF stubs).
+- **russh 0.61 → 0.62** — server `Handler` channel-open callbacks now receive
+  a `ChannelOpenHandle` that must be explicitly accepted; full dependency
+  refresh (`clap_complete` 4.6.7, `uuid` 1.23.4, transitives).
+- **CI hardening** — least-privilege `permissions:` on every workflow
+  (plus `issues: write` where the fuzz crash-reporter needs it),
+  `timeout-minutes` on all long jobs, concurrency group on `security.yml`,
+  dispatch inputs routed through `env:` instead of `${{ }}` shell
+  interpolation, doc-only changes skip the heavy non-required jobs
+  (`dorny/paths-filter`), prebuilt tool installs via
+  `taiki-e/install-action` (cargo-audit, cargo-machete, cargo-cyclonedx),
+  `actions/checkout@v6` everywhere.
+- **`make ci` now runs cargo-deny** and the local coverage threshold is
+  aligned with CI (`--fail-under 70`).
+- **Plugin 1.19.1 → 1.20.0** (re-aligned with the binary): enriched the
+  `bridge` and `discover` skill `description` frontmatter with concrete
+  trigger phrases (docker, kubernetes, systemd, logs, metrics, ports, host
+  names) so Claude auto-invokes them more reliably, per Anthropic's
+  skill-authoring guidance. Dropped the removed ZeroMQ/NATS/MQTT/SNMP/NETCONF
+  stubs from the `discover` skill.
+
+### Fixed
+
+- **Stale tool counts everywhere** — README, `server.json`, `dxt/manifest.json`
+  and the plugin still advertised 357 tools / 75 groups; all synced to the
+  `.migration-baseline.json` source of truth (476 / 77). The README now also
+  documents the FIND-024 secure-by-default behaviour (only the 8 core groups
+  are enabled without explicit `tool_groups` opt-in) instead of the outdated
+  "all enabled by default".
+
+### Security
+
+- **RUSTSEC-2026-0194 / RUSTSEC-2026-0195** (quick-xml 0.36 DoS, published
+  2026-06-29) added to the ignore lists: only reachable through the optional
+  `psrp` / `all-protocols` features via psrp-rs; default and air-gapped
+  builds never compile the vulnerable path. Proper fix tracked as a
+  quick-xml >= 0.41 bump inside psrp-rs.
 
 ## [1.19.0] - 2026-06-19
 
@@ -1325,6 +1382,12 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...HEAD
+[1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
+[1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0
+[1.18.0]: https://github.com/muchiny/bridge-mcp/compare/v1.17.0...v1.18.0
+[1.17.0]: https://github.com/muchiny/bridge-mcp/compare/v1.16.0...v1.17.0
+[1.16.0]: https://github.com/muchiny/bridge-mcp/compare/v1.15.1...v1.16.0
 [1.15.0]: https://github.com/muchiny/bridge-mcp/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/muchiny/bridge-mcp/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/muchiny/bridge-mcp/compare/v1.12.0...v1.13.0

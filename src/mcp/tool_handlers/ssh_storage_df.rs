@@ -102,7 +102,14 @@ impl StandardTool for StorageDfTool {
         output: &str,
         dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
-        let Some(parsed) = super::utils::parse_columnar_output(output) else {
+        // `df -hT` is whitespace-separated with right-aligned numeric
+        // columns, which the generic ≥2-space-gutter parser splits wrongly
+        // (e.g. headers `used a` / `vail u`). Parse it with a fixed
+        // 7-column schema instead. Falls back to the generic parser only
+        // if the df-specific parse can't find a header.
+        let Some(parsed) =
+            parse_df_output(output).or_else(|| super::utils::parse_columnar_output(output))
+        else {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
@@ -134,6 +141,46 @@ impl StandardTool for StorageDfTool {
     }
 }
 
+/// Parse `df -hT` (and `df -hT -i`) output into a `ParsedTable`.
+///
+/// Both variants have a fixed 7-column layout: `Filesystem Type <3 size or
+/// inode columns> Use%/IUse% Mounted-on`. The first six columns never
+/// contain whitespace; the mount point (last column) may, so everything
+/// after the sixth field is joined back together. The two-word header
+/// `Mounted on` is collapsed to a single `mounted on` column. Returns
+/// `None` when the output has no header line, so the caller can fall back
+/// to the generic parser.
+fn parse_df_output(output: &str) -> Option<super::utils::ParsedTable> {
+    let mut lines = output.lines().filter(|l| !l.trim().is_empty());
+    let header_line = lines.next()?;
+    let header_fields: Vec<&str> = header_line.split_whitespace().collect();
+    // Need at least: Filesystem Type c3 c4 c5 Use% Mounted on = 8 tokens.
+    if header_fields.len() < 8 {
+        return None;
+    }
+    // First six headers are single tokens; the remainder ("Mounted on")
+    // becomes one column.
+    let mut headers: Vec<String> = header_fields[..6]
+        .iter()
+        .map(|h| h.to_lowercase())
+        .collect();
+    headers.push(header_fields[6..].join(" ").to_lowercase());
+
+    let rows: Vec<Vec<String>> = lines
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 7 {
+                return None;
+            }
+            let mut row: Vec<String> = fields[..6].iter().map(|s| (*s).to_string()).collect();
+            row.push(fields[6..].join(" "));
+            Some(row)
+        })
+        .collect();
+
+    Some(super::utils::ParsedTable { headers, rows })
+}
+
 /// Handler for the `ssh_storage_df` tool.
 pub type SshStorageDfHandler = StandardToolHandler<StorageDfTool>;
 
@@ -144,6 +191,64 @@ mod tests {
     use crate::ports::ToolHandler;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    // Real `df -hT` output from a Raspberry Pi (LC_ALL=C). The generic
+    // ≥2-space-gutter parser mangled this into `used a` / `vail u`
+    // headers; parse_df_output must keep the 7 columns intact.
+    const DF_HT_SAMPLE: &str = "\
+Filesystem     Type     Size  Used Avail Use% Mounted on
+udev           devtmpfs  3.8G     0  3.8G   0% /dev
+tmpfs          tmpfs     1.6G  166M  1.5G  11% /run
+/dev/nvme0n1p2 ext4      917G  674G  197G  78% /
+/dev/nvme0n1p1 vfat      510M   91M  420M  18% /boot/firmware";
+
+    #[test]
+    fn test_parse_df_output_columns_intact() {
+        let parsed = parse_df_output(DF_HT_SAMPLE).expect("df output should parse");
+        assert_eq!(
+            parsed.headers,
+            vec![
+                "filesystem",
+                "type",
+                "size",
+                "used",
+                "avail",
+                "use%",
+                "mounted on"
+            ]
+        );
+        assert_eq!(parsed.rows.len(), 4);
+        // Root filesystem row, fields intact and aligned.
+        let root = parsed
+            .rows
+            .iter()
+            .find(|r| r[6] == "/")
+            .expect("root mount row");
+        assert_eq!(root[0], "/dev/nvme0n1p2");
+        assert_eq!(root[1], "ext4");
+        assert_eq!(root[2], "917G");
+        assert_eq!(root[5], "78%");
+    }
+
+    #[test]
+    fn test_parse_df_output_column_selection() {
+        let parsed = parse_df_output(DF_HT_SAMPLE).unwrap();
+        let cols = vec![
+            "Filesystem".to_string(),
+            "Use%".to_string(),
+            "Mounted on".to_string(),
+        ];
+        let reduced = parsed.select_columns(&cols);
+        assert_eq!(reduced.headers, vec!["filesystem", "use%", "mounted on"]);
+        assert_eq!(reduced.rows.len(), 4);
+        assert_eq!(reduced.rows[0].len(), 3);
+    }
+
+    #[test]
+    fn test_parse_df_output_rejects_non_df() {
+        // Too few header tokens -> None, so caller falls back to generic parser.
+        assert!(parse_df_output("just one line of text").is_none());
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {

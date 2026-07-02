@@ -1899,7 +1899,7 @@ impl KubernetesCommandBuilder {
 
     /// Build a `kubectl get secret -o yaml` command that strips cluster-instance metadata.
     ///
-    /// The output is a re-appliable YAML manifest with `creationTimestamp`,
+    /// The output is a re-applicable YAML manifest with `creationTimestamp`,
     /// `resourceVersion`, `uid`, `selfLink`, `generation`, `managedFields`,
     /// `last-applied-configuration` annotation, and the `namespace` line removed.
     /// The `.data` block still contains base64-encoded values — treat as secret.
@@ -1936,7 +1936,7 @@ impl KubernetesCommandBuilder {
         }
         let ctx_flag = kubectl_context_flag(context);
         cmd.push_str(&ctx_flag);
-        // Strip cluster-instance fields so the manifest is re-appliable
+        // Strip cluster-instance fields so the manifest is re-applicable
         cmd.push_str(
             r" -o yaml | grep -v -E '^\s*(creationTimestamp|resourceVersion|uid|selfLink|generation|managedFields):' | grep -v -E '^\s+(kubectl\.kubernetes\.io/last-applied-configuration|namespace):'",
         );

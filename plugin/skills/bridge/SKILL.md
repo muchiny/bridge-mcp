@@ -8,7 +8,7 @@ description: |
   host", "restart nginx on prod", "docker ps / containers on", "kubectl / k8s
   pods / helm on the cluster", "tail the logs on", "disk usage / cpu / memory /
   processes on host", "what's listening on port", "is host reachable", "service
-  status", "configure / validate the bridge". Drives the bridge-mcp CLI (357 SSH
+  status", "configure / validate the bridge". Drives the bridge-mcp CLI (476 SSH
   tools) — guided setup, status checks, and tool execution.
 user-invocable: true
 argument-hint: "[status|config|tool-name] [args...]"

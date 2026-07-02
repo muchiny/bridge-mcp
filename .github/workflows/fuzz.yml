@@ -14,6 +14,11 @@ on:
         required: false
         default: "30"
 
+# issues: write is required by the "Create issue on crash" step below.
+permissions:
+  contents: read
+  issues: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -21,6 +26,7 @@ jobs:
   fuzz:
     name: Fuzz testing
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
 
@@ -34,10 +40,12 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Run fuzz targets
+        # Dispatch inputs go through env so they are never interpolated
+        # into the shell script (template-injection hardening).
+        env:
+          DEFAULT_DURATION: ${{ inputs.duration || '30' }}
+          SPECIFIC_TARGET: ${{ inputs.target }}
         run: |
-          DEFAULT_DURATION="${{ inputs.duration || '30' }}"
-          SPECIFIC_TARGET="${{ inputs.target }}"
-
           # Security-critical targets get extra time
           SECURITY_TARGETS="fuzz_command_validator fuzz_sanitizer fuzz_shell_escape fuzz_security_config"
 
