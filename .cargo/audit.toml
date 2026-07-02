@@ -19,6 +19,13 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    # quick-xml 0.36 DoS advisories (2026-06-29): unbounded namespace
+    # allocation + quadratic duplicate-attribute check. Transitive via the
+    # optional psrp-rs dep (`psrp`/`all-protocols` features only; default
+    # and air-gapped builds never compile it). Fixed in quick-xml >=0.41 —
+    # remove once psrp-rs bumps quick-xml. Same list as deny.toml.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 # Warn instead of error for informational advisories
