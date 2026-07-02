@@ -19,11 +19,11 @@ struct SshTunnelCloseArgs {
 }
 
 /// SSH Tunnel Close tool handler
-#[mcp_tool(
-    name = "ssh_tunnel_close",
-    group = "tunnels",
-    annotation = "destructive"
-)]
+// Closing a tunnel tears down a forwarded port — a non-idempotent
+// cleanup, not a destructive host mutation. `destructive` wrongly
+// triggered the elicitation guard on routine teardown (and disagreed
+// with tests/annotation_audit.rs, which lists it as Mutating).
+#[mcp_tool(name = "ssh_tunnel_close", group = "tunnels", annotation = "mutating")]
 pub struct SshTunnelCloseHandler;
 
 impl SshTunnelCloseHandler {

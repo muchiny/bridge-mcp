@@ -44,6 +44,8 @@ pub fn load_config(path: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(path)?;
     let mut config: Config = crate::domain::yaml::parse_yaml(&content)?;
 
+    normalize_paths(&mut config);
+
     // Merge hosts from ~/.ssh/config if discovery is enabled
     if config.ssh_config.enabled {
         merge_ssh_config_hosts(&mut config);
@@ -52,6 +54,19 @@ pub fn load_config(path: &Path) -> Result<Config> {
     validate_config(&config)?;
 
     Ok(config)
+}
+
+/// Expand a leading `~` in path-typed config fields so a value like
+/// `audit.path: ~/.local/share/bridge-mcp/audit.log` resolves to the
+/// user's home directory instead of a literal `~` directory under the
+/// server's working directory. SSH key and `ssh_config` paths are already
+/// expanded on use in `validate_config`/`merge_ssh_config_hosts`; this
+/// covers `PathBuf` fields opened directly (currently `audit.path`).
+fn normalize_paths(config: &mut Config) {
+    if let Some(p) = config.audit.path.to_str() {
+        config.audit.path =
+            crate::path_utils::home_expand(p).unwrap_or_else(|| config.audit.path.clone());
+    }
 }
 
 /// Discover hosts from SSH config and merge into the main config.
@@ -307,6 +322,67 @@ mod tests {
         // be returned by the backward-compat fallback when present.
         let s = path.to_string_lossy();
         assert!(s.contains("bridge-mcp") || s.contains("mcp-ssh-bridge"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_audit_path_tilde_is_expanded() {
+        let yaml = r#"
+hosts:
+  test:
+    hostname: "10.0.0.1"
+    user: testuser
+    auth:
+      type: agent
+security:
+  mode: permissive
+audit:
+  enabled: true
+  path: ~/.local/share/bridge-mcp/audit.log
+"#;
+        let file = secure_temp_file();
+        std::fs::write(file.path(), yaml).unwrap();
+
+        let config = load_config(file.path()).expect("config should load");
+        let audit_path = config.audit.path.to_string_lossy();
+        assert!(
+            !audit_path.starts_with('~') && !audit_path.contains("/~/"),
+            "leading ~ in audit.path must be expanded to $HOME, got: {audit_path}"
+        );
+        if let Some(home) = dirs::home_dir() {
+            assert!(
+                config.audit.path.starts_with(&home),
+                "expanded audit.path should live under $HOME ({}), got: {audit_path}",
+                home.display()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_audit_path_absolute_is_unchanged() {
+        let yaml = r#"
+hosts:
+  test:
+    hostname: "10.0.0.1"
+    user: testuser
+    auth:
+      type: agent
+security:
+  mode: permissive
+audit:
+  enabled: true
+  path: /var/log/bridge-mcp/audit.log
+"#;
+        let file = secure_temp_file();
+        std::fs::write(file.path(), yaml).unwrap();
+
+        let config = load_config(file.path()).expect("config should load");
+        assert_eq!(
+            config.audit.path,
+            Path::new("/var/log/bridge-mcp/audit.log"),
+            "absolute audit.path must pass through unchanged"
+        );
     }
 
     #[test]

@@ -48,7 +48,11 @@ const ALLOWLIST: &[(&str, ToolAnnotationKind)] = &[
     ("ssh_session_close", ToolAnnotationKind::Mutating),
     ("ssh_tunnel_create", ToolAnnotationKind::Mutating),
     ("ssh_tunnel_close", ToolAnnotationKind::Mutating),
-    ("ssh_runbook_execute", ToolAnnotationKind::Mutating),
+    // Runbooks execute arbitrary YAML-defined steps (which may include
+    // destructive commands), so the handler annotates this `destructive`
+    // to force the elicitation gate — same rationale as ssh_exec /
+    // ssh_ansible_adhoc. Allowlist kept in sync with that (was Mutating).
+    ("ssh_runbook_execute", ToolAnnotationKind::Destructive),
     ("ssh_helm_rollback", ToolAnnotationKind::Destructive),
     ("ssh_helm_uninstall", ToolAnnotationKind::Destructive),
     ("ssh_helm_install", ToolAnnotationKind::Mutating),
@@ -195,6 +199,41 @@ fn behavioral_destructive_tools_are_destructive() {
         "behaviorally-destructive tools must be annotated `destructive` \
          (edit the handler macro, or remove from BEHAVIORAL_DESTRUCTIVE if \
          intentionally downgraded): {violations:#?}"
+    );
+}
+
+/// The `ALLOWLIST` records the intended annotation for tools whose name
+/// suffix does not imply it. The registered annotation must actually
+/// match that intent — otherwise the allowlist silently disagrees with
+/// the handler macro. This caught `ssh_session_close` / `ssh_tunnel_close`
+/// being annotated `destructive` while the allowlist (correctly) lists
+/// them as `Mutating`, which needlessly tripped the
+/// `require_elicitation_on_destructive` gate on routine cleanup.
+/// (Audit 2026-07-03.)
+#[test]
+fn allowlist_matches_registered_annotation() {
+    use std::collections::HashMap;
+    let kinds: HashMap<&str, ToolAnnotationKind> = inventory::iter::<ToolRegistryEntry>()
+        .map(|e| (e.name, e.annotation_kind))
+        .collect();
+    let mut violations = vec![];
+    for (name, expected) in ALLOWLIST {
+        match kinds.get(name) {
+            Some(actual) if actual == expected => {}
+            Some(actual) => {
+                violations.push(format!(
+                    "{name}: registered {actual:?}, allowlist says {expected:?}"
+                ));
+            }
+            None => violations.push(format!(
+                "{name}: in ALLOWLIST but not registered (stale entry?)"
+            )),
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "ALLOWLIST disagrees with the handler-macro annotation — fix the macro or \
+         the allowlist so they match: {violations:#?}"
     );
 }
 
