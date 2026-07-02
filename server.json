@@ -61,7 +61,7 @@
   ],
   "links": {
     "homepage": "https://github.com/muchiny/bridge-mcp",
-    "documentation": "https://docs.rs/bridge-mcp",
+    "documentation": "https://github.com/muchiny/bridge-mcp/blob/main/README.md",
     "changelog": "https://github.com/muchiny/bridge-mcp/blob/main/CHANGELOG.md"
   }
 }

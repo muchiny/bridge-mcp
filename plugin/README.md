@@ -39,7 +39,7 @@ directly to Claude Code for remote server management.
 
 ### Capabilities
 
-- **Linux** (60 groups): systemd, Docker, Kubernetes, networking, filesystems, logs, packages, users, cron, firewall, etc.
+- **Linux** (62 groups): systemd, Docker, Kubernetes, networking, filesystems, logs, packages, users, cron, firewall, etc.
 - **Windows** (13 groups): PowerShell, services, registry, IIS, Active Directory, EventLog, etc.
 - **9 protocols**: SSH, WinRM, PSRP, Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP
 - **Token-efficient**: server-side output filtering (jq/yq, columns, limit, pagination)
@@ -48,6 +48,4 @@ directly to Claude Code for remote server management.
 ## Links
 
 - [GitHub](https://github.com/muchiny/bridge-mcp)
-- [crates.io](https://crates.io/crates/bridge-mcp)
-- [docs.rs](https://docs.rs/bridge-mcp)
 - [Configuration reference](https://github.com/muchiny/bridge-mcp/blob/main/config/config.example.yaml)

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-MCP SSH Bridge is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **476 tools** across **77 groups** (62 Linux, 13 Windows, 2 cross-platform). Count source of truth: `.migration-baseline.json` (`python3 scripts/validate_baseline.py`).
+Bridge MCP (binary `bridge-mcp`, formerly MCP SSH Bridge / `mcp-ssh-bridge`) is a Rust MCP server that enables Claude Code to securely execute commands on air-gapped environments via SSH. JSON-RPC over stdio, strict security controls. **476 tools** across **77 groups** (62 Linux, 13 Windows, 2 cross-platform). Count source of truth: `.migration-baseline.json` (`python3 scripts/validate_baseline.py`).
 
 ## CLI-as-Tool Mode (Alternative to MCP)
 
@@ -202,9 +202,10 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Active Technologies
 
-- Rust 2024 edition, MSRV 1.94 + winrm-rs 1.0, psrp-rs 1.0, russh 0.61, tokio, serde, clap 4
+- Rust 2024 edition, MSRV 1.94 + winrm-rs 1.1, psrp-rs 1.0, russh 0.62, tokio, serde, clap 4
 
 ## Recent Changes
 
-- 001-winrm-psrp-integration: Added winrm-rs + psrp-rs protocol adapters, russh 0.58->0.60
+- v1.20.0: russh 0.61->0.62 (channel-open callbacks take a `ChannelOpenHandle`), K3s/CRI/K8s-triage tool expansion (476 tools / 77 groups), CI hardening (least-privilege permissions, MSRV job, test-gated release/docker), `audit.path` tilde expansion, `df -hT` column-parse fix, session/tunnel `close` re-annotated non-destructive.
+- 001-winrm-psrp-integration: Added winrm-rs + psrp-rs protocol adapters (russh 0.58->0.60 originally; now 0.62).
 - 2026-roadmap-alignment: opt-in `security.require_elicitation_on_destructive` (MCP `elicitation/create` confirmation before any `destructive_hint: true` tool runs); three progressive-discovery meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) surfaced at the top of `tools/list`; `SessionStore` async trait + `InMemorySessionStore` behind the HTTP session hashmap so a future Redis/Valkey store drops in without touching the handlers.

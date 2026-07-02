@@ -162,7 +162,9 @@ hosts:
 
 ## Tool Groups
 
-All 74 tool groups (357 tools) are enabled by default. Disable groups you don't need:
+77 tool groups (476 tools). Secure by default: only the 8 core groups (core,
+file_ops, directory, process, monitoring, network, systemd, sessions) are enabled
+without opt-in — enable others explicitly, or disable a default group:
 
 ```yaml
 tool_groups:

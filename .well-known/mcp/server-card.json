@@ -1,7 +1,7 @@
 {
   "name": "bridge-mcp",
   "version": "1.20.0",
-  "description": "Secure SSH bridge for AI-powered remote server management. 357 tools across 75 groups covering Linux, Windows, Docker, Kubernetes, and more.",
+  "description": "Secure SSH bridge for AI-powered remote server management. 476 tools across 77 groups covering Linux, Windows, Docker, Kubernetes, and more.",
   "capabilities": {
     "tools": true,
     "resources": true,
@@ -22,8 +22,8 @@
     "oauth2",
     "jwt"
   ],
-  "tool_count": 357,
-  "tool_groups": 75,
+  "tool_count": 476,
+  "tool_groups": 77,
   "homepage": "https://github.com/muchiny/bridge-mcp",
   "repository": "https://github.com/muchiny/bridge-mcp",
   "license": "MIT",
@@ -31,7 +31,7 @@
   "extensions": {
     "progressive_discovery": {
       "supported": true,
-      "description": "Three meta-tools let clients discover the registry on demand instead of loading all 357 schemas up front. Call mcp_list_tool_groups first (~75 entries), then mcp_search_tools to narrow by keyword, then mcp_describe_tool for the one full schema you need. All three are read-only and argument-validated locally.",
+      "description": "Three meta-tools let clients discover the registry on demand instead of loading all 476 schemas up front. Call mcp_list_tool_groups first (~77 entries), then mcp_search_tools to narrow by keyword, then mcp_describe_tool for the one full schema you need. All three are read-only and argument-validated locally.",
       "tools": [
         "mcp_list_tool_groups",
         "mcp_search_tools",

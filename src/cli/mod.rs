@@ -29,7 +29,7 @@ pub use runner::{
     # Execute a command on a remote host
     bridge-mcp exec prod-server \"docker ps\"
 
-    # Invoke any of the 337 MCP tools directly via CLI
+    # Invoke any of the 476 MCP tools directly via CLI
     bridge-mcp tool ssh_docker_ps host=prod
     bridge-mcp tool ssh_exec host=prod command=\"ls -la\" --json
     bridge-mcp tool ssh_k8s_get --json-args '{\"host\":\"k8s\",\"resource\":\"pods\"}'

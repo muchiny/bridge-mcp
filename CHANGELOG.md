@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **russh 0.60 → 0.62** — server `Handler` channel-open callbacks now receive
+- **russh 0.61 → 0.62** — server `Handler` channel-open callbacks now receive
   a `ChannelOpenHandle` that must be explicitly accepted; full dependency
   refresh (`clap_complete` 4.6.7, `uuid` 1.23.4, transitives).
 - **CI hardening** — least-privilege `permissions:` on every workflow
@@ -1382,6 +1382,12 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...HEAD
+[1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
+[1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0
+[1.18.0]: https://github.com/muchiny/bridge-mcp/compare/v1.17.0...v1.18.0
+[1.17.0]: https://github.com/muchiny/bridge-mcp/compare/v1.16.0...v1.17.0
+[1.16.0]: https://github.com/muchiny/bridge-mcp/compare/v1.15.1...v1.16.0
 [1.15.0]: https://github.com/muchiny/bridge-mcp/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/muchiny/bridge-mcp/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/muchiny/bridge-mcp/compare/v1.12.0...v1.13.0
