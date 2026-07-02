@@ -390,9 +390,9 @@ audit:
 #       kubernetes: true   # opt in to kubectl + helm
 #       sessions: false    # remove tmux sessions from the default profile
 #
-# Available groups (76 groups, 399 tools):
+# Available groups (77 groups, 476 tools — source of truth: .migration-baseline.json):
 #
-#   --- Linux (59 groups) ---
+#   --- Linux (62 groups) ---
 #   core              - ssh_exec, ssh_exec_multi, ssh_status, ssh_health, ssh_history,
 #                       ssh_output_fetch
 #   file_transfer     - ssh_upload, ssh_download, ssh_sync
@@ -444,6 +444,10 @@ audit:
 #   podman            - ssh_podman_ps, ssh_podman_logs, ssh_podman_inspect, ssh_podman_exec,
 #                       ssh_podman_images, ssh_podman_compose
 #   cri               - ssh_crictl_ps (CRI container listing via crictl; works when apiserver is down)
+#   k3s               - ssh_k3s_status, ssh_k3s_check_config, ssh_k3s_etcd_snapshot_save/list/restore,
+#                       ssh_k3s_etcd_status, ssh_k3s_ctr_images, ssh_k3s_kubeconfig_get,
+#                       ssh_k3s_config_get, ssh_k3s_upgrade, ssh_k3s_uninstall, ssh_k3s_killall,
+#                       ssh_k3s_cert_rotate
 #   kubernetes        - ssh_k8s_get, ssh_k8s_logs, ssh_k8s_describe, ssh_k8s_apply,
 #                       ssh_k8s_delete, ssh_k8s_rollout, ssh_k8s_scale, ssh_k8s_exec,
 #                       ssh_k8s_top, ssh_helm_list, ssh_helm_status, ssh_helm_upgrade,
