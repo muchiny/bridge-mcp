@@ -103,7 +103,7 @@ impl StandardTool for StorageDfTool {
         dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
         // `df -hT` is whitespace-separated with right-aligned numeric
-        // columns, which the generic ≥2-space-gutter parser mis-splits
+        // columns, which the generic ≥2-space-gutter parser splits wrongly
         // (e.g. headers `used a` / `vail u`). Parse it with a fixed
         // 7-column schema instead. Falls back to the generic parser only
         // if the df-specific parse can't find a header.
