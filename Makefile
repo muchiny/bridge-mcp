@@ -94,8 +94,10 @@ outdated:
 # Full quality check (all linters)
 quality: fmt-check lint typos machete
 
-# Full CI check (quick)
-ci: fmt-check lint test audit typos
+# Full CI check (quick). Mirrors the required ci.yml checks
+# (Format/Clippy/Tests/Deny/Typos); CI additionally runs coverage (70%),
+# feature-powerset and markdownlint.
+ci: fmt-check lint test audit deny typos
 
 # Full CI check (comprehensive - replaces GitHub Actions)
 ci-full: fmt-check lint test audit typos hack geiger
@@ -118,9 +120,10 @@ setup:
 coverage:
 	@command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin --engine llvm --out Html --output-dir coverage && echo "Coverage report: coverage/tarpaulin-report.html" || echo "cargo-tarpaulin not installed, run: cargo install cargo-tarpaulin"
 
-# Code coverage with minimum threshold (fail if below)
+# Code coverage with minimum threshold (fail if below).
+# Threshold must match ci.yml's coverage job (--fail-under 70).
 coverage-check:
-	@command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin --engine llvm --out xml --output-dir coverage --fail-under 60 || echo "cargo-tarpaulin not installed, run: cargo install cargo-tarpaulin"
+	@command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin --engine llvm --out xml --output-dir coverage --fail-under 70 || echo "cargo-tarpaulin not installed, run: cargo install cargo-tarpaulin"
 
 # Mutation testing (security module only - fast)
 mutants:
@@ -211,7 +214,8 @@ docker-build:
 docker-scan: docker-build
 	@command -v trivy >/dev/null 2>&1 && trivy image --severity CRITICAL,HIGH bridge-mcp:local || echo "trivy not installed, skipping scan"
 
-# Check for outdated and unused dependencies (replaces Dependabot)
+# Check for outdated and unused dependencies (report-only complement to
+# Dependabot, which opens the actual update PRs — see .github/dependabot.yml)
 deps-check: outdated machete
 	@echo "Dependency check complete. Run 'cargo update' to apply compatible updates."
 
@@ -308,7 +312,7 @@ help:
 	@echo "  security-audit   - Full security audit (audit+deny+tests+geiger)"
 	@echo ""
 	@echo "Dependencies:"
-	@echo "  deps-check       - Check outdated + unused (replaces Dependabot)"
+	@echo "  deps-check       - Check outdated + unused (report; Dependabot opens PRs)"
 	@echo "  deps-update      - Update compatible dependencies"
 	@echo "  machete          - Check for unused dependencies"
 	@echo "  outdated         - Check for outdated dependencies"
@@ -316,7 +320,7 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  coverage         - Generate HTML coverage report (cargo-tarpaulin)"
-	@echo "  coverage-check   - Coverage with minimum threshold (--fail-under 60)"
+	@echo "  coverage-check   - Coverage with minimum threshold (--fail-under 70)"
 	@echo "  mutants          - Mutation testing (security module)"
 	@echo "  mutants-db       - Mutation testing (domain/database)"
 	@echo "  mutants-full     - Mutation testing (full project)"

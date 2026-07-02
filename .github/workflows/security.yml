@@ -12,6 +12,13 @@ on:
       - "Cargo.lock"
       - "deny.toml"
 
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -19,6 +26,7 @@ jobs:
   audit:
     name: Cargo audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -27,14 +35,26 @@ jobs:
       # input" when advisories need to be ignored — run cargo-audit
       # directly instead. It reads .cargo/audit.toml natively so the
       # ignore list stays in one place.
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # cargo audit reads .cargo/audit.toml, cargo-deny reads deny.toml —
+      # the RUSTSEC ignore lists are duplicated by design and must match,
+      # otherwise one gate goes red while the other stays green.
+      - name: Check RUSTSEC ignore lists stay in sync
+        run: |
+          extract() { grep -v '^[[:space:]]*#' "$1" | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]+' | sort -u; }
+          if ! diff <(extract deny.toml) <(extract .cargo/audit.toml); then
+            echo "::error::RUSTSEC ignore lists differ between deny.toml and .cargo/audit.toml"
+            exit 1
+          fi
       - name: Run cargo audit
         run: cargo audit
 
   deny:
     name: Cargo deny
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -44,6 +64,7 @@ jobs:
   security-tests:
     name: Security tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -56,6 +77,7 @@ jobs:
     name: Unsafe code scan
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -71,6 +93,7 @@ jobs:
     name: Mutation testing (security)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

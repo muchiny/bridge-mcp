@@ -16,9 +16,28 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Tag pushes never go through ci.yml — run the test suite before an
+  # image is built and pushed to GHCR.
+  test:
+    name: Test before push
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docker-test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --all-targets --all-features
+
   build-scan-push:
     name: Build, scan & push
     runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -57,7 +76,9 @@ jobs:
 
       - name: Get scan target tag
         id: scan_target
-        run: echo "tag=$(echo '${{ steps.meta.outputs.tags }}' | head -n1)" >> "$GITHUB_OUTPUT"
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: echo "tag=$(echo "$TAGS" | head -n1)" >> "$GITHUB_OUTPUT"
 
       - name: Trivy scan (CRITICAL + HIGH — fail)
         uses: aquasecurity/trivy-action@v0.35.0
@@ -85,7 +106,9 @@ jobs:
 
       - name: Push to GHCR
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          for tag in $(echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n'); do
+          for tag in $(echo "$TAGS" | tr ',' '\n'); do
             docker push "$tag"
           done
