@@ -366,4 +366,25 @@ mod tests {
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshRedisKeysArgs =
+            serde_json::from_value(json!({"host": "server1", "pattern": "user:*"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "user:1000\nuser:1001\nsession:abc\n";
+        let result = RedisKeysTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshRedisKeysArgs =
+            serde_json::from_value(json!({"host": "server1", "pattern": "user:*"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = RedisKeysTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

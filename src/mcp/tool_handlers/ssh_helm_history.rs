@@ -388,4 +388,27 @@ mod tests {
         assert!(cmd.contains("-n 'staging'"));
         assert!(cmd.contains("-o 'yaml'"));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshHelmHistoryArgs =
+            serde_json::from_value(json!({"host": "server1", "release": "my-app"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "REVISION   STATUS     CHART         APP_VERSION\n\
+                      1          deployed   nginx-1.0.0   1.21.0\n\
+                      2          deployed   nginx-1.1.0   1.22.0";
+        let result = HelmHistoryTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshHelmHistoryArgs =
+            serde_json::from_value(json!({"host": "server1", "release": "my-app"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = HelmHistoryTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

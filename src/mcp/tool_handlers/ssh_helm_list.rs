@@ -477,4 +477,24 @@ mod tests {
         assert!(cmd.contains("-l 'app=nginx'"), "cmd={cmd}");
         assert!(cmd.contains("--max 10"), "cmd={cmd}");
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshHelmListArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "NAME   NAMESPACE   REVISION   STATUS     CHART\n\
+                      app    default     1          deployed   nginx-1.0.0";
+        let result = HelmListTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshHelmListArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = HelmListTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

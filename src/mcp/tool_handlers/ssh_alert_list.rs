@@ -264,4 +264,23 @@ mod tests {
         assert!(cmd.contains("Disk"));
         assert!(cmd.contains("Load"));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshAlertListArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "METRIC   VALUE\ncpu      12%\nmemory   45%";
+        let result = AlertListTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshAlertListArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = AlertListTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

@@ -457,4 +457,27 @@ mod tests {
         assert!(cmd.contains("--sort-by='memory'"));
         assert!(cmd.contains("--containers"));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshK8sTopArgs =
+            serde_json::from_value(json!({"host": "server1", "resource_type": "nodes"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "NAME    CPU(cores)   MEMORY(bytes)\n\
+                      node1   100m         200Mi\n\
+                      node2   250m         512Mi";
+        let result = K8sTopTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshK8sTopArgs =
+            serde_json::from_value(json!({"host": "server1", "resource_type": "nodes"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = K8sTopTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

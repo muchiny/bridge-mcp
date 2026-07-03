@@ -364,4 +364,29 @@ mod tests {
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshDiscoverHostsArgs =
+            serde_json::from_value(json!({"host": "server1", "network": "192.168.1.0/24"}))
+                .unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "IP             MAC                STATUS\n\
+                      192.168.1.10   aa:bb:cc:dd:ee:01  reachable\n\
+                      192.168.1.11   aa:bb:cc:dd:ee:02  reachable";
+        let result = DiscoverHostsTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshDiscoverHostsArgs =
+            serde_json::from_value(json!({"host": "server1", "network": "192.168.1.0/24"}))
+                .unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = DiscoverHostsTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }
