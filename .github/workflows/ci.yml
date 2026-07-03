@@ -141,6 +141,16 @@ jobs:
       # up by --include-ignored. Container is stopped in the always() step.
       - name: Start test SSH container
         run: |
+          # Pre-pull with backoff: the lscr.io/Docker Hub registry
+          # occasionally rate-limits (`toomanyrequests`), which otherwise
+          # fails this whole (non-required) coverage job spuriously.
+          for attempt in 1 2 3 4 5; do
+            if docker compose -f docker-compose.test.yml pull; then
+              break
+            fi
+            echo "::warning::image pull failed (attempt $attempt) — retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
           docker compose -f docker-compose.test.yml up -d --wait
           docker compose -f docker-compose.test.yml ps
 
