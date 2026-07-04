@@ -33,10 +33,38 @@ jobs:
           tool: cargo-nextest
       - run: cargo nextest run --all-targets --all-features
 
+  # The crate is not on crates.io, so the SemVer baseline is the previous
+  # release tag. A breaking API change without a major bump fails the
+  # release before any binary is built.
+  semver:
+    name: SemVer check vs previous tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: semver
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Run cargo-semver-checks
+        run: |
+          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -z "$prev" ]; then
+            echo "No previous tag found; skipping SemVer check"
+            exit 0
+          fi
+          echo "Baseline: $prev"
+          cargo semver-checks --baseline-rev "$prev" --default-features
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    needs: test
+    needs: [test, semver]
     timeout-minutes: 60
     strategy:
       fail-fast: false
