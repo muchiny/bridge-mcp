@@ -166,9 +166,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage
+      # cargo-llvm-cov: source-based LLVM instrumentation (precise line and
+      # region counts) instead of tarpaulin's ptrace engine; integrates with
+      # nextest so the run behaves exactly like the Tests job.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin
+          tool: cargo-llvm-cov,cargo-nextest
 
       # Phase A: start the SSH test container and generate the integration
       # test config so the previously-#[ignore]'d tests in
@@ -207,14 +210,13 @@ jobs:
 
       - name: Generate coverage (with integration tests)
         run: |
-          cargo tarpaulin --engine llvm --all-features \
-            --out xml --output-dir coverage \
-            --fail-under 70 \
-            --timeout 600 \
-            --skip-clean \
-            --exclude-files tests/e2e_raspberry.rs \
-            -- --include-ignored \
-               --skip rpi::
+          mkdir -p coverage
+          cargo llvm-cov nextest --all-features \
+            --ignore-filename-regex 'tests/e2e_raspberry\.rs' \
+            --cobertura --output-path coverage/cobertura.xml \
+            --fail-under-lines 70 \
+            --run-ignored all \
+            -E 'not test(rpi::)'
 
       - name: Stop test SSH container
         if: always()

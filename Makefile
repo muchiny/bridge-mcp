@@ -112,7 +112,7 @@ setup:
 	@echo "Installing Rust dev tools..."
 	rustup component add rustfmt clippy
 	@echo "Installing cargo tools..."
-	cargo install cargo-nextest cargo-deny cargo-audit cargo-watch cargo-machete cargo-outdated typos-cli cargo-semver-checks cargo-hack cargo-insta cargo-geiger cargo-cyclonedx cross --locked
+	cargo install cargo-nextest cargo-deny cargo-audit cargo-watch cargo-machete cargo-outdated typos-cli cargo-semver-checks cargo-hack cargo-insta cargo-geiger cargo-cyclonedx cargo-llvm-cov cross --locked
 	@echo "Installing pre-commit (requires Python)..."
 	@command -v pip >/dev/null 2>&1 && pip install --user pre-commit && pre-commit install || echo "pip not found, skipping pre-commit"
 	@echo "Installing markdownlint (requires Node.js)..."
@@ -120,14 +120,15 @@ setup:
 	@echo ""
 	@echo "Setup complete! Run 'make check' to verify."
 
-# Code coverage report (requires cargo-tarpaulin: cargo install cargo-tarpaulin)
+# Code coverage report (requires cargo-llvm-cov: cargo install cargo-llvm-cov)
+# WSL NOTE: full-crate coverage is heavy; locally we scope to --lib.
 coverage:
-	@command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin --engine llvm --out Html --output-dir coverage && echo "Coverage report: coverage/tarpaulin-report.html" || echo "cargo-tarpaulin not installed, run: cargo install cargo-tarpaulin"
+	@command -v cargo-llvm-cov >/dev/null 2>&1 && cargo llvm-cov --lib --html --output-dir coverage && echo "Coverage report: coverage/html/index.html" || echo "cargo-llvm-cov not installed, run: cargo install cargo-llvm-cov"
 
 # Code coverage with minimum threshold (fail if below).
-# Threshold must match ci.yml's coverage job (--fail-under 70).
+# Threshold must match ci.yml's coverage job (--fail-under-lines 70).
 coverage-check:
-	@command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin --engine llvm --out xml --output-dir coverage --fail-under 70 || echo "cargo-tarpaulin not installed, run: cargo install cargo-tarpaulin"
+	@command -v cargo-llvm-cov >/dev/null 2>&1 && cargo llvm-cov --lib --summary-only --fail-under-lines 70 || echo "cargo-llvm-cov not installed, run: cargo install cargo-llvm-cov"
 
 # Mutation testing (security module only - fast)
 mutants:
@@ -324,8 +325,8 @@ help:
 	@echo "  sbom             - Generate SBOM (CycloneDX)"
 	@echo ""
 	@echo "Testing:"
-	@echo "  coverage         - Generate HTML coverage report (cargo-tarpaulin)"
-	@echo "  coverage-check   - Coverage with minimum threshold (--fail-under 70)"
+	@echo "  coverage         - Generate HTML coverage report (cargo-llvm-cov, --lib)"
+	@echo "  coverage-check   - Coverage with minimum threshold (--fail-under-lines 70)"
 	@echo "  mutants          - Mutation testing (security module)"
 	@echo "  mutants-db       - Mutation testing (domain/database)"
 	@echo "  mutants-full     - Mutation testing (full project)"
