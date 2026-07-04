@@ -1,7 +1,9 @@
 [profile.default]
 retries = 0
 
-# Flaky test: config watcher uses filesystem events with timing-sensitive assertions
+# The watcher's decision logic is deterministic (pure should_process_event,
+# unit-tested), but this end-to-end test still depends on real inotify event
+# DELIVERY latency, which varies under instrumented builds (llvm-cov).
 [[profile.default.overrides]]
 filter = "test(test_config_watcher_detects_changes)"
 retries = 2

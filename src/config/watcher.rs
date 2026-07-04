@@ -17,6 +17,89 @@ const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 use super::{Config, load_config};
 use crate::security::CommandValidator;
 
+/// Decide whether a filesystem event must trigger a config reload.
+///
+/// Functional core of the watcher: the notify callback passes the current
+/// instant explicitly, so kind/path filtering and the debounce window are
+/// unit-testable without a real filesystem or clock. On acceptance the
+/// debounce timestamp is updated.
+fn should_process_event(
+    event: &Event,
+    config_path: &Path,
+    last_reload: &Mutex<Instant>,
+    now: Instant,
+) -> bool {
+    // Accept both Modify and Create events to handle atomic saves
+    // (vim/nano/VSCode write a temp file then rename it over the original,
+    // which produces Create rather than Modify).
+    let relevant_kind = event.kind.is_modify() || event.kind.is_create();
+    let concerns_config = event.paths.iter().any(|p| p == config_path);
+    if !(relevant_kind && concerns_config) {
+        return false;
+    }
+
+    let mut last = last_reload
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if now.duration_since(*last) < DEBOUNCE_DURATION {
+        debug!(path = %config_path.display(), "Debouncing config reload");
+        return false;
+    }
+    *last = now;
+    true
+}
+
+/// Build the notify callback shared by all constructors.
+fn make_reload_handler(
+    path: PathBuf,
+    config: Arc<RwLock<Config>>,
+    validator: Option<Arc<CommandValidator>>,
+    on_reload: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> impl Fn(notify::Result<Event>) + Send + 'static {
+    // Initialize the debounce timestamp to an instant in the past so the
+    // first change is processed immediately.
+    let last_reload = Arc::new(Mutex::new(
+        Instant::now()
+            .checked_sub(DEBOUNCE_DURATION)
+            .unwrap_or_else(Instant::now),
+    ));
+    move |res| match res {
+        Ok(event) => {
+            if !should_process_event(&event, &path, &last_reload, Instant::now()) {
+                return;
+            }
+            info!(path = %path.display(), "Configuration file changed, reloading...");
+            match load_config(&path) {
+                Ok(new_config) => {
+                    let security_config = new_config.security.clone();
+                    {
+                        // blocking_write: we're in a sync callback on the
+                        // notify watcher thread, not a tokio task.
+                        let mut guard = config.blocking_write();
+                        *guard = new_config;
+                    }
+                    if let Some(ref v) = validator {
+                        v.reload(&security_config);
+                    }
+                    info!("Configuration reloaded successfully");
+                    if let Some(ref cb) = on_reload {
+                        cb();
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "Failed to reload configuration, keeping previous config"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "File watch error");
+        }
+    }
+}
+
 /// Configuration file watcher for hot-reload
 ///
 /// When the configuration file is modified, the watcher automatically
@@ -62,98 +145,7 @@ impl ConfigWatcher {
         config: Arc<RwLock<Config>>,
         validator: Option<Arc<CommandValidator>>,
     ) -> notify::Result<Self> {
-        // Verify the config file exists before setting up the watcher
-        if !config_path.exists() {
-            return Err(notify::Error::path_not_found());
-        }
-
-        let path = config_path.to_path_buf();
-        let path_clone = path.clone();
-
-        // Debounce: track last reload time to avoid processing duplicate events
-        // from editors that generate multiple filesystem events per save.
-        // Initialize to an instant in the past so the first change is processed immediately.
-        let last_reload = Arc::new(Mutex::new(
-            Instant::now()
-                .checked_sub(DEBOUNCE_DURATION)
-                .unwrap_or_else(Instant::now),
-        ));
-
-        // Create the file watcher
-        let mut watcher = notify::recommended_watcher(move |res: Result<Event, _>| {
-            match res {
-                Ok(event) => {
-                    // Accept both Modify and Create events to handle atomic saves.
-                    // Editors like vim/nano/VSCode write to a temp file then rename
-                    // it over the original, which generates Create events rather
-                    // than Modify events.
-                    let dominated = event.kind.is_modify() || event.kind.is_create();
-                    let concerns_config = event.paths.iter().any(|p| p == &path_clone);
-
-                    if dominated && concerns_config {
-                        // Debounce: skip if a reload happened recently
-                        {
-                            let mut last = last_reload
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if last.elapsed() < DEBOUNCE_DURATION {
-                                debug!(path = %path_clone.display(), "Debouncing config reload");
-                                return;
-                            }
-                            *last = Instant::now();
-                        }
-
-                        info!(path = %path_clone.display(), "Configuration file changed, reloading...");
-
-                        match load_config(&path_clone) {
-                            Ok(new_config) => {
-                                // Use blocking_write since we're in a sync callback
-                                // (the watcher runs on its own thread, not a tokio task).
-                                // This replaces the previous std::thread::spawn + mini-runtime
-                                // approach which was unreliable.
-                                let security_config = new_config.security.clone();
-
-                                {
-                                    let mut guard = config.blocking_write();
-                                    *guard = new_config;
-                                }
-
-                                // Reload validator with new security rules
-                                if let Some(ref v) = validator {
-                                    v.reload(&security_config);
-                                }
-
-                                info!("Configuration reloaded successfully");
-                            }
-                            Err(e) => {
-                                error!(
-                                    error = %e,
-                                    "Failed to reload configuration, keeping previous config"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "File watch error");
-                }
-            }
-        })?;
-
-        // Watch the parent directory instead of the file directly.
-        // On Linux, inotify watches file inodes. When editors do atomic saves
-        // (write temp file, rename over original), the original inode is deleted
-        // and a new one is created, causing the watcher to lose track.
-        // Watching the parent directory avoids this issue.
-        let watch_path = config_path.parent().unwrap_or(config_path);
-        watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
-
-        info!(path = %config_path.display(), "Started watching configuration file for changes");
-
-        Ok(Self {
-            _watcher: watcher,
-            path,
-        })
+        Self::build(config_path, config, validator, None)
     }
 
     /// Create a configuration watcher with validator and reload notifications.
@@ -178,76 +170,39 @@ impl ConfigWatcher {
         validator: Option<Arc<CommandValidator>>,
         on_reload: Arc<dyn Fn() + Send + Sync>,
     ) -> notify::Result<Self> {
+        Self::build(config_path, config, validator, Some(on_reload))
+    }
+
+    /// Shared constructor: wires the reload handler to a watcher on the
+    /// config file's parent directory.
+    fn build(
+        config_path: &Path,
+        config: Arc<RwLock<Config>>,
+        validator: Option<Arc<CommandValidator>>,
+        on_reload: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> notify::Result<Self> {
+        // Verify the config file exists before setting up the watcher
         if !config_path.exists() {
             return Err(notify::Error::path_not_found());
         }
 
         let path = config_path.to_path_buf();
-        let path_clone = path.clone();
+        let mut watcher = notify::recommended_watcher(make_reload_handler(
+            path.clone(),
+            config,
+            validator,
+            on_reload,
+        ))?;
 
-        let last_reload = Arc::new(Mutex::new(
-            Instant::now()
-                .checked_sub(DEBOUNCE_DURATION)
-                .unwrap_or_else(Instant::now),
-        ));
-
-        let mut watcher = notify::recommended_watcher(move |res: Result<Event, _>| {
-            match res {
-                Ok(event) => {
-                    let dominated = event.kind.is_modify() || event.kind.is_create();
-                    let concerns_config = event.paths.iter().any(|p| p == &path_clone);
-
-                    if dominated && concerns_config {
-                        {
-                            let mut last = last_reload
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if last.elapsed() < DEBOUNCE_DURATION {
-                                debug!(path = %path_clone.display(), "Debouncing config reload");
-                                return;
-                            }
-                            *last = Instant::now();
-                        }
-
-                        info!(path = %path_clone.display(), "Configuration file changed, reloading...");
-
-                        match load_config(&path_clone) {
-                            Ok(new_config) => {
-                                let security_config = new_config.security.clone();
-
-                                {
-                                    let mut guard = config.blocking_write();
-                                    *guard = new_config;
-                                }
-
-                                if let Some(ref v) = validator {
-                                    v.reload(&security_config);
-                                }
-
-                                info!("Configuration reloaded successfully");
-
-                                // Notify the server after successful reload
-                                on_reload();
-                            }
-                            Err(e) => {
-                                error!(
-                                    error = %e,
-                                    "Failed to reload configuration, keeping previous config"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "File watch error");
-                }
-            }
-        })?;
-
+        // Watch the parent directory instead of the file directly.
+        // On Linux, inotify watches file inodes. When editors do atomic saves
+        // (write temp file, rename over original), the original inode is deleted
+        // and a new one is created, causing the watcher to lose track.
+        // Watching the parent directory avoids this issue.
         let watch_path = config_path.parent().unwrap_or(config_path);
         watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
 
-        info!(path = %config_path.display(), "Started watching configuration file for changes (with notifications)");
+        info!(path = %config_path.display(), "Started watching configuration file for changes");
 
         Ok(Self {
             _watcher: watcher,
@@ -1251,6 +1206,123 @@ mod tests {
     #[test]
     fn test_debounce_duration_value() {
         assert_eq!(DEBOUNCE_DURATION, Duration::from_millis(500));
+    }
+
+    // ============== should_process_event (pure core) ==============
+
+    mod should_process {
+        use notify::Event;
+        use notify::event::{AccessKind, CreateKind, DataChange, EventKind, ModifyKind};
+
+        use super::super::should_process_event;
+        use super::*;
+
+        fn modify_event(path: &Path) -> Event {
+            Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+                .add_path(path.to_path_buf())
+        }
+
+        /// Debounce state whose last reload is comfortably in the past.
+        fn past_instant(now: Instant) -> Mutex<Instant> {
+            Mutex::new(now.checked_sub(DEBOUNCE_DURATION * 2).unwrap_or(now))
+        }
+
+        #[test]
+        fn accepts_modify_on_config_path() {
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let now = Instant::now();
+            assert!(should_process_event(
+                &modify_event(&p),
+                &p,
+                &past_instant(now),
+                now
+            ));
+        }
+
+        #[test]
+        fn accepts_create_for_atomic_saves() {
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let ev = Event::new(EventKind::Create(CreateKind::File)).add_path(p.clone());
+            let now = Instant::now();
+            assert!(should_process_event(&ev, &p, &past_instant(now), now));
+        }
+
+        #[test]
+        fn rejects_wrong_path() {
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let other = PathBuf::from("/etc/bridge/other.yaml");
+            let now = Instant::now();
+            assert!(!should_process_event(
+                &modify_event(&other),
+                &p,
+                &past_instant(now),
+                now
+            ));
+        }
+
+        #[test]
+        fn rejects_access_events() {
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let ev = Event::new(EventKind::Access(AccessKind::Read)).add_path(p.clone());
+            let now = Instant::now();
+            assert!(!should_process_event(&ev, &p, &past_instant(now), now));
+        }
+
+        #[test]
+        fn debounces_inside_window() {
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let start = Instant::now();
+            let last = Mutex::new(start);
+            let just_inside = start + DEBOUNCE_DURATION - Duration::from_millis(1);
+            assert!(!should_process_event(
+                &modify_event(&p),
+                &p,
+                &last,
+                just_inside
+            ));
+        }
+
+        #[test]
+        fn fires_at_exact_debounce_boundary() {
+            // elapsed == DEBOUNCE_DURATION: strict `<` means the debounce
+            // window is over, the event must be processed.
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let start = Instant::now();
+            let last = Mutex::new(start);
+            assert!(should_process_event(
+                &modify_event(&p),
+                &p,
+                &last,
+                start + DEBOUNCE_DURATION
+            ));
+        }
+
+        #[test]
+        fn updates_last_reload_timestamp_on_acceptance() {
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let now = Instant::now();
+            let last = past_instant(now);
+            assert!(should_process_event(&modify_event(&p), &p, &last, now));
+            // Second event at the same instant: now inside the debounce window.
+            assert!(!should_process_event(&modify_event(&p), &p, &last, now));
+        }
+
+        #[test]
+        fn debounce_rejection_does_not_update_timestamp() {
+            // A debounced event must not extend the window: an event exactly
+            // at the boundary after a rejected mid-window event still fires.
+            let p = PathBuf::from("/etc/bridge/config.yaml");
+            let start = Instant::now();
+            let last = Mutex::new(start);
+            let mid = start + DEBOUNCE_DURATION / 2;
+            assert!(!should_process_event(&modify_event(&p), &p, &last, mid));
+            assert!(should_process_event(
+                &modify_event(&p),
+                &p,
+                &last,
+                start + DEBOUNCE_DURATION
+            ));
+        }
     }
 
     #[tokio::test]
