@@ -129,32 +129,27 @@ fn take_tail_lines(s: &str, budget: usize) -> &str {
 
 /// Find the largest index that is both <= `index` and a valid char boundary.
 /// This is a UTF-8 safe version of slicing.
+///
+/// UTF-8 encodes a char in at most 4 bytes, so a boundary always exists in
+/// the 4-position window ending at `index` — the scan is bounded by
+/// construction (no open loop that a mutation could turn infinite).
 #[doc(hidden)]
 pub fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    // Walk backwards until we find a char boundary
-    let mut i = index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+    let index = index.min(s.len());
+    (index.saturating_sub(3)..=index)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0)
 }
 
 /// Find the smallest index that is both >= `index` and a valid char boundary.
 /// This is a UTF-8 safe version of slicing.
 #[doc(hidden)]
 pub fn ceil_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    // Walk forwards until we find a char boundary
-    let mut i = index;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
+    let index = index.min(s.len());
+    (index..=index.saturating_add(3).min(s.len()))
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(s.len())
 }
 
 #[cfg(test)]
@@ -772,5 +767,20 @@ mod tests {
         assert!(result.contains("MORE DATA AVAILABLE"));
         assert!(result.contains("To get the complete output, call:"));
         assert!(result.contains("offset=0, limit=50000"));
+    }
+
+    proptest::proptest! {
+        /// Characterization of the char-boundary helpers: results are always
+        /// valid boundaries bracketing the requested index.
+        #[test]
+        fn char_boundary_helpers_invariants(s in "\\PC*", idx in 0usize..64) {
+            let f = floor_char_boundary(&s, idx);
+            let c = ceil_char_boundary(&s, idx);
+            proptest::prop_assert!(s.is_char_boundary(f));
+            proptest::prop_assert!(s.is_char_boundary(c));
+            proptest::prop_assert!(f <= idx.min(s.len()));
+            proptest::prop_assert!(c >= idx.min(s.len()));
+            proptest::prop_assert!(f <= c);
+        }
     }
 }

@@ -41,25 +41,11 @@ exclude_re = [
     # (2026-07-04) OutputCache TTL exclusions removed: the cache now uses
     # `tokio::time::Instant`, and `start_paused` boundary tests kill the
     # `<`/`<=`/`==` mutants deterministically.
-    # `floor_char_boundary` / `ceil_char_boundary` short-circuit on the
-    # second condition (`!s.is_char_boundary(0)` and `_(s.len())` are
-    # both `false` because byte 0 and byte len are *always* char
-    # boundaries in Rust strings). The mutations `> -> >=` and `< -> <=`
-    # therefore produce the same observable output as the original.
-    "replace > with >= in floor_char_boundary",
-    "replace < with <= in ceil_char_boundary",
-    # `i -= 1` / `i += 1` mutated to `i /= 1` / `i *= 1` are no-ops on
-    # any value (x*1 == x, x/1 == x). The loop body becomes infinite,
-    # which would be caught by a tight per-call timeout — but the
-    # current test infrastructure exercises `floor`/`ceil` indirectly
-    # through `truncate_output` calls inside many other tests, all of
-    # which then hang and trip a SIGTERM that flips the whole mutant
-    # outcome to TIMEOUT instead of FAIL. Killing these properly
-    # requires either factoring the loop out behind a `Clock`-style
-    # bound, or wrapping every truncation test in a thread+recv
-    # timeout — both out of scope for this batch.
-    "replace -= with /= in floor_char_boundary",
-    "replace \\+= with \\*= in ceil_char_boundary",
+    # (2026-07-04) floor/ceil_char_boundary exclusions removed: the open
+    # `while` loops were rewritten as bounded range scans (a UTF-8 char is
+    # at most 4 bytes, so a boundary always exists in a 4-position window).
+    # No comparison/assignment operators remain to mutate; body-replacement
+    # mutants are killed by the unit tests + boundary property test.
     # `DataReductionArgs::wants_tsv` is `#[cfg(feature = "jq")]`-gated.
     # Mutations on the body are equivalent in default builds because
     # the function is compiled out; killing them requires a `--features
