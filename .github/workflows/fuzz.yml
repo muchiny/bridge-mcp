@@ -3,6 +3,7 @@ name: Fuzz
 on:
   schedule:
     - cron: "0 3 * * *" # Nightly at 3am UTC
+    - cron: "0 4 1 * *" # Monthly (1st, 4am UTC): corpus minimization run
   workflow_dispatch:
     inputs:
       target:
@@ -38,6 +39,36 @@ jobs:
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+
+      # Accumulating corpus: the per-run key never matches, so the freshest
+      # `fuzz-corpus-*` entry is restored via the prefix and a new snapshot
+      # (with everything this run discovered) is saved at job end. Without
+      # this, every nightly run restarts coverage-guided exploration from
+      # zero and 30s/target only ever scratches the same shallow surface.
+      - name: Restore fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-
+
+      - name: Seed corpus from committed seeds
+        run: |
+          for dir in fuzz/seeds/*/; do
+            target=$(basename "$dir")
+            mkdir -p "fuzz/corpus/$target"
+            cp -n "$dir"* "fuzz/corpus/$target/" 2>/dev/null || true
+          done
+
+      - name: Minimize corpus (monthly)
+        if: github.event.schedule == '0 4 1 * *'
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            if [ -d "fuzz/corpus/$target" ]; then
+              cargo +nightly fuzz cmin "$target" 2>&1 || true
+            fi
+          done
 
       - name: Run fuzz targets
         # Dispatch inputs go through env so they are never interpolated
