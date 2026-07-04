@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
 
 # Default target
 all: check lint test
@@ -56,6 +56,10 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
+# Rustdoc as a lint: broken intra-doc links, bare URLs, invalid HTML
+doc-check:
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
 # Security audit (requires cargo-audit: cargo install cargo-audit)
 audit:
 	@command -v cargo-deny >/dev/null 2>&1 && cargo deny check advisories || (command -v cargo-audit >/dev/null 2>&1 && cargo-audit audit || echo "neither cargo-deny nor cargo-audit installed, skipping")
@@ -100,7 +104,7 @@ quality: fmt-check lint typos machete
 ci: fmt-check lint test audit deny typos
 
 # Full CI check (comprehensive - replaces GitHub Actions)
-ci-full: fmt-check lint test audit typos hack geiger
+ci-full: fmt-check lint test audit typos hack geiger doc-check
 	@echo "Full CI complete."
 
 # Setup development environment
@@ -301,6 +305,7 @@ help:
 	@echo "  fmt              - Format code"
 	@echo "  fmt-check        - Check formatting"
 	@echo "  typos            - Check for typos"
+	@echo "  doc-check        - Rustdoc lint (broken links, -D warnings)"
 	@echo "  hack             - Check all feature combinations"
 	@echo "  quality          - Full quality check (lint+typos+machete)"
 	@echo ""

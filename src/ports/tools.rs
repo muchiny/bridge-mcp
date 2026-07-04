@@ -104,7 +104,7 @@ pub struct ToolContext {
     /// Client-provided progress token for `notifications/progress`.
     ///
     /// Present when the MCP client passed a `_meta.progressToken` on the
-    /// request. Handlers obtain a [`ProgressReporter`] via
+    /// request. Handlers obtain a [`ProgressReporter`](crate::mcp::progress::ProgressReporter) via
     /// [`ToolContext::progress_reporter`] which couples this token with
     /// the per-session [`Self::notification_tx`]; long-running handlers
     /// (`ssh_exec_multi`, `ssh_metrics_multi`, `ssh_diagnose`, runbook
@@ -189,7 +189,7 @@ impl ToolContext {
         }
     }
 
-    /// Build a [`ProgressReporter`] for the current request, or `None`
+    /// Build a [`ProgressReporter`](crate::mcp::progress::ProgressReporter) for the current request, or `None`
     /// when the client did not provide a `progressToken` or the session
     /// has no notification channel attached. `total` is the number of
     /// expected steps and enables percentage display on the client side

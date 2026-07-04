@@ -13,12 +13,12 @@
 //! amplification factors.
 //!
 //! Limits enforced (per call):
-//! - max input size: [`MAX_YAML_BYTES`] (1 MiB)
+//! - max input size: `MAX_YAML_BYTES` (1 MiB)
 //! - max anchors: 100
 //! - max alias events: 1 000
 //! - max structural depth: 50
 //! - max nodes (sequences + maps + scalars): 10 000
-//! - max total scalar bytes: [`MAX_YAML_BYTES`] (1 MiB, matching input cap)
+//! - max total scalar bytes: `MAX_YAML_BYTES` (1 MiB, matching input cap)
 //!
 //! Test fixtures inside `#[cfg(test)] mod tests` blocks intentionally keep
 //! using the bare `serde_saphyr::from_str` so they can exercise edge cases
@@ -73,7 +73,7 @@ fn hardened_options() -> serde_saphyr::Options {
 /// # Errors
 ///
 /// Returns [`BridgeError::Config`] when:
-/// - the input exceeds [`MAX_YAML_BYTES`],
+/// - the input exceeds `MAX_YAML_BYTES`,
 /// - the input trips any saphyr [`Budget`](serde_saphyr::Budget) limit
 ///   (anchor count, alias count, depth, node count, total scalar bytes),
 /// - the input is not valid YAML or does not match the target type `T`.

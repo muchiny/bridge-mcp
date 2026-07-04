@@ -8,7 +8,8 @@
 //! # Production wiring
 //!
 //! Use [`build_validator`] at server startup to construct a single
-//! [`OAuthValidator`] from a [`HttpOAuthConfig`]. The validator pre-loads
+//! [`OAuthValidator`] from a [`HttpOAuthConfig`](crate::config::types::HttpOAuthConfig).
+//! The validator pre-loads
 //! every signing key declared in `static_keys` and is shared across
 //! requests as `Arc<OAuthValidator>` via Axum extensions; the middleware
 //! reads the shared instance instead of building a fresh empty validator
@@ -127,11 +128,11 @@ struct JwtClaims {
 /// Public keys are addressed by their JWK `kid`. Two key shapes are accepted:
 /// - PEM-encoded RSA public key (PKCS#1 or `SubjectPublicKeyInfo`)
 /// - `n.e` JWK components stored as `"<n>.<e>"` (populated by
-///   [`Self::refresh_jwks`])
+///   [`OAuthValidator::load_jwks`])
 pub struct OAuthValidator {
     config: OAuthConfig,
     /// Public keys keyed by `kid`. Each value is either a PEM blob or the
-    /// `n.e` JWK components when populated by [`Self::refresh_jwks`].
+    /// `n.e` JWK components when populated by [`Self::load_jwks`].
     keys: HashMap<String, String>,
 }
 
@@ -139,7 +140,7 @@ impl OAuthValidator {
     /// Create a new OAuth validator with no signing keys.
     ///
     /// Callers must populate keys via [`Self::set_static_keys`] or
-    /// [`Self::refresh_jwks`] before any token will be accepted.
+    /// [`Self::load_jwks`] before any token will be accepted.
     #[must_use]
     pub fn new(config: OAuthConfig) -> Self {
         Self {
