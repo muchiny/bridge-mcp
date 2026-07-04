@@ -55,6 +55,26 @@ pub fn home_expand_or_input(input: &str) -> String {
     home_expand_string(input).unwrap_or_else(|| input.to_string())
 }
 
+/// Default directory for user-provided runbooks: `<config>/bridge-mcp/runbooks`.
+///
+/// Resolves the platform config directory via [`dirs::config_dir`], falling
+/// back to `<home>/.config` and finally a relative `./bridge-mcp/runbooks`
+/// when neither the config dir nor a home directory can be resolved (stripped
+/// containers, `HOME`/`XDG_CONFIG_HOME` unset).
+///
+/// This lives in the infrastructure layer (not `domain/`) because it performs
+/// platform/environment path resolution through the `dirs` crate, which the
+/// domain layer must not depend on. The previous implementation lived in
+/// `domain/runbook.rs` and used a literal `"~/.config"` fallback whose `~` was
+/// never expanded by callers — replaced here with a real path.
+#[must_use]
+pub fn default_runbooks_dir() -> PathBuf {
+    let config_dir = dirs::config_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    config_dir.join("bridge-mcp").join("runbooks")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +130,19 @@ mod tests {
         assert_eq!(
             home_expand_or_input("~/.ssh/id_ed25519"),
             format!("{home}/.ssh/id_ed25519")
+        );
+    }
+
+    #[test]
+    fn default_runbooks_dir_has_expected_segments_and_no_literal_tilde() {
+        let dir = default_runbooks_dir();
+        let s = dir.to_string_lossy();
+        assert!(s.contains("bridge-mcp"), "path should contain crate name: {s}");
+        assert!(s.contains("runbooks"), "path should contain runbooks segment: {s}");
+        // Regression guard: the fallback must never emit a literal, un-expanded `~`.
+        assert!(
+            !s.starts_with('~'),
+            "runbooks dir must be a real path, not a literal tilde: {s}"
         );
     }
 }

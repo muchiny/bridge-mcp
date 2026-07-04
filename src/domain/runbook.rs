@@ -4,7 +4,7 @@
 //! automated multi-step operational procedures.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -167,13 +167,6 @@ pub fn load_runbook(path: &Path) -> Result<Runbook, String> {
     Ok(runbook)
 }
 
-/// Get the default runbooks directory path
-#[must_use]
-pub fn default_runbooks_dir() -> PathBuf {
-    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("~/.config"));
-    config_dir.join("bridge-mcp").join("runbooks")
-}
-
 /// Get built-in runbook definitions (embedded in binary)
 #[must_use]
 pub fn builtin_runbooks() -> Vec<Runbook> {
@@ -309,13 +302,6 @@ mod tests {
             assert!(!rb.name.is_empty());
             assert!(!rb.steps.is_empty());
         }
-    }
-
-    #[test]
-    fn test_default_runbooks_dir() {
-        let dir = default_runbooks_dir();
-        assert!(dir.to_string_lossy().contains("bridge-mcp"));
-        assert!(dir.to_string_lossy().contains("runbooks"));
     }
 
     #[test]
