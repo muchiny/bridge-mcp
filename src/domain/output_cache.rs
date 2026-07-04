@@ -5,9 +5,12 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::RwLock;
+// tokio Instant (not std): honors tokio::time::pause/advance in tests, so
+// TTL boundaries are deterministically testable. Identical API otherwise.
+use tokio::time::Instant;
 
 use super::output_truncator::ceil_char_boundary;
 
@@ -268,6 +271,42 @@ mod tests {
         let result = cache.fetch(&id, 1, 6).await.unwrap();
         // Offset 1 is inside "日" (3 bytes), should snap to byte 3 ("本")
         assert!(result.text.is_char_boundary(0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_expired_at_exact_ttl_boundary() {
+        // Strict `<` in the TTL checks: an entry whose age == ttl is expired.
+        let cache = OutputCache::new(300, 100);
+        let id = cache.store("x".to_string()).await;
+        tokio::time::advance(Duration::from_secs(300)).await;
+        assert!(cache.fetch(&id, 0, 10).await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_alive_just_before_ttl_boundary() {
+        let cache = OutputCache::new(300, 100);
+        let id = cache.store("x".to_string()).await;
+        tokio::time::advance(Duration::from_secs(300) - Duration::from_millis(1)).await;
+        assert!(cache.fetch(&id, 0, 10).await.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_store_lazy_cleanup_evicts_at_exact_ttl() {
+        let cache = OutputCache::new(300, 100);
+        cache.store("old".to_string()).await;
+        tokio::time::advance(Duration::from_secs(300)).await;
+        cache.store("new".to_string()).await; // lazy cleanup runs here
+        assert_eq!(cache.len().await, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cleanup_evicts_at_exact_ttl() {
+        let cache = OutputCache::new(300, 100);
+        cache.store("a".to_string()).await;
+        cache.store("b".to_string()).await;
+        tokio::time::advance(Duration::from_secs(300)).await;
+        cache.cleanup().await;
+        assert!(cache.is_empty().await);
     }
 
     #[tokio::test]
