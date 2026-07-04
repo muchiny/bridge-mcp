@@ -58,13 +58,9 @@ exclude_re = [
     # so the guarded block never runs — same observable behavior as
     # the original on the empty-state path.
     "replace > with < in Metrics::render_token_summary",
-    # `AuditLogger::cleanup_old_files` compares file mtime to a
-    # cutoff `< self.retain_days`. The mutation `< -> <=` only
-    # differs at the *exact* cutoff timestamp — unreachable from a
-    # deterministic test for the same reason as `OutputCache`:
-    # `SystemTime`/`Utc::now` are real-time syscalls and the
-    # filesystem mtime is not under test control.
-    "replace < with <= in AuditLogger::cleanup_old_files",
+    # (2026-07-04) AuditLogger::cleanup_old_files exclusion removed: the
+    # retention clock is now an injectable `fn() -> DateTime<Utc>` field, and
+    # a fixed-clock + filetime test pins the exact-cutoff boundary.
     # `ConfigWatcher` uses `Instant::elapsed() < DEBOUNCE_DURATION` to
     # skip reloads that arrive within the debounce window, plus
     # `notify::EventKind` filters on a sync callback that runs on the
