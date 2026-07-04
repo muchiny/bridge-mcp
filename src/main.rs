@@ -1,3 +1,7 @@
+// No unwrap/expect in production code (tests are exempted via
+// allow-unwrap-in-tests / allow-expect-in-tests in clippy.toml).
+#![warn(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};

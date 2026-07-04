@@ -17,6 +17,7 @@ use crate::error::{BridgeError, Result};
 
 /// Pre-compiled regexes for dangerous SQL pattern detection.
 /// Compiled once on first use, avoiding per-query regex compilation overhead.
+#[allow(clippy::unwrap_used)] // static regex literals, exercised by every SQL validation test
 static DANGEROUS_SQL_PATTERNS: LazyLock<[(Regex, &str); 7]> = LazyLock::new(|| {
     [
         (

@@ -12,3 +12,9 @@ type-complexity-threshold = 250
 
 # Minimum lines for functions considered large
 too-large-for-stack = 200
+
+# unwrap/expect are fine in tests, forbidden in production code
+# (enforced via crate-level #![warn(clippy::unwrap_used, clippy::expect_used)]
+# in src/lib.rs + src/main.rs so tests/, benches/, examples/ stay unaffected)
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

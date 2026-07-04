@@ -6,11 +6,18 @@ use regex::{Regex, RegexSet};
 use tracing::{debug, error, info};
 
 /// Pre-compiled regex for stripping ANSI escape codes from SSH output.
+#[allow(clippy::unwrap_used)] // static regex literal, exercised by the ANSI-stripping tests
 static ANSI_ESCAPE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\[[\d;]*m").unwrap());
 
 use crate::config::{CustomSanitizePattern, SanitizeConfig};
 use crate::security::entropy::EntropyDetector;
+
+/// An Aho-Corasick automaton over zero patterns.
+#[allow(clippy::unwrap_used)] // building over an empty pattern set cannot fail
+fn empty_literal_detector() -> AhoCorasick {
+    AhoCorasick::builder().build(Vec::<&str>::new()).unwrap()
+}
 
 /// Threshold in bytes above which parallel detection is used
 const PARALLEL_THRESHOLD: usize = 512 * 1024; // 512 KB
@@ -164,11 +171,10 @@ impl Sanitizer {
     /// Create a disabled sanitizer (pass-through)
     #[must_use]
     pub fn disabled() -> Self {
-        let empty: Vec<&str> = Vec::new();
         Self {
             patterns: Vec::new(),
             detection_set: RegexSet::empty(),
-            literal_detector: AhoCorasick::builder().build(&empty).unwrap(),
+            literal_detector: empty_literal_detector(),
             enabled: false,
             strip_ansi: false,
             entropy_detector: EntropyDetector::disabled(),
@@ -258,8 +264,7 @@ impl Sanitizer {
             .build(&literal_keywords)
             .unwrap_or_else(|e| {
                 error!(error = %e, "Failed to build Aho-Corasick, using empty");
-                let empty: Vec<&str> = Vec::new();
-                AhoCorasick::builder().build(&empty).unwrap()
+                empty_literal_detector()
             });
 
         info!(
