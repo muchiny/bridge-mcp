@@ -393,4 +393,79 @@ mod tests {
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         assert!(!result.content.is_empty());
     }
+
+    fn text_content(result: &ToolCallResult) -> String {
+        let mut s = String::new();
+        for content in &result.content {
+            if let ToolContent::Text { text } = content {
+                s.push_str(text);
+            }
+        }
+        s
+    }
+
+    #[tokio::test]
+    async fn test_enrich_summarize_disabled_returns_unchanged() {
+        // summarize=None and no mcp_logger: both enrich steps are skipped and
+        // the raw result is returned untouched.
+        let ctx = create_test_context();
+        let args: SshSecurityAuditArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
+        let output = "raw audit output";
+        let result = ToolCallResult::text(output);
+        let enriched = SecurityAuditTool::enrich(result, &args, output, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(text_content(&enriched), "raw audit output");
+        assert!(!text_content(&enriched).contains("LLM SUMMARY"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_summarize_enabled_without_sampling_returns_unchanged() {
+        // summarize=true but the test context does not advertise sampling, so
+        // ctx.sample returns None and enrich falls back to the raw output.
+        let ctx = create_test_context();
+        let args: SshSecurityAuditArgs =
+            serde_json::from_value(json!({"host": "s", "summarize": true})).unwrap();
+        let output = "=== USERS ===\nroot\n";
+        let result = ToolCallResult::text(output);
+        let enriched = SecurityAuditTool::enrich(result, &args, output, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(text_content(&enriched), output);
+        assert!(!text_content(&enriched).contains("LLM SUMMARY"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_emits_section_logs() {
+        // Step 1 of enrich: each '=== SECTION ===' header in the output is
+        // emitted as a structured notifications/message when a logger is
+        // attached, regardless of summarize.
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU8;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let level = Arc::new(AtomicU8::new(LogLevel::Debug.severity()));
+        let mut ctx = create_test_context();
+        ctx.mcp_logger = Some(Arc::new(crate::mcp::logger::McpLogger::new(level, tx)));
+
+        let args: SshSecurityAuditArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
+        let output = "=== USERS ===\nroot\n=== SUID BINARIES ===\n/usr/bin/sudo\nsome line\n";
+        let result = ToolCallResult::text(output);
+        let _ = SecurityAuditTool::enrich(result, &args, output, &ctx)
+            .await
+            .unwrap();
+
+        let mut sections = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::mcp::protocol::WriterMessage::Notification(n) = msg {
+                let params = n.params.unwrap();
+                assert_eq!(params["logger"], "ssh_security_audit");
+                assert_eq!(params["data"]["phase"], "section");
+                sections.push(params["data"]["name"].as_str().unwrap().to_string());
+            }
+        }
+        assert!(sections.contains(&"USERS".to_string()));
+        assert!(sections.contains(&"SUID BINARIES".to_string()));
+        // Non-header lines must not produce a section entry.
+        assert!(!sections.contains(&"root".to_string()));
+    }
 }

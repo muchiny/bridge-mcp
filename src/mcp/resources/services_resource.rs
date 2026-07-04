@@ -121,39 +121,39 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn create_ctx_with_hosts() -> ToolContext {
-        let mut hosts = HashMap::new();
-        hosts.insert(
-            "app1".to_string(),
-            HostConfig {
-                hostname: "10.0.0.1".to_string(),
-                port: 22,
-                user: "admin".to_string(),
-                auth: AuthConfig::Key {
-                    path: "~/.ssh/id_rsa".to_string(),
-                    passphrase: None,
-                },
-                description: Some("Application server".to_string()),
-                host_key_verification: HostKeyVerification::default(),
-                proxy_jump: None,
-                socks_proxy: None,
-                sudo_password: None,
-                tags: Vec::new(),
-                os_type: OsType::Linux,
-                shell: None,
-                retry: None,
-                protocol: crate::config::Protocol::default(),
-                #[cfg(feature = "winrm")]
-                winrm_use_tls: None,
-                #[cfg(feature = "winrm")]
-                winrm_accept_invalid_certs: None,
-                #[cfg(feature = "winrm")]
-                winrm_operation_timeout_secs: None,
-                #[cfg(feature = "winrm")]
-                winrm_max_envelope_size: None,
+    /// Build a Linux `HostConfig` with the given optional description.
+    fn sample_host_config(description: Option<String>) -> HostConfig {
+        HostConfig {
+            hostname: "10.0.0.1".to_string(),
+            port: 22,
+            user: "admin".to_string(),
+            auth: AuthConfig::Key {
+                path: "~/.ssh/id_rsa".to_string(),
+                passphrase: None,
             },
-        );
+            description,
+            host_key_verification: HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: OsType::Linux,
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
 
+    /// Build a `ToolContext` around the given host map (rate limiting disabled).
+    fn build_ctx(hosts: HashMap<String, HostConfig>) -> ToolContext {
         let config = Config {
             hosts,
             security: SecurityConfig::default(),
@@ -205,6 +205,15 @@ mod tests {
         }
     }
 
+    fn create_ctx_with_hosts() -> ToolContext {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "app1".to_string(),
+            sample_host_config(Some("Application server".to_string())),
+        );
+        build_ctx(hosts)
+    }
+
     #[test]
     fn test_scheme() {
         let handler = ServicesResourceHandler;
@@ -247,5 +256,55 @@ mod tests {
 
         let result = handler.read("invalid://host", &ctx).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_resource_name_and_mime() {
+        let handler = ServicesResourceHandler;
+        let ctx = create_ctx_with_hosts();
+
+        let resources = handler.list(&ctx).await.unwrap();
+        assert_eq!(resources[0].name, "app1 services");
+        assert_eq!(resources[0].mime_type.as_deref(), Some("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn test_list_default_description_when_host_has_none() {
+        let handler = ServicesResourceHandler;
+        let mut hosts = HashMap::new();
+        hosts.insert("bare".to_string(), sample_host_config(None));
+        let ctx = build_ctx(hosts);
+
+        let resources = handler.list(&ctx).await.unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "services://bare");
+        assert_eq!(resources[0].name, "bare services");
+        // Missing description falls back to the generic label
+        assert_eq!(
+            resources[0].description.as_deref(),
+            Some("Systemd services")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_empty_when_no_hosts() {
+        let handler = ServicesResourceHandler;
+        let ctx = build_ctx(HashMap::new());
+
+        let resources = handler.list(&ctx).await.unwrap();
+        assert!(resources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_read_empty_host_is_unknown() {
+        // "services://" strips to an empty host string, which is not configured
+        let handler = ServicesResourceHandler;
+        let ctx = create_ctx_with_hosts();
+
+        let result = handler.read("services://", &ctx).await;
+        match result.unwrap_err() {
+            BridgeError::UnknownHost { host } => assert_eq!(host, ""),
+            e => panic!("Expected UnknownHost, got: {e:?}"),
+        }
     }
 }

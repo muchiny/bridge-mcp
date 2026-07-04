@@ -231,4 +231,80 @@ mod tests {
         let parsed = parse_log_uri("log://server1/var/log/syslog?lines=abc").unwrap();
         assert_eq!(parsed.lines, DEFAULT_LINES);
     }
+
+    #[test]
+    fn test_parse_log_uri_nested_path() {
+        // Nested path segments must be preserved verbatim under the leading slash
+        let parsed = parse_log_uri("log://web1/var/log/nginx/access.log").unwrap();
+        assert_eq!(parsed.host, "web1");
+        assert_eq!(parsed.path, "/var/log/nginx/access.log");
+        assert_eq!(parsed.lines, DEFAULT_LINES);
+    }
+
+    #[test]
+    fn test_parse_log_uri_query_without_lines_param() {
+        // Query string present but no `lines=` key → default lines
+        let parsed = parse_log_uri("log://server1/var/log/syslog?follow=true").unwrap();
+        assert_eq!(parsed.lines, DEFAULT_LINES);
+        assert_eq!(parsed.path, "/var/log/syslog");
+    }
+
+    #[test]
+    fn test_parse_log_uri_lines_zero() {
+        // Zero is a valid u64 and must not be coerced to the default
+        let parsed = parse_log_uri("log://server1/var/log/syslog?lines=0").unwrap();
+        assert_eq!(parsed.lines, 0);
+    }
+
+    #[test]
+    fn test_parse_log_uri_root_path() {
+        // A trailing slash with an empty segment resolves to the root "/"
+        let parsed = parse_log_uri("log://server1/").unwrap();
+        assert_eq!(parsed.host, "server1");
+        assert_eq!(parsed.path, "/");
+        assert_eq!(parsed.lines, DEFAULT_LINES);
+    }
+
+    #[test]
+    fn test_parse_log_uri_path_at_max_boundary() {
+        // full_path = "/" + path, so a path of MAX_PATH_LEN-1 yields exactly MAX_PATH_LEN
+        let path = "a".repeat(MAX_PATH_LEN - 1);
+        let uri = format!("log://server1/{path}");
+        let parsed = parse_log_uri(&uri).unwrap();
+        assert_eq!(parsed.path.len(), MAX_PATH_LEN);
+    }
+
+    #[test]
+    fn test_parse_log_uri_path_one_over_boundary() {
+        // full_path length MAX_PATH_LEN + 1 must be rejected
+        let path = "a".repeat(MAX_PATH_LEN);
+        let uri = format!("log://server1/{path}");
+        assert!(parse_log_uri(&uri).is_err());
+    }
+
+    #[test]
+    fn test_description_mentions_uri_template() {
+        let handler = LogResourceHandler;
+        assert!(handler.description().contains("log://"));
+    }
+
+    #[tokio::test]
+    async fn test_read_rejects_invalid_uri() {
+        let handler = LogResourceHandler;
+        let ctx = crate::ports::mock::create_test_context();
+        let result = handler.read("file://server1/etc/passwd", &ctx).await;
+        assert!(matches!(result, Err(BridgeError::McpInvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_read_unknown_host() {
+        let handler = LogResourceHandler;
+        let ctx = crate::ports::mock::create_test_context();
+        // URI parses fine but no such host is configured
+        let result = handler.read("log://ghost/var/log/syslog", &ctx).await;
+        match result.unwrap_err() {
+            BridgeError::UnknownHost { host } => assert_eq!(host, "ghost"),
+            e => panic!("Expected UnknownHost, got: {e:?}"),
+        }
+    }
 }

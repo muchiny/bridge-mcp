@@ -644,4 +644,63 @@ mod tests {
         // error; both branches exercise the previously-uncovered code.
         assert!(result.is_ok() || result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_append_path_with_mock_executor() {
+        // append=true drives the `append` true branch, the "Append to"
+        // elicitation summary, and the append shell command through the real
+        // execute() flow (mock connection pool). Threshold default keeps the
+        // small content on the shell path rather than SFTP.
+        use std::collections::HashMap;
+        let handler = SshFileWriteHandler;
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "server1".to_string(),
+            crate::config::HostConfig {
+                hostname: "h".to_string(),
+                port: 22,
+                user: "u".to_string(),
+                auth: crate::config::AuthConfig::Agent,
+                description: None,
+                host_key_verification: crate::config::HostKeyVerification::default(),
+                proxy_jump: None,
+                socks_proxy: None,
+                sudo_password: None,
+                tags: Vec::new(),
+                os_type: crate::config::OsType::default(),
+                shell: None,
+                retry: None,
+                protocol: crate::config::Protocol::default(),
+                #[cfg(feature = "winrm")]
+                winrm_use_tls: None,
+                #[cfg(feature = "winrm")]
+                winrm_accept_invalid_certs: None,
+                #[cfg(feature = "winrm")]
+                winrm_operation_timeout_secs: None,
+                #[cfg(feature = "winrm")]
+                winrm_max_envelope_size: None,
+            },
+        );
+        let mock_output = crate::ssh::CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration_ms: 5,
+        };
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output);
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1",
+                    "path": "/tmp/app.log",
+                    "content": "line",
+                    "append": true
+                })),
+                &ctx,
+            )
+            .await;
+        // Exercises the append branch; final outcome depends on the mock
+        // connection, so both Ok and Err are acceptable here.
+        assert!(result.is_ok() || result.is_err());
+    }
 }

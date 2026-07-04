@@ -462,4 +462,49 @@ mod tests {
             assert!(text.contains("Apply complete!"));
         }
     }
+
+    #[test]
+    fn test_build_command_path_traversal_rejected() {
+        // `validate_terraform_dir` rejects any `..` path component, so
+        // `build_command` propagates the error instead of returning a string.
+        let args = SshTerraformApplyArgs {
+            host: "s".to_string(),
+            dir: "/opt/../etc".to_string(),
+            auto_approve: Some(true),
+            vars: None,
+            var_file: None,
+            targets: None,
+            plan_file: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let res = TerraformApplyTool::build_command(&args, &test_host_config());
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_build_command_all_options_combined() {
+        // Every optional append branch (auto_approve, multi vars, var_file,
+        // targets, plan_file) fires in a single build.
+        let args = SshTerraformApplyArgs {
+            host: "s".to_string(),
+            dir: "/opt/infra".to_string(),
+            auto_approve: Some(true),
+            vars: Some(vec!["region=us-east-1".to_string(), "env=prod".to_string()]),
+            var_file: Some("prod.tfvars".to_string()),
+            targets: Some(vec!["aws_instance.web".to_string()]),
+            plan_file: Some("saved.tfplan".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = TerraformApplyTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("-auto-approve"), "cmd={cmd}");
+        assert!(cmd.contains("region=us-east-1"), "cmd={cmd}");
+        assert!(cmd.contains("env=prod"), "cmd={cmd}");
+        assert!(cmd.contains("prod.tfvars"), "cmd={cmd}");
+        assert!(cmd.contains("aws_instance.web"), "cmd={cmd}");
+        assert!(cmd.contains("saved.tfplan"), "cmd={cmd}");
+    }
 }

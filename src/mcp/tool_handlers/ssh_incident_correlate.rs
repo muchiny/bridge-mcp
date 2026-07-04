@@ -319,4 +319,88 @@ mod tests {
         assert!(cmd.contains("-u 'postgresql'"));
         assert!(cmd.contains("--since"));
     }
+
+    #[test]
+    fn test_build_command_invalid_services_errors() {
+        // Illegal shell metacharacters in a service name propagate the
+        // validate_services error out of build_command.
+        let args = SshIncidentCorrelateArgs {
+            host: "s".to_string(),
+            services: "bad;service".to_string(),
+            since: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        };
+        let result = IncidentCorrelateTool::build_command(&args, &test_host_config());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_command_empty_services_errors() {
+        let args = SshIncidentCorrelateArgs {
+            host: "s".to_string(),
+            services: String::new(),
+            since: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        };
+        let result = IncidentCorrelateTool::build_command(&args, &test_host_config());
+        assert!(result.is_err());
+    }
+
+    fn text_content(result: &ToolCallResult) -> String {
+        let mut s = String::new();
+        for content in &result.content {
+            if let ToolContent::Text { text } = content {
+                s.push_str(text);
+            }
+        }
+        s
+    }
+
+    fn correlate_args(summarize: Option<bool>) -> SshIncidentCorrelateArgs {
+        SshIncidentCorrelateArgs {
+            host: "s".to_string(),
+            services: "nginx".to_string(),
+            since: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize,
+            summary_max_tokens: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enrich_summarize_disabled_returns_unchanged() {
+        // summarize=None -> early return, output passed through verbatim.
+        let ctx = create_test_context();
+        let args = correlate_args(None);
+        let result = ToolCallResult::text("correlated logs");
+        let enriched = IncidentCorrelateTool::enrich(result, &args, "correlated logs", &ctx)
+            .await
+            .unwrap();
+        assert_eq!(text_content(&enriched), "correlated logs");
+        assert!(!text_content(&enriched).contains("LLM SUMMARY"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_summarize_enabled_without_sampling_returns_unchanged() {
+        // summarize=true but sampling is unavailable in the test context, so
+        // ctx.sample returns None and enrich returns the raw result.
+        let ctx = create_test_context();
+        let args = correlate_args(Some(true));
+        let result = ToolCallResult::text("correlated logs");
+        let enriched = IncidentCorrelateTool::enrich(result, &args, "correlated logs", &ctx)
+            .await
+            .unwrap();
+        assert_eq!(text_content(&enriched), "correlated logs");
+        assert!(!text_content(&enriched).contains("LLM SUMMARY"));
+    }
 }

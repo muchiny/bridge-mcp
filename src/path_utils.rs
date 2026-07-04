@@ -137,8 +137,14 @@ mod tests {
     fn default_runbooks_dir_has_expected_segments_and_no_literal_tilde() {
         let dir = default_runbooks_dir();
         let s = dir.to_string_lossy();
-        assert!(s.contains("bridge-mcp"), "path should contain crate name: {s}");
-        assert!(s.contains("runbooks"), "path should contain runbooks segment: {s}");
+        assert!(
+            s.contains("bridge-mcp"),
+            "path should contain crate name: {s}"
+        );
+        assert!(
+            s.contains("runbooks"),
+            "path should contain runbooks segment: {s}"
+        );
         // Regression guard: the fallback must never emit a literal, un-expanded `~`.
         assert!(
             !s.starts_with('~'),

@@ -293,4 +293,106 @@ mod tests {
         assert!(handler.description().contains("tunnel"));
         assert!(handler.description().contains("forwarding"));
     }
+
+    #[test]
+    fn test_args_deserialization() {
+        let args: SshTunnelCreateArgs = serde_json::from_value(json!({
+            "host": "prod",
+            "local_port": 15432,
+            "remote_host": "db.internal",
+            "remote_port": 5432
+        }))
+        .unwrap();
+        assert_eq!(args.host, "prod");
+        assert_eq!(args.local_port, 15432);
+        assert_eq!(args.remote_host.as_deref(), Some("db.internal"));
+        assert_eq!(args.remote_port, 5432);
+    }
+
+    #[test]
+    fn test_args_minimal_deserialization() {
+        // remote_host omitted → None (execute() defaults it to "localhost")
+        let args: SshTunnelCreateArgs = serde_json::from_value(json!({
+            "host": "prod",
+            "local_port": 16379,
+            "remote_port": 6379
+        }))
+        .unwrap();
+        assert_eq!(args.host, "prod");
+        assert_eq!(args.local_port, 16379);
+        assert!(args.remote_host.is_none());
+        assert_eq!(args.remote_port, 6379);
+    }
+
+    #[test]
+    fn test_args_debug() {
+        let args: SshTunnelCreateArgs = serde_json::from_value(json!({
+            "host": "prod",
+            "local_port": 8080,
+            "remote_port": 80
+        }))
+        .unwrap();
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("SshTunnelCreateArgs"));
+        assert!(dbg.contains("prod"));
+    }
+
+    #[test]
+    fn test_invalid_json_type() {
+        // local_port as a string is not a valid u16
+        let result: std::result::Result<SshTunnelCreateArgs, _> = serde_json::from_value(json!({
+            "host": "prod",
+            "local_port": "not-a-port",
+            "remote_port": 80
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_args_port_overflow_rejected() {
+        // 70000 exceeds u16::MAX, so deserialization into `remote_port: u16` fails
+        let result: std::result::Result<SshTunnelCreateArgs, _> = serde_json::from_value(json!({
+            "host": "prod",
+            "local_port": 8080,
+            "remote_port": 70000
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_schema_optional_fields() {
+        let handler = SshTunnelCreateHandler;
+        let schema_json: serde_json::Value =
+            serde_json::from_str(handler.schema().input_schema).unwrap();
+
+        // remote_host is optional (absent from `required`) and documents a localhost default
+        let required = schema_json["required"].as_array().unwrap();
+        assert!(!required.contains(&json!("remote_host")));
+        assert_eq!(
+            schema_json["properties"]["remote_host"]["default"],
+            json!("localhost")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_invalid_port_type() {
+        // Through the execute() path, a bad port type surfaces as McpInvalidRequest
+        let handler = SshTunnelCreateHandler;
+        let ctx = create_test_context();
+
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "prod",
+                    "local_port": "bad",
+                    "remote_port": 80
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::McpInvalidRequest(_) => {}
+            e => panic!("Expected McpInvalidRequest, got: {e:?}"),
+        }
+    }
 }

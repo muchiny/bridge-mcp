@@ -502,4 +502,89 @@ mod tests {
         assert!(cmd.contains("--timeout '10m'"), "cmd={cmd}");
         assert!(cmd.contains("--force"), "cmd={cmd}");
     }
+
+    #[test]
+    fn test_build_command_invalid_namespace() {
+        // Uppercase + underscore violate the DNS-1123 label rules enforced
+        // by `validate_namespace`, so `build_command` returns an error before
+        // ever assembling the helm command string.
+        let args = SshHelmRollbackArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            revision: None,
+            namespace: Some("Invalid_NS".to_string()),
+            dry_run: None,
+            wait: None,
+            cleanup_on_fail: None,
+            wait_for_jobs: None,
+            timeout: None,
+            force: None,
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let res = HelmRollbackTool::build_command(&args, &test_host_config());
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_build_command_with_kubeconfig_and_client_dry_run() {
+        // A valid kubeconfig path prepends the `KUBECONFIG=` env prefix; the
+        // "client" dry-run enum value exercises the dry_run append branch.
+        let args = SshHelmRollbackArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            revision: None,
+            namespace: None,
+            dry_run: Some("client".to_string()),
+            wait: None,
+            cleanup_on_fail: None,
+            wait_for_jobs: None,
+            timeout: None,
+            force: None,
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: Some("/etc/rancher/k3s/k3s.yaml".to_string()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = HelmRollbackTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.contains("KUBECONFIG=/etc/rancher/k3s/k3s.yaml"),
+            "cmd={cmd}"
+        );
+        assert!(cmd.contains("--dry-run='client'"), "cmd={cmd}");
+    }
+
+    #[tokio::test]
+    async fn test_enrich_no_logger_returns_input_unchanged() {
+        // ctx.mcp_logger is None in test contexts -> early return path.
+        let ctx = create_test_context();
+        let args = SshHelmRollbackArgs {
+            host: "server1".to_string(),
+            release: "my-app".to_string(),
+            revision: Some(2),
+            namespace: Some("production".to_string()),
+            dry_run: Some("server".to_string()),
+            wait: None,
+            cleanup_on_fail: None,
+            wait_for_jobs: None,
+            timeout: None,
+            force: None,
+            helm_bin: Some("helm".to_string()),
+            kubeconfig: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let base = ToolCallResult::text("STATUS: deployed\nREVISION: 2".to_string());
+        let result = HelmRollbackTool::enrich(base, &args, "STATUS: deployed\nREVISION: 2", &ctx)
+            .await
+            .unwrap();
+        if let crate::ports::protocol::ToolContent::Text { text } = &result.content[0] {
+            assert!(text.contains("deployed"));
+        }
+    }
 }
