@@ -348,4 +348,29 @@ mod tests {
         assert!(debug_str.contains("SshBackupListArgs"));
         assert!(debug_str.contains("test-host"));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshBackupListArgs =
+            serde_json::from_value(json!({"host": "server1", "archive_file": "/tmp/backup.tar"}))
+                .unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "PERMS        SIZE  DATE        NAME\n\
+                      -rw-r--r--   1024  2024-01-01  etc/hosts\n\
+                      -rw-r--r--   2048  2024-01-02  etc/passwd";
+        let result = BackupListTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshBackupListArgs =
+            serde_json::from_value(json!({"host": "server1", "archive_file": "/tmp/backup.tar"}))
+                .unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = BackupListTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

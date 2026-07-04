@@ -3139,4 +3139,64 @@ mod tests {
         let result = run_describe_tool(Arc::new(config), "nonexistent_tool", false).await;
         assert!(result.is_err());
     }
+
+    // ============== print_daemon_response Tests ==============
+
+    #[test]
+    fn test_print_daemon_response_error_text() {
+        let resp = serde_json::json!({"error": {"code": -32601, "message": "not found"}});
+        let code = print_daemon_response(&resp, false).unwrap();
+        assert_eq!(code, 1, "JSON-RPC error must map to exit code 1");
+    }
+
+    #[test]
+    fn test_print_daemon_response_error_json() {
+        let resp = serde_json::json!({"error": {"code": -1, "message": "boom"}});
+        let code = print_daemon_response(&resp, true).unwrap();
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_print_daemon_response_missing_result_and_error() {
+        let resp = serde_json::json!({"jsonrpc": "2.0", "id": 1});
+        let err = print_daemon_response(&resp, false);
+        assert!(err.is_err(), "neither result nor error must be an error");
+    }
+
+    #[test]
+    fn test_print_daemon_response_is_error_true() {
+        let resp = serde_json::json!({
+            "result": {"isError": true, "content": [{"type": "text", "text": "failed"}]}
+        });
+        let code = print_daemon_response(&resp, false).unwrap();
+        assert_eq!(code, 1, "isError=true must map to exit code 1");
+    }
+
+    #[test]
+    fn test_print_daemon_response_success_content_text() {
+        let resp = serde_json::json!({
+            "result": {"content": [{"type": "text", "text": "hello"}]}
+        });
+        let code = print_daemon_response(&resp, false).unwrap();
+        assert_eq!(code, 0, "success without isError must map to exit code 0");
+    }
+
+    #[test]
+    fn test_print_daemon_response_success_json_output() {
+        let resp = serde_json::json!({
+            "result": {"content": [{"type": "text", "text": "hi"}], "isError": false}
+        });
+        let code = print_daemon_response(&resp, true).unwrap();
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_print_daemon_response_content_non_text_item() {
+        // A content item without a `text` field falls through to pretty-print.
+        let resp = serde_json::json!({
+            "result": {"content": [{"type": "resource", "uri": "file:///x"}]}
+        });
+        let code = print_daemon_response(&resp, false).unwrap();
+        assert_eq!(code, 0);
+    }
 }

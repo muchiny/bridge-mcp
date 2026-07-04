@@ -57,7 +57,7 @@ impl ToolHandler for SshRunbookListHandler {
         let mut all_runbooks = runbook::builtin_runbooks();
 
         // Load user-defined runbooks
-        let user_dir = runbook::default_runbooks_dir();
+        let user_dir = crate::path_utils::default_runbooks_dir();
         let user_runbooks = runbook::load_runbooks_from_dir(&user_dir);
         all_runbooks.extend(user_runbooks);
 

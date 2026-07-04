@@ -370,4 +370,25 @@ mod tests {
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshVaultListArgs =
+            serde_json::from_value(json!({"host": "server1", "path": "secret/"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "Keys\n----\napp1\napp2\n";
+        let result = VaultListTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshVaultListArgs =
+            serde_json::from_value(json!({"host": "server1", "path": "secret/"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = VaultListTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

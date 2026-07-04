@@ -1,6 +1,6 @@
 ---
 name: ssh-discover
-description: This skill should be used when the user asks to "show me the available tools", "what Docker tools exist", "search for kubernetes tools", "explore the tool catalog", or wants to browse the 338 bridge-mcp tools by group or keyword.
+description: This skill should be used when the user asks to "show me the available tools", "what Docker tools exist", "search for kubernetes tools", "explore the tool catalog", or wants to browse the 476 bridge-mcp tools by group or keyword.
 argument-hint: [group-name|search-keyword]
 compatibility: "2.1+"
 ---
@@ -45,11 +45,11 @@ bridge-mcp describe-tool TOOL_NAME
 |----------|-------------------|
 | Servers | core, process, monitoring, systemd, storage, journald |
 | Files | file_ops, file_transfer, directory |
-| Containers | docker, podman, kubernetes, esxi, hyperv |
+| Containers | docker, podman, kubernetes, k3s, cri, esxi, hyperv |
 | Databases | database, redis, postgresql, mysql, mongodb |
 | Network | network, firewall, network_equipment, tunnels |
 | Security | security_scan, network_security, compliance, certificates |
-| Deploy | orchestration, runbooks, ansible, terraform |
+| Deploy | orchestration, runbooks, ansible, awx, terraform |
 | Cloud | cloud, inventory, multicloud, vault |
 | Windows | windows_services, windows_events, active_directory, iis |
 

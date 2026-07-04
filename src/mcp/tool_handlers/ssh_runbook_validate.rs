@@ -80,7 +80,7 @@ impl ToolHandler for SshRunbookValidateHandler {
         } else if let Some(ref name) = args.runbook_name {
             let mut all = runbook::builtin_runbooks();
             all.extend(runbook::load_runbooks_from_dir(
-                &runbook::default_runbooks_dir(),
+                &crate::path_utils::default_runbooks_dir(),
             ));
             all.into_iter().find(|r| r.name == *name).ok_or_else(|| {
                 BridgeError::McpInvalidRequest(format!("Runbook '{name}' not found"))

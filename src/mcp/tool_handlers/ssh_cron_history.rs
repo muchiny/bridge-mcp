@@ -344,4 +344,25 @@ mod tests {
         let result = CronHistoryTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshCronHistoryArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "TIME            USER  COMMAND\n\
+                      Jan01_03:00:01  root  /usr/bin/backup\n\
+                      Jan01_04:00:01  root  /usr/bin/cleanup";
+        let result = CronHistoryTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshCronHistoryArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = CronHistoryTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

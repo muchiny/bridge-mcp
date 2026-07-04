@@ -405,4 +405,22 @@ mod tests {
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshDiskUsageArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let output = "Filesystem      Size  Used  Avail  Use%  Mounted\n\
+                      /dev/sda1       10G   4G    6G     40%   /";
+        let result = post_process_disk_usage(result, &args, output);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = ToolCallResult::text("raw");
+        let args: SshDiskUsageArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let result = post_process_disk_usage(result, &args, "");
+        assert!(!result.content.is_empty());
+    }
 }

@@ -263,4 +263,23 @@ mod tests {
         let cmd = TemplateListTool::build_command(&args, &host_config).unwrap();
         assert!(cmd.contains("nginx-reverse-proxy"));
     }
+
+    #[test]
+    fn test_post_process_with_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshTemplateListArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let output = "TEMPLATE\nnginx-reverse-proxy\napache-vhost\npostgresql-config\n";
+        let result = TemplateListTool::post_process(result, &args, output, &dr);
+        assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_post_process_empty_output() {
+        let result = crate::ports::protocol::ToolCallResult::text("raw");
+        let args: SshTemplateListArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs::default();
+        let result = TemplateListTool::post_process(result, &args, "", &dr);
+        assert!(!result.content.is_empty());
+    }
 }

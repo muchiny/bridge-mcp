@@ -245,4 +245,129 @@ mod tests {
         assert!(cmd.contains("MEMORY DETAIL"));
         assert!(cmd.contains("TOP MEM"));
     }
+
+    fn test_host_config() -> crate::config::HostConfig {
+        crate::config::HostConfig {
+            hostname: "test".to_string(),
+            port: 22,
+            user: "test".to_string(),
+            auth: crate::config::AuthConfig::Agent,
+            description: None,
+            host_key_verification: crate::config::HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: crate::config::OsType::default(),
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
+
+    fn triage_args(symptom: &str) -> SshIncidentTriageArgs {
+        SshIncidentTriageArgs {
+            host: "server1".to_string(),
+            symptom: symptom.to_string(),
+            since: "1 hour ago".to_string(),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+            summarize: None,
+            summary_max_tokens: None,
+        }
+    }
+
+    fn text_content(result: &ToolCallResult) -> String {
+        let mut s = String::new();
+        for content in &result.content {
+            if let ToolContent::Text { text } = content {
+                s.push_str(text);
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn test_build_command_slow() {
+        let cmd =
+            IncidentTriageTool::build_command(&triage_args("slow"), &test_host_config()).unwrap();
+        assert!(cmd.contains("CPU LOAD"));
+        assert!(cmd.contains("TOP CPU"));
+        // 'since' is threaded into the journalctl segment.
+        assert!(cmd.contains("1 hour ago"));
+    }
+
+    #[test]
+    fn test_build_command_crash() {
+        let cmd =
+            IncidentTriageTool::build_command(&triage_args("crash"), &test_host_config()).unwrap();
+        assert!(cmd.contains("RECENT BOOTS"));
+        assert!(cmd.contains("KERNEL PANICS"));
+    }
+
+    #[test]
+    fn test_build_command_disk() {
+        let cmd =
+            IncidentTriageTool::build_command(&triage_args("disk"), &test_host_config()).unwrap();
+        assert!(cmd.contains("INODE USAGE"));
+        assert!(cmd.contains("LARGE FILES"));
+    }
+
+    #[test]
+    fn test_build_command_network() {
+        let host = test_host_config();
+        let cmd = IncidentTriageTool::build_command(&triage_args("network"), &host).unwrap();
+        assert!(cmd.contains("INTERFACES"));
+        assert!(cmd.contains("LISTENERS"));
+    }
+
+    #[test]
+    fn test_build_command_unknown_symptom_general() {
+        // Any symptom outside the known enum falls through to the general branch.
+        let cmd =
+            IncidentTriageTool::build_command(&triage_args("bogus"), &test_host_config()).unwrap();
+        assert!(cmd.contains("GENERAL TRIAGE"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_summarize_disabled_returns_unchanged() {
+        // summarize=None -> early return, output is passed through verbatim.
+        let ctx = create_test_context();
+        let args = triage_args("oom");
+        let result = ToolCallResult::text("raw triage output");
+        let enriched = IncidentTriageTool::enrich(result, &args, "raw triage output", &ctx)
+            .await
+            .unwrap();
+        assert_eq!(text_content(&enriched), "raw triage output");
+        assert!(!text_content(&enriched).contains("LLM SUMMARY"));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_summarize_enabled_without_sampling_returns_unchanged() {
+        // summarize=true but the test context does not advertise sampling, so
+        // ctx.sample returns None and enrich falls back to the raw result.
+        let ctx = create_test_context();
+        let mut args = triage_args("oom");
+        args.summarize = Some(true);
+        args.summary_max_tokens = Some(256);
+        let result = ToolCallResult::text("raw triage output");
+        let enriched = IncidentTriageTool::enrich(result, &args, "raw triage output", &ctx)
+            .await
+            .unwrap();
+        assert_eq!(text_content(&enriched), "raw triage output");
+        assert!(!text_content(&enriched).contains("LLM SUMMARY"));
+    }
 }
