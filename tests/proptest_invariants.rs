@@ -28,10 +28,12 @@ proptest! {
         whitelist in proptest::collection::vec("[a-zA-Z0-9 .*+?^$-]{1,40}", 0..5),
         blacklist in proptest::collection::vec("[a-zA-Z0-9 .*+?^$-]{1,40}", 0..5),
     ) {
-        let mut cfg = SecurityConfig::default();
-        cfg.mode = mode;
-        cfg.whitelist = whitelist;
-        cfg.blacklist = blacklist;
+        let cfg = SecurityConfig {
+            mode,
+            whitelist,
+            blacklist,
+            ..SecurityConfig::default()
+        };
 
         let yaml = serde_saphyr::to_string(&cfg).expect("serialize");
         let back: SecurityConfig = serde_saphyr::from_str(&yaml).expect("deserialize");

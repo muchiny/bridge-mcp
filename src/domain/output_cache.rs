@@ -286,7 +286,8 @@ mod tests {
     async fn test_fetch_alive_just_before_ttl_boundary() {
         let cache = OutputCache::new(300, 100);
         let id = cache.store("x".to_string()).await;
-        tokio::time::advance(Duration::from_secs(300) - Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_secs(300).saturating_sub(Duration::from_millis(1)))
+            .await;
         assert!(cache.fetch(&id, 0, 10).await.is_some());
     }
 

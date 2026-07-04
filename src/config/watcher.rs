@@ -1273,7 +1273,7 @@ mod tests {
             let p = PathBuf::from("/etc/bridge/config.yaml");
             let start = Instant::now();
             let last = Mutex::new(start);
-            let just_inside = start + DEBOUNCE_DURATION - Duration::from_millis(1);
+            let just_inside = start + DEBOUNCE_DURATION.saturating_sub(Duration::from_millis(1));
             assert!(!should_process_event(
                 &modify_event(&p),
                 &p,
