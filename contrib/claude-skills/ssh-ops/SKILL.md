@@ -7,7 +7,7 @@ compatibility: "2.1+"
 
 # Remote Infrastructure Operations
 
-**338 tools** are available via the `bridge-mcp` CLI for managing remote servers over SSH.
+**476 tools** are available via the `bridge-mcp` CLI for managing remote servers over SSH.
 
 ## Golden Rule
 
@@ -64,6 +64,28 @@ bridge-mcp t ssh_exec host=prod command="whoami"
 bridge-mcp dt ssh_docker_ps
 ```
 
+## Output Reduction (server-side, runs BEFORE truncation)
+
+`describe-tool` prints each tool's **Reduction Strategy** — apply it to avoid
+losing data to the output cap:
+
+```bash
+# JSON output tools: jq filter + TSV (60-80% token savings)
+bridge-mcp --jq '.items[] | [.name, .status]' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
+
+# Tabular tools: keep only needed columns + row limit
+bridge-mcp --columns NAME,STATUS --limit 20 tool ssh_docker_ps host=prod
+
+# Raw text (logs, ssh_exec): save full output to a local file
+bridge-mcp tool ssh_exec host=prod command="journalctl -u nginx" save_output=/tmp/out.txt
+```
+
+Truncated output prints `[output_id: abc123]` — paginate the rest:
+
+```bash
+bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
+```
+
 ## Exit Codes
 
 | Code | Meaning | Action |
@@ -81,10 +103,10 @@ bridge-mcp dt ssh_docker_ps
 |----------|--------|
 | **Core** | core, file_ops, file_transfer, directory, process, monitoring, sessions |
 | **System** | systemd, systemd_timers, firewall, package, cron, user_management, storage, journald |
-| **Containers** | docker, podman, kubernetes, esxi |
+| **Containers** | docker, podman, kubernetes, k3s, cri, esxi |
 | **Databases** | database, redis, postgresql, mysql, mongodb |
 | **Web** | nginx, apache, letsencrypt, certificates |
-| **IaC** | ansible, terraform, vault, git |
+| **IaC** | ansible, awx, terraform, vault, git |
 | **Security** | security_scan, network_security, compliance, security_modules |
 | **Observability** | diagnostics, performance, container_logs, cron_analysis, drift |
 | **Cloud** | cloud, inventory, multicloud |

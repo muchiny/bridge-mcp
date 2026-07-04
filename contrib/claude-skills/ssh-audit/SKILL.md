@@ -90,9 +90,6 @@ bridge-mcp tool ssh_apparmor_status host=HOST --json
 # Security audit log
 bridge-mcp tool ssh_security_audit host=HOST --json
 
-# SSH key audit
-bridge-mcp tool ssh_key_audit host=HOST --json
-
 # User accounts review
 bridge-mcp tool ssh_user_list host=HOST --json
 ```
