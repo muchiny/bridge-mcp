@@ -305,10 +305,11 @@ graph TB
 ## 📊 Coverage
 
 ```bash
-# With cargo-tarpaulin (if installed)
-cargo tarpaulin --out Html
+# With cargo-llvm-cov (if installed) — WSL-safe scope
+make coverage
 
-# Open target/tarpaulin/tarpaulin-report.html
+# Open coverage/html/index.html
+# CI runs the full --all-features suite with --fail-under-lines 70
 ```
 
 ## 🎨 Best Practices
