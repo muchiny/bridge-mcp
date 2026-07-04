@@ -40,3 +40,23 @@ jobs:
         if: matrix.toolchain == 'nightly'
         run: cargo check --all-targets --all-features
         continue-on-error: true
+
+  # cargo-careful: rebuilds std + the crate with debug assertions and extra
+  # UB checks, then runs the unit suite. With #![forbid(unsafe_code)] the
+  # residual UB risk lives in dependencies — this is the nightly canary.
+  careful:
+    name: cargo careful (runtime UB checks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: careful
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-careful,cargo-nextest
+      - run: cargo +nightly careful test --lib

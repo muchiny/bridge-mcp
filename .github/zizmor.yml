@@ -1,0 +1,25 @@
+# zizmor configuration — https://docs.zizmor.sh/configuration/
+#
+# unpinned-uses: tag-pinning (ref-pin) is accepted for the well-known,
+# actively-maintained owners already vetted in these workflows; anything
+# new/unknown must be hash-pinned. Tightening everything to hash-pin is
+# possible later (Dependabot keeps SHA pins fresh) but is a 100+ line churn
+# with no marginal benefit while the owner list stays this short.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "actions/*": ref-pin
+        "github/*": ref-pin
+        "docker/*": ref-pin
+        "aquasecurity/*": ref-pin
+        "astral-sh/*": ref-pin
+        "crate-ci/*": ref-pin
+        "DavidAnson/*": ref-pin
+        "dorny/*": ref-pin
+        "dtolnay/*": ref-pin
+        "EmbarkStudios/*": ref-pin
+        "softprops/*": ref-pin
+        "Swatinem/*": ref-pin
+        "taiki-e/*": ref-pin
+        "*": hash-pin

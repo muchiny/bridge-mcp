@@ -23,6 +23,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  zizmor:
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Audit GitHub Actions workflows
+        run: uvx zizmor --min-severity medium .github/workflows/
+
   audit:
     name: Cargo audit
     runs-on: ubuntu-latest

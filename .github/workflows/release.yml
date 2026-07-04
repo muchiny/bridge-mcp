@@ -5,10 +5,9 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
+# Job-level permissions below (zizmor excessive-permissions): only the
+# release job writes contents / mints attestations.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,12 +21,14 @@ jobs:
     name: Test before release
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-test
+      # No rust-cache in this workflow: it publishes artifacts, and restoring
+      # a branch-writable cache into a publishing pipeline is a
+      # cache-poisoning vector (zizmor cache-poisoning). Clean builds only.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -40,14 +41,13 @@ jobs:
     name: SemVer check vs previous tag
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: semver
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
@@ -66,6 +66,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: [test, semver]
     timeout-minutes: 60
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -97,10 +99,6 @@ jobs:
 
       - name: Ensure target is installed
         run: rustup target add ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
 
       - name: Install cross
         if: matrix.cross
@@ -135,6 +133,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
 
