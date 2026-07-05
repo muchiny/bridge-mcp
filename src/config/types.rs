@@ -636,7 +636,8 @@ pub struct SanitizeConfig {
     ///
     /// Tokens with entropy above this value are considered potential secrets.
     /// - English text: ~3.5-4.5 bits
-    /// - Hex secrets: ~3.7-4.0 bits
+    /// - Hex secrets: ~3.7-4.0 bits (mathematically capped at 4.0 —
+    ///   see `entropy_hex_threshold`)
     /// - Base64 secrets: ~5.0-6.0 bits
     #[serde(default = "default_entropy_threshold")]
     pub entropy_threshold: f64,
@@ -648,6 +649,15 @@ pub struct SanitizeConfig {
     /// Known safe strings to exclude from entropy detection
     #[serde(default)]
     pub entropy_whitelist: Vec<String>,
+
+    /// Optional Shannon-entropy threshold for hexadecimal tokens (default: disabled).
+    ///
+    /// Hex strings max out at 4.0 bits/char, so `entropy_threshold` (4.5)
+    /// can never flag them. Set e.g. `3.1` to catch bare hex secrets —
+    /// beware false positives on checksum outputs (md5sum, sha256sum).
+    /// 40-char tokens (git SHA-1) are always skipped.
+    #[serde(default)]
+    pub entropy_hex_threshold: Option<f64>,
 }
 
 const fn default_entropy_threshold() -> f64 {
@@ -668,6 +678,7 @@ impl Default for SanitizeConfig {
             entropy_threshold: default_entropy_threshold(),
             entropy_min_length: default_entropy_min_length(),
             entropy_whitelist: Vec::new(),
+            entropy_hex_threshold: None,
         }
     }
 }
@@ -1606,6 +1617,14 @@ mod tests {
         assert!(config.enabled);
         assert!(config.disable_builtin.is_empty());
         assert!(config.custom_patterns.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_config_entropy_hex_threshold_parses() {
+        let yaml = "enabled: true\nentropy_hex_threshold: 3.1\n";
+        let config: SanitizeConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(matches!(config.entropy_hex_threshold, Some(t) if (t - 3.1).abs() < f64::EPSILON));
+        assert!(SanitizeConfig::default().entropy_hex_threshold.is_none());
     }
 
     #[test]

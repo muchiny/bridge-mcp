@@ -10,6 +10,14 @@ use std::collections::HashMap;
 pub struct EntropyDetector {
     /// Minimum Shannon entropy threshold (bits per character)
     threshold: f64,
+    /// Optional separate threshold for hexadecimal tokens.
+    ///
+    /// Hex maxes out at log2(16) = 4.0 bits/char, so the main `threshold`
+    /// (default 4.5) can mathematically never flag a hex secret. `None`
+    /// (default) skips bare-hex analysis entirely — keyword-anchored hex
+    /// values are already covered by the regex tiers, and bare hex is FP
+    /// territory (checksums, git SHAs).
+    hex_threshold: Option<f64>,
     /// Minimum token length to analyze
     min_length: usize,
     /// Known safe strings that should not be flagged
@@ -27,6 +35,7 @@ impl EntropyDetector {
     pub fn new(threshold: f64, min_length: usize, whitelist: Vec<String>, enabled: bool) -> Self {
         Self {
             threshold,
+            hex_threshold: None,
             min_length,
             whitelist,
             enabled,
@@ -38,10 +47,18 @@ impl EntropyDetector {
     pub fn disabled() -> Self {
         Self {
             threshold: 0.0,
+            hex_threshold: None,
             min_length: 0,
             whitelist: Vec::new(),
             enabled: false,
         }
+    }
+
+    /// Enable hex-charset detection with its own threshold (e.g. 3.1).
+    #[must_use]
+    pub fn with_hex_threshold(mut self, hex_threshold: Option<f64>) -> Self {
+        self.hex_threshold = hex_threshold;
+        self
     }
 
     /// Check if entropy detection is enabled
@@ -111,8 +128,18 @@ impl EntropyDetector {
                 continue;
             }
 
+            let threshold = if Self::is_hex_token(token) {
+                // 40-char hex = git SHA-1: structural false positive.
+                match self.hex_threshold {
+                    Some(t) if token.len() != 40 => t,
+                    _ => continue,
+                }
+            } else {
+                self.threshold
+            };
+
             let entropy = Self::shannon_entropy(token);
-            if entropy >= self.threshold {
+            if entropy >= threshold {
                 result = result.replace(token, ENTROPY_REDACTED);
             }
         }
@@ -178,12 +205,21 @@ impl EntropyDetector {
 
         false
     }
+
+    /// Hex-only token containing both digits and letters (pure digits or
+    /// pure letters are not hex-encoded material).
+    fn is_hex_token(token: &str) -> bool {
+        token.chars().all(|c| c.is_ascii_hexdigit())
+            && token.chars().any(|c| c.is_ascii_digit())
+            && token.chars().any(|c| c.is_ascii_alphabetic())
+    }
 }
 
 impl Default for EntropyDetector {
     fn default() -> Self {
         Self {
             threshold: 4.5,
+            hex_threshold: None,
             min_length: 16,
             whitelist: Vec::new(),
             enabled: true,
@@ -381,6 +417,53 @@ mod tests {
         assert_eq!(
             result_disabled, input,
             "Disabled detector should not redact"
+        );
+    }
+
+    // ============== Hex threshold (opt-in) tests ==============
+
+    #[test]
+    fn test_hex_secret_never_flagged_by_default() {
+        // 64-char hex ≈ 3.9 bits/char — mathematically below the 4.5 default.
+        let detector = EntropyDetector::default();
+        let input =
+            "token value 3f7a9c2e8b1d4f6a0c5e7b9d2f4a6c8e1b3d5f7a9c2e4b6d8f0a2c4e6b8d0f2a here";
+        let result = detector.redact(input);
+        assert_eq!(result, input, "hex detection must be opt-in (default off)");
+    }
+
+    #[test]
+    fn test_hex_secret_flagged_when_hex_threshold_enabled() {
+        let detector = EntropyDetector::default().with_hex_threshold(Some(3.1));
+        let input = "leaked 3f7a9c2e8b1d4f6a0c5e7b9d2f4a6c8e1b3d5f7a9c2e4b6d8f0a2c4e6b8d0f2a here";
+        let result = detector.redact(input);
+        assert!(
+            !result.contains("3f7a9c2e"),
+            "hex secret must be redacted: {result}"
+        );
+        assert!(result.contains("[HIGH_ENTROPY_REDACTED]"));
+    }
+
+    #[test]
+    fn test_git_sha1_skipped_even_with_hex_threshold() {
+        // 40-char hex = git SHA-1 — structural false positive, always skipped.
+        let detector = EntropyDetector::default().with_hex_threshold(Some(3.1));
+        let sha = "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3";
+        let input = format!("commit {sha} (HEAD -> main)");
+        let result = detector.redact(&input);
+        assert!(result.contains(sha), "git SHA-1 wrongly redacted: {result}");
+    }
+
+    #[test]
+    fn test_base64_detection_unchanged_by_hex_threshold() {
+        let detector = EntropyDetector::default().with_hex_threshold(Some(3.1));
+        // Mixed-case base64ish ≥24 chars with entropy ≥4.5 must still be caught
+        // by the general threshold (regression guard).
+        let input = "key Zx9!kQ2@pL5#mN8$vB3^cR7&wT1*yU4( end";
+        let result = detector.redact(input);
+        assert!(
+            !result.contains("Zx9!kQ2"),
+            "general detection regressed: {result}"
         );
     }
 }

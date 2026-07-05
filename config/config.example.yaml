@@ -225,6 +225,9 @@ security:
     # entropy_detection: true        # Enable/disable (default: true)
     # entropy_threshold: 4.5         # Shannon entropy bits threshold (default: 4.5)
     # entropy_min_length: 16         # Min token length to analyze (default: 16)
+    # entropy_hex_threshold: 3.1    # Opt-in hex-charset threshold (default: disabled).
+    #                               # Hex caps at 4.0 bits/char so the 4.5 default never
+    #                               # fires on hex. Enabling may redact checksums (md5/sha).
     # entropy_whitelist: []          # Known safe strings to exclude
     #   - "my-known-safe-hash-value"
 

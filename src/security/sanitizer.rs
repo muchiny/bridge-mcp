@@ -123,7 +123,8 @@ impl Sanitizer {
             config.entropy_min_length,
             config.entropy_whitelist.clone(),
             config.entropy_detection,
-        );
+        )
+        .with_hex_threshold(config.entropy_hex_threshold);
 
         Self::from_pattern_defs_with_custom(&all_patterns, &all_custom, true, entropy_detector)
     }
