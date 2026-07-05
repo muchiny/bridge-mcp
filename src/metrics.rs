@@ -350,27 +350,30 @@ impl Metrics {
             output.push('\n');
         }
 
-        output.push_str("# HELP mcp_reduction_calls_with_params_total Pipeline calls that supplied at least one reduction param\n");
-        output.push_str("# TYPE mcp_reduction_calls_with_params_total counter\n");
+        output.push_str("# HELP bridge_mcp_reduction_calls_with_params_total Pipeline calls that supplied at least one reduction param\n");
+        output.push_str("# TYPE bridge_mcp_reduction_calls_with_params_total counter\n");
         let _ = writeln!(
             output,
-            "mcp_reduction_calls_with_params_total {}",
+            "bridge_mcp_reduction_calls_with_params_total {}",
             self.calls_with_reduction.load(Ordering::Relaxed)
         );
+        output.push('\n');
+
         output.push_str(
-            "# HELP mcp_reduction_param_used_total Reduction param adoption by param name\n",
+            "# HELP bridge_mcp_reduction_param_used_total Reduction param adoption by param name\n",
         );
-        output.push_str("# TYPE mcp_reduction_param_used_total counter\n");
+        output.push_str("# TYPE bridge_mcp_reduction_param_used_total counter\n");
         if let Ok(params) = self.reduction_param_counts.read() {
             let mut sorted: Vec<_> = params.iter().collect();
             sorted.sort();
             for (param, count) in sorted {
                 let _ = writeln!(
                     output,
-                    "mcp_reduction_param_used_total{{param=\"{param}\"}} {count}"
+                    "bridge_mcp_reduction_param_used_total{{param=\"{param}\"}} {count}"
                 );
             }
         }
+        output.push('\n');
 
         output
     }
@@ -666,11 +669,11 @@ mod tests {
 
         let prom = m.render_prometheus();
         assert!(
-            prom.contains("mcp_reduction_param_used_total{param=\"jq_filter\"} 1"),
+            prom.contains("bridge_mcp_reduction_param_used_total{param=\"jq_filter\"} 1"),
             "got: {prom}"
         );
         assert!(
-            prom.contains("mcp_reduction_calls_with_params_total 2"),
+            prom.contains("bridge_mcp_reduction_calls_with_params_total 2"),
             "got: {prom}"
         );
     }
