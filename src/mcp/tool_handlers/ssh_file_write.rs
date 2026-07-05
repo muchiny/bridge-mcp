@@ -183,7 +183,8 @@ impl ToolHandler for SshFileWriteHandler {
             .max_output
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
         let truncated =
-            truncate_output_with_cache(&output_text, max_chars, ctx.output_cache.as_deref()).await;
+            truncate_output_with_cache(&output_text, max_chars, ctx.output_cache.as_deref(), None)
+                .await;
 
         // Save full output if requested
         let mut final_output = truncated;

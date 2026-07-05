@@ -100,6 +100,36 @@ impl OutputKind {
         }
     }
 
+    /// Short, actionable remediation appended to truncation messages.
+    ///
+    /// Unlike [`Self::strategy_hint`] (schema/describe-tool documentation),
+    /// this is injected into the tool RESPONSE when output was truncated,
+    /// so the model learns the server-side alternative to pagination at
+    /// the exact moment it needs it. `RawText` has no reduction params,
+    /// hence `None`.
+    #[must_use]
+    pub const fn truncation_tip(&self) -> Option<&'static str> {
+        match self {
+            Self::RawText => None,
+            Self::Tabular => Some(
+                "re-run with columns=[\"COL1\",\"COL2\"] and limit=N to keep \
+                 only the fields you need (filtered server-side, before truncation)",
+            ),
+            Self::Json => Some(
+                "re-run with jq_filter='.field' (add output_format=\"tsv\" for \
+                 array results) to extract only what you need server-side",
+            ),
+            Self::Yaml => Some(
+                "re-run with yq_filter='.field' (add output_format=\"tsv\" for \
+                 array results) to extract only what you need server-side",
+            ),
+            Self::Auto => Some(
+                "re-run with jq_filter='...' (JSON output) or columns=[...] and \
+                 limit=N (tabular output) to reduce the output server-side",
+            ),
+        }
+    }
+
     /// Short compact marker for list-tools output ("jq+tsv", "cols", "—", …).
     #[must_use]
     pub const fn short_marker(&self) -> &'static str {
@@ -194,5 +224,30 @@ mod tests {
         assert_eq!(OutputKind::Json.short_marker(), "jq+tsv");
         assert_eq!(OutputKind::Yaml.short_marker(), "yq+tsv");
         assert_eq!(OutputKind::Auto.short_marker(), "*");
+    }
+
+    #[test]
+    fn test_truncation_tip_per_kind() {
+        assert!(OutputKind::RawText.truncation_tip().is_none());
+        assert!(
+            OutputKind::Tabular
+                .truncation_tip()
+                .is_some_and(|t| t.contains("columns") && t.contains("limit"))
+        );
+        assert!(
+            OutputKind::Json
+                .truncation_tip()
+                .is_some_and(|t| t.contains("jq_filter"))
+        );
+        assert!(
+            OutputKind::Yaml
+                .truncation_tip()
+                .is_some_and(|t| t.contains("yq_filter"))
+        );
+        assert!(
+            OutputKind::Auto
+                .truncation_tip()
+                .is_some_and(|t| t.contains("jq_filter") && t.contains("columns"))
+        );
     }
 }

@@ -215,9 +215,13 @@ impl ToolHandler for SshTailHandler {
         let max_chars = args
             .max_output
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
-        let truncated_stdout =
-            truncate_output_with_cache(&response.stdout, max_chars, ctx.output_cache.as_deref())
-                .await;
+        let truncated_stdout = truncate_output_with_cache(
+            &response.stdout,
+            max_chars,
+            ctx.output_cache.as_deref(),
+            None,
+        )
+        .await;
 
         // Save full output to local file if requested
         let mut output_text = response.format_for_llm(&truncated_stdout);

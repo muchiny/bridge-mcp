@@ -454,9 +454,13 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         let max_chars = args
             .max_output()
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
-        let truncated_stdout =
-            truncate_output_with_cache(&response.stdout, max_chars, ctx.output_cache.as_deref())
-                .await;
+        let truncated_stdout = truncate_output_with_cache(
+            &response.stdout,
+            max_chars,
+            ctx.output_cache.as_deref(),
+            T::OUTPUT_KIND.truncation_tip(),
+        )
+        .await;
 
         // Step 16: Save full output to file if requested
         let mut save_info: Option<String> = None;

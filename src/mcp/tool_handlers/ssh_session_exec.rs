@@ -182,9 +182,13 @@ impl ToolHandler for SshSessionExecHandler {
         let max_chars = args
             .max_output
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
-        let output_text =
-            truncate_output_with_cache(&sanitized_output, max_chars, ctx.output_cache.as_deref())
-                .await;
+        let output_text = truncate_output_with_cache(
+            &sanitized_output,
+            max_chars,
+            ctx.output_cache.as_deref(),
+            None,
+        )
+        .await;
 
         // Build response with metadata
         let response = serde_json::json!({
