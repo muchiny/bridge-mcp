@@ -1,0 +1,5 @@
+mode: strict
+whitelist:
+  - "^ls\\b"
+  - "^df\\b"
+blacklist: []

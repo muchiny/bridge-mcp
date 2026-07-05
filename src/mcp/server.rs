@@ -1059,7 +1059,7 @@ impl McpServer {
     ///
     /// Server-to-client features (elicitation, sampling) are unavailable on
     /// this code path because no per-session pending-requests map is
-    /// supplied. Use [`Self::serve`] / [`Self::serve_session`] for full
+    /// supplied. Use [`Self::serve`] / `Self::serve_session` (private) for full
     /// MCP feature support.
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
         self.handle_request_with_cancel(request, None, None).await

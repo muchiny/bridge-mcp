@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
 
 # Default target
 all: check lint test
@@ -56,6 +56,10 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
+# Rustdoc as a lint: broken intra-doc links, bare URLs, invalid HTML
+doc-check:
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
 # Security audit (requires cargo-audit: cargo install cargo-audit)
 audit:
 	@command -v cargo-deny >/dev/null 2>&1 && cargo deny check advisories || (command -v cargo-audit >/dev/null 2>&1 && cargo-audit audit || echo "neither cargo-deny nor cargo-audit installed, skipping")
@@ -100,7 +104,7 @@ quality: fmt-check lint typos machete
 ci: fmt-check lint test audit deny typos
 
 # Full CI check (comprehensive - replaces GitHub Actions)
-ci-full: fmt-check lint test audit typos hack geiger
+ci-full: fmt-check lint test audit typos hack geiger doc-check
 	@echo "Full CI complete."
 
 # Setup development environment
@@ -108,7 +112,7 @@ setup:
 	@echo "Installing Rust dev tools..."
 	rustup component add rustfmt clippy
 	@echo "Installing cargo tools..."
-	cargo install cargo-nextest cargo-deny cargo-audit cargo-watch cargo-machete cargo-outdated typos-cli cargo-semver-checks cargo-hack cargo-insta cargo-geiger cargo-cyclonedx cross --locked
+	cargo install cargo-nextest cargo-deny cargo-audit cargo-watch cargo-machete cargo-outdated typos-cli cargo-semver-checks cargo-hack cargo-insta cargo-geiger cargo-cyclonedx cargo-llvm-cov cross --locked
 	@echo "Installing pre-commit (requires Python)..."
 	@command -v pip >/dev/null 2>&1 && pip install --user pre-commit && pre-commit install || echo "pip not found, skipping pre-commit"
 	@echo "Installing markdownlint (requires Node.js)..."
@@ -116,26 +120,42 @@ setup:
 	@echo ""
 	@echo "Setup complete! Run 'make check' to verify."
 
-# Code coverage report (requires cargo-tarpaulin: cargo install cargo-tarpaulin)
+# Code coverage report (requires cargo-llvm-cov: cargo install cargo-llvm-cov)
+# WSL NOTE: full-crate coverage is heavy; locally we scope to --lib.
 coverage:
-	@command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin --engine llvm --out Html --output-dir coverage && echo "Coverage report: coverage/tarpaulin-report.html" || echo "cargo-tarpaulin not installed, run: cargo install cargo-tarpaulin"
+	@command -v cargo-llvm-cov >/dev/null 2>&1 && cargo llvm-cov --lib --html --output-dir coverage && echo "Coverage report: coverage/html/index.html" || echo "cargo-llvm-cov not installed, run: cargo install cargo-llvm-cov"
 
 # Code coverage with minimum threshold (fail if below).
-# Threshold must match ci.yml's coverage job (--fail-under 70).
+# Threshold must match ci.yml's coverage job (--fail-under-lines 70).
 coverage-check:
-	@command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin --engine llvm --out xml --output-dir coverage --fail-under 70 || echo "cargo-tarpaulin not installed, run: cargo install cargo-tarpaulin"
+	@command -v cargo-llvm-cov >/dev/null 2>&1 && cargo llvm-cov --lib --summary-only --fail-under-lines 70 || echo "cargo-llvm-cov not installed, run: cargo install cargo-llvm-cov"
+
+# WSL-safe mutation settings (crash post-mortem 2026-07-04):
+# - TMPDIR=/var/tmp — WSL /tmp is a RAM-backed tmpfs; cargo-mutants builds its
+#   scratch trees under $TMPDIR, so building there doubles memory pressure.
+# - -j 1 — a single job is the only proven-safe parallelism on this 24GB VM.
+# - NEXTEST_TEST_THREADS=2 — caps per-mutant test parallelism.
+MUTANTS_SAFE = TMPDIR=/var/tmp NEXTEST_TEST_THREADS=2 cargo mutants -j 1
 
 # Mutation testing (security module only - fast)
 mutants:
-	@command -v cargo-mutants >/dev/null 2>&1 && cargo mutants --re '^src/security/' || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
+	@command -v cargo-mutants >/dev/null 2>&1 && $(MUTANTS_SAFE) --re '^src/security/' || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
 
 # Mutation testing (database + domain modules)
 mutants-db:
-	@command -v cargo-mutants >/dev/null 2>&1 && cargo mutants --re '^src/domain/' || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
+	@command -v cargo-mutants >/dev/null 2>&1 && $(MUTANTS_SAFE) --re '^src/domain/' || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
 
-# Mutation testing (full project - slow)
+# Mutation testing of a single file: make mutants-file FILE=src/domain/output_cache.rs
+mutants-file:
+	@test -n "$(FILE)" || (echo "Usage: make mutants-file FILE=src/path/to/file.rs" && exit 1)
+	@command -v cargo-mutants >/dev/null 2>&1 && $(MUTANTS_SAFE) --file "$(FILE)" || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
+
+# Full-project mutation is CI-only (weekly 8-shard job in security.yml +
+# per-PR --in-diff job in ci.yml). Running it locally OOMs the WSL VM.
 mutants-full:
-	@command -v cargo-mutants >/dev/null 2>&1 && cargo mutants || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
+	@echo "Refusing: full-crate mutation OOMs this WSL VM."
+	@echo "Use the weekly sharded CI job (security.yml), the PR in-diff job (ci.yml),"
+	@echo "or scope locally: make mutants-file FILE=src/path/to/file.rs"
 
 # Extra runtime checks on dependencies (requires cargo-careful + nightly)
 careful:
@@ -301,6 +321,7 @@ help:
 	@echo "  fmt              - Format code"
 	@echo "  fmt-check        - Check formatting"
 	@echo "  typos            - Check for typos"
+	@echo "  doc-check        - Rustdoc lint (broken links, -D warnings)"
 	@echo "  hack             - Check all feature combinations"
 	@echo "  quality          - Full quality check (lint+typos+machete)"
 	@echo ""
@@ -319,11 +340,12 @@ help:
 	@echo "  sbom             - Generate SBOM (CycloneDX)"
 	@echo ""
 	@echo "Testing:"
-	@echo "  coverage         - Generate HTML coverage report (cargo-tarpaulin)"
-	@echo "  coverage-check   - Coverage with minimum threshold (--fail-under 70)"
-	@echo "  mutants          - Mutation testing (security module)"
-	@echo "  mutants-db       - Mutation testing (domain/database)"
-	@echo "  mutants-full     - Mutation testing (full project)"
+	@echo "  coverage         - Generate HTML coverage report (cargo-llvm-cov, --lib)"
+	@echo "  coverage-check   - Coverage with minimum threshold (--fail-under-lines 70)"
+	@echo "  mutants          - Mutation testing (security module, WSL-safe)"
+	@echo "  mutants-db       - Mutation testing (domain modules, WSL-safe)"
+	@echo "  mutants-file     - Mutation testing of one file (FILE=src/...)"
+	@echo "  mutants-full     - [CI-ONLY] refuses locally, points to CI jobs"
 	@echo "  semver-checks    - Check for semver-breaking changes"
 	@echo "  careful          - Extra runtime checks (cargo-careful + nightly)"
 	@echo "  bench            - Run benchmarks"

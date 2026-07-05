@@ -151,6 +151,8 @@ bridge-mcp-macros = { version = "0.1.0", path = "crates/bridge-mcp-macros" }
 jsonwebtoken = { version = "10", features = ["rust_crypto", "use_pem"] }
 
 [dev-dependencies]
+# test-util enables tokio::time::pause/advance for deterministic TTL tests
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 filetime = "0.2"

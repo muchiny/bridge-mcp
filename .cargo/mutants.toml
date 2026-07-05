@@ -38,32 +38,14 @@ exclude_re = [
     "replace StandardTool::scoped_paths -> Vec<&str> with vec!\\[\\]",
     "replace try_apply_yq -> Result<bool> with Ok\\(false\\)",
     "replace try_apply_jq -> Result<bool> with Ok\\(false\\)",
-    # `OutputCache::store` / `cleanup` use `now.duration_since(entry.created)
-    # < self.ttl`. The mutations `< -> <=` and `< -> ==` only differ at the
-    # exact ttl boundary, which requires a `Clock` abstraction to reach
-    # deterministically — `Instant::now()` ignores `tokio::time::pause`.
-    "replace < with <= in OutputCache::store",
-    "replace < with <= in OutputCache::cleanup",
-    "replace < with == in OutputCache::cleanup",
-    # `floor_char_boundary` / `ceil_char_boundary` short-circuit on the
-    # second condition (`!s.is_char_boundary(0)` and `_(s.len())` are
-    # both `false` because byte 0 and byte len are *always* char
-    # boundaries in Rust strings). The mutations `> -> >=` and `< -> <=`
-    # therefore produce the same observable output as the original.
-    "replace > with >= in floor_char_boundary",
-    "replace < with <= in ceil_char_boundary",
-    # `i -= 1` / `i += 1` mutated to `i /= 1` / `i *= 1` are no-ops on
-    # any value (x*1 == x, x/1 == x). The loop body becomes infinite,
-    # which would be caught by a tight per-call timeout — but the
-    # current test infrastructure exercises `floor`/`ceil` indirectly
-    # through `truncate_output` calls inside many other tests, all of
-    # which then hang and trip a SIGTERM that flips the whole mutant
-    # outcome to TIMEOUT instead of FAIL. Killing these properly
-    # requires either factoring the loop out behind a `Clock`-style
-    # bound, or wrapping every truncation test in a thread+recv
-    # timeout — both out of scope for this batch.
-    "replace -= with /= in floor_char_boundary",
-    "replace \\+= with \\*= in ceil_char_boundary",
+    # (2026-07-04) OutputCache TTL exclusions removed: the cache now uses
+    # `tokio::time::Instant`, and `start_paused` boundary tests kill the
+    # `<`/`<=`/`==` mutants deterministically.
+    # (2026-07-04) floor/ceil_char_boundary exclusions removed: the open
+    # `while` loops were rewritten as bounded range scans (a UTF-8 char is
+    # at most 4 bytes, so a boundary always exists in a 4-position window).
+    # No comparison/assignment operators remain to mutate; body-replacement
+    # mutants are killed by the unit tests + boundary property test.
     # `DataReductionArgs::wants_tsv` is `#[cfg(feature = "jq")]`-gated.
     # Mutations on the body are equivalent in default builds because
     # the function is compiled out; killing them requires a `--features
@@ -76,28 +58,14 @@ exclude_re = [
     # so the guarded block never runs — same observable behavior as
     # the original on the empty-state path.
     "replace > with < in Metrics::render_token_summary",
-    # `AuditLogger::cleanup_old_files` compares file mtime to a
-    # cutoff `< self.retain_days`. The mutation `< -> <=` only
-    # differs at the *exact* cutoff timestamp — unreachable from a
-    # deterministic test for the same reason as `OutputCache`:
-    # `SystemTime`/`Utc::now` are real-time syscalls and the
-    # filesystem mtime is not under test control.
-    "replace < with <= in AuditLogger::cleanup_old_files",
-    # `ConfigWatcher` uses `Instant::elapsed() < DEBOUNCE_DURATION` to
-    # skip reloads that arrive within the debounce window, plus
-    # `notify::EventKind` filters on a sync callback that runs on the
-    # `notify` watcher thread. Both ride on real-time and a real
-    # filesystem event source — killing the timing/filter mutations
-    # deterministically requires either injecting a `Clock` or
-    # spinning up a real `tempfile`-based fixture with carefully
-    # ordered fs writes. Out of scope for this batch.
-    "replace < with <= in ConfigWatcher::with_validator",
-    "replace < with == in ConfigWatcher::with_validator",
-    "replace && with || in ConfigWatcher::with_validator",
-    "replace < with <= in ConfigWatcher::with_notifications",
-    "replace < with == in ConfigWatcher::with_notifications",
-    "replace && with || in ConfigWatcher::with_notifications",
-    "replace == with != in ConfigWatcher::with_notifications",
+    # (2026-07-04) AuditLogger::cleanup_old_files exclusion removed: the
+    # retention clock is now an injectable `fn() -> DateTime<Utc>` field, and
+    # a fixed-clock + filetime test pins the exact-cutoff boundary.
+    # (2026-07-04) ConfigWatcher exclusions removed: the kind/path/debounce
+    # decision now lives in the pure `should_process_event(event, path,
+    # last_reload, now)` function — the callback passes `Instant::now()`
+    # explicitly — and boundary unit tests kill the timing/filter mutants
+    # without touching the filesystem.
 ]
 
 # Examine groups for focused mutation testing:

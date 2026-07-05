@@ -74,6 +74,9 @@ pub struct AuditLogger {
     config: AuditConfig,
     sender: Option<mpsc::UnboundedSender<AuditEvent>>,
     sanitizer: Option<Arc<crate::security::Sanitizer>>,
+    /// Clock used for the retention cutoff; injectable so the boundary
+    /// (mtime == cutoff) is deterministically testable.
+    now_fn: fn() -> DateTime<Utc>,
 }
 
 /// Background task that writes audit events to a file
@@ -149,6 +152,7 @@ impl AuditLogger {
             config: config.clone(),
             sender: Some(tx),
             sanitizer: None,
+            now_fn: Utc::now,
         };
 
         let task = AuditWriterTask {
@@ -196,7 +200,15 @@ impl AuditLogger {
             config: AuditConfig::default(),
             sender: None,
             sanitizer: None,
+            now_fn: Utc::now,
         }
+    }
+
+    /// Test-only clock override so retention-boundary behavior is
+    /// deterministic.
+    #[cfg(test)]
+    fn set_clock(&mut self, now_fn: fn() -> DateTime<Utc>) {
+        self.now_fn = now_fn;
     }
 
     /// Log an audit event (non-blocking)
@@ -317,7 +329,7 @@ impl AuditLogger {
             return;
         };
 
-        let cutoff = Utc::now() - chrono::Duration::days(i64::from(retain_days));
+        let cutoff = (self.now_fn)() - chrono::Duration::days(i64::from(retain_days));
 
         if let Ok(entries) = std::fs::read_dir(parent) {
             for entry in entries.flatten() {
@@ -889,6 +901,48 @@ mod tests {
 
         // Old file should be deleted
         assert!(!old_file.exists(), "Old file should be deleted");
+    }
+
+    #[test]
+    fn test_cleanup_keeps_file_at_exact_cutoff() {
+        // Strict `<` in the retention check: a file whose mtime is exactly
+        // equal to the cutoff must NOT be deleted. Fixed clock + fixed mtime
+        // make the boundary reachable deterministically.
+        fn fixed_now() -> DateTime<Utc> {
+            chrono::DateTime::parse_from_rfc3339("2026-01-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+        std::fs::write(&audit_path, "current log").unwrap();
+
+        let boundary_file = temp_dir.path().join("audit.log.20260101_000000");
+        std::fs::write(&boundary_file, "boundary content").unwrap();
+
+        let cutoff = fixed_now() - chrono::Duration::days(30);
+        filetime::set_file_mtime(
+            &boundary_file,
+            filetime::FileTime::from_system_time(std::time::SystemTime::from(cutoff)),
+        )
+        .unwrap();
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path,
+            max_size_mb: 10,
+            retain_days: 30,
+        };
+
+        let (mut logger, _) = AuditLogger::new(&config).unwrap();
+        logger.set_clock(fixed_now);
+        logger.cleanup_old_files();
+
+        assert!(
+            boundary_file.exists(),
+            "file with mtime == cutoff must be kept (strict <)"
+        );
     }
 
     #[test]

@@ -27,6 +27,17 @@ use crate::ssh::CommandOutput;
 /// Default Telnet port.
 const DEFAULT_TELNET_PORT: u16 = 23;
 
+/// Login-prompt matcher ("login:", "Login:", "Username:"-style endings).
+/// Compiled once — the login flow runs on every reconnect.
+#[allow(clippy::expect_used)] // static regex literal
+static LOGIN_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new("ogin:").expect("static regex"));
+
+/// Password-prompt matcher ("password:", "Password:").
+#[allow(clippy::expect_used)] // static regex literal
+static PASS_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new("assword:").expect("static regex"));
+
 /// Default prompt regex for network devices.
 const DEFAULT_PROMPT: &str = r"[>#$]";
 
@@ -102,10 +113,7 @@ impl TelnetConnection {
         };
 
         // Login flow: wait for "ogin:" → send user, "assword:" → send pass, prompt → ready.
-        let login_re = Regex::new("ogin:").expect("static regex");
-        let pass_re = Regex::new("assword:").expect("static regex");
-
-        conn.read_until(&login_re)
+        conn.read_until(&LOGIN_RE)
             .await
             .map_err(|e| BridgeError::SshExec {
                 reason: format!("Telnet login prompt not received: {e}"),
@@ -116,7 +124,7 @@ impl TelnetConnection {
                 reason: format!("Telnet login send failed: {e}"),
             })?;
 
-        conn.read_until(&pass_re)
+        conn.read_until(&PASS_RE)
             .await
             .map_err(|e| BridgeError::SshExec {
                 reason: format!("Telnet password prompt not received: {e}"),

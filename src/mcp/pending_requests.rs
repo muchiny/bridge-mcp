@@ -47,7 +47,10 @@ impl PendingRequests {
         let id = format!("srv-{}", uuid::Uuid::new_v4().simple());
         let (tx, rx) = oneshot::channel();
 
-        let mut pending = self.pending.lock().expect("pending lock poisoned");
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pending.insert(id.clone(), tx);
 
         (id, rx)
@@ -57,7 +60,10 @@ impl PendingRequests {
     ///
     /// Returns `true` if the request was found and resolved.
     pub fn resolve(&self, id: &str, response: ClientResponse) -> bool {
-        let mut pending = self.pending.lock().expect("pending lock poisoned");
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(tx) = pending.remove(id) {
             // If the receiver was dropped, that's fine — the caller timed out.
             let _ = tx.send(response);
@@ -70,7 +76,10 @@ impl PendingRequests {
     /// Number of currently pending requests.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.pending.lock().expect("pending lock poisoned").len()
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Whether there are no pending requests.

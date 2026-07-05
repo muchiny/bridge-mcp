@@ -1,0 +1,1 @@
+kubectl get pods --namespace=kube-system --output=jsonpath='{.items[*].metadata.name}'

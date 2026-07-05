@@ -200,7 +200,9 @@ fn merge_data_reduction(
     if !args.is_object() {
         args = serde_json::Value::Object(serde_json::Map::new());
     }
-    let map = args.as_object_mut().expect("just ensured object");
+    let serde_json::Value::Object(ref mut map) = args else {
+        return args; // unreachable: an object was just ensured above
+    };
 
     #[cfg(feature = "jq")]
     if let Some(expr) = flags.jq.as_deref()

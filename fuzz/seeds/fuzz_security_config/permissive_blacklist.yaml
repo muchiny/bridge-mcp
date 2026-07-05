@@ -1,0 +1,4 @@
+mode: permissive
+blacklist:
+  - "rm\\s+-rf"
+  - "mkfs\\."

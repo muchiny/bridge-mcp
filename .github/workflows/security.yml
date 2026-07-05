@@ -23,6 +23,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  zizmor:
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Audit GitHub Actions workflows
+        run: uvx zizmor --min-severity medium .github/workflows/
+
   audit:
     name: Cargo audit
     runs-on: ubuntu-latest
@@ -89,11 +101,19 @@ jobs:
       - name: Scan for unsafe code in dependencies
         run: cargo geiger --all-features --output-format ascii
 
+  # Weekly mutation sweep over the pure-logic layers (domain, security,
+  # config — tool_handlers are thin adapters with poor mutation ROI),
+  # sharded 8 ways so each runner stays under the timeout. PR-scoped
+  # mutation lives in ci.yml (mutants-diff).
   mutation-testing:
-    name: Mutation testing (security)
+    name: Mutation testing (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 180
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -103,12 +123,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,cargo-mutants
-      - name: Run mutation testing on security module
-        run: cargo mutants --re '^src/security/' -- --all-features
+      - name: Run mutation shard
+        run: >
+          cargo mutants --re '^src/(domain|security|config)/'
+          --shard ${{ matrix.shard }}/8 -- --all-features
       - name: Upload mutation report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mutation-report
+          name: mutation-report-shard-${{ matrix.shard }}
           path: mutants.out/
           retention-days: 30

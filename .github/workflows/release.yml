@@ -5,10 +5,9 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
+# Job-level permissions below (zizmor excessive-permissions): only the
+# release job writes contents / mints attestations.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,22 +21,53 @@ jobs:
     name: Test before release
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-test
+      # No rust-cache in this workflow: it publishes artifacts, and restoring
+      # a branch-writable cache into a publishing pipeline is a
+      # cache-poisoning vector (zizmor cache-poisoning). Clean builds only.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
       - run: cargo nextest run --all-targets --all-features
 
+  # The crate is not on crates.io, so the SemVer baseline is the previous
+  # release tag. A breaking API change without a major bump fails the
+  # release before any binary is built.
+  semver:
+    name: SemVer check vs previous tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Run cargo-semver-checks
+        run: |
+          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -z "$prev" ]; then
+            echo "No previous tag found; skipping SemVer check"
+            exit 0
+          fi
+          echo "Baseline: $prev"
+          cargo semver-checks --baseline-rev "$prev" --default-features
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    needs: test
+    needs: [test, semver]
     timeout-minutes: 60
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -69,10 +99,6 @@ jobs:
 
       - name: Ensure target is installed
         run: rustup target add ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
 
       - name: Install cross
         if: matrix.cross
@@ -107,6 +133,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
 

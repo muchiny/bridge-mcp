@@ -119,6 +119,41 @@ jobs:
       # ~150 builds × ~30s = >75min. Depth 1 = 18 builds = ~10 min.
       - run: cargo hack check --feature-powerset --depth 1 --no-dev-deps --exclude-features full,air-gapped,all-protocols,cloud
 
+  # Incremental mutation testing: mutate ONLY the lines touched by the PR
+  # diff. Full-crate mutation is hours of compute (that's the weekly
+  # sharded job in security.yml); the diff scope is minutes and catches
+  # untested new logic at the moment it lands.
+  mutants-diff:
+    name: Mutants (diff)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants-diff
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-mutants
+      - name: Mutation-test the PR diff
+        # GITHUB_BASE_REF via env (never interpolated into the script) —
+        # template-injection hardening, same pattern as fuzz.yml.
+        run: |
+          git diff "origin/${GITHUB_BASE_REF}"...HEAD > pr.diff
+          cargo mutants --in-diff pr.diff --timeout-multiplier 1.5 -vV
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-diff-report
+          path: mutants.out/
+          retention-days: 14
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -131,9 +166,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage
+      # cargo-llvm-cov: source-based LLVM instrumentation (precise line and
+      # region counts) instead of tarpaulin's ptrace engine; integrates with
+      # nextest so the run behaves exactly like the Tests job.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin
+          tool: cargo-llvm-cov,cargo-nextest
 
       # Phase A: start the SSH test container and generate the integration
       # test config so the previously-#[ignore]'d tests in
@@ -172,14 +210,13 @@ jobs:
 
       - name: Generate coverage (with integration tests)
         run: |
-          cargo tarpaulin --engine llvm --all-features \
-            --out xml --output-dir coverage \
-            --fail-under 70 \
-            --timeout 600 \
-            --skip-clean \
-            --exclude-files tests/e2e_raspberry.rs \
-            -- --include-ignored \
-               --skip rpi::
+          mkdir -p coverage
+          cargo llvm-cov nextest --all-features \
+            --ignore-filename-regex 'tests/e2e_raspberry\.rs' \
+            --cobertura --output-path coverage/cobertura.xml \
+            --fail-under-lines 70 \
+            --run-ignored all \
+            -E 'not test(rpi::)'
 
       - name: Stop test SSH container
         if: always()
@@ -192,6 +229,21 @@ jobs:
           name: coverage-report
           path: coverage/cobertura.xml
           retention-days: 30
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      - name: Check rustdoc (broken links, bare URLs)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
   typos:
     name: Typos

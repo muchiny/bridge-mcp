@@ -223,6 +223,7 @@ fn render_unified_diff(baseline: &str, other: &str) -> String {
 /// normalize every possible volatile field. Adding more rules is
 /// easy but each rule is a risk of hiding a real divergence, so we
 /// keep the defaults conservative.
+#[allow(clippy::expect_used)] // static regex literals below, validated by the normalization tests
 fn maybe_normalize(output: &str, normalize: bool) -> String {
     // Module-level statics so rustc (and clippy) don't flag
     // `items_after_statements` when they sit inside the function.
