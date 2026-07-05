@@ -128,7 +128,7 @@ pub fn build_instructions(config: &Config, tool_count: usize) -> String {
     );
 
     // --- Static Guidance ---
-    let _ = write!(
+    let _ = writeln!(
         out,
         "\n\
          WORKFLOW: Call ssh_status first to verify host connectivity and OS type.\n\
@@ -143,14 +143,33 @@ pub fn build_instructions(config: &Config, tool_count: usize) -> String {
          ssh_output_fetch output_id=<id> offset=<N> to paginate the rest.\n\
          \n\
          SESSIONS: For multi-step workflows needing shared state (cd, env vars), \
-         use ssh_session_create + ssh_session_exec. Close with ssh_session_close when done.\n\
-         \n\
-         TOKEN SAVINGS: Tools exposing jq_filter (JSON output), yq_filter (YAML), \
+         use ssh_session_create + ssh_session_exec. Close with ssh_session_close when done.\n"
+    );
+
+    // TOKEN SAVINGS: jq_filter/yq_filter only work on binaries built with the
+    // `jq` feature (see `DataReductionArgs::extract`, which hard-errors on
+    // those params otherwise), so the no-jq variant must not recommend them.
+    #[cfg(feature = "jq")]
+    let _ = writeln!(
+        out,
+        "TOKEN SAVINGS: Tools exposing jq_filter (JSON output), yq_filter (YAML), \
          or columns (tabular output) support server-side data reduction. Add \
          output_format=tsv for list-shaped results (60-80% fewer tokens than pretty JSON). \
          ALWAYS use these parameters \u{2014} call describe-tool (CLI) or inspect the tool \
-         schema (MCP) to see the exact Reduction Strategy per tool.\n\
-         \n\
+         schema (MCP) to see the exact Reduction Strategy per tool."
+    );
+    #[cfg(not(feature = "jq"))]
+    let _ = writeln!(
+        out,
+        "TOKEN SAVINGS: Tools exposing columns (tabular output) or limit \
+         support server-side data reduction. ALWAYS use these parameters \u{2014} \
+         call describe-tool (CLI) or inspect the tool schema (MCP) to see the \
+         exact Reduction Strategy per tool."
+    );
+
+    let _ = write!(
+        out,
+        "\n\
          OVERRIDES: All tools accept timeout_seconds (override default timeout) and \
          max_output (override default output char limit) as optional parameters.\n\
          \n\
@@ -346,8 +365,18 @@ mod tests {
         assert!(out.contains("APPS:"));
         assert!(out.contains("ROOTS:"));
         assert!(out.contains("TOKEN SAVINGS:"));
-        assert!(out.contains("output_format=tsv"));
-        assert!(out.contains("yq_filter"));
+        #[cfg(feature = "jq")]
+        {
+            assert!(out.contains("output_format=tsv"));
+            assert!(out.contains("yq_filter"));
+        }
+        #[cfg(not(feature = "jq"))]
+        {
+            // No-jq builds must not advertise jq_filter/yq_filter — they hard-error.
+            assert!(!out.contains("jq_filter"));
+            assert!(!out.contains("yq_filter"));
+            assert!(out.contains("columns"));
+        }
         assert!(out.contains("OVERRIDES:"));
         assert!(out.contains("timeout_seconds"));
         assert!(out.contains("max_output"));

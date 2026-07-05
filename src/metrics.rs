@@ -351,20 +351,24 @@ impl Metrics {
             output.push('\n');
         }
 
-        output.push_str("# HELP bridge_mcp_reduction_calls_with_params_total Pipeline calls that supplied at least one reduction param\n");
-        output.push_str("# TYPE bridge_mcp_reduction_calls_with_params_total counter\n");
-        let _ = writeln!(
-            output,
-            "bridge_mcp_reduction_calls_with_params_total {}",
-            self.calls_with_reduction.load(Ordering::Relaxed)
-        );
-        output.push('\n');
-
-        output.push_str(
-            "# HELP bridge_mcp_reduction_param_used_total Reduction param adoption by param name\n",
-        );
-        output.push_str("# TYPE bridge_mcp_reduction_param_used_total counter\n");
+        // Both `bridge_mcp_reduction_*` families share one lock guard (like
+        // the per-tool/per-host blocks above): a poisoned `reduction_param_counts`
+        // lock means we emit nothing for either metric family, rather than
+        // a HELP/TYPE header with no matching data.
         if let Ok(params) = self.reduction_param_counts.read() {
+            output.push_str("# HELP bridge_mcp_reduction_calls_with_params_total Pipeline calls that supplied at least one reduction param\n");
+            output.push_str("# TYPE bridge_mcp_reduction_calls_with_params_total counter\n");
+            let _ = writeln!(
+                output,
+                "bridge_mcp_reduction_calls_with_params_total {}",
+                self.calls_with_reduction.load(Ordering::Relaxed)
+            );
+            output.push('\n');
+
+            output.push_str(
+                "# HELP bridge_mcp_reduction_param_used_total Reduction param adoption by param name\n",
+            );
+            output.push_str("# TYPE bridge_mcp_reduction_param_used_total counter\n");
             let mut sorted: Vec<_> = params.iter().collect();
             sorted.sort();
             for (param, count) in sorted {
@@ -373,8 +377,8 @@ impl Metrics {
                     "bridge_mcp_reduction_param_used_total{{param=\"{param}\"}} {count}"
                 );
             }
+            output.push('\n');
         }
-        output.push('\n');
 
         output
     }

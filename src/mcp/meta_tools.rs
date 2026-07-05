@@ -185,6 +185,7 @@ pub fn unwrap_call_tool(
     let Some(name) = obj
         .get("name")
         .and_then(Value::as_str)
+        .map(str::trim)
         .filter(|s| !s.is_empty())
     else {
         return Err(format!(
@@ -659,5 +660,15 @@ mod tests {
         let args = json!({"arguments": {}});
         assert!(unwrap_call_tool(Some(&args)).is_err());
         assert!(unwrap_call_tool(None).is_err());
+    }
+
+    #[test]
+    fn test_unwrap_call_tool_whitespace_only_name_is_error() {
+        let args = json!({"name": "   ", "arguments": {}});
+        let err = unwrap_call_tool(Some(&args)).unwrap_err();
+        assert!(
+            err.contains("`name` (string, non-empty) is required"),
+            "got: {err}"
+        );
     }
 }

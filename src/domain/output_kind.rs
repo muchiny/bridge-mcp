@@ -71,6 +71,11 @@ impl OutputKind {
     ///
     /// Used by `describe-tool` (CLI) and schema metadata to tell the
     /// AI consumer exactly which data-reduction params to use and how.
+    ///
+    /// The `Json`/`Yaml`/`Auto` arms have `jq`-feature and no-`jq` variants:
+    /// binaries built without the `jq` feature reject `jq_filter`/`yq_filter`
+    /// (see `DataReductionArgs::extract`), so this hint must never recommend
+    /// a param that would hard-error on that build.
     #[must_use]
     pub const fn strategy_hint(&self) -> &'static str {
         match self {
@@ -84,18 +89,44 @@ impl OutputKind {
                  cap rows. Header is always preserved."
             }
             Self::Json => {
-                "JSON — use jq_filter='.field' to extract only what you need and \
-                 output_format='tsv' for 60-80% token savings on list-shaped data. \
-                 Example: jq_filter='.items[] | [.name, .status]' output_format=tsv."
+                #[cfg(feature = "jq")]
+                {
+                    "JSON — use jq_filter='.field' to extract only what you need and \
+                     output_format='tsv' for 60-80% token savings on list-shaped data. \
+                     Example: jq_filter='.items[] | [.name, .status]' output_format=tsv."
+                }
+                #[cfg(not(feature = "jq"))]
+                {
+                    "JSON — use limit=N to cap top-level array elements server-side; \
+                     for the full output use save_output=/path/to/file (or paginate via \
+                     ssh_output_fetch)."
+                }
             }
             Self::Yaml => {
-                "YAML — use yq_filter='.field' (jaq engine over parsed YAML) and \
-                 output_format='tsv' for list-shaped data."
+                #[cfg(feature = "jq")]
+                {
+                    "YAML — use yq_filter='.field' (jaq engine over parsed YAML) and \
+                     output_format='tsv' for list-shaped data."
+                }
+                #[cfg(not(feature = "jq"))]
+                {
+                    "YAML — no server-side filter without the 'jq' build feature; use \
+                     save_output=/path/to/file (or paginate via ssh_output_fetch) for \
+                     the full output."
+                }
             }
             Self::Auto => {
-                "Auto-detect JSON or tabular at runtime — accepts all reduction \
-                 params (jq_filter, columns, limit, output_format). JSON is tried \
-                 first; tabular is the fallback."
+                #[cfg(feature = "jq")]
+                {
+                    "Auto-detect JSON or tabular at runtime — accepts all reduction \
+                     params (jq_filter, columns, limit, output_format). JSON is tried \
+                     first; tabular is the fallback."
+                }
+                #[cfg(not(feature = "jq"))]
+                {
+                    "Auto-detect JSON or tabular at runtime — use columns=[\"A\",\"B\"] \
+                     to pick fields and limit=N to cap rows/items server-side."
+                }
             }
         }
     }
@@ -115,18 +146,44 @@ impl OutputKind {
                 "re-run with columns=[\"COL1\",\"COL2\"] and limit=N to keep \
                  only the fields you need (filtered server-side, before truncation)",
             ),
-            Self::Json => Some(
-                "re-run with jq_filter='.field' (add output_format=\"tsv\" for \
-                 array results) to extract only what you need server-side",
-            ),
-            Self::Yaml => Some(
-                "re-run with yq_filter='.field' (add output_format=\"tsv\" for \
-                 array results) to extract only what you need server-side",
-            ),
-            Self::Auto => Some(
-                "re-run with jq_filter='...' (JSON output) or columns=[...] and \
-                 limit=N (tabular output) to reduce the output server-side",
-            ),
+            Self::Json => Some({
+                #[cfg(feature = "jq")]
+                {
+                    "re-run with jq_filter='.field' (add output_format=\"tsv\" for \
+                     array results) to extract only what you need server-side"
+                }
+                #[cfg(not(feature = "jq"))]
+                {
+                    "re-run with limit=N to cap top-level array elements, or \
+                     save_output=/path/to/file (paginate via ssh_output_fetch) for \
+                     the full output server-side"
+                }
+            }),
+            Self::Yaml => Some({
+                #[cfg(feature = "jq")]
+                {
+                    "re-run with yq_filter='.field' (add output_format=\"tsv\" for \
+                     array results) to extract only what you need server-side"
+                }
+                #[cfg(not(feature = "jq"))]
+                {
+                    "re-run with save_output=/path/to/file (paginate via \
+                     ssh_output_fetch) for the full output server-side — yq_filter \
+                     requires a build with the 'jq' feature"
+                }
+            }),
+            Self::Auto => Some({
+                #[cfg(feature = "jq")]
+                {
+                    "re-run with jq_filter='...' (JSON output) or columns=[...] and \
+                     limit=N (tabular output) to reduce the output server-side"
+                }
+                #[cfg(not(feature = "jq"))]
+                {
+                    "re-run with columns=[...] and limit=N to reduce the output \
+                     server-side"
+                }
+            }),
         }
     }
 
@@ -210,11 +267,26 @@ mod tests {
         );
         assert!(OutputKind::Tabular.strategy_hint().contains("columns"));
         assert!(OutputKind::Tabular.strategy_hint().contains("limit"));
-        assert!(OutputKind::Json.strategy_hint().contains("jq_filter"));
-        assert!(OutputKind::Json.strategy_hint().contains("tsv"));
-        assert!(OutputKind::Yaml.strategy_hint().contains("yq_filter"));
-        assert!(OutputKind::Auto.strategy_hint().contains("jq_filter"));
-        assert!(OutputKind::Auto.strategy_hint().contains("columns"));
+
+        #[cfg(feature = "jq")]
+        {
+            assert!(OutputKind::Json.strategy_hint().contains("jq_filter"));
+            assert!(OutputKind::Json.strategy_hint().contains("tsv"));
+            assert!(OutputKind::Yaml.strategy_hint().contains("yq_filter"));
+            assert!(OutputKind::Auto.strategy_hint().contains("jq_filter"));
+            assert!(OutputKind::Auto.strategy_hint().contains("columns"));
+        }
+        #[cfg(not(feature = "jq"))]
+        {
+            // No-jq builds must never recommend jq_filter/yq_filter — they'd
+            // hard-error at runtime (DataReductionArgs::extract).
+            assert!(!OutputKind::Json.strategy_hint().contains("jq_filter"));
+            assert!(OutputKind::Json.strategy_hint().contains("limit"));
+            assert!(!OutputKind::Yaml.strategy_hint().contains("yq_filter"));
+            assert!(OutputKind::Yaml.strategy_hint().contains("save_output"));
+            assert!(!OutputKind::Auto.strategy_hint().contains("jq_filter"));
+            assert!(OutputKind::Auto.strategy_hint().contains("columns"));
+        }
     }
 
     #[test]
@@ -234,20 +306,47 @@ mod tests {
                 .truncation_tip()
                 .is_some_and(|t| t.contains("columns") && t.contains("limit"))
         );
-        assert!(
-            OutputKind::Json
-                .truncation_tip()
-                .is_some_and(|t| t.contains("jq_filter"))
-        );
-        assert!(
-            OutputKind::Yaml
-                .truncation_tip()
-                .is_some_and(|t| t.contains("yq_filter"))
-        );
-        assert!(
-            OutputKind::Auto
-                .truncation_tip()
-                .is_some_and(|t| t.contains("jq_filter") && t.contains("columns"))
-        );
+
+        #[cfg(feature = "jq")]
+        {
+            assert!(
+                OutputKind::Json
+                    .truncation_tip()
+                    .is_some_and(|t| t.contains("jq_filter"))
+            );
+            assert!(
+                OutputKind::Yaml
+                    .truncation_tip()
+                    .is_some_and(|t| t.contains("yq_filter"))
+            );
+            assert!(
+                OutputKind::Auto
+                    .truncation_tip()
+                    .is_some_and(|t| t.contains("jq_filter") && t.contains("columns"))
+            );
+        }
+        #[cfg(not(feature = "jq"))]
+        {
+            // No-jq builds must never recommend jq_filter/yq_filter — they'd
+            // hard-error at runtime (DataReductionArgs::extract).
+            assert!(
+                OutputKind::Json
+                    .truncation_tip()
+                    .is_some_and(|t| !t.contains("jq_filter") && t.contains("limit"))
+            );
+            // Yaml's tip may name yq_filter only to explain it needs the
+            // 'jq' build feature — it must not be offered as a ready-to-use
+            // recommendation the way the jq-feature variant does.
+            assert!(
+                OutputKind::Yaml
+                    .truncation_tip()
+                    .is_some_and(|t| t.contains("save_output") && t.contains("'jq' feature"))
+            );
+            assert!(
+                OutputKind::Auto
+                    .truncation_tip()
+                    .is_some_and(|t| !t.contains("jq_filter") && t.contains("columns"))
+            );
+        }
     }
 }

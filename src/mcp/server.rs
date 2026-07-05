@@ -1392,7 +1392,10 @@ impl McpServer {
         // tool BEFORE the elicitation gate and annotation lookups, so the
         // target tool's own safety semantics apply. A rewritten name equal to
         // CALL_TOOL again falls through to the registry and fails as unknown —
-        // no recursion.
+        // no recursion. Any future runtime RBAC enforcement must likewise key
+        // on this REWRITTEN (inner) name — enforcement keyed on the
+        // transport-level outer name (`mcp_call_tool`) would be bypassable
+        // via this dispatcher.
         if call_params.name == super::meta_tools::CALL_TOOL {
             match super::meta_tools::unwrap_call_tool(call_params.arguments.as_ref()) {
                 Ok((inner_name, inner_args)) => {
@@ -2654,6 +2657,31 @@ mod tests {
         // to the registry rather than being swallowed by a meta branch.
         let result = response.result.unwrap();
         assert!(result["isError"].as_bool().unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn test_call_tool_self_reference_is_unknown_tool() {
+        // Regression test pinning the single-`if` no-recursion property: a
+        // client that wraps `mcp_call_tool` as its own inner tool name must
+        // NOT be dispatched again — `call_params.name` is rewritten exactly
+        // once, so the (still-)CALL_TOOL name falls through to the registry
+        // and fails as an ordinary unknown tool.
+        let server = create_test_server();
+        let params = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {"name": super::super::meta_tools::CALL_TOOL}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+
+        let result = response.result.unwrap();
+        assert!(result["isError"].as_bool().unwrap_or(false));
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.to_lowercase().contains("unknown tool"),
+            "self-reference must not recurse, must fail as unknown tool: {text}"
+        );
     }
 
     #[tokio::test]

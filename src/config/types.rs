@@ -1316,7 +1316,6 @@ fn default_ssh_config_path() -> String {
 /// - `config`: `ssh_config_get`, `ssh_config_set`
 /// - `recording`: `ssh_recording_start`, `ssh_recording_stop`, `ssh_recording_list`,
 ///   `ssh_recording_replay`, `ssh_recording_verify`
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolGroupsConfig {

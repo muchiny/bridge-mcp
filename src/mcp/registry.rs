@@ -3296,4 +3296,19 @@ mod tests {
         assert!(props.contains_key("jq_filter"));
         assert!(props.contains_key("output_format"));
     }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn test_inject_reduction_schema_yq_params_with_feature() {
+        let mut schema = json!({"properties": {"host": {"type": "string"}}});
+        inject_reduction_schema(&mut schema, crate::domain::output_kind::OutputKind::Yaml);
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("yq_filter"));
+        assert!(props.contains_key("output_format"));
+        assert!(props.contains_key("limit"));
+        assert!(
+            !props.contains_key("jq_filter"),
+            "Yaml must not get jq_filter"
+        );
+    }
 }
