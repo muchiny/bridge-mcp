@@ -1086,7 +1086,7 @@ impl McpServer {
 
         match request.method.as_str() {
             "initialize" => self.handle_initialize(id, request.params, session).await,
-            "tools/list" => self.handle_tools_list(id, request.params.as_ref()),
+            "tools/list" => self.handle_tools_list(id, request.params.as_ref()).await,
             "tools/call" => {
                 self.handle_tools_call(id, request.params, cancel_token, session)
                     .await
@@ -1274,10 +1274,16 @@ impl McpServer {
         JsonRpcResponse::success_or_serialize_error(id, &result)
     }
 
-    fn handle_tools_list(&self, id: Option<Value>, params: Option<&Value>) -> JsonRpcResponse {
+    async fn handle_tools_list(
+        &self,
+        id: Option<Value>,
+        params: Option<&Value>,
+    ) -> JsonRpcResponse {
         use super::registry::tool_group;
+        use crate::config::types::ToolListingMode;
 
         let page_size = 50;
+        let listing = self.config.read().await.tool_groups.listing;
 
         // Filtering by annotation hints and tool group
         let filter_read_only = params
@@ -1288,11 +1294,19 @@ impl McpServer {
             .and_then(Value::as_bool);
         let filter_group = params.and_then(|p| p.get("group")).and_then(|v| v.as_str());
 
-        let mut all_tools = self.registry.list_tools();
-        // Surface the progressive-discovery meta-tools alongside the registry
-        // so clients can find them via `tools/list`. They stay at the front
-        // so a client paging through the list sees them immediately.
+        // Progressive mode: only the discovery meta-tools + the generic
+        // dispatcher are listed — the full registry (~2K chars of schema
+        // per tool) stays out of the client's context and is fetched on
+        // demand via mcp_describe_tool.
+        let mut all_tools = if listing == ToolListingMode::Progressive {
+            Vec::new()
+        } else {
+            self.registry.list_tools()
+        };
         let mut meta_defs = super::meta_tools::definitions();
+        if listing == ToolListingMode::Progressive {
+            meta_defs.push(super::meta_tools::call_tool_definition());
+        }
         meta_defs.extend(all_tools);
         all_tools = meta_defs;
 
@@ -2168,13 +2182,20 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
-    fn create_test_server() -> McpServer {
-        // Tests in this module exercise the full handler inventory
-        // (pagination, group filters, etc.). FIND-024 changed the
-        // default profile to a minimal 8-group set, so we explicitly
-        // opt every group in for the test fixture. Production code paths
-        // continue to use whatever the operator put in `tool_groups`.
-        let config = Config {
+    /// Build the `Config` used by `create_test_server()`.
+    ///
+    /// Tests in this module exercise the full handler inventory
+    /// (pagination, group filters, etc.). FIND-024 changed the
+    /// default profile to a minimal 8-group set, so we explicitly
+    /// opt every group in for the test fixture. Production code paths
+    /// continue to use whatever the operator put in `tool_groups`.
+    ///
+    /// Extracted from `create_test_server()` so other tests (e.g. the
+    /// progressive-listing test) can start from the same baseline and
+    /// then flip a single field, instead of duplicating the whole
+    /// struct literal.
+    fn test_config() -> Config {
+        Config {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
@@ -2185,8 +2206,11 @@ mod tests {
             http: HttpTransportConfig::default(),
             rbac: crate::security::rbac::RbacConfig::default(),
             awx: None,
-        };
-        let (server, _audit_task) = McpServer::new(config);
+        }
+    }
+
+    fn create_test_server() -> McpServer {
+        let (server, _audit_task) = McpServer::new(test_config());
         server
     }
 
@@ -2326,11 +2350,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_handle_tools_list_returns_all_registered_tools() {
+    #[tokio::test]
+    async fn test_handle_tools_list_returns_all_registered_tools() {
         let server = create_test_server();
 
-        let response = server.handle_tools_list(Some(json!(1)), None);
+        let response = server.handle_tools_list(Some(json!(1)), None).await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -2346,11 +2370,11 @@ mod tests {
         assert!(tool_names.contains(&"ssh_download"));
     }
 
-    #[test]
-    fn test_handle_tools_list_tools_have_required_fields() {
+    #[tokio::test]
+    async fn test_handle_tools_list_tools_have_required_fields() {
         let server = create_test_server();
 
-        let response = server.handle_tools_list(Some(json!(1)), None);
+        let response = server.handle_tools_list(Some(json!(1)), None).await;
 
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
@@ -2455,7 +2479,7 @@ mod tests {
     #[tokio::test]
     async fn test_tools_list_surfaces_meta_tools() {
         let server = create_test_server();
-        let response = server.handle_tools_list(Some(json!(1)), None);
+        let response = server.handle_tools_list(Some(json!(1)), None).await;
         let tools = response.result.unwrap()["tools"]
             .as_array()
             .cloned()
@@ -2464,6 +2488,33 @@ mod tests {
         assert!(names.contains(&super::super::meta_tools::LIST_TOOL_GROUPS));
         assert!(names.contains(&super::super::meta_tools::SEARCH_TOOLS));
         assert!(names.contains(&super::super::meta_tools::DESCRIBE_TOOL));
+        // Full mode (the default) must NOT surface the progressive-only
+        // `mcp_call_tool` dispatcher — that's exclusive to progressive mode.
+        assert!(!names.contains(&super::super::meta_tools::CALL_TOOL));
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_progressive_mode_lists_only_meta_tools() {
+        let mut config = test_config();
+        config.tool_groups.listing = crate::config::types::ToolListingMode::Progressive;
+        let (server, _audit) = McpServer::new(config);
+
+        let response = server.handle_tools_list(Some(json!(1)), None).await;
+        let tools = response.result.unwrap()["tools"]
+            .as_array()
+            .cloned()
+            .unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+
+        assert_eq!(
+            names.len(),
+            4,
+            "exactly 4 tools in progressive mode: {names:?}"
+        );
+        assert!(names.contains(&super::super::meta_tools::LIST_TOOL_GROUPS));
+        assert!(names.contains(&super::super::meta_tools::SEARCH_TOOLS));
+        assert!(names.contains(&super::super::meta_tools::DESCRIBE_TOOL));
+        assert!(names.contains(&super::super::meta_tools::CALL_TOOL));
     }
 
     #[tokio::test]
@@ -2505,7 +2556,7 @@ mod tests {
     async fn test_tools_call_dispatches_describe_tool() {
         let server = create_test_server();
         // First find a real tool via list
-        let list_response = server.handle_tools_list(Some(json!(1)), None);
+        let list_response = server.handle_tools_list(Some(json!(1)), None).await;
         let first_real = list_response.result.unwrap()["tools"]
             .as_array()
             .unwrap()
@@ -2862,21 +2913,21 @@ mod tests {
 
     // ============== Additional Tools Tests ==============
 
-    #[test]
-    fn test_tools_list_with_null_id() {
+    #[tokio::test]
+    async fn test_tools_list_with_null_id() {
         let server = create_test_server();
-        let response = server.handle_tools_list(None, None);
+        let response = server.handle_tools_list(None, None).await;
 
         assert!(response.error.is_none());
         assert!(response.id.is_none());
     }
 
-    #[test]
-    fn test_tools_list_multiple_times() {
+    #[tokio::test]
+    async fn test_tools_list_multiple_times() {
         let server = create_test_server();
 
-        let response1 = server.handle_tools_list(Some(json!(1)), None);
-        let response2 = server.handle_tools_list(Some(json!(2)), None);
+        let response1 = server.handle_tools_list(Some(json!(1)), None).await;
+        let response2 = server.handle_tools_list(Some(json!(2)), None).await;
 
         assert!(response1.error.is_none());
         assert!(response2.error.is_none());
@@ -3171,10 +3222,10 @@ mod tests {
         assert!(result["capabilities"]["tasks"]["requests"]["tools"]["call"].is_object());
     }
 
-    #[test]
-    fn test_tools_list_includes_execution_field() {
+    #[tokio::test]
+    async fn test_tools_list_includes_execution_field() {
         let server = create_test_server();
-        let response = server.handle_tools_list(Some(json!(1)), None);
+        let response = server.handle_tools_list(Some(json!(1)), None).await;
 
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
@@ -3943,13 +3994,15 @@ mod tests {
 
     // ============== Tools List Pagination Tests ==============
 
-    #[test]
-    fn test_tools_list_with_cursor_paginates() {
+    #[tokio::test]
+    async fn test_tools_list_with_cursor_paginates() {
         let server = create_test_server();
 
         // First page with cursor "0"
         let params = json!({ "cursor": "0" });
-        let response = server.handle_tools_list(Some(json!(1)), Some(&params));
+        let response = server
+            .handle_tools_list(Some(json!(1)), Some(&params))
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -3958,13 +4011,15 @@ mod tests {
         assert!(result["nextCursor"].is_string()); // more pages available
     }
 
-    #[test]
-    fn test_tools_list_cursor_past_end_returns_empty() {
+    #[tokio::test]
+    async fn test_tools_list_cursor_past_end_returns_empty() {
         let server = create_test_server();
 
         // Cursor way past the end
         let params = json!({ "cursor": "999999" });
-        let response = server.handle_tools_list(Some(json!(1)), Some(&params));
+        let response = server
+            .handle_tools_list(Some(json!(1)), Some(&params))
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -3972,11 +4027,11 @@ mod tests {
         assert!(tools.is_empty());
     }
 
-    #[test]
-    fn test_tools_list_no_cursor_returns_all() {
+    #[tokio::test]
+    async fn test_tools_list_no_cursor_returns_all() {
         let server = create_test_server();
 
-        let response = server.handle_tools_list(Some(json!(1)), None);
+        let response = server.handle_tools_list(Some(json!(1)), None).await;
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
 
@@ -3986,12 +4041,14 @@ mod tests {
         assert!(result.get("nextCursor").is_none() || result["nextCursor"].is_null());
     }
 
-    #[test]
-    fn test_tools_list_filter_by_group() {
+    #[tokio::test]
+    async fn test_tools_list_filter_by_group() {
         let server = create_test_server();
 
         let params = json!({ "group": "docker" });
-        let response = server.handle_tools_list(Some(json!(1)), Some(&params));
+        let response = server
+            .handle_tools_list(Some(json!(1)), Some(&params))
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -4006,12 +4063,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_tools_list_filter_read_only() {
+    #[tokio::test]
+    async fn test_tools_list_filter_read_only() {
         let server = create_test_server();
 
         let params = json!({ "readOnlyHint": true });
-        let response = server.handle_tools_list(Some(json!(1)), Some(&params));
+        let response = server
+            .handle_tools_list(Some(json!(1)), Some(&params))
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -4025,12 +4084,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_tools_list_filter_destructive() {
+    #[tokio::test]
+    async fn test_tools_list_filter_destructive() {
         let server = create_test_server();
 
         let params = json!({ "destructiveHint": true });
-        let response = server.handle_tools_list(Some(json!(1)), Some(&params));
+        let response = server
+            .handle_tools_list(Some(json!(1)), Some(&params))
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();

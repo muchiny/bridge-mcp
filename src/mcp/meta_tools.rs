@@ -23,6 +23,10 @@ pub const LIST_TOOL_GROUPS: &str = "mcp_list_tool_groups";
 pub const SEARCH_TOOLS: &str = "mcp_search_tools";
 /// Tool name for the describe meta-tool.
 pub const DESCRIBE_TOOL: &str = "mcp_describe_tool";
+/// Generic dispatcher surfaced when `tool_groups.listing = progressive`:
+/// invokes any enabled registry tool by name so the client only ever
+/// needs the four meta-schemas in context.
+pub const CALL_TOOL: &str = "mcp_call_tool";
 
 /// Returns `true` when `name` matches one of the three meta-tools.
 #[must_use]
@@ -124,6 +128,43 @@ pub fn definitions() -> Vec<Tool> {
             meta: None,
         },
     ]
+}
+
+/// Definition of the generic `mcp_call_tool` dispatcher.
+/// Only surfaced in `tools/list` when listing mode is `progressive`.
+#[must_use]
+pub fn call_tool_definition() -> Tool {
+    Tool {
+        name: CALL_TOOL.to_string(),
+        description: "Invoke any enabled bridge tool by name. Discovery workflow: \
+                      mcp_list_tool_groups → mcp_search_tools → mcp_describe_tool \
+                      (fetch the schema + Reduction Strategy) → mcp_call_tool. \
+                      The target tool's own annotations, destructive-op elicitation \
+                      gate, and output-reduction params (jq_filter/columns/limit/\
+                      output_format) all apply exactly as if called directly."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact tool name (use mcp_search_tools to find it)"
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments for the target tool, exactly as its \
+                                    schema describes — including reduction params \
+                                    like jq_filter, columns, limit, output_format"
+                }
+            },
+            "required": ["name"]
+        }),
+        annotations: None,
+        execution: None,
+        output_schema: None,
+        icons: None,
+        meta: None,
+    }
 }
 
 /// Execute one of the three meta-tools. Returns `None` when `tool_name` is
