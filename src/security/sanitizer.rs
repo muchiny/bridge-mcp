@@ -329,6 +329,7 @@ impl Sanitizer {
             "redis://",
             "DATABASE_URL",
             "DB_PASSWORD",
+            "://",
             // Cloud providers
             "AZURE_",
             "GCP_",
@@ -529,6 +530,15 @@ impl Sanitizer {
                 description: "Opaque Authorization Bearer token",
                 category: "generic",
             },
+            // Authorization: Basic <base64(user:pass)> — anchored on the
+            // header name to avoid matching prose like "basic understanding"
+            // (audit 2026-07-05 finding 5).
+            PatternDef {
+                pattern: r"(?i)authorization:\s*basic\s+[A-Za-z0-9+/=]{8,}",
+                replacement: "Authorization: Basic [BASIC_AUTH_REDACTED]",
+                description: "HTTP Basic Authorization header",
+                category: "generic",
+            },
             // Anthropic API keys (specific prefix sk-ant-*)
             PatternDef {
                 pattern: r"sk-ant-api\d{2}-[A-Za-z0-9_-]{80,}",
@@ -659,6 +669,15 @@ impl Sanitizer {
                 replacement: "$1://[CREDENTIALS]@",
                 description: "Database connection strings",
                 category: "database",
+            },
+            // Generic scheme://user:password@ — covers git clone over HTTPS,
+            // webhook URLs, any non-DB scheme (audit 2026-07-05 finding 6).
+            // host:port never matches: no trailing @ after the port.
+            PatternDef {
+                pattern: r#"\b([a-zA-Z][a-zA-Z0-9+.-]{1,15})://([^/\s:@'"]{1,64}):([^\s@'"]{1,256})@"#,
+                replacement: "$1://$2:[REDACTED]@",
+                description: "Generic URL embedded credentials",
+                category: "generic",
             },
             // Terraform sensitive values
             PatternDef {
@@ -2175,5 +2194,62 @@ users:
             "sibling field eaten: {result}"
         );
         assert!(result.ends_with('}'), "closing braces eaten: {result}");
+    }
+
+    #[test]
+    fn test_authorization_basic_header_redacted() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = "> Authorization: Basic dXNlcjpodW50ZXIy";
+        let result = sanitizer.sanitize(input);
+        assert!(
+            !result.contains("dXNlcjpodW50ZXIy"),
+            "Basic auth leaked: {result}"
+        );
+        assert!(result.contains("[BASIC_AUTH_REDACTED]"));
+    }
+
+    #[test]
+    fn test_basic_no_false_positive_on_prose() {
+        let sanitizer = Sanitizer::with_defaults();
+        // "basic understanding" must not be redacted — the pattern is anchored
+        // on the Authorization: header, not the bare word "basic".
+        let input = "a basic understanding of authorization concepts";
+        let result = sanitizer.sanitize(input);
+        assert_eq!(result.as_ref(), input);
+    }
+
+    #[test]
+    fn test_generic_url_credentials_redacted() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = "cloning https://deploy:ghp_tokenvalue123@github.com/org/repo.git";
+        let result = sanitizer.sanitize(input);
+        assert!(
+            !result.contains("ghp_tokenvalue123"),
+            "URL password leaked: {result}"
+        );
+        assert!(
+            result.contains("https://deploy:[REDACTED]@"),
+            "scheme/user must survive: {result}"
+        );
+    }
+
+    #[test]
+    fn test_url_with_port_not_redacted() {
+        let sanitizer = Sanitizer::with_defaults();
+        // host:port is not user:password — no @ terminator, must pass through
+        let input = "listening on http://localhost:8080/health";
+        let result = sanitizer.sanitize(input);
+        assert!(
+            result.contains("http://localhost:8080/health"),
+            "port wrongly redacted: {result}"
+        );
+    }
+
+    #[test]
+    fn test_db_url_still_uses_specific_replacement() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = "DATABASE: mysql://root:hunter2@db.local:3306/app";
+        let result = sanitizer.sanitize(input);
+        assert!(!result.contains("hunter2"), "db password leaked: {result}");
     }
 }
