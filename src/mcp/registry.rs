@@ -466,7 +466,10 @@ pub fn all_enabled_tool_groups_config_for_test() -> ToolGroupsConfig {
     for entry in inventory::iter::<ToolRegistryEntry>() {
         groups.insert(entry.group.to_string(), true);
     }
-    ToolGroupsConfig { groups }
+    ToolGroupsConfig {
+        groups,
+        ..Default::default()
+    }
 }
 
 /// Create a registry filtered by the tool groups configuration.
@@ -1199,7 +1202,10 @@ mod tests {
     fn test_filtered_registry_disable_sessions() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("sessions".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 338 total minus 4 session tools
@@ -1216,7 +1222,10 @@ mod tests {
     fn test_filtered_registry_disable_monitoring() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("monitoring".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 monitoring tools  = 246
@@ -1230,7 +1239,10 @@ mod tests {
     fn test_filtered_registry_disable_file_transfer() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("file_transfer".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 file transfer tools  = 247
@@ -1249,7 +1261,10 @@ mod tests {
         groups.insert("sessions".to_string(), false);
         groups.insert("monitoring".to_string(), false);
         groups.insert("file_transfer".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         let disabled =
@@ -1269,7 +1284,10 @@ mod tests {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("core".to_string(), true);
         groups.insert("sessions".to_string(), true);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         assert_eq!(registry.len(), all_tools_count());
@@ -1279,7 +1297,10 @@ mod tests {
     fn test_filtered_registry_disable_tunnels() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("tunnels".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 tunnel tools  = 247
@@ -1295,7 +1316,10 @@ mod tests {
     fn test_filtered_registry_disable_kubernetes() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("kubernetes".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 16 kubernetes tools (9 k8s + 7 helm)  = 234
@@ -1327,7 +1351,10 @@ mod tests {
     fn test_filtered_registry_disable_ansible() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("ansible".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // full registry minus the ansible group
@@ -1350,7 +1377,10 @@ mod tests {
     fn test_filtered_registry_disable_awx() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("awx".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // full registry minus the awx group
@@ -1377,7 +1407,10 @@ mod tests {
     fn test_filtered_registry_disable_docker() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("docker".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 11 docker tools  = 270
@@ -1402,7 +1435,10 @@ mod tests {
     fn test_filtered_registry_disable_esxi() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("esxi".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 7 esxi tools  = 243
@@ -1424,7 +1460,10 @@ mod tests {
     fn test_filtered_registry_disable_git() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("git".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 7 git tools  = 243
@@ -1445,7 +1484,10 @@ mod tests {
     fn test_filtered_registry_disable_systemd() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("systemd".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 9 systemd tools  = 272
@@ -1466,7 +1508,10 @@ mod tests {
     fn test_filtered_registry_disable_network() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("network".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 6 network tools  = 244
@@ -1484,7 +1529,10 @@ mod tests {
     fn test_filtered_registry_disable_process() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("process".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 process tools  = 247
@@ -1499,7 +1547,10 @@ mod tests {
     fn test_filtered_registry_disable_package() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("package".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 package tools  = 276
@@ -1516,7 +1567,10 @@ mod tests {
     fn test_filtered_registry_disable_firewall() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("firewall".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 firewall tools  = 246
@@ -1532,7 +1586,10 @@ mod tests {
     fn test_filtered_registry_disable_cron() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("cron".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 cron tools  = 247
@@ -1547,7 +1604,10 @@ mod tests {
     fn test_filtered_registry_disable_certificates() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("certificates".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 certificate tools  = 247
@@ -1565,7 +1625,10 @@ mod tests {
     fn test_filtered_registry_disable_nginx() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("nginx".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 nginx tools  = 246
@@ -1581,7 +1644,10 @@ mod tests {
     fn test_filtered_registry_disable_redis() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("redis".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 redis tools  = 247
@@ -1596,7 +1662,10 @@ mod tests {
     fn test_filtered_registry_disable_terraform() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("terraform".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 terraform tools  = 276
@@ -1613,7 +1682,10 @@ mod tests {
     fn test_filtered_registry_disable_vault() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("vault".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 vault tools  = 246
@@ -1629,7 +1701,10 @@ mod tests {
     fn test_filtered_registry_disable_config() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("config".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 2 config tools  = 248
@@ -1645,7 +1720,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_services() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_services".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 8 windows_services tools  = 242
@@ -1668,7 +1746,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_events() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_events".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 windows_events tools  = 276
@@ -1688,7 +1769,10 @@ mod tests {
     fn test_filtered_registry_disable_active_directory() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("active_directory".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 6 active_directory tools  = 244
@@ -1709,7 +1793,10 @@ mod tests {
     fn test_filtered_registry_disable_scheduled_tasks() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("scheduled_tasks".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 scheduled_tasks tools  = 276
@@ -1729,7 +1816,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_firewall() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_firewall".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 windows_firewall tools  = 276
@@ -1749,7 +1839,10 @@ mod tests {
     fn test_filtered_registry_disable_iis() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("iis".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 6 iis tools  = 244
@@ -1767,7 +1860,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_updates() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_updates".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 windows_updates tools  = 276
@@ -1787,7 +1883,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_perf() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_perf".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 6 windows_perf tools  = 244
@@ -1808,7 +1907,10 @@ mod tests {
     fn test_filtered_registry_disable_hyperv() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("hyperv".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 8 hyperv tools  = 242
@@ -1828,7 +1930,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_registry() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_registry".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 windows_registry tools  = 276
@@ -1848,7 +1953,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_features() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_features".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 windows_features tools  = 246
@@ -1867,7 +1975,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_network() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_network".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 6 windows_network tools  = 244
@@ -1888,7 +1999,10 @@ mod tests {
     fn test_filtered_registry_disable_windows_process() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("windows_process".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 windows_process tools  = 276
@@ -1908,7 +2022,10 @@ mod tests {
     fn test_filtered_registry_disable_directory() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("directory".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 2 directory tools
@@ -1922,7 +2039,10 @@ mod tests {
     fn test_filtered_registry_disable_database() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("database".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 database tools
@@ -1937,7 +2057,10 @@ mod tests {
     fn test_filtered_registry_disable_backup() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("backup".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 6 backup tools
@@ -1955,7 +2078,10 @@ mod tests {
     fn test_filtered_registry_disable_cron_analysis() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("cron_analysis".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 cron_analysis tools
@@ -1973,7 +2099,10 @@ mod tests {
     fn test_filtered_registry_disable_performance() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("performance".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 performance tools
@@ -1992,7 +2121,10 @@ mod tests {
     fn test_filtered_registry_disable_container_logs() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("container_logs".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 container_logs tools
@@ -2011,7 +2143,10 @@ mod tests {
     fn test_filtered_registry_disable_network_security() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("network_security".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 network_security tools
@@ -2030,7 +2165,10 @@ mod tests {
     fn test_filtered_registry_disable_compliance() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("compliance".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 compliance tools
@@ -2046,7 +2184,10 @@ mod tests {
     fn test_filtered_registry_disable_alerting() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("alerting".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 alerting tools
@@ -2061,7 +2202,10 @@ mod tests {
     fn test_filtered_registry_disable_capacity() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("capacity".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 capacity tools
@@ -2076,7 +2220,10 @@ mod tests {
     fn test_filtered_registry_disable_incident() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("incident".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 2 incident tools
@@ -2090,7 +2237,10 @@ mod tests {
     fn test_filtered_registry_disable_log_aggregation() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("log_aggregation".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 log_aggregation tools
@@ -2108,7 +2258,10 @@ mod tests {
     fn test_filtered_registry_disable_key_management() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("key_management".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 key_management tools
@@ -2126,7 +2279,10 @@ mod tests {
     fn test_filtered_registry_disable_chatops() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("chatops".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 2 chatops tools
@@ -2140,7 +2296,10 @@ mod tests {
     fn test_filtered_registry_disable_templates() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("templates".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 templates tools
@@ -2157,7 +2316,10 @@ mod tests {
     fn test_filtered_registry_disable_pty() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("pty".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 pty tools
@@ -2172,7 +2334,10 @@ mod tests {
     fn test_filtered_registry_disable_cloud() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("cloud".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 cloud tools
@@ -2188,7 +2353,10 @@ mod tests {
     fn test_filtered_registry_disable_inventory() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("inventory".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 inventory tools
@@ -2203,7 +2371,10 @@ mod tests {
     fn test_filtered_registry_disable_multicloud() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("multicloud".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 multicloud tools
@@ -2218,7 +2389,10 @@ mod tests {
     fn test_filtered_registry_disable_postgresql() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("postgresql".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 2 postgresql tools
@@ -2232,7 +2406,10 @@ mod tests {
     fn test_filtered_registry_disable_mysql() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("mysql".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 2 mysql tools
@@ -2246,7 +2423,10 @@ mod tests {
     fn test_filtered_registry_disable_apache() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("apache".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 2 apache tools
@@ -2260,7 +2440,10 @@ mod tests {
     fn test_filtered_registry_disable_letsencrypt() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("letsencrypt".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 1 letsencrypt tool
@@ -2276,7 +2459,10 @@ mod tests {
     fn test_filtered_registry_disable_mongodb() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("mongodb".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 1 mongodb tool
@@ -2289,7 +2475,10 @@ mod tests {
     fn test_filtered_registry_disable_diagnostics() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("diagnostics".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 diagnostics tools
@@ -2307,7 +2496,10 @@ mod tests {
     fn test_filtered_registry_disable_runbooks() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("runbooks".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 runbooks tools
@@ -2322,7 +2514,10 @@ mod tests {
     fn test_filtered_registry_disable_recording() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("recording".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 recording tools
@@ -2339,7 +2534,10 @@ mod tests {
     fn test_filtered_registry_disable_orchestration() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("orchestration".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 orchestration tools
@@ -2357,7 +2555,10 @@ mod tests {
     fn test_filtered_registry_disable_drift() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("drift".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 drift tools
@@ -2372,7 +2573,10 @@ mod tests {
     fn test_filtered_registry_disable_security_scan() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("security_scan".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 3 security_scan tools
@@ -2390,7 +2594,10 @@ mod tests {
     fn test_filtered_registry_disable_file_ops() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("file_ops".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 338 total minus 9 file_ops tools
@@ -2411,7 +2618,10 @@ mod tests {
     fn test_filtered_registry_disable_user_management() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("user_management".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 8 user_management tools
@@ -2434,7 +2644,10 @@ mod tests {
     fn test_filtered_registry_disable_storage() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("storage".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 7 storage tools
@@ -2453,7 +2666,10 @@ mod tests {
     fn test_filtered_registry_disable_journald() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("journald".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 4 journald tools
@@ -2469,7 +2685,10 @@ mod tests {
     fn test_filtered_registry_disable_systemd_timers() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("systemd_timers".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 systemd_timers tools
@@ -2489,7 +2708,10 @@ mod tests {
     fn test_filtered_registry_disable_security_modules() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("security_modules".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 security_modules tools
@@ -2509,7 +2731,10 @@ mod tests {
     fn test_filtered_registry_disable_network_equipment() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("network_equipment".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 8 network_equipment tools
@@ -2532,7 +2757,10 @@ mod tests {
     fn test_filtered_registry_disable_podman() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("podman".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 6 podman tools
@@ -2550,7 +2778,10 @@ mod tests {
     fn test_filtered_registry_disable_ldap() {
         let mut groups = all_enabled_tool_groups_config_for_test().groups;
         groups.insert("ldap".to_string(), false);
-        let config = ToolGroupsConfig { groups };
+        let config = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
 
         let registry = create_filtered_registry(&config);
         // 337 total minus 5 ldap tools
