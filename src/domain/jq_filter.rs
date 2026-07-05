@@ -18,7 +18,7 @@ use crate::error::{BridgeError, Result};
 /// multiple results, they are joined with newlines.
 ///
 /// If `input` is not valid JSON, returns an error suggesting the use
-/// of other data reduction params (`fields`, `limit`) instead.
+/// of other data reduction params (`columns`, `limit`) instead.
 ///
 /// # Errors
 ///
@@ -31,7 +31,7 @@ pub fn apply_jq_filter(input: &str, filter_expr: &str) -> Result<String> {
     let input_val: Val = serde_json::from_str(input).map_err(|e| {
         BridgeError::McpInvalidRequest(format!(
             "jq_filter requires JSON output, but command returned plain text: {e}. \
-             Use 'fields' or 'limit' parameters for non-JSON output."
+             Use 'columns' or 'limit' parameters for non-JSON output."
         ))
     })?;
 
@@ -115,7 +115,7 @@ pub fn apply_jq_filter_tsv(input: &str, filter_expr: &str) -> Result<String> {
     let input_val: Val = serde_json::from_str(input).map_err(|e| {
         BridgeError::McpInvalidRequest(format!(
             "jq_filter requires JSON output, but command returned plain text: {e}. \
-             Use 'fields' or 'limit' parameters for non-JSON output."
+             Use 'columns' or 'limit' parameters for non-JSON output."
         ))
     })?;
 
@@ -282,6 +282,16 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("jq_filter requires JSON"));
+        // The hint must name params that actually exist (columns/limit),
+        // not the never-implemented `fields`.
+        assert!(
+            err.contains("'columns'"),
+            "hint must mention columns: {err}"
+        );
+        assert!(
+            !err.contains("'fields'"),
+            "hint must not mention fields: {err}"
+        );
     }
 
     #[test]
@@ -440,6 +450,15 @@ mod tests {
         let input = "not json";
         let result = apply_jq_filter_tsv(input, ".");
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("'columns'"),
+            "hint must mention columns: {err}"
+        );
+        assert!(
+            !err.contains("'fields'"),
+            "hint must not mention fields: {err}"
+        );
     }
 
     #[test]
