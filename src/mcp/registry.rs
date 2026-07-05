@@ -219,6 +219,7 @@ pub fn inject_reduction_schema(schema: &mut Value, kind: crate::domain::output_k
         return;
     };
 
+    #[cfg(feature = "jq")]
     if kind.supports_jq() {
         props.insert(
             "jq_filter".to_string(),
@@ -236,6 +237,7 @@ pub fn inject_reduction_schema(schema: &mut Value, kind: crate::domain::output_k
         );
     }
 
+    #[cfg(feature = "jq")]
     if kind.supports_yq() {
         props.insert(
             "yq_filter".to_string(),
@@ -280,6 +282,7 @@ pub fn inject_reduction_schema(schema: &mut Value, kind: crate::domain::output_k
         );
     }
 
+    #[cfg(feature = "jq")]
     if kind.supports_jq() || kind.supports_yq() {
         props.insert(
             "output_format".to_string(),
@@ -3040,5 +3043,26 @@ mod tests {
     #[test]
     fn test_tool_icons_uncurated_group_is_none() {
         assert!(tool_icons("ssh_pty_exec").is_none());
+    }
+
+    #[cfg(not(feature = "jq"))]
+    #[test]
+    fn test_inject_reduction_schema_no_jq_params_without_feature() {
+        let mut schema = json!({"properties": {"host": {"type": "string"}}});
+        inject_reduction_schema(&mut schema, crate::domain::output_kind::OutputKind::Json);
+        let props = schema["properties"].as_object().unwrap();
+        assert!(!props.contains_key("jq_filter"));
+        assert!(!props.contains_key("output_format"));
+        assert!(props.contains_key("limit"), "limit works without jq");
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn test_inject_reduction_schema_jq_params_with_feature() {
+        let mut schema = json!({"properties": {"host": {"type": "string"}}});
+        inject_reduction_schema(&mut schema, crate::domain::output_kind::OutputKind::Json);
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("jq_filter"));
+        assert!(props.contains_key("output_format"));
     }
 }

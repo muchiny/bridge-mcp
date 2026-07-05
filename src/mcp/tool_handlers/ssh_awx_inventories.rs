@@ -92,7 +92,7 @@ impl ToolHandler for SshAwxInventoriesHandler {
         let mut raw = args.ok_or_else(|| BridgeError::McpMissingParam {
             param: "arguments".to_string(),
         })?;
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut raw);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut raw)?;
         let args: SshAwxInventoriesArgs = serde_json::from_value(raw)
             .map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 

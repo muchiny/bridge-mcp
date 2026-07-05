@@ -122,7 +122,7 @@ impl ToolHandler for SshMetricsHandler {
                 param: "arguments".to_string(),
             });
         };
-        let dr = DataReductionArgs::extract(&mut v);
+        let dr = DataReductionArgs::extract(&mut v)?;
         let args: SshMetricsArgs =
             serde_json::from_value(v).map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 

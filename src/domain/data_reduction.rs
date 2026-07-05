@@ -6,6 +6,10 @@
 
 use serde::Deserialize;
 
+#[cfg(not(feature = "jq"))]
+use crate::error::BridgeError;
+use crate::error::Result;
+
 /// Universal data reduction parameters extracted from tool arguments.
 ///
 /// Extracted from the raw JSON before tool-specific argument parsing
@@ -44,23 +48,26 @@ pub struct DataReductionArgs {
 impl DataReductionArgs {
     /// Extract data reduction params from a JSON value, removing them
     /// so they don't interfere with tool-specific argument parsing.
-    pub fn extract(value: &mut serde_json::Value) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// When the binary is built WITHOUT the `jq` feature and the caller
+    /// supplied `jq_filter`, `yq_filter`, or `output_format`, returns
+    /// `BridgeError::McpInvalidRequest` instead of silently ignoring the
+    /// param — the model must not believe its filter was applied.
+    pub fn extract(value: &mut serde_json::Value) -> Result<Self> {
         let Some(obj) = value.as_object_mut() else {
-            return Self::default();
+            return Ok(Self::default());
         };
 
-        // When the binary is built without the `jq` feature, jq/yq/output_format
-        // params would otherwise stay in the JSON object and silently bypass
-        // both the reduction pipeline and the handler arg parsing (no
-        // deny_unknown_fields). Strip them and warn the caller (#2A).
         #[cfg(not(feature = "jq"))]
         for key in ["jq_filter", "yq_filter", "output_format"] {
-            if obj.remove(key).is_some() {
-                tracing::warn!(
-                    param = key,
-                    "ignoring data-reduction param: binary built without the 'jq' feature \
-                     — rebuild with --features jq (or 'full') to enable server-side filtering"
-                );
+            if obj.contains_key(key) {
+                return Err(BridgeError::McpInvalidRequest(format!(
+                    "'{key}' is not available: this bridge-mcp binary was built \
+                     without the 'jq' feature. Use 'columns' (tabular output) or \
+                     'limit' instead, or rebuild with --features full."
+                )));
             }
         }
 
@@ -89,7 +96,7 @@ impl DataReductionArgs {
             .remove("output_format")
             .and_then(|v| v.as_str().map(String::from));
 
-        Self {
+        Ok(Self {
             #[cfg(feature = "jq")]
             jq_filter,
             #[cfg(feature = "jq")]
@@ -98,7 +105,7 @@ impl DataReductionArgs {
             limit,
             #[cfg(feature = "jq")]
             output_format,
-        }
+        })
     }
 
     /// Returns true if no data reduction is requested.
@@ -137,7 +144,7 @@ mod tests {
     #[test]
     fn test_extract_empty() {
         let mut v = serde_json::json!({"host": "prod"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(args.is_empty());
         assert!(v.get("host").is_some());
     }
@@ -146,7 +153,7 @@ mod tests {
     #[test]
     fn test_extract_jq_filter() {
         let mut v = serde_json::json!({"host": "prod", "jq_filter": ".[] | {name}"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert_eq!(args.jq_filter.as_deref(), Some(".[] | {name}"));
         assert!(v.get("jq_filter").is_none());
         assert!(v.get("host").is_some());
@@ -155,22 +162,41 @@ mod tests {
     #[test]
     fn test_extract_non_object() {
         let mut v = serde_json::json!("string");
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(args.is_empty());
+    }
+
+    #[cfg(not(feature = "jq"))]
+    #[test]
+    fn test_extract_jq_param_without_feature_is_error() {
+        let mut v = serde_json::json!({"host": "prod", "jq_filter": ".name"});
+        let err = DataReductionArgs::extract(&mut v).unwrap_err().to_string();
+        assert!(err.contains("'jq' feature"), "got: {err}");
+        assert!(
+            err.contains("columns"),
+            "must suggest working fallbacks: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "jq"))]
+    #[test]
+    fn test_extract_output_format_without_feature_is_error() {
+        let mut v = serde_json::json!({"output_format": "tsv"});
+        assert!(DataReductionArgs::extract(&mut v).is_err());
     }
 
     #[cfg(feature = "jq")]
     #[test]
     fn test_is_empty_with_filter() {
         let mut v = serde_json::json!({"jq_filter": ".name"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.is_empty());
     }
 
     #[test]
     fn test_extract_columns() {
         let mut v = serde_json::json!({"host": "prod", "columns": ["NAME", "STATUS"]});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert_eq!(
             args.columns.as_deref(),
             Some(&["NAME".to_string(), "STATUS".to_string()][..])
@@ -182,14 +208,14 @@ mod tests {
     #[test]
     fn test_is_empty_with_columns() {
         let mut v = serde_json::json!({"columns": ["PID"]});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.is_empty());
     }
 
     #[test]
     fn test_extract_columns_non_string_items_ignored() {
         let mut v = serde_json::json!({"columns": ["NAME", 42, "STATUS", null]});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         let cols = args.columns.unwrap();
         assert_eq!(cols, vec!["NAME", "STATUS"]);
     }
@@ -197,14 +223,14 @@ mod tests {
     #[test]
     fn test_extract_columns_not_array() {
         let mut v = serde_json::json!({"columns": "NAME"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(args.columns.is_none());
     }
 
     #[test]
     fn test_extract_limit() {
         let mut v = serde_json::json!({"host": "prod", "limit": 10});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert_eq!(args.limit, Some(10));
         assert!(v.get("limit").is_none());
         assert!(v.get("host").is_some());
@@ -213,14 +239,14 @@ mod tests {
     #[test]
     fn test_is_empty_with_limit() {
         let mut v = serde_json::json!({"limit": 5});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.is_empty());
     }
 
     #[test]
     fn test_extract_limit_not_integer() {
         let mut v = serde_json::json!({"limit": "ten"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(args.limit.is_none());
     }
 
@@ -228,7 +254,7 @@ mod tests {
     #[test]
     fn test_extract_yq_filter() {
         let mut v = serde_json::json!({"host": "prod", "yq_filter": ".all.children | keys"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert_eq!(args.yq_filter.as_deref(), Some(".all.children | keys"));
         assert!(v.get("yq_filter").is_none());
         assert!(v.get("host").is_some());
@@ -238,7 +264,7 @@ mod tests {
     #[test]
     fn test_is_empty_with_yq_filter() {
         let mut v = serde_json::json!({"yq_filter": ".name"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.is_empty());
     }
 
@@ -246,7 +272,7 @@ mod tests {
     #[test]
     fn test_extract_output_format_tsv() {
         let mut v = serde_json::json!({"output_format": "tsv"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert_eq!(args.output_format.as_deref(), Some("tsv"));
         assert!(args.wants_tsv());
         assert!(v.get("output_format").is_none());
@@ -256,7 +282,7 @@ mod tests {
     #[test]
     fn test_wants_tsv_case_insensitive() {
         let mut v = serde_json::json!({"output_format": "TSV"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(args.wants_tsv());
     }
 
@@ -265,7 +291,7 @@ mod tests {
     fn test_wants_tsv_default_false() {
         let v = serde_json::json!({});
         let mut v = v;
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.wants_tsv());
     }
 
@@ -273,7 +299,7 @@ mod tests {
     #[test]
     fn test_wants_tsv_json_format() {
         let mut v = serde_json::json!({"output_format": "json"});
-        let args = DataReductionArgs::extract(&mut v);
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.wants_tsv());
     }
 }
