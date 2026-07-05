@@ -44,6 +44,11 @@ pub struct Metrics {
     pub truncation_events: AtomicU64,
     /// Per-`OutputKind` call counts
     output_kind_counts: RwLock<HashMap<String, u64>>,
+    /// Per-param adoption counters for the reduction pipeline
+    /// (`jq_filter`, `yq_filter`, `columns`, `limit`, `output_format`).
+    reduction_param_counts: RwLock<HashMap<String, u64>>,
+    /// Number of pipeline calls that supplied at least one reduction param.
+    calls_with_reduction: AtomicU64,
 }
 
 impl Metrics {
@@ -70,6 +75,8 @@ impl Metrics {
             chars_after_reduction: AtomicU64::new(0),
             truncation_events: AtomicU64::new(0),
             output_kind_counts: RwLock::new(HashMap::new()),
+            reduction_param_counts: RwLock::new(HashMap::new()),
+            calls_with_reduction: AtomicU64::new(0),
         }
     }
 
@@ -106,12 +113,17 @@ impl Metrics {
     }
 
     /// Record data reduction pipeline stats from `StandardToolHandler`.
+    ///
+    /// `params_used` lists the reduction params supplied on this call
+    /// (see `DataReductionArgs::used_params`), so adoption per param can
+    /// be measured instead of only aggregate bytes saved.
     pub fn record_pipeline_stats(
         &self,
         chars_before: u64,
         chars_after: u64,
         truncated: bool,
         output_kind: &str,
+        params_used: &[&'static str],
     ) {
         self.chars_before_reduction
             .fetch_add(chars_before, Ordering::Relaxed);
@@ -122,6 +134,14 @@ impl Metrics {
         }
         if let Ok(mut counts) = self.output_kind_counts.write() {
             *counts.entry(output_kind.to_string()).or_insert(0) += 1;
+        }
+        if !params_used.is_empty() {
+            self.calls_with_reduction.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut counts) = self.reduction_param_counts.write() {
+                for param in params_used {
+                    *counts.entry((*param).to_string()).or_insert(0) += 1;
+                }
+            }
         }
     }
 
@@ -177,6 +197,21 @@ impl Metrics {
             let tokens_saved = saved * 10 / 35;
             let _ = writeln!(out, "  Savings: {pct}% (~{tokens_saved} tokens saved)");
             let _ = writeln!(out, "  Truncation events: {truncations}");
+            out.push('\n');
+        }
+
+        // Per-param adoption
+        if let Ok(params) = self.reduction_param_counts.read()
+            && !params.is_empty()
+        {
+            let with_reduction = self.calls_with_reduction.load(Ordering::Relaxed);
+            out.push_str("Reduction Param Adoption:\n");
+            let _ = writeln!(out, "  Calls with ≥1 reduction param: {with_reduction}");
+            let mut sorted: Vec<_> = params.iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(a.1));
+            for (param, count) in &sorted {
+                let _ = writeln!(out, "  {param:<15} {count} calls");
+            }
             out.push('\n');
         }
 
@@ -315,6 +350,28 @@ impl Metrics {
             output.push('\n');
         }
 
+        output.push_str("# HELP mcp_reduction_calls_with_params_total Pipeline calls that supplied at least one reduction param\n");
+        output.push_str("# TYPE mcp_reduction_calls_with_params_total counter\n");
+        let _ = writeln!(
+            output,
+            "mcp_reduction_calls_with_params_total {}",
+            self.calls_with_reduction.load(Ordering::Relaxed)
+        );
+        output.push_str(
+            "# HELP mcp_reduction_param_used_total Reduction param adoption by param name\n",
+        );
+        output.push_str("# TYPE mcp_reduction_param_used_total counter\n");
+        if let Ok(params) = self.reduction_param_counts.read() {
+            let mut sorted: Vec<_> = params.iter().collect();
+            sorted.sort();
+            for (param, count) in sorted {
+                let _ = writeln!(
+                    output,
+                    "mcp_reduction_param_used_total{{param=\"{param}\"}} {count}"
+                );
+            }
+        }
+
         output
     }
 }
@@ -439,8 +496,8 @@ mod tests {
     #[test]
     fn test_record_pipeline_stats() {
         let m = Metrics::new();
-        m.record_pipeline_stats(10000, 6000, true, "Tabular");
-        m.record_pipeline_stats(5000, 5000, false, "Json");
+        m.record_pipeline_stats(10000, 6000, true, "Tabular", &[]);
+        m.record_pipeline_stats(5000, 5000, false, "Json", &[]);
 
         assert_eq!(m.chars_before_reduction.load(Ordering::Relaxed), 15000);
         assert_eq!(m.chars_after_reduction.load(Ordering::Relaxed), 11000);
@@ -458,7 +515,7 @@ mod tests {
         m.record_tool_call("ssh_ls", "prod");
         m.record_tool_output("ssh_exec", 3500);
         m.record_tool_output("ssh_ls", 700);
-        m.record_pipeline_stats(5000, 3000, true, "Tabular");
+        m.record_pipeline_stats(5000, 3000, true, "Tabular", &[]);
 
         let summary = m.render_token_summary();
         assert!(summary.contains("=== Token Consumption ==="));
@@ -479,7 +536,7 @@ mod tests {
         let m = Metrics::new();
         m.record_tool_call("ssh_exec", "prod");
         m.record_tool_output("ssh_exec", 350); // 350*10/35 = 100 tokens
-        m.record_pipeline_stats(1000, 500, false, "Json");
+        m.record_pipeline_stats(1000, 500, false, "Json", &[]);
 
         let s = m.render_token_summary();
         // total_chars
@@ -566,9 +623,9 @@ mod tests {
     #[test]
     fn render_token_summary_kind_percentages_use_division() {
         let m = Metrics::new();
-        m.record_pipeline_stats(100, 50, false, "Json");
-        m.record_pipeline_stats(100, 50, false, "Json");
-        m.record_pipeline_stats(100, 50, false, "Tabular");
+        m.record_pipeline_stats(100, 50, false, "Json", &[]);
+        m.record_pipeline_stats(100, 50, false, "Json", &[]);
+        m.record_pipeline_stats(100, 50, false, "Tabular", &[]);
         let s = m.render_token_summary();
         assert!(
             s.contains("Json       2 calls (66%)"),
@@ -584,11 +641,37 @@ mod tests {
     fn test_prometheus_includes_token_metrics() {
         let m = Metrics::new();
         m.record_tool_output("ssh_exec", 1000);
-        m.record_pipeline_stats(2000, 1500, true, "Json");
+        m.record_pipeline_stats(2000, 1500, true, "Json", &[]);
 
         let output = m.render_prometheus();
         assert!(output.contains("bridge_mcp_output_chars_total 1000"));
         assert!(output.contains("bridge_mcp_estimated_tokens_total"));
         assert!(output.contains("bridge_mcp_truncation_events_total 1"));
+    }
+
+    #[test]
+    fn test_record_pipeline_stats_param_adoption() {
+        let m = Metrics::new();
+        m.record_pipeline_stats(10000, 2000, false, "Json", &["jq_filter", "output_format"]);
+        m.record_pipeline_stats(5000, 1000, false, "Tabular", &["columns", "limit"]);
+        m.record_pipeline_stats(3000, 3000, false, "Json", &[]);
+
+        let summary = m.render_token_summary();
+        assert!(
+            summary.contains("Reduction Param Adoption"),
+            "got: {summary}"
+        );
+        assert!(summary.contains("jq_filter"), "got: {summary}");
+        assert!(summary.contains("columns"), "got: {summary}");
+
+        let prom = m.render_prometheus();
+        assert!(
+            prom.contains("mcp_reduction_param_used_total{param=\"jq_filter\"} 1"),
+            "got: {prom}"
+        );
+        assert!(
+            prom.contains("mcp_reduction_calls_with_params_total 2"),
+            "got: {prom}"
+        );
     }
 }

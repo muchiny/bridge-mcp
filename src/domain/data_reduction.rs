@@ -135,6 +135,33 @@ impl DataReductionArgs {
             .as_deref()
             .is_some_and(|s| s.eq_ignore_ascii_case("tsv"))
     }
+
+    /// Names of the reduction params actually supplied on this call,
+    /// in a stable order (jq_filter, yq_filter, output_format, columns, limit).
+    /// Used by metrics to measure per-param adoption.
+    #[must_use]
+    pub fn used_params(&self) -> Vec<&'static str> {
+        let mut used = Vec::new();
+        #[cfg(feature = "jq")]
+        {
+            if self.jq_filter.is_some() {
+                used.push("jq_filter");
+            }
+            if self.yq_filter.is_some() {
+                used.push("yq_filter");
+            }
+            if self.output_format.is_some() {
+                used.push("output_format");
+            }
+        }
+        if self.columns.is_some() {
+            used.push("columns");
+        }
+        if self.limit.is_some() {
+            used.push("limit");
+        }
+        used
+    }
 }
 
 #[cfg(test)]
@@ -301,5 +328,27 @@ mod tests {
         let mut v = serde_json::json!({"output_format": "json"});
         let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.wants_tsv());
+    }
+
+    #[test]
+    fn test_used_params_empty() {
+        let mut v = serde_json::json!({"host": "prod"});
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
+        assert!(args.used_params().is_empty());
+    }
+
+    #[test]
+    fn test_used_params_columns_and_limit() {
+        let mut v = serde_json::json!({"columns": ["NAME"], "limit": 5});
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
+        assert_eq!(args.used_params(), vec!["columns", "limit"]);
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn test_used_params_jq_and_tsv() {
+        let mut v = serde_json::json!({"jq_filter": ".x", "output_format": "tsv"});
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
+        assert_eq!(args.used_params(), vec!["jq_filter", "output_format"]);
     }
 }

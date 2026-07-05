@@ -487,6 +487,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 post_reduction_chars as u64,
                 truncated,
                 &format!("{:?}", T::OUTPUT_KIND),
+                &dr.used_params(),
             );
         }
 
