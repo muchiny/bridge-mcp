@@ -674,7 +674,7 @@ impl Sanitizer {
             // webhook URLs, any non-DB scheme (audit 2026-07-05 finding 6).
             // host:port never matches: no trailing @ after the port.
             PatternDef {
-                pattern: r#"\b([a-zA-Z][a-zA-Z0-9+.-]{1,15})://([^/\s:@'"]{1,64}):([^\s@'"]{1,256})@"#,
+                pattern: r#"\b([a-zA-Z][a-zA-Z0-9+.-]{1,15})://([^/\s:@'"]{1,64}):([^/\s@'"?#]{1,256})@"#,
                 replacement: "$1://$2:[REDACTED]@",
                 description: "Generic URL embedded credentials",
                 category: "generic",
@@ -1103,6 +1103,19 @@ Done";
         assert!(
             output.contains("[CREDENTIALS]@"),
             "Should have credentials marker"
+        );
+    }
+
+    #[test]
+    fn test_url_with_at_in_query_not_corrupted() {
+        let sanitizer = Sanitizer::with_defaults();
+        // No credentials here: the @ lives in a query param. The URL-creds
+        // pattern must not eat the port/path/query looking for it.
+        let input = "redirect http://localhost:8080/callback?redirect=user@example.com done";
+        let result = sanitizer.sanitize(input);
+        assert!(
+            result.contains("http://localhost:8080/callback?redirect=user@example.com"),
+            "benign URL corrupted: {result}"
         );
     }
 
