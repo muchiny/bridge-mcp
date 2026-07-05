@@ -52,6 +52,13 @@ pub struct Sanitizer {
     strip_ansi: bool,
     /// Entropy-based secret detector (complements regex patterns)
     entropy_detector: EntropyDetector,
+    /// Exact-match masker for credential values the bridge knows from its
+    /// own config (host passwords, passphrases, AWX token). Highest-
+    /// confidence tier: applied before keyword/regex/entropy detection.
+    /// NOTE: the automaton holds plaintext copies of the secrets; they are
+    /// not zeroized on drop — acceptable since Config keeps them in memory
+    /// for the whole process lifetime anyway.
+    known_secret_masker: Option<AhoCorasick>,
 }
 
 struct SanitizePattern {
@@ -129,6 +136,32 @@ impl Sanitizer {
         Self::from_pattern_defs_with_custom(&all_patterns, &all_custom, true, entropy_detector)
     }
 
+    /// Register exact credential values to mask (GitHub-Actions-style
+    /// `::add-mask::`). Values shorter than 8 chars are ignored — masking
+    /// them would shred normal output.
+    #[must_use]
+    pub fn with_known_secrets(mut self, secrets: &[String]) -> Self {
+        const MIN_KNOWN_SECRET_LEN: usize = 8;
+        let filtered: Vec<&String> = secrets
+            .iter()
+            .filter(|s| s.len() >= MIN_KNOWN_SECRET_LEN)
+            .collect();
+        if filtered.is_empty() {
+            return self;
+        }
+        match AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            .build(&filtered)
+        {
+            Ok(masker) => {
+                info!(count = filtered.len(), "Known-secret masking enabled");
+                self.known_secret_masker = Some(masker);
+            }
+            Err(e) => error!(error = %e, "Failed to build known-secret masker"),
+        }
+        self
+    }
+
     /// Create a new sanitizer with user-defined patterns (added to defaults)
     /// Legacy method for backward compatibility
     #[must_use]
@@ -173,6 +206,7 @@ impl Sanitizer {
             enabled: false,
             strip_ansi: false,
             entropy_detector: EntropyDetector::disabled(),
+            known_secret_masker: None,
         }
     }
 
@@ -283,6 +317,7 @@ impl Sanitizer {
             enabled,
             strip_ansi,
             entropy_detector,
+            known_secret_masker: None,
         }
     }
 
@@ -927,6 +962,20 @@ impl Sanitizer {
         };
         let text_ref: &str = &text;
 
+        // Tier 0: exact-match masking of the bridge's own configured
+        // credentials — must run even when no keyword/regex/entropy fires.
+        let text = if let Some(ref masker) = self.known_secret_masker {
+            if masker.is_match(text_ref) {
+                let replacements = vec!["[KNOWN_SECRET_REDACTED]"; masker.patterns_len()];
+                Cow::Owned(masker.replace_all(text_ref, &replacements))
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+        let text_ref: &str = &text;
+
         // Tier 1: Fast keyword detection with Aho-Corasick
         // If no keywords found, very likely no secrets present — but entropy may still catch some
         if !self.literal_detector.is_match(text_ref) {
@@ -1069,6 +1118,36 @@ mod tests {
             !output.contains("abc123def456xyz"),
             "API key should be redacted"
         );
+    }
+
+    #[test]
+    fn test_known_secret_masked_without_keyword_context() {
+        let sanitizer =
+            Sanitizer::with_defaults().with_known_secrets(&["Hunter2-longpass".to_string()]);
+        // Bare value, no keyword, low entropy — only exact-match can catch it.
+        let input = "process args: sshpass Hunter2-longpass target.host";
+        let result = sanitizer.sanitize(input);
+        assert!(
+            !result.contains("Hunter2-longpass"),
+            "known secret leaked: {result}"
+        );
+        assert!(result.contains("[KNOWN_SECRET_REDACTED]"));
+    }
+
+    #[test]
+    fn test_known_secret_too_short_is_ignored() {
+        // < 8 chars: masking "abc" would shred normal output.
+        let sanitizer = Sanitizer::with_defaults().with_known_secrets(&["abc".to_string()]);
+        let input = "abcdef abc xyz";
+        let result = sanitizer.sanitize(input);
+        assert_eq!(result.as_ref(), input);
+    }
+
+    #[test]
+    fn test_known_secrets_empty_list_is_noop() {
+        let sanitizer = Sanitizer::with_defaults().with_known_secrets(&[]);
+        let input = "Server started on port 8080";
+        assert_eq!(sanitizer.sanitize(input).as_ref(), input);
     }
 
     #[test]

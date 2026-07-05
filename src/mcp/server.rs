@@ -192,17 +192,22 @@ impl McpServer {
 
         // Create sanitizer with advanced config (supports categories and custom replacements)
         // Also includes legacy sanitize_patterns for backward compatibility
-        let sanitizer = Arc::new(Sanitizer::from_config_with_legacy(
-            &config.security.sanitize,
-            &config.security.sanitize_patterns,
-        ));
+        let known_secrets = config.collect_secret_values();
+        let sanitizer = Arc::new(
+            Sanitizer::from_config_with_legacy(
+                &config.security.sanitize,
+                &config.security.sanitize_patterns,
+            )
+            .with_known_secrets(&known_secrets),
+        );
 
         // Create audit logger (async with background writer task)
         // Vuln 3 (audit 2026-05-09): wire a sanitizer so `event.command` is
         // masked before tracing emission AND before file write — the audit
         // log used to leak MYSQL_PWD/PGPASSWORD/Bearer tokens/webhook URLs.
         let sanitizer_for_audit =
-            crate::security::Sanitizer::from_config(&config.security.sanitize);
+            crate::security::Sanitizer::from_config(&config.security.sanitize)
+                .with_known_secrets(&known_secrets);
         let (audit_logger, audit_task) =
             match AuditLogger::new_with_sanitizer(&config.audit, sanitizer_for_audit) {
                 Ok((logger, task)) => (logger, task),

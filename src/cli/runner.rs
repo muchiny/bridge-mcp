@@ -499,14 +499,19 @@ pub async fn run_config_diff(config: Arc<Config>) -> Result<()> {
 /// Create a `ToolContext` from configuration
 fn create_context(config: Arc<Config>) -> ToolContext {
     let validator = Arc::new(CommandValidator::new(&config.security));
-    let sanitizer = Arc::new(Sanitizer::from_config_with_legacy(
-        &config.security.sanitize,
-        &config.security.sanitize_patterns,
-    ));
+    let known_secrets = config.collect_secret_values();
+    let sanitizer = Arc::new(
+        Sanitizer::from_config_with_legacy(
+            &config.security.sanitize,
+            &config.security.sanitize_patterns,
+        )
+        .with_known_secrets(&known_secrets),
+    );
     // For CLI mode, we don't spawn the audit writer task (short-lived process).
     // Wire the sanitizer so event.command is masked on the tracing sink too
     // (audit 2026-07-05 finding 1 — MCP mode already does this in server.rs).
-    let audit_sanitizer = Sanitizer::from_config(&config.security.sanitize);
+    let audit_sanitizer =
+        Sanitizer::from_config(&config.security.sanitize).with_known_secrets(&known_secrets);
     let (audit_logger, _audit_task) =
         AuditLogger::new_with_sanitizer(&config.audit, audit_sanitizer)
             .unwrap_or_else(|_| (AuditLogger::disabled(), None));

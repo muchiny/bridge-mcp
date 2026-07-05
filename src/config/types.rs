@@ -40,6 +40,46 @@ pub struct Config {
     pub awx: Option<AwxConfig>,
 }
 
+impl Config {
+    /// Collect every credential VALUE the bridge knows from its own config,
+    /// for exact-match masking in the sanitizer (GitHub-Actions-style
+    /// `::add-mask::`). Empty values are dropped; length filtering happens
+    /// in `Sanitizer::with_known_secrets`.
+    #[must_use]
+    pub fn collect_secret_values(&self) -> Vec<String> {
+        let mut secrets = Vec::new();
+        for host in self.hosts.values() {
+            match &host.auth {
+                AuthConfig::Password { password } => {
+                    secrets.push(password.as_str().to_string());
+                }
+                AuthConfig::Key {
+                    passphrase: Some(passphrase),
+                    ..
+                } => secrets.push(passphrase.as_str().to_string()),
+                #[cfg(feature = "winrm")]
+                AuthConfig::Ntlm { password, .. } => {
+                    secrets.push(password.as_str().to_string());
+                }
+                _ => {}
+            }
+            if let Some(sudo) = &host.sudo_password {
+                secrets.push(sudo.as_str().to_string());
+            }
+            if let Some(socks) = &host.socks_proxy
+                && let Some(password) = &socks.password
+            {
+                secrets.push(password.as_str().to_string());
+            }
+        }
+        if let Some(awx) = &self.awx {
+            secrets.push(awx.token.as_str().to_string());
+        }
+        secrets.retain(|s| !s.is_empty());
+        secrets
+    }
+}
+
 /// AWX REST API configuration.
 ///
 /// AWX API calls are relayed through SSH: the MCP server connects to
@@ -1554,6 +1594,39 @@ mod tests {
             !json.contains("awx-oauth-token-123"),
             "AwxConfig Serialize leaked the token"
         );
+    }
+
+    // ============== Config::collect_secret_values Tests ==============
+
+    #[test]
+    fn test_collect_secret_values_gathers_all_credential_sources() {
+        let yaml = r#"
+hosts:
+  web:
+    hostname: web.local
+    user: admin
+    auth:
+      type: password
+      password: "Hunter2-longpass"
+    sudo_password: "SudoSecret99"
+  db:
+    hostname: db.local
+    user: dba
+    auth:
+      type: key
+      path: /home/x/.ssh/id_ed25519
+      passphrase: "KeyPhrase-Abc1"
+"#;
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
+        let secrets = config.collect_secret_values();
+        assert!(secrets.contains(&"Hunter2-longpass".to_string()));
+        assert!(secrets.contains(&"SudoSecret99".to_string()));
+        assert!(secrets.contains(&"KeyPhrase-Abc1".to_string()));
+    }
+
+    #[test]
+    fn test_collect_secret_values_empty_config() {
+        assert!(Config::default().collect_secret_values().is_empty());
     }
 
     // ============== LimitsConfig Tests ==============
