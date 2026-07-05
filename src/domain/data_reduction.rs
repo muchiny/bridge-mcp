@@ -137,7 +137,7 @@ impl DataReductionArgs {
     }
 
     /// Names of the reduction params actually supplied on this call,
-    /// in a stable order (jq_filter, yq_filter, output_format, columns, limit).
+    /// in a stable order (`jq_filter`, `yq_filter`, `output_format`, columns, limit).
     /// Used by metrics to measure per-param adoption.
     #[must_use]
     pub fn used_params(&self) -> Vec<&'static str> {

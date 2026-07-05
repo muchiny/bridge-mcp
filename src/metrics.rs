@@ -238,6 +238,7 @@ impl Metrics {
 
     /// Render metrics in Prometheus text exposition format
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn render_prometheus(&self) -> String {
         let mut output = String::new();
 

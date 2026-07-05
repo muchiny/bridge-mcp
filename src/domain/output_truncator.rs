@@ -9,7 +9,7 @@ use crate::domain::output_cache::OutputCache;
 /// Legacy default max output characters.
 ///
 /// This constant is kept for backward compatibility only — the runtime
-/// default is `LimitsConfig::max_output_chars` (40_000, see
+/// default is `LimitsConfig::max_output_chars` (`40_000`, see
 /// `config::types::default_max_output_chars`), with per-client overrides.
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 20_000;
 

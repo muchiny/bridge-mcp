@@ -1317,24 +1317,6 @@ fn default_ssh_config_path() -> String {
 /// - `recording`: `ssh_recording_start`, `ssh_recording_stop`, `ssh_recording_list`,
 ///   `ssh_recording_replay`, `ssh_recording_verify`
 
-/// How `tools/list` exposes the registry to MCP clients.
-///
-/// `Full` (default) lists every enabled tool's complete schema — ~2K chars
-/// per tool, i.e. ~140K tokens for a 280-tool config. `Progressive` lists
-/// only the three progressive-discovery meta-tools plus the generic
-/// `mcp_call_tool` dispatcher; the model discovers tools on demand
-/// (`mcp_list_tool_groups` → `mcp_search_tools` → `mcp_describe_tool`)
-/// and invokes them through `mcp_call_tool`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolListingMode {
-    /// Every enabled tool with its full schema (default).
-    #[default]
-    Full,
-    /// Meta-tools + `mcp_call_tool` only; schemas fetched on demand.
-    Progressive,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolGroupsConfig {
@@ -1359,6 +1341,24 @@ pub struct ToolGroupsConfig {
     /// `tools/list` exposure mode. See [`ToolListingMode`].
     #[serde(default)]
     pub listing: ToolListingMode,
+}
+
+/// How `tools/list` exposes the registry to MCP clients.
+///
+/// `Full` (default) lists every enabled tool's complete schema — ~2K chars
+/// per tool, i.e. ~140K tokens for a 280-tool config. `Progressive` lists
+/// only the three progressive-discovery meta-tools plus the generic
+/// `mcp_call_tool` dispatcher; the model discovers tools on demand
+/// (`mcp_list_tool_groups` → `mcp_search_tools` → `mcp_describe_tool`)
+/// and invokes them through `mcp_call_tool`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolListingMode {
+    /// Every enabled tool with its full schema (default).
+    #[default]
+    Full,
+    /// Meta-tools + `mcp_call_tool` only; schemas fetched on demand.
+    Progressive,
 }
 
 /// Default-enabled tool groups (FIND-024).
