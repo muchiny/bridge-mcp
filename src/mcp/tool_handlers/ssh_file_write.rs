@@ -64,7 +64,7 @@ const SCHEMA: &str = r#"{
         },
         "max_output": {
             "type": "integer",
-            "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
+            "description": "Max output characters (default: from server config, typically 40000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
             "minimum": 0
         },
         "save_output": {
@@ -183,7 +183,8 @@ impl ToolHandler for SshFileWriteHandler {
             .max_output
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
         let truncated =
-            truncate_output_with_cache(&output_text, max_chars, ctx.output_cache.as_deref()).await;
+            truncate_output_with_cache(&output_text, max_chars, ctx.output_cache.as_deref(), None)
+                .await;
 
         // Save full output if requested
         let mut final_output = truncated;

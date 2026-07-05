@@ -61,7 +61,7 @@ impl SshExecHandler {
             },
             "max_output": {
                 "type": "integer",
-                "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
+                "description": "Max output characters (default: from server config, typically 40000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
             },
             "save_output": {
@@ -242,9 +242,13 @@ impl ToolHandler for SshExecHandler {
         let max_chars = args
             .max_output
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
-        let truncated_stdout =
-            truncate_output_with_cache(&response.stdout, max_chars, ctx.output_cache.as_deref())
-                .await;
+        let truncated_stdout = truncate_output_with_cache(
+            &response.stdout,
+            max_chars,
+            ctx.output_cache.as_deref(),
+            None,
+        )
+        .await;
 
         // Save full output to local file if requested
         let mut output_text = response.format_for_llm(&truncated_stdout);

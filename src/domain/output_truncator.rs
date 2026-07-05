@@ -6,10 +6,11 @@
 
 use crate::domain::output_cache::OutputCache;
 
-/// Default max output characters (~20-25K tokens, fits within Claude's 200K context).
+/// Legacy default max output characters.
 ///
-/// This constant is kept for backward compatibility. Prefer using
-/// `LimitsConfig::max_output_chars` for runtime configuration.
+/// This constant is kept for backward compatibility only — the runtime
+/// default is `LimitsConfig::max_output_chars` (`40_000`, see
+/// `config::types::default_max_output_chars`), with per-client overrides.
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 20_000;
 
 /// Truncate output keeping head and tail, removing the middle.
@@ -50,12 +51,18 @@ pub fn truncate_output(output: &str, max_chars: usize) -> String {
 /// is stored in the cache and an `output_id` hint is appended to the
 /// truncation message so the LLM can use `ssh_output_fetch` to retrieve more.
 ///
-/// When `cache` is `None` (e.g., CLI mode), behaves identically to
-/// [`truncate_output`].
+/// When `reduction_tip` is `Some` and the output is truncated, a
+/// `💡 Better: …` line is appended suggesting the server-side reduction
+/// params (`jq_filter`/`columns`/`limit`) for the tool's `OutputKind` —
+/// so the model learns the cheaper alternative to pagination in-band.
+///
+/// When `cache` is `None` (e.g., CLI mode), no `output_id` is emitted but
+/// the reduction tip still applies.
 pub async fn truncate_output_with_cache(
     output: &str,
     max_chars: usize,
     cache: Option<&OutputCache>,
+    reduction_tip: Option<&str>,
 ) -> String {
     if max_chars == 0 || output.len() <= max_chars {
         return output.to_string();
@@ -73,6 +80,8 @@ pub async fn truncate_output_with_cache(
     let tail_lines = tail.lines().count();
     let omitted = total_lines.saturating_sub(head_lines + tail_lines);
 
+    let tip = reduction_tip.map_or_else(String::new, |t| format!("\n💡 Better: {t}."));
+
     if let Some(cache) = cache {
         let output_id = cache.store(output.to_string()).await;
         format!(
@@ -80,7 +89,7 @@ pub async fn truncate_output_with_cache(
              ⚠️ MORE DATA AVAILABLE — Truncated: {total_lines} lines total, \
              {omitted} lines omitted ({orig} → {new} chars).\n\
              To get the complete output, call: \
-             ssh_output_fetch(output_id=\"{output_id}\", offset=0, limit=50000)\
+             ssh_output_fetch(output_id=\"{output_id}\", offset=0, limit=50000){tip}\
              \n\n{tail}",
             orig = output.len(),
             new = head.len() + tail.len(),
@@ -88,7 +97,7 @@ pub async fn truncate_output_with_cache(
     } else {
         format!(
             "{head}\n\n--- [truncated: {total_lines} lines total, \
-             {omitted} lines omitted, {orig} → {new} chars] ---\n\n{tail}",
+             {omitted} lines omitted, {orig} → {new} chars] ---{tip}\n\n{tail}",
             orig = output.len(),
             new = head.len() + tail.len(),
         )
@@ -470,7 +479,7 @@ mod tests {
             let _ = writeln!(output, "Line {i}: verbose log data here");
         }
 
-        let result = truncate_output_with_cache(&output, 500, Some(&cache)).await;
+        let result = truncate_output_with_cache(&output, 500, Some(&cache), None).await;
 
         // Should include cache hint
         assert!(result.contains("ssh_output_fetch"));
@@ -485,7 +494,7 @@ mod tests {
         let cache = OutputCache::new(300, 100);
         let output = "x".repeat(1000);
 
-        let result = truncate_output_with_cache(&output, 100, Some(&cache)).await;
+        let result = truncate_output_with_cache(&output, 100, Some(&cache), None).await;
 
         assert!(result.contains("out-0000"));
     }
@@ -494,7 +503,7 @@ mod tests {
     async fn test_without_cache_no_hint() {
         let output = "x".repeat(1000);
 
-        let result = truncate_output_with_cache(&output, 100, None).await;
+        let result = truncate_output_with_cache(&output, 100, None, None).await;
 
         assert!(result.contains("[truncated:"));
         assert!(!result.contains("ssh_output_fetch"));
@@ -505,7 +514,7 @@ mod tests {
         let cache = OutputCache::new(300, 100);
         let output = "short output";
 
-        let result = truncate_output_with_cache(output, 1000, Some(&cache)).await;
+        let result = truncate_output_with_cache(output, 1000, Some(&cache), None).await;
 
         assert_eq!(result, output);
         assert_eq!(cache.len().await, 0);
@@ -516,7 +525,7 @@ mod tests {
         let cache = OutputCache::new(300, 100);
         let output = "x".repeat(1000);
 
-        let result = truncate_output_with_cache(&output, 0, Some(&cache)).await;
+        let result = truncate_output_with_cache(&output, 0, Some(&cache), None).await;
 
         assert_eq!(result, output);
         assert_eq!(cache.len().await, 0);
@@ -707,7 +716,7 @@ mod tests {
         for i in 0..200 {
             let _ = writeln!(output, "Line {i:03}");
         }
-        let result = truncate_output_with_cache(&output, 500, None).await;
+        let result = truncate_output_with_cache(&output, 500, None, None).await;
         let head_only = result
             .split("\n\n--- [truncated:")
             .next()
@@ -741,7 +750,7 @@ mod tests {
         for i in 0..200 {
             let _ = writeln!(output, "Line {i:03}");
         }
-        let result = truncate_output_with_cache(&output, 500, None).await;
+        let result = truncate_output_with_cache(&output, 500, None, None).await;
         let total_lines = output.lines().count();
         let after = result
             .split("lines total, ")
@@ -766,11 +775,59 @@ mod tests {
             let _ = writeln!(output, "Line {i}: verbose log data here");
         }
 
-        let result = truncate_output_with_cache(&output, 500, Some(&cache)).await;
+        let result = truncate_output_with_cache(&output, 500, Some(&cache), None).await;
 
         // Directive markers that help LLMs paginate
         assert!(result.contains("MORE DATA AVAILABLE"));
         assert!(result.contains("To get the complete output, call:"));
         assert!(result.contains("offset=0, limit=50000"));
+    }
+
+    // ============== reduction-tip Tests ==============
+
+    #[tokio::test]
+    async fn test_with_cache_appends_reduction_tip() {
+        let cache = OutputCache::new(300, 100);
+        let output = "x".repeat(1000);
+
+        let result = truncate_output_with_cache(
+            &output,
+            100,
+            Some(&cache),
+            Some("re-run with jq_filter='.field'"),
+        )
+        .await;
+
+        assert!(result.contains("💡 Better: re-run with jq_filter='.field'."));
+        // Pagination hint must still be present alongside the tip.
+        assert!(result.contains("ssh_output_fetch"));
+    }
+
+    #[tokio::test]
+    async fn test_without_cache_appends_reduction_tip() {
+        let output = "x".repeat(1000);
+
+        let result =
+            truncate_output_with_cache(&output, 100, None, Some("use columns=[...]")).await;
+
+        assert!(result.contains("💡 Better: use columns=[...]."));
+    }
+
+    #[tokio::test]
+    async fn test_no_tip_when_none() {
+        let cache = OutputCache::new(300, 100);
+        let output = "x".repeat(1000);
+
+        let result = truncate_output_with_cache(&output, 100, Some(&cache), None).await;
+
+        assert!(!result.contains("💡"));
+    }
+
+    #[tokio::test]
+    async fn test_no_tip_when_not_truncated() {
+        let result =
+            truncate_output_with_cache("short", 1000, None, Some("use columns=[...]")).await;
+
+        assert_eq!(result, "short");
     }
 }

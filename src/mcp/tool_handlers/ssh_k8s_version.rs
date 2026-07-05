@@ -71,7 +71,7 @@ impl StandardTool for K8sVersionTool {
             },
             "max_output": {
                 "type": "integer",
-                "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
+                "description": "Max output characters (default: from server config, typically 40000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
             },
             "save_output": {

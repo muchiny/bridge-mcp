@@ -107,7 +107,7 @@ impl ToolHandler for SshLsHandler {
                 param: "arguments".to_string(),
             });
         };
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)?;
         let args: SshLsArgs =
             serde_json::from_value(v).map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 

@@ -23,6 +23,10 @@ pub const LIST_TOOL_GROUPS: &str = "mcp_list_tool_groups";
 pub const SEARCH_TOOLS: &str = "mcp_search_tools";
 /// Tool name for the describe meta-tool.
 pub const DESCRIBE_TOOL: &str = "mcp_describe_tool";
+/// Generic dispatcher surfaced when `tool_groups.listing = progressive`:
+/// invokes any enabled registry tool by name so the client only ever
+/// needs the four meta-schemas in context.
+pub const CALL_TOOL: &str = "mcp_call_tool";
 
 /// Returns `true` when `name` matches one of the three meta-tools.
 #[must_use]
@@ -124,6 +128,72 @@ pub fn definitions() -> Vec<Tool> {
             meta: None,
         },
     ]
+}
+
+/// Definition of the generic `mcp_call_tool` dispatcher.
+/// Only surfaced in `tools/list` when listing mode is `progressive`.
+#[must_use]
+pub fn call_tool_definition() -> Tool {
+    Tool {
+        name: CALL_TOOL.to_string(),
+        description: "Invoke any enabled bridge tool by name. Discovery workflow: \
+                      mcp_list_tool_groups → mcp_search_tools → mcp_describe_tool \
+                      (fetch the schema + Reduction Strategy) → mcp_call_tool. \
+                      The target tool's own annotations, destructive-op elicitation \
+                      gate, and output-reduction params (jq_filter/columns/limit/\
+                      output_format) all apply exactly as if called directly."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact tool name (use mcp_search_tools to find it)"
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments for the target tool, exactly as its \
+                                    schema describes — including reduction params \
+                                    like jq_filter, columns, limit, output_format"
+                }
+            },
+            "required": ["name"]
+        }),
+        annotations: None,
+        execution: None,
+        output_schema: None,
+        icons: None,
+        meta: None,
+    }
+}
+
+/// Unwrap `mcp_call_tool` arguments into `(inner_tool_name, inner_arguments)`.
+///
+/// # Errors
+///
+/// Returns a client-facing message when `name` is absent, empty, or not a
+/// string. The inner name's existence is NOT checked here — the registry
+/// dispatch reports `McpUnknownTool` with the normal error path.
+pub fn unwrap_call_tool(
+    args: Option<&Value>,
+) -> std::result::Result<(String, Option<Value>), String> {
+    let Some(obj) = args else {
+        return Err(format!(
+            "{CALL_TOOL}: missing arguments — expected {{\"name\": \"<tool>\", \"arguments\": {{…}}}}"
+        ));
+    };
+    let Some(name) = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(format!(
+            "{CALL_TOOL}: `name` (string, non-empty) is required. \
+             Use mcp_search_tools to discover tool names."
+        ));
+    };
+    Ok((name.to_string(), obj.get("arguments").cloned()))
 }
 
 /// Execute one of the three meta-tools. Returns `None` when `tool_name` is
@@ -564,6 +634,41 @@ mod tests {
         assert!(
             desc_161.ends_with('…'),
             "161-char description must be truncated (kills `> -> ==` and `> -> <`)"
+        );
+    }
+
+    // ============== `unwrap_call_tool` (mcp_call_tool dispatcher) ==============
+
+    #[test]
+    fn test_unwrap_call_tool_ok() {
+        let args = json!({"name": "ssh_status", "arguments": {"host": "pi"}});
+        let (name, inner) = unwrap_call_tool(Some(&args)).unwrap();
+        assert_eq!(name, "ssh_status");
+        assert_eq!(inner.unwrap()["host"], "pi");
+    }
+
+    #[test]
+    fn test_unwrap_call_tool_no_arguments_key() {
+        let args = json!({"name": "ssh_status"});
+        let (name, inner) = unwrap_call_tool(Some(&args)).unwrap();
+        assert_eq!(name, "ssh_status");
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn test_unwrap_call_tool_missing_name_is_error() {
+        let args = json!({"arguments": {}});
+        assert!(unwrap_call_tool(Some(&args)).is_err());
+        assert!(unwrap_call_tool(None).is_err());
+    }
+
+    #[test]
+    fn test_unwrap_call_tool_whitespace_only_name_is_error() {
+        let args = json!({"name": "   ", "arguments": {}});
+        let err = unwrap_call_tool(Some(&args)).unwrap_err();
+        assert!(
+            err.contains("`name` (string, non-empty) is required"),
+            "got: {err}"
         );
     }
 }

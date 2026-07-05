@@ -54,7 +54,7 @@ impl SshSessionExecHandler {
             },
             "max_output": {
                 "type": "integer",
-                "description": "Max output characters (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
+                "description": "Max output characters (default: from server config, typically 40000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
             },
             "save_output": {
@@ -182,9 +182,13 @@ impl ToolHandler for SshSessionExecHandler {
         let max_chars = args
             .max_output
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
-        let output_text =
-            truncate_output_with_cache(&sanitized_output, max_chars, ctx.output_cache.as_deref())
-                .await;
+        let output_text = truncate_output_with_cache(
+            &sanitized_output,
+            max_chars,
+            ctx.output_cache.as_deref(),
+            None,
+        )
+        .await;
 
         // Build response with metadata
         let response = serde_json::json!({

@@ -206,6 +206,7 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Recent Changes
 
+- token-efficiency-2026-07: truncation messages now suggest jq_filter/columns/limit per OutputKind; no-jq builds reject (and no longer advertise) jq params; per-param reduction adoption metrics; `tool_groups.listing: progressive` lists only 4 meta-schemas (vs ~140K tokens for the full registry) with `mcp_call_tool` dispatch; handler schemas say 40000 (real default), not 20000.
 - v1.20.0: russh 0.61->0.62 (channel-open callbacks take a `ChannelOpenHandle`), K3s/CRI/K8s-triage tool expansion (476 tools / 77 groups), CI hardening (least-privilege permissions, MSRV job, test-gated release/docker), `audit.path` tilde expansion, `df -hT` column-parse fix, session/tunnel `close` re-annotated non-destructive.
 - 001-winrm-psrp-integration: Added winrm-rs + psrp-rs protocol adapters (russh 0.58->0.60 originally; now 0.62).
 - 2026-roadmap-alignment: opt-in `security.require_elicitation_on_destructive` (MCP `elicitation/create` confirmation before any `destructive_hint: true` tool runs); three progressive-discovery meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) surfaced at the top of `tools/list`; `SessionStore` async trait + `InMemorySessionStore` behind the HTTP session hashmap so a future Redis/Valkey store drops in without touching the handlers.

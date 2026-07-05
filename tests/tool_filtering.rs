@@ -54,7 +54,10 @@ fn test_default_registry_includes_all_groups() {
 fn test_disable_docker_removes_all_docker_tools() {
     let mut groups = all_enabled_tool_groups_config_for_test().groups;
     groups.insert("docker".to_string(), false);
-    let config = ToolGroupsConfig { groups };
+    let config = ToolGroupsConfig {
+        groups,
+        ..Default::default()
+    };
     let registry = create_filtered_registry(&config);
 
     let tools = registry.list_tools();
@@ -110,7 +113,10 @@ fn test_disable_docker_removes_all_docker_tools() {
 fn test_disable_kubernetes_removes_all_k8s_and_helm_tools() {
     let mut groups = all_enabled_tool_groups_config_for_test().groups;
     groups.insert("kubernetes".to_string(), false);
-    let config = ToolGroupsConfig { groups };
+    let config = ToolGroupsConfig {
+        groups,
+        ..Default::default()
+    };
     let registry = create_filtered_registry(&config);
 
     let tools = registry.list_tools();
@@ -147,7 +153,10 @@ fn test_disable_multiple_groups_removes_all_their_tools() {
     groups.insert("docker".to_string(), false);
     groups.insert("kubernetes".to_string(), false);
     groups.insert("ansible".to_string(), false);
-    let config = ToolGroupsConfig { groups };
+    let config = ToolGroupsConfig {
+        groups,
+        ..Default::default()
+    };
     let registry = create_filtered_registry(&config);
 
     let tools = registry.list_tools();
@@ -184,7 +193,10 @@ fn test_disable_all_windows_groups() {
     ] {
         groups.insert((*group).to_string(), false);
     }
-    let config = ToolGroupsConfig { groups };
+    let config = ToolGroupsConfig {
+        groups,
+        ..Default::default()
+    };
     let registry = create_filtered_registry(&config);
 
     let tools = registry.list_tools();
@@ -416,7 +428,10 @@ fn test_all_tools_have_valid_input_schema() {
 async fn test_calling_disabled_tool_returns_unknown_tool_error() {
     let mut groups = all_enabled_tool_groups_config_for_test().groups;
     groups.insert("docker".to_string(), false);
-    let config = ToolGroupsConfig { groups };
+    let config = ToolGroupsConfig {
+        groups,
+        ..Default::default()
+    };
     let registry = create_filtered_registry(&config);
 
     // ssh_docker_ps should not exist in the registry

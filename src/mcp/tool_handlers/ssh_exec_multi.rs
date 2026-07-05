@@ -112,7 +112,7 @@ impl SshExecMultiHandler {
             },
             "max_output": {
                 "type": "integer",
-                "description": "Max output characters per host (default: from server config, typically 20000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
+                "description": "Max output characters per host (default: from server config, typically 40000, 0 = no limit). Truncated output includes an output_id for retrieval via ssh_output_fetch.",
                 "minimum": 0
             },
             "save_output": {
@@ -482,9 +482,13 @@ async fn execute_on_host(
     match output {
         Ok(output) => {
             let response = execute_use_case.process_success(&host_name, &command, &output.into());
-            let truncated =
-                truncate_output_with_cache(&response.output, max_chars, output_cache.as_deref())
-                    .await;
+            let truncated = truncate_output_with_cache(
+                &response.output,
+                max_chars,
+                output_cache.as_deref(),
+                None,
+            )
+            .await;
 
             if response.exit_code != 0 && fail_fast {
                 cancel_token.cancel();

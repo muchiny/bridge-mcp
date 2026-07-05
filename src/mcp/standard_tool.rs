@@ -264,7 +264,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 param: "arguments".to_string(),
             });
         };
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)?;
 
         // Step 1: Parse args
         let args: T::Args =
@@ -454,9 +454,13 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         let max_chars = args
             .max_output()
             .map_or(ctx.config.limits.max_output_chars, |v| v as usize);
-        let truncated_stdout =
-            truncate_output_with_cache(&response.stdout, max_chars, ctx.output_cache.as_deref())
-                .await;
+        let truncated_stdout = truncate_output_with_cache(
+            &response.stdout,
+            max_chars,
+            ctx.output_cache.as_deref(),
+            T::OUTPUT_KIND.truncation_tip(),
+        )
+        .await;
 
         // Step 16: Save full output to file if requested
         let mut save_info: Option<String> = None;
@@ -483,6 +487,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 post_reduction_chars as u64,
                 truncated,
                 &format!("{:?}", T::OUTPUT_KIND),
+                &dr.used_params(),
             );
         }
 
@@ -1029,7 +1034,8 @@ mod tests {
         use crate::domain::output_kind::OutputKind;
         let mut stdout = "NAME           STATUS    CPU\nnginx          running   5%\npostgres       running   12%\n".to_string();
         let mut v = json!({"columns": ["NAME", "STATUS"]});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let jq = apply_reduction(&mut stdout, &dr, OutputKind::Tabular).unwrap();
         assert!(!jq);
         // After tabular reduction, only NAME and STATUS columns should remain
@@ -1044,7 +1050,8 @@ mod tests {
             "NAME           STATUS\nrow1           ok\nrow2           ok\nrow3           ok\n"
                 .to_string();
         let mut v = json!({"limit": 1});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let jq = apply_reduction(&mut stdout, &dr, OutputKind::Tabular).unwrap();
         assert!(!jq);
         // Should keep header + 1 row
@@ -1069,7 +1076,8 @@ mod tests {
         use crate::domain::output_kind::OutputKind;
         let mut stdout = r#"{"name": "test", "value": 42}"#.to_string();
         let mut v = json!({"jq_filter": ".name"});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let jq = apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap();
         assert!(jq);
         assert!(stdout.contains("test"));
@@ -1092,7 +1100,8 @@ mod tests {
         // Non-JSON output with columns param → should fall back to tabular reduction
         let mut stdout = "NAME           STATUS\nnginx          running\n".to_string();
         let mut v = json!({"columns": ["NAME"]});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let jq = apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
         assert!(!jq); // jq not applied (not JSON)
         assert!(stdout.contains("NAME"));
@@ -1105,7 +1114,8 @@ mod tests {
         // Non-columnar output should be left unchanged
         let mut stdout = "this is just a random string without columns".to_string();
         let mut v = json!({"columns": ["NAME"]});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         try_apply_tabular_reduction(&mut stdout, &dr);
         assert_eq!(stdout, "this is just a random string without columns");
     }
@@ -1125,7 +1135,8 @@ mod tests {
     fn test_json_limit_truncates_array() {
         let mut stdout = r#"[{"a":1},{"a":2},{"a":3},{"a":4},{"a":5}]"#.to_string();
         let mut v = json!({"limit": 2});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         try_apply_json_limit(&mut stdout, &dr);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
         assert_eq!(parsed.len(), 2);
@@ -1136,7 +1147,8 @@ mod tests {
         let original = r#"{"name": "test"}"#.to_string();
         let mut stdout = original.clone();
         let mut v = json!({"limit": 1});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         try_apply_json_limit(&mut stdout, &dr);
         assert_eq!(stdout, original);
     }
@@ -1146,7 +1158,8 @@ mod tests {
         let original = r#"[{"a":1},{"a":2}]"#.to_string();
         let mut stdout = original.clone();
         let mut v = json!({"limit": 10});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         try_apply_json_limit(&mut stdout, &dr);
         assert_eq!(stdout, original);
     }
@@ -1156,7 +1169,8 @@ mod tests {
         let original = "not json at all".to_string();
         let mut stdout = original.clone();
         let mut v = json!({"limit": 1});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         try_apply_json_limit(&mut stdout, &dr);
         assert_eq!(stdout, original);
     }
@@ -1175,7 +1189,8 @@ mod tests {
         use crate::domain::output_kind::OutputKind;
         let mut stdout = r#"[{"a":1},{"a":2},{"a":3}]"#.to_string();
         let mut v = json!({"limit": 1});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let jq = apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap();
         assert!(!jq);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
@@ -1234,7 +1249,8 @@ mod tests {
     fn test_try_apply_jq_with_filter() {
         let mut stdout = r#"{"name": "test", "value": 42}"#.to_string();
         let mut v = json!({"jq_filter": ".name"});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let applied = try_apply_jq(&mut stdout, &dr).unwrap();
         assert!(applied);
         assert!(stdout.contains("test"));
@@ -1803,7 +1819,8 @@ mod tests {
         let original = r#"[{"a":1},{"a":2},{"a":3}]"#.to_string();
         let mut stdout = original.clone();
         let mut v = json!({"limit": 3});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         try_apply_json_limit(&mut stdout, &dr);
         assert_eq!(stdout, original, "exact-length array must not be truncated");
     }
@@ -1830,7 +1847,8 @@ mod tests {
     fn test_try_apply_yq_with_filter_returns_true() {
         let mut stdout = "name: test\nvalue: 42\n".to_string();
         let mut v = json!({"yq_filter": ".name"});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let applied = try_apply_yq(&mut stdout, &dr).unwrap();
         assert!(applied, "yq must report applied when yq_filter is set");
         assert!(stdout.contains("test"));
@@ -1951,7 +1969,8 @@ mod tests {
         let mut stdout =
             "NAME           STATUS\nrow1           ok\nrow2           ok\n".to_string();
         let mut v = json!({"columns": ["NAME"]});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let jq = apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
         assert!(!jq, "no jq_filter, jq must not be reported applied");
         assert!(
@@ -2001,7 +2020,8 @@ mod tests {
         use crate::domain::output_kind::OutputKind;
         let mut stdout = r#"[{"a":1},{"a":2},{"a":3},{"a":4},{"a":5}]"#.to_string();
         let mut v = json!({"jq_filter": ".[0:1]", "limit": 2});
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v);
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("extract must succeed");
         let jq = apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap();
         assert!(jq, "jq must be applied for Json kind with jq_filter");
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
