@@ -167,6 +167,34 @@ pub fn call_tool_definition() -> Tool {
     }
 }
 
+/// Unwrap `mcp_call_tool` arguments into `(inner_tool_name, inner_arguments)`.
+///
+/// # Errors
+///
+/// Returns a client-facing message when `name` is absent, empty, or not a
+/// string. The inner name's existence is NOT checked here — the registry
+/// dispatch reports `McpUnknownTool` with the normal error path.
+pub fn unwrap_call_tool(
+    args: Option<&Value>,
+) -> std::result::Result<(String, Option<Value>), String> {
+    let Some(obj) = args else {
+        return Err(format!(
+            "{CALL_TOOL}: missing arguments — expected {{\"name\": \"<tool>\", \"arguments\": {{…}}}}"
+        ));
+    };
+    let Some(name) = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(format!(
+            "{CALL_TOOL}: `name` (string, non-empty) is required. \
+             Use mcp_search_tools to discover tool names."
+        ));
+    };
+    Ok((name.to_string(), obj.get("arguments").cloned()))
+}
+
 /// Execute one of the three meta-tools. Returns `None` when `tool_name` is
 /// not a meta-tool (caller should then dispatch to the regular registry).
 pub fn execute(
@@ -606,5 +634,30 @@ mod tests {
             desc_161.ends_with('…'),
             "161-char description must be truncated (kills `> -> ==` and `> -> <`)"
         );
+    }
+
+    // ============== `unwrap_call_tool` (mcp_call_tool dispatcher) ==============
+
+    #[test]
+    fn test_unwrap_call_tool_ok() {
+        let args = json!({"name": "ssh_status", "arguments": {"host": "pi"}});
+        let (name, inner) = unwrap_call_tool(Some(&args)).unwrap();
+        assert_eq!(name, "ssh_status");
+        assert_eq!(inner.unwrap()["host"], "pi");
+    }
+
+    #[test]
+    fn test_unwrap_call_tool_no_arguments_key() {
+        let args = json!({"name": "ssh_status"});
+        let (name, inner) = unwrap_call_tool(Some(&args)).unwrap();
+        assert_eq!(name, "ssh_status");
+        assert!(inner.is_none());
+    }
+
+    #[test]
+    fn test_unwrap_call_tool_missing_name_is_error() {
+        let args = json!({"arguments": {}});
+        assert!(unwrap_call_tool(Some(&args)).is_err());
+        assert!(unwrap_call_tool(None).is_err());
     }
 }

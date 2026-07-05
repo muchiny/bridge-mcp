@@ -1376,7 +1376,7 @@ impl McpServer {
             return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
         };
 
-        let call_params: ToolCallParams = match serde_json::from_value(params) {
+        let mut call_params: ToolCallParams = match serde_json::from_value(params) {
             Ok(p) => p,
             Err(e) => {
                 return JsonRpcResponse::error(
@@ -1387,6 +1387,27 @@ impl McpServer {
         };
 
         info!(tool = %call_params.name, "Tool call");
+
+        // Generic dispatcher (progressive listing mode): rewrite to the inner
+        // tool BEFORE the elicitation gate and annotation lookups, so the
+        // target tool's own safety semantics apply. A rewritten name equal to
+        // CALL_TOOL again falls through to the registry and fails as unknown —
+        // no recursion.
+        if call_params.name == super::meta_tools::CALL_TOOL {
+            match super::meta_tools::unwrap_call_tool(call_params.arguments.as_ref()) {
+                Ok((inner_name, inner_args)) => {
+                    info!(inner_tool = %inner_name, "mcp_call_tool dispatch");
+                    call_params.name = inner_name;
+                    call_params.arguments = inner_args;
+                }
+                Err(msg) => {
+                    return JsonRpcResponse::success_or_serialize_error(
+                        id,
+                        &ToolCallResult::error(msg),
+                    );
+                }
+            }
+        }
 
         // Progressive-discovery meta-tools are dispatched before the registry
         // so they can inspect the registry itself. They are read-only and
@@ -2580,6 +2601,59 @@ mod tests {
         assert_eq!(structured["name"], first_real);
         assert!(structured["input_schema"].is_object());
         assert!(structured["reduction_strategy"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_call_tool_dispatches_inner_meta_tool() {
+        let server = create_test_server();
+        let params = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {"name": super::super::meta_tools::LIST_TOOL_GROUPS}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert!(
+            !result["isError"].as_bool().unwrap_or(false),
+            "got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_tool_missing_name_is_tool_error() {
+        let server = create_test_server();
+        let params = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+
+        let result = response.result.unwrap();
+        assert!(result["isError"].as_bool().unwrap_or(false));
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("`name`"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_call_tool_unknown_inner_tool() {
+        let server = create_test_server();
+        let params = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {"name": "ssh_does_not_exist"}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+
+        // Normal unknown-tool error path — proves the rewrite fell through
+        // to the registry rather than being swallowed by a meta branch.
+        let result = response.result.unwrap();
+        assert!(result["isError"].as_bool().unwrap_or(false));
     }
 
     #[tokio::test]
