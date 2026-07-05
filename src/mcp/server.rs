@@ -2684,6 +2684,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_destructive_gate_applies_through_call_tool() {
+        // Regression test: Task 8 added an `mcp_call_tool` dispatcher that
+        // rewrites the call to the inner tool BEFORE the destructive-elicitation
+        // gate. This test pins the security property: even when a destructive tool
+        // is reached VIA mcp_call_tool, the gate still blocks it if the session
+        // lacks elicitation support.
+        let server = create_test_server();
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        // session_ctx.caps.supports_elicitation() defaults to false —
+        // the gate should refuse, even through the dispatcher.
+        let params = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {
+                "name": "ssh_cron_remove",
+                "arguments": {"host": "nonexistent", "name": "x"}
+            }
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session_ctx))
+            .await;
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("does not support elicitation"),
+            "gate must fire on inner tool after dispatcher rewrite: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_handle_request_unknown_method() {
         let server = create_test_server();
         let request = JsonRpcRequest {
