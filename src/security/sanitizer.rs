@@ -838,7 +838,7 @@ impl Sanitizer {
             // quote after the key name defeats the bare NAME=value patterns
             // below (audit 2026-07-05 finding 2). Value may be quoted or bare.
             PatternDef {
-                pattern: r#"(?i)["'](password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|credentials?)["']\s*[=:]\s*(["'][^"'\n]*["']|[^\s\n]+)"#,
+                pattern: r#"(?i)["'](password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|credentials?)["']\s*[=:]\s*(["'][^"'\n]*["']|[^\s\n"',}\]]+)"#,
                 replacement: r#""$1": "[REDACTED]""#,
                 description: "Quoted JSON/YAML secret keys",
                 category: "generic",
@@ -2162,5 +2162,18 @@ users:
             "secretName value wrongly redacted: {result}"
         );
         assert!(result.contains("plain text"));
+    }
+
+    #[test]
+    fn test_quoted_key_bare_value_preserves_json_structure() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = r#"{"data":{"password":hunter2},"other":"keep"}"#;
+        let result = sanitizer.sanitize(input);
+        assert!(!result.contains("hunter2"), "bare value leaked: {result}");
+        assert!(
+            result.contains(r#""other":"keep""#),
+            "sibling field eaten: {result}"
+        );
+        assert!(result.ends_with('}'), "closing braces eaten: {result}");
     }
 }
