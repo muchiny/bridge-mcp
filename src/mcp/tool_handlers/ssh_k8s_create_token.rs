@@ -107,7 +107,7 @@ impl StandardTool for K8sCreateTokenTool {
             },
             "max_output": {
                 "type": "integer",
-                "description": "Max output characters (default: from server config, typically 20000, 0 = no limit).",
+                "description": "Max output characters (default: from server config, typically 40000, 0 = no limit).",
                 "minimum": 0
             },
             "save_output": {

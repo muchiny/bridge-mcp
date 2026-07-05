@@ -6,10 +6,11 @@
 
 use crate::domain::output_cache::OutputCache;
 
-/// Default max output characters (~20-25K tokens, fits within Claude's 200K context).
+/// Legacy default max output characters.
 ///
-/// This constant is kept for backward compatibility. Prefer using
-/// `LimitsConfig::max_output_chars` for runtime configuration.
+/// This constant is kept for backward compatibility only — the runtime
+/// default is `LimitsConfig::max_output_chars` (40_000, see
+/// `config::types::default_max_output_chars`), with per-client overrides.
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 20_000;
 
 /// Truncate output keeping head and tail, removing the middle.
