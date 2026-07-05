@@ -300,6 +300,8 @@ impl Sanitizer {
             "api_key",
             "apikey",
             "api-key",
+            "access_key",
+            "access-key",
             "private",
             // AWS
             "aws_access",
@@ -832,6 +834,25 @@ impl Sanitizer {
             // ══════════════════════════════════════════════════════════════════
             // TIER 5: GENERIC PATTERNS (catch-all, must be last!)
             // ══════════════════════════════════════════════════════════════════
+            // Quoted JSON/YAML secret keys: {"password": "..."} — the closing
+            // quote after the key name defeats the bare NAME=value patterns
+            // below (audit 2026-07-05 finding 2). Value may be quoted or bare.
+            PatternDef {
+                pattern: r#"(?i)["'](password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|credentials?)["']\s*[=:]\s*(["'][^"'\n]*["']|[^\s\n]+)"#,
+                replacement: r#""$1": "[REDACTED]""#,
+                description: "Quoted JSON/YAML secret keys",
+                category: "generic",
+            },
+            // Quoted values with spaces: password: "mon secret" — must run
+            // BEFORE the bare [^\s\n]+ generic below, which would otherwise
+            // eat the opening quote and leave the tail of the value in place
+            // (audit 2026-07-05 finding 7).
+            PatternDef {
+                pattern: r#"(?i)(password|passwd|pwd|secret|credential)\s*[=:]\s*("[^"\n]*"|'[^'\n]*')"#,
+                replacement: r#"$1="[REDACTED]""#,
+                description: "Generic secrets with quoted values",
+                category: "generic",
+            },
             PatternDef {
                 pattern: r"(?i)(password|passwd|pwd)\s*[=:]\s*[^\s\n]+",
                 replacement: "$1=[REDACTED]",
@@ -2071,5 +2092,75 @@ users:
         let input = "\x1b[1;31mERROR\x1b[0m \x1b[33mWarning\x1b[0m normal text";
         let output = sanitizer.sanitize(input);
         assert_eq!(output.as_ref(), "ERROR Warning normal text");
+    }
+
+    #[test]
+    fn test_json_quoted_key_password() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = r#"{"user": "admin", "password": "hunter2"}"#;
+        let result = sanitizer.sanitize(input);
+        assert!(
+            !result.contains("hunter2"),
+            "JSON quoted-key password leaked: {result}"
+        );
+        assert!(result.contains("[REDACTED]"));
+        assert!(
+            result.contains(r#""user": "admin""#),
+            "non-secret JSON must survive"
+        );
+    }
+
+    #[test]
+    fn test_k8s_secret_json_data_block() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = r#"{"data": {"password": "aHVudGVyMg==", "token": "c2VjcmV0dG9rZW4="}}"#;
+        let result = sanitizer.sanitize(input);
+        assert!(
+            !result.contains("aHVudGVyMg=="),
+            "k8s secret data leaked: {result}"
+        );
+        assert!(
+            !result.contains("c2VjcmV0dG9rZW4="),
+            "k8s token leaked: {result}"
+        );
+    }
+
+    #[test]
+    fn test_yaml_quoted_key_unquoted_value() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = "\"api_key\": AbCd1234EfGh5678\n";
+        let result = sanitizer.sanitize(input);
+        assert!(
+            !result.contains("AbCd1234EfGh5678"),
+            "quoted-key unquoted value leaked: {result}"
+        );
+    }
+
+    #[test]
+    fn test_quoted_value_with_spaces_fully_redacted() {
+        let sanitizer = Sanitizer::with_defaults();
+        let input = r#"password: "mon secret avec espaces""#;
+        let result = sanitizer.sanitize(input);
+        assert!(
+            !result.contains("mon secret"),
+            "quoted value partially leaked: {result}"
+        );
+        assert!(
+            !result.contains("espaces"),
+            "quoted value tail leaked: {result}"
+        );
+    }
+
+    #[test]
+    fn test_quoted_key_no_false_positive_on_substring_keys() {
+        let sanitizer = Sanitizer::with_defaults();
+        // "secretName" must NOT match the quoted "secret" key pattern
+        let input = r#"{"secretName": "my-tls-cert", "description": "plain text"}"#;
+        let result = sanitizer.sanitize(input);
+        assert!(
+            result.contains("my-tls-cert"),
+            "secretName value wrongly redacted: {result}"
+        );
+        assert!(result.contains("plain text"));
     }
 }
