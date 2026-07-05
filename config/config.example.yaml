@@ -617,6 +617,15 @@ tool_groups:
     # config: true             # Enable runtime config tools
     # recording: true          # Enable session recording tools
 
+  # tools/list exposure mode (default: full).
+  #   full        — every enabled tool with its complete schema (~2K chars/tool;
+  #                 ~140K tokens for 280 tools — fine for clients that lazy-load
+  #                 schemas, heavy for clients that inject them all into context).
+  #   progressive — only the 3 discovery meta-tools + mcp_call_tool are listed;
+  #                 the model discovers tools on demand and calls them through
+  #                 mcp_call_tool. Recommended for Claude Desktop / big tool sets.
+  # listing: progressive
+
 # =============================================================================
 # OBSERVABILITY (feature = "otel")
 # =============================================================================

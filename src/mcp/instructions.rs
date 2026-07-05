@@ -89,6 +89,18 @@ pub fn build_instructions(config: &Config, tool_count: usize) -> String {
          opted in via config.yaml."
     );
 
+    // --- Progressive Listing Mode ---
+    if config.tool_groups.listing == crate::config::types::ToolListingMode::Progressive {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "TOOL LISTING: progressive mode \u{2014} only the discovery meta-tools are \
+             listed. Find tools with mcp_list_tool_groups / mcp_search_tools, fetch \
+             one schema with mcp_describe_tool, then invoke it via \
+             mcp_call_tool(name, arguments)."
+        );
+    }
+
     // --- Key Limits ---
     let _ = writeln!(out);
     let _ = writeln!(
@@ -157,6 +169,7 @@ mod tests {
     use crate::config::{
         AuditConfig, AuthConfig, HostConfig, HostKeyVerification, HttpTransportConfig,
         LimitsConfig, SecurityConfig, SessionConfig, SshConfigDiscovery, ToolGroupsConfig,
+        ToolListingMode,
     };
 
     fn default_config() -> Config {
@@ -294,6 +307,25 @@ mod tests {
 
         assert!(out.contains("60s command timeout"));
         assert!(out.contains("80000 char output limit"));
+    }
+
+    #[test]
+    fn test_progressive_listing_mode_announced() {
+        let mut config = default_config();
+        config.tool_groups.listing = ToolListingMode::Progressive;
+        let out = build_instructions(&config, 4);
+
+        assert!(out.contains("TOOL LISTING: progressive mode"));
+        assert!(out.contains("mcp_call_tool(name, arguments)"));
+    }
+
+    #[test]
+    fn test_full_listing_mode_not_announced() {
+        let mut config = default_config();
+        config.tool_groups.listing = ToolListingMode::Full;
+        let out = build_instructions(&config, 337);
+
+        assert!(!out.contains("TOOL LISTING:"));
     }
 
     #[test]
