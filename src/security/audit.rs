@@ -183,6 +183,12 @@ impl AuditLogger {
         Ok((logger, task))
     }
 
+    /// Whether a sanitizer is wired to mask `event.command` before logging.
+    #[must_use]
+    pub fn has_sanitizer(&self) -> bool {
+        self.sanitizer.is_some()
+    }
+
     /// Create a disabled audit logger (for testing or when audit is off)
     #[must_use]
     pub fn disabled() -> Self {
@@ -331,6 +337,7 @@ impl AuditLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::Sanitizer;
     use std::path::{Path, PathBuf};
 
     /// Check if a path is within the configured audit directory
@@ -339,6 +346,23 @@ mod tests {
             return path_parent == config_parent;
         }
         false
+    }
+
+    #[test]
+    fn test_has_sanitizer_reports_wiring() {
+        let config = AuditConfig::default();
+        let (plain, _task) = AuditLogger::new(&config).unwrap();
+        assert!(
+            !plain.has_sanitizer(),
+            "plain logger must not report a sanitizer"
+        );
+
+        let (wired, _task) =
+            AuditLogger::new_with_sanitizer(&config, Sanitizer::with_defaults()).unwrap();
+        assert!(
+            wired.has_sanitizer(),
+            "new_with_sanitizer must wire the sanitizer"
+        );
     }
 
     #[test]

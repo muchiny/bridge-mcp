@@ -503,9 +503,13 @@ fn create_context(config: Arc<Config>) -> ToolContext {
         &config.security.sanitize,
         &config.security.sanitize_patterns,
     ));
-    // For CLI mode, we don't spawn the audit writer task (short-lived process)
+    // For CLI mode, we don't spawn the audit writer task (short-lived process).
+    // Wire the sanitizer so event.command is masked on the tracing sink too
+    // (audit 2026-07-05 finding 1 — MCP mode already does this in server.rs).
+    let audit_sanitizer = Sanitizer::from_config(&config.security.sanitize);
     let (audit_logger, _audit_task) =
-        AuditLogger::new(&config.audit).unwrap_or_else(|_| (AuditLogger::disabled(), None));
+        AuditLogger::new_with_sanitizer(&config.audit, audit_sanitizer)
+            .unwrap_or_else(|_| (AuditLogger::disabled(), None));
     let audit_logger = Arc::new(audit_logger);
     let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
     let connection_pool = Arc::new(ExecutorRouter::with_defaults());
@@ -1374,6 +1378,18 @@ mod tests {
     };
     use crate::mcp::tool_handlers::utils::shell_escape;
     use std::collections::HashMap;
+
+    // ============== create_context Tests ==============
+
+    #[test]
+    fn test_create_context_wires_audit_sanitizer() {
+        let config = Arc::new(Config::default());
+        let ctx = create_context(config);
+        assert!(
+            ctx.audit_logger.has_sanitizer(),
+            "CLI audit logger must sanitize event.command (audit 2026-07-05 finding 1)"
+        );
+    }
 
     // ============== DataReductionFlags merge Tests ==============
 
