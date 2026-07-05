@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`tool_groups.listing: progressive`** — `tools/list` exposes only the 3
+  discovery meta-tools plus a new generic `mcp_call_tool` dispatcher (the
+  inner tool it rewrites to keeps its own annotations and
+  destructive-elicitation gate — the dispatch rewrite happens before those
+  checks run).
+- **Per-param reduction adoption metrics** — `bridge_mcp_reduction_param_used_total`
+  and `bridge_mcp_reduction_calls_with_params_total` (Prometheus), plus a
+  "Reduction Param Adoption" section in `ssh_health`.
+- **Truncation messages now suggest a next step** — each truncated response
+  appends an `OutputKind`-specific tip recommending `jq_filter`/`columns`/`limit`
+  as appropriate.
+
+### Changed
+
+- **BREAKING (no-`jq` builds)**: binaries built without the `jq` feature now
+  return an explicit error when `jq_filter`, `yq_filter`, or `output_format`
+  are supplied (previously silently ignored), and no longer advertise those
+  params in `tools/list`. Lib API: `DataReductionArgs::extract` now returns
+  `Result`; `truncate_output_with_cache` takes a 4th `reduction_tip` argument;
+  `Metrics::record_pipeline_stats` takes a 5th `params_used` argument.
+
+### Fixed
+
+- **jq error hint named a nonexistent param** — the hint referenced `fields`
+  instead of the real `columns` param.
+- **Handler schemas understated the default output cap** — docs said
+  "typically 20000" while the real default is 40000.
+
 ## [1.20.0] - 2026-07-02
 
 ### Added
