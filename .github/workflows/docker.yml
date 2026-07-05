@@ -24,7 +24,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # No rust-cache here: this workflow publishes artifacts on tag pushes,
       # and restoring a branch-writable cache into a publishing pipeline is
@@ -44,7 +44,7 @@ jobs:
       packages: write
       security-events: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
