@@ -784,8 +784,7 @@ impl McpServer {
 
             match incoming {
                 IncomingMessage::Single(message) => {
-                    let Some(request) = self.route_incoming_message(message, &session_ctx).await
-                    else {
+                    let Some(request) = Self::route_incoming_message(message, &session_ctx) else {
                         continue;
                     };
 
@@ -950,8 +949,11 @@ impl McpServer {
     /// notifications are dispatched against THIS session's map only — a
     /// different client cannot cancel a request another session is
     /// running.
-    async fn route_incoming_message(
-        &self,
+    /// Synchronous by design (audit 2026-08-02): this runs inside
+    /// `serve_session`'s reader loop, so anything awaited here stalls the
+    /// only task able to read the client's next message. Work that needs
+    /// to await — including the `roots/list` round-trip — is spawned.
+    fn route_incoming_message(
         message: JsonRpcMessage,
         session: &SessionContext,
     ) -> Option<JsonRpcRequest> {
@@ -980,7 +982,7 @@ impl McpServer {
 
         // Handle client notifications (no response needed per JSON-RPC 2.0)
         if message.method.as_deref() == Some("notifications/roots/list_changed") {
-            self.handle_roots_changed(session).await;
+            Self::handle_roots_changed(session);
             return None;
         }
         if message.method.as_deref() == Some("notifications/cancelled") {
@@ -991,7 +993,7 @@ impl McpServer {
             return None;
         }
         if message.method.as_deref() == Some("notifications/initialized") {
-            self.handle_initialized_notification(session).await;
+            Self::handle_initialized_notification(session);
             return None;
         }
 
@@ -1004,6 +1006,29 @@ impl McpServer {
         })
     }
 
+    /// Start a roots fetch **off** the session reader loop.
+    ///
+    /// Audit 2026-08-02: [`Self::fetch_roots`] must never be awaited from
+    /// `route_incoming_message`, because that runs inside
+    /// `serve_session`'s reader loop — the only place the client's
+    /// `roots/list` *response* can be read. Awaiting inline deadlocked the
+    /// session against itself until the 10s `ClientRequester` timeout
+    /// expired, delaying the first `tools/list` of every session that
+    /// advertises the `roots` capability.
+    ///
+    /// Fire-and-forget is correct here: nothing in the request path reads
+    /// `session.roots` synchronously, and a client that never answers
+    /// simply leaves the slot empty.
+    fn spawn_fetch_roots(session: &SessionContext) {
+        if !session.caps.supports_roots() {
+            return;
+        }
+        let session = session.clone();
+        tokio::spawn(async move {
+            Self::fetch_roots(&session).await;
+        });
+    }
+
     /// Fetch roots from the client after initialization.
     ///
     /// Uses the SESSION-LOCAL pending-requests map so a `roots/list`
@@ -1012,7 +1037,10 @@ impl McpServer {
     /// stored on the session-local roots slot (FIND-037 audit
     /// 2026-05-09): a different client's `roots/list` response cannot
     /// overwrite this session's roots.
-    async fn fetch_roots(&self, session: &SessionContext) {
+    ///
+    /// Always call via [`Self::spawn_fetch_roots`] from the reader loop —
+    /// awaiting this inline deadlocks the session (audit 2026-08-02).
+    async fn fetch_roots(session: &SessionContext) {
         if !session.caps.supports_roots() {
             return;
         }
@@ -1037,16 +1065,16 @@ impl McpServer {
     }
 
     /// Handle `notifications/roots/list_changed` — re-fetch roots.
-    async fn handle_roots_changed(&self, session: &SessionContext) {
+    fn handle_roots_changed(session: &SessionContext) {
         info!("Client roots changed, re-fetching");
-        self.fetch_roots(session).await;
+        Self::spawn_fetch_roots(session);
     }
 
     /// Handle `notifications/initialized` — fetch client roots if supported.
     /// No response is emitted (per JSON-RPC 2.0 notification semantics).
-    async fn handle_initialized_notification(&self, session: &SessionContext) {
+    fn handle_initialized_notification(session: &SessionContext) {
         info!("Client sent notifications/initialized; fetching roots");
-        self.fetch_roots(session).await;
+        Self::spawn_fetch_roots(session);
     }
 
     /// Handle a single JSON-RPC request and return the response.
@@ -2785,7 +2813,6 @@ mod tests {
         // Per JSON-RPC 2.0 / MCP spec, notifications carry no `id` and MUST NOT
         // receive a response. `route_incoming_message` must short-circuit
         // `notifications/initialized` so it never reaches the dispatcher.
-        let server = create_test_server();
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
@@ -2797,7 +2824,7 @@ mod tests {
         };
 
         let session_ctx = SessionContext::new(tx);
-        let routed = server.route_incoming_message(message, &session_ctx).await;
+        let routed = McpServer::route_incoming_message(message, &session_ctx);
 
         assert!(routed.is_none(), "notification must not be dispatched");
         assert!(
@@ -2812,10 +2839,9 @@ mod tests {
         // receiving `notifications/initialized` must trigger a server-initiated
         // `roots/list` request on the writer channel.
         //
-        // `fetch_roots` awaits the (never-arriving) client response, so we
-        // drive `route_incoming_message` in a background task and just verify
-        // the outbound `roots/list` shows up on tx.
-        let server = Arc::new(create_test_server());
+        // The fetch is spawned (audit 2026-08-02), so routing returns at
+        // once and the `roots/list` request lands on tx from the detached
+        // task.
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         session_ctx.caps.set_supports_roots(true);
@@ -2828,13 +2854,10 @@ mod tests {
             error: None,
         };
 
-        let server_bg = Arc::clone(&server);
-        let session_ctx_bg = session_ctx.clone();
-        let route_handle = tokio::spawn(async move {
-            server_bg
-                .route_incoming_message(message, &session_ctx_bg)
-                .await
-        });
+        assert!(
+            McpServer::route_incoming_message(message, &session_ctx).is_none(),
+            "a notification is never dispatched"
+        );
 
         let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
@@ -2846,8 +2869,62 @@ mod tests {
             }
             _ => panic!("expected WriterMessage::Request(roots/list)"),
         }
+    }
 
-        route_handle.abort();
+    /// Regression (audit 2026-08-02): `notifications/initialized` must NOT
+    /// block the session reader loop while the `roots/list` round-trip is
+    /// in flight.
+    ///
+    /// `route_incoming_message` runs *inside* `serve_session`'s reader loop.
+    /// When `fetch_roots` was awaited inline, the loop could not read the
+    /// client's `roots/list` response — the very message it was waiting
+    /// for — so every session stalled for the full `ClientRequester`
+    /// timeout (10s) before serving its first request. Claude Code
+    /// advertises the `roots` capability, so its `tools/list` health check
+    /// timed out with `MCP error -32001` on every connect.
+    ///
+    /// The fetch is fire-and-forget: routing returns immediately and the
+    /// roots land on the session slot whenever the client answers.
+    #[tokio::test]
+    async fn test_route_initialized_notification_does_not_block_reader_loop() {
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+        let message = super::super::protocol::JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: Some("notifications/initialized".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        // No client response is ever sent. Routing must still return well
+        // inside the 10s ClientRequester timeout — 500ms is two orders of
+        // magnitude below it, so this cannot flake on a slow machine
+        // without also being a real regression. `route_incoming_message`
+        // being synchronous is the structural half of the guarantee; this
+        // wall-clock bound is the behavioural half, and it survives a
+        // future refactor that makes the function async again.
+        let started = std::time::Instant::now();
+        let routed = McpServer::route_incoming_message(message, &session_ctx);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "initialized notification blocked the reader loop for {elapsed:?}"
+        );
+        assert!(routed.is_none(), "a notification is never dispatched");
+
+        // The fetch still happened — just off the reader loop.
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a roots/list request within 2s")
+            .expect("channel closed unexpectedly");
+        match sent {
+            WriterMessage::Request(req) => assert_eq!(req.method, "roots/list"),
+            _ => panic!("expected WriterMessage::Request(roots/list)"),
+        }
     }
 
     #[tokio::test]
