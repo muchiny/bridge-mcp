@@ -5,6 +5,10 @@ on:
     - cron: "0 4 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: nightly-compat-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -20,8 +24,16 @@ jobs:
       fail-fast: false
       matrix:
         toolchain: [stable, beta, nightly]
+    env:
+      # Without this the rust-toolchain.toml pin (1.94.0) wins over the
+      # `rustup default` that dtolnay/rust-toolchain sets, and all three legs
+      # of this matrix test the exact same compiler — which is what happened
+      # for every run of this workflow until 2026-08.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -31,6 +43,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - name: Confirm the intended compiler is in use
+        run: rustc --version
       - name: Test (default features)
         run: cargo nextest run --all-targets
       - name: Test (all features)
@@ -48,8 +62,12 @@ jobs:
     name: cargo careful (runtime UB checks)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -60,3 +78,39 @@ jobs:
         with:
           tool: cargo-careful,cargo-nextest
       - run: cargo +nightly careful test --lib
+
+  # Same rationale as security.yml: a scheduled workflow that fails silently is
+  # a workflow nobody reads.
+  report-failure:
+    name: Report scheduled failure
+    runs-on: ubuntu-latest
+    needs: [test, careful]
+    if: failure() && github.event_name == 'schedule'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # open/comment the scheduled-failure tracking issue
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const marker = '<!-- scheduled-nightly-compat-failure -->';
+            const url = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'ci-failure', per_page: 100,
+            });
+            const open = existing.data.find((i) => (i.body || '').includes(marker));
+            if (open) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: open.number,
+                body: `Still failing: ${url}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner, repo,
+                title: 'Nightly Compatibility workflow is failing',
+                body: `${marker}\nThe daily toolchain-compatibility workflow failed.\n\nLatest failing run: ${url}`,
+                labels: ['ci-failure'],
+              });
+            }

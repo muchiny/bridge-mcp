@@ -1,3 +1,11 @@
+# Local development toolchain. Pinned to the MSRV so a post-1.94 feature can
+# never slip in unnoticed on a dev machine.
+#
+# CAUTION for CI: a toolchain file OUTRANKS the `rustup default` that
+# dtolnay/rust-toolchain sets, so a workflow step that merely installs
+# `stable`/`beta`/`nightly` still runs 1.94.0 here. Only `cargo +<channel>` and
+# the RUSTUP_TOOLCHAIN env var beat this file — every workflow therefore sets
+# RUSTUP_TOOLCHAIN explicitly. Do not drop those env blocks.
 [toolchain]
 channel = "1.94.0"
 components = ["rustfmt", "clippy"]

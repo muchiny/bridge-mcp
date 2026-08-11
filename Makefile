@@ -17,9 +17,13 @@ release:
 check:
 	cargo check --all-targets
 
-# Run tests
+# Run tests.
+# The second line is not redundant: nextest cannot run doctests, so on any
+# machine where the nextest path succeeds the compiled examples in src/ would
+# otherwise never be built or executed (they weren't, anywhere, until 2026-08).
 test:
 	cargo nextest run 2>/dev/null || cargo test
+	cargo test --doc
 
 # Run tests with OpenTelemetry feature enabled
 # Validates the feature-gated telemetry module and OTLP plumbing compiles
@@ -44,9 +48,21 @@ daemon-stop:
 daemon-status:
 	./target/release/bridge-mcp daemon status
 
-# Run clippy linter
+# Run clippy linter (MSRV toolchain — rust-toolchain.toml pins 1.94.0)
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings
+
+# Run clippy on real stable, which is what the CI Clippy gate uses.
+# rust-toolchain.toml outranks `rustup default`, so `make lint` alone can stay
+# green while CI goes red on a lint that only exists in a newer clippy — that
+# gap hid 48 lints until 2026-08. RUSTUP_TOOLCHAIN is the only way past the
+# toolchain file short of `cargo +stable`.
+# Its own CARGO_TARGET_DIR on purpose: sharing target/ with `make lint` makes
+# the two targets evict each other's artifacts and rebuild the world on every
+# alternation. Not under /tmp — that is a RAM-backed tmpfs on this box.
+lint-stable:
+	RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target-stable \
+		cargo clippy --all-targets --all-features -- -D warnings
 
 # Format code
 fmt:
@@ -104,7 +120,7 @@ quality: fmt-check lint typos machete
 ci: fmt-check lint test audit deny typos
 
 # Full CI check (comprehensive - replaces GitHub Actions)
-ci-full: fmt-check lint test audit typos hack geiger doc-check
+ci-full: fmt-check lint lint-stable test audit typos hack geiger doc-check
 	@echo "Full CI complete."
 
 # Setup development environment
@@ -317,7 +333,8 @@ help:
 	@echo ""
 	@echo "Quality:"
 	@echo "  test             - Run tests"
-	@echo "  lint             - Run clippy"
+	@echo "  lint             - Run clippy (MSRV toolchain)"
+	@echo "  lint-stable      - Run clippy on real stable (what CI gates on)"
 	@echo "  fmt              - Format code"
 	@echo "  fmt-check        - Check formatting"
 	@echo "  typos            - Check for typos"

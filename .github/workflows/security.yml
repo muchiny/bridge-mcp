@@ -14,13 +14,16 @@ on:
 
 concurrency:
   group: security-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # See the comment in ci.yml: rust-toolchain.toml outranks `rustup default`,
+  # so every job that shells out to cargo must say which channel it means.
+  RUSTUP_TOOLCHAIN: stable
 
 jobs:
   zizmor:
@@ -31,6 +34,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v7
       - name: Audit GitHub Actions workflows
         run: uvx zizmor --min-severity medium .github/workflows/
@@ -41,6 +46,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # rustsec/audit-check@v2 crashes with "Unexpected end of JSON
@@ -69,6 +76,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses bans sources
@@ -79,6 +88,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -92,30 +103,69 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: geiger
+      # cargo-geiger has no prebuilt binary in taiki-e/install-action, so it is
+      # the one tool here that still pays a from-source build.
       - name: Install cargo-geiger
         run: cargo install cargo-geiger --locked
       - name: Scan for unsafe code in dependencies
         run: cargo geiger --all-features --output-format ascii
 
   # Weekly mutation sweep over the pure-logic layers (domain, security,
-  # config — tool_handlers are thin adapters with poor mutation ROI),
-  # sharded 8 ways so each runner stays under the timeout. PR-scoped
-  # mutation lives in ci.yml (mutants-diff).
+  # config — tool_handlers are thin adapters with poor mutation ROI).
+  # PR-scoped mutation lives in ci.yml (mutants-diff).
+  #
+  # HISTORY: this used to be 8 shards with `timeout-minutes: 300` and nothing
+  # else. Every shard hit the job timeout, and a job timeout kills the runner
+  # before `if: always()` steps run — so the matrix burned 40 runner-hours a
+  # week and produced zero reports for months. The budget is now enforced by
+  # `timeout` INSIDE the step (artifacts always upload, partial results are
+  # labelled as partial) and the per-mutant cost is cut three ways: more
+  # shards, `--baseline skip`, and two concurrent mutants per runner.
   mutation-testing:
-    name: Mutation testing (shard ${{ matrix.shard }}/8)
+    name: Mutation testing (shard ${{ matrix.shard }}/24)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 300
+    timeout-minutes: 170
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard:
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+          ]
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -124,13 +174,79 @@ jobs:
         with:
           tool: cargo-nextest,cargo-mutants
       - name: Run mutation shard
-        run: >
-          cargo mutants --re '^src/(domain|security|config)/'
-          --shard ${{ matrix.shard }}/8 -- --all-features
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # cargo-mutants has no total-budget flag, so the budget is enforced
+          # here rather than by `timeout-minutes` — a job timeout would skip
+          # the upload step below and throw the whole shard away.
+          #
+          # `--baseline skip` drops one full build+test per shard. It is safe
+          # here because the `security-tests` job in this same workflow already
+          # proves the unmutated tree builds and passes.
+          set +e
+          timeout --signal=INT --kill-after=2m 150m \
+            cargo mutants \
+              --baseline skip \
+              --re '^src/(domain|security|config)/' \
+              --shard "$SHARD/24" \
+              --test-tool nextest \
+              --timeout-multiplier 2.0 \
+              -j 2 \
+              -- --all-features
+          rc=$?
+          set -e
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "::warning::shard $SHARD exhausted its 150m budget — this report covers only part of the shard"
+            echo "- shard \`$SHARD/24\`: **PARTIAL** (150m budget exhausted)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "- shard \`$SHARD/24\`: complete (exit $rc)" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
       - name: Upload mutation report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mutation-report-shard-${{ matrix.shard }}
           path: mutants.out/
+          if-no-files-found: warn
           retention-days: 30
+
+  # Nothing watches a scheduled run: the previous two weekly Security runs went
+  # red (RUSTSEC-2026-0204 + a yanked crate) and nobody was told. Fuzz already
+  # files an issue on crash; this does the same for the whole workflow, and
+  # reuses one open issue instead of filing a duplicate every Monday.
+  report-failure:
+    name: Report scheduled failure
+    runs-on: ubuntu-latest
+    needs: [zizmor, audit, deny, security-tests, unsafe-scan, mutation-testing]
+    if: failure() && github.event_name == 'schedule'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # open/comment the scheduled-failure tracking issue
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const marker = '<!-- scheduled-security-failure -->';
+            const url = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\nThe weekly Security workflow failed.\n\nLatest failing run: ${url}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'ci-failure', per_page: 100,
+            });
+            const open = existing.data.find((i) => (i.body || '').includes(marker));
+            if (open) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: open.number,
+                body: `Still failing: ${url}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner, repo,
+                title: 'Weekly Security workflow is failing',
+                body,
+                labels: ['ci-failure', 'security'],
+              });
+            }
