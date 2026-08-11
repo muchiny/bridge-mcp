@@ -217,7 +217,7 @@ impl ToolHandler for SshLsHandler {
 
                 // Sort entries
                 match sort_by {
-                    "size" => entries.sort_by(|a, b| a.size.cmp(&b.size)),
+                    "size" => entries.sort_by_key(|a| a.size),
                     "type" => {
                         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
                     }

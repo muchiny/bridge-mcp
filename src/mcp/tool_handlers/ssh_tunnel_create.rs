@@ -119,10 +119,7 @@ impl ToolHandler for SshTunnelCreateHandler {
                 reason: format!("Failed to bind local port {}: {e}", args.local_port),
             })?;
 
-        let actual_local_port = listener
-            .local_addr()
-            .map(|a| a.port())
-            .unwrap_or(args.local_port);
+        let actual_local_port = listener.local_addr().map_or(args.local_port, |a| a.port());
 
         info!(
             host = %args.host,

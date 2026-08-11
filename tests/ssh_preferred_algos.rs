@@ -111,7 +111,7 @@ fn rekey_limits_set_to_one_gigabyte_one_hour() {
     );
     assert_eq!(
         limits.rekey_time_limit,
-        std::time::Duration::from_secs(3600),
+        std::time::Duration::from_hours(1),
         "rekey_time_limit should be 1 hour"
     );
 }

@@ -20,7 +20,7 @@ use crate::config::{HostConfig, LimitsConfig};
 use crate::error::Result;
 
 /// Default idle TTL for cached `WinrmClient` entries in the PSRP pool.
-const DEFAULT_PSRP_IDLE_TTL: Duration = Duration::from_secs(300);
+const DEFAULT_PSRP_IDLE_TTL: Duration = Duration::from_mins(5);
 
 /// A cached entry: one `WinrmClient` + last-used timestamp.
 struct PooledClient {
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = PsrpPoolConfig::default();
-        assert_eq!(config.max_idle, Duration::from_secs(300));
+        assert_eq!(config.max_idle, Duration::from_mins(5));
     }
 
     #[tokio::test]

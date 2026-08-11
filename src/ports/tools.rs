@@ -255,7 +255,7 @@ impl ToolContext {
         let requester = Arc::new(crate::mcp::client_requester::ClientRequester::new(
             tx,
             pending,
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_mins(2),
         ));
         let service = crate::mcp::elicitation::ElicitationService::new(requester);
         service.set_supported(true);
@@ -312,7 +312,7 @@ impl ToolContext {
         let requester = Arc::new(crate::mcp::client_requester::ClientRequester::new(
             tx,
             pending,
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_mins(2),
         ));
         let service = crate::mcp::sampling::SamplingService::new(requester);
         service.set_supported(true);

@@ -150,7 +150,7 @@ mod tests {
             age_seconds: 0,
         };
         let handle = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_mins(1)).await;
         });
         ctx.tunnel_manager.register(info, handle).await.unwrap();
 

@@ -25,7 +25,7 @@ const DEFAULT_WINDOWS_DOCUMENT: &str = "AWS-RunPowerShellScript";
 /// Poll interval for command status.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Maximum time to wait for command completion.
-const MAX_WAIT: Duration = Duration::from_secs(300);
+const MAX_WAIT: Duration = Duration::from_mins(5);
 
 /// AWS SSM connection — wraps an SSM API client configured for a target instance.
 ///

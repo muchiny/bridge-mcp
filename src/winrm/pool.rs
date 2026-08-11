@@ -19,7 +19,7 @@ use crate::config::{HostConfig, LimitsConfig};
 use crate::error::Result;
 
 /// Default idle TTL for cached `WinrmClient` entries.
-const DEFAULT_WINRM_IDLE_TTL: Duration = Duration::from_secs(120);
+const DEFAULT_WINRM_IDLE_TTL: Duration = Duration::from_mins(2);
 
 /// A cached entry: one `WinrmClient` + last-used timestamp.
 struct PooledClient {

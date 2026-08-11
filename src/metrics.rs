@@ -157,9 +157,12 @@ impl Metrics {
         let _ = writeln!(out, "Total output chars: {total_chars}");
         let _ = writeln!(out, "Estimated tokens: {total_tokens} (~3.5 chars/token)");
         let _ = writeln!(out, "Total tool calls: {total_calls}");
-        if total_calls > 0 {
-            let _ = writeln!(out, "Avg chars/call: {}", total_chars / total_calls);
-            let _ = writeln!(out, "Avg tokens/call: {}", total_tokens / total_calls);
+        if let (Some(avg_chars), Some(avg_tokens)) = (
+            total_chars.checked_div(total_calls),
+            total_tokens.checked_div(total_calls),
+        ) {
+            let _ = writeln!(out, "Avg chars/call: {avg_chars}");
+            let _ = writeln!(out, "Avg tokens/call: {avg_tokens}");
         }
         out.push('\n');
 

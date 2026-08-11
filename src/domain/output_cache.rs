@@ -278,7 +278,7 @@ mod tests {
         // Strict `<` in the TTL checks: an entry whose age == ttl is expired.
         let cache = OutputCache::new(300, 100);
         let id = cache.store("x".to_string()).await;
-        tokio::time::advance(Duration::from_secs(300)).await;
+        tokio::time::advance(Duration::from_mins(5)).await;
         assert!(cache.fetch(&id, 0, 10).await.is_none());
     }
 
@@ -286,8 +286,7 @@ mod tests {
     async fn test_fetch_alive_just_before_ttl_boundary() {
         let cache = OutputCache::new(300, 100);
         let id = cache.store("x".to_string()).await;
-        tokio::time::advance(Duration::from_secs(300).saturating_sub(Duration::from_millis(1)))
-            .await;
+        tokio::time::advance(Duration::from_mins(5).saturating_sub(Duration::from_millis(1))).await;
         assert!(cache.fetch(&id, 0, 10).await.is_some());
     }
 
@@ -295,7 +294,7 @@ mod tests {
     async fn test_store_lazy_cleanup_evicts_at_exact_ttl() {
         let cache = OutputCache::new(300, 100);
         cache.store("old".to_string()).await;
-        tokio::time::advance(Duration::from_secs(300)).await;
+        tokio::time::advance(Duration::from_mins(5)).await;
         cache.store("new".to_string()).await; // lazy cleanup runs here
         assert_eq!(cache.len().await, 1);
     }
@@ -305,7 +304,7 @@ mod tests {
         let cache = OutputCache::new(300, 100);
         cache.store("a".to_string()).await;
         cache.store("b".to_string()).await;
-        tokio::time::advance(Duration::from_secs(300)).await;
+        tokio::time::advance(Duration::from_mins(5)).await;
         cache.cleanup().await;
         assert!(cache.is_empty().await);
     }

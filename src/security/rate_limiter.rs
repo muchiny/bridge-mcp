@@ -309,7 +309,7 @@ mod tests {
         assert!(limiter.check("host1").is_ok());
 
         // Wait long enough for many tokens to accumulate
-        sleep(Duration::from_millis(1000));
+        sleep(Duration::from_secs(1));
 
         // Should be capped at 5 tokens, not more
         let mut success_count = 0;
