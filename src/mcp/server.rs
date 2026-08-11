@@ -10,6 +10,7 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
 use crate::config::{Config, ConfigWatcher};
+use crate::domain::output_truncator::truncate_chars;
 use crate::domain::{ExecuteCommandUseCase, OutputCache, TaskStore, TunnelManager};
 use crate::error::Result;
 use crate::mcp::instructions;
@@ -173,13 +174,36 @@ impl ActiveRequests {
     }
 }
 
+/// Character cap on the serialized-arguments summary embedded in the
+/// destructive-confirmation prompt.
+const SUMMARY_MAX_CHARS: usize = 300;
+
+/// Character cap on the `command` rendered into the destructive-confirmation
+/// prompt. Mirrors the 4000-char cap `ElicitationService` already applies to
+/// the diff: an uncapped command produces a prompt the operator cannot read,
+/// let alone approve.
+const PLAN_COMMAND_MAX_CHARS: usize = 2000;
+
 /// Extract the `command` field from tool arguments for the destructive
 /// confirmation plan, if present and a string. Returns `None` otherwise.
+///
+/// The command is truncated by **characters**, never bytes — a byte slice
+/// through a multi-byte character panics, and the release profile aborts on
+/// panic.
 fn plan_command_from_args(arguments: Option<&Value>) -> Option<String> {
     arguments
         .and_then(|v| v.get("command"))
         .and_then(Value::as_str)
-        .map(str::to_string)
+        .map(|cmd| {
+            if cmd.chars().count() > PLAN_COMMAND_MAX_CHARS {
+                format!(
+                    "{}\n… (command truncated)",
+                    truncate_chars(cmd, PLAN_COMMAND_MAX_CHARS)
+                )
+            } else {
+                cmd.to_string()
+            }
+        })
 }
 
 impl McpServer {
@@ -440,8 +464,12 @@ impl McpServer {
             || "(no arguments)".to_string(),
             |v| {
                 let s = serde_json::to_string(v).unwrap_or_default();
-                if s.len() > 300 {
-                    format!("{}… (truncated)", &s[..300])
+                // Truncate by CHARACTERS: `&s[..300]` panics when byte 300
+                // lands inside a multi-byte char (accented args are routine),
+                // and `panic = "abort"` in the release profile turns that into
+                // a full server kill.
+                if s.chars().count() > SUMMARY_MAX_CHARS {
+                    format!("{}… (truncated)", truncate_chars(&s, SUMMARY_MAX_CHARS))
                 } else {
                     s
                 }
@@ -2742,6 +2770,114 @@ mod tests {
             text.contains("does not support elicitation"),
             "gate must fire by default (FIND-022): {text}"
         );
+    }
+
+    #[test]
+    fn test_plan_command_from_args_caps_by_chars() {
+        // Long ASCII command is capped and marked.
+        let args = json!({"command": "a".repeat(PLAN_COMMAND_MAX_CHARS + 500)});
+        let cmd = plan_command_from_args(Some(&args)).expect("command extracted");
+        assert!(cmd.ends_with("\n… (command truncated)"));
+        assert_eq!(
+            cmd.trim_end_matches("\n… (command truncated)")
+                .chars()
+                .count(),
+            PLAN_COMMAND_MAX_CHARS
+        );
+
+        // Multibyte command must not panic and must cap on chars, not bytes.
+        let args = json!({"command": "é".repeat(PLAN_COMMAND_MAX_CHARS + 500)});
+        let cmd = plan_command_from_args(Some(&args)).expect("command extracted");
+        assert_eq!(
+            cmd.trim_end_matches("\n… (command truncated)")
+                .chars()
+                .count(),
+            PLAN_COMMAND_MAX_CHARS
+        );
+
+        // Short command passes through untouched.
+        let args = json!({"command": "systemctl restart nginx"});
+        assert_eq!(
+            plan_command_from_args(Some(&args)).as_deref(),
+            Some("systemctl restart nginx")
+        );
+
+        // No `command` field, no plan.
+        assert!(plan_command_from_args(Some(&json!({"host": "prod"}))).is_none());
+        assert!(plan_command_from_args(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_destructive_elicitation_summary_survives_multibyte_args() {
+        // Regression: the destructive-gate summary used to slice the
+        // serialized args with `&s[..300]` — a BYTE index. Any multibyte
+        // char straddling byte 300 panicked ("byte index is not a char
+        // boundary"), and `panic = "abort"` made that kill the server.
+        // The pad loop flips the prefix parity so at least one iteration
+        // lands mid-char whatever the serializer's key order.
+        for pad in 0..4_usize {
+            let server = create_test_server();
+            let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+            let session_ctx = SessionContext::new(tx);
+            session_ctx.caps.set_supports_elicitation(true);
+
+            let params = json!({
+                "name": "ssh_cron_remove",
+                "arguments": {
+                    "host": "h".repeat(pad),
+                    "name": "é".repeat(400),
+                }
+            });
+            // After the fix this call blocks on the elicitation round-trip;
+            // the timeout is the "did not panic" success path.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                server.handle_tools_call(Some(json!(1)), Some(params), None, Some(&session_ctx)),
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_destructive_elicitation_prompt_is_bounded() {
+        // Regression: `plan_command_from_args` used to copy the whole
+        // `command` arg into the elicitation prompt with no cap (the diff
+        // next to it is capped at 4000), producing a prompt too large for
+        // the client to render or the operator to approve.
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_elicitation(true);
+
+        let params = json!({
+            "name": "ssh_cron_remove",
+            "arguments": {
+                "host": "prod",
+                "name": "x",
+                "command": "a".repeat(50_000),
+            }
+        });
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            server.handle_tools_call(Some(json!(1)), Some(params), None, Some(&session_ctx)),
+        )
+        .await;
+
+        let msg = rx
+            .try_recv()
+            .expect("elicitation/create must have been sent");
+        match msg {
+            WriterMessage::Request(req) => {
+                let params = req.params.expect("params");
+                let message = params["message"].as_str().expect("message").to_string();
+                assert!(
+                    message.len() < 10_000,
+                    "elicitation prompt must be bounded, got {} bytes",
+                    message.len()
+                );
+            }
+            _ => panic!("expected a WriterMessage::Request"),
+        }
     }
 
     #[tokio::test]
