@@ -1,6 +1,11 @@
 # typos configuration
 # https://github.com/crate-ci/typos
 
+# The CI job pins `crate-ci/typos@v1`, which floats: a dictionary bump in a new
+# typos release turns a green main red without a single source change (v1.49.0
+# did exactly that). Entries below must stay *precise* — a bare word would
+# disable that correction repository-wide and hide a real typo later.
+
 [default]
 extend-ignore-identifiers-re = [
     # Company names
@@ -8,6 +13,9 @@ extend-ignore-identifiers-re = [
     "Hashi",
     # Mermaid diagram node IDs (e.g., K8SROLL, K8SGET)
     "K8S[A-Z]+",
+    # base64("user:hunter2") — Authorization: Basic redaction test vector in
+    # src/security/sanitizer.rs. typos reads the "ZIy" tail as `Iy` -> `It`.
+    "dXNlcjpodW50ZXIy",
 ]
 
 [default.extend-words]
