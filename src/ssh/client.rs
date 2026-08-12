@@ -116,7 +116,7 @@ pub fn build_russh_client_config(limits: &LimitsConfig) -> Config {
         keepalive_interval: Some(Duration::from_secs(limits.keepalive_interval_seconds)),
         keepalive_max: 3,
         preferred: hardened_preferred(),
-        limits: russh::Limits::new(1 << 30, 1 << 30, Duration::from_secs(3600)),
+        limits: russh::Limits::new(1 << 30, 1 << 30, Duration::from_hours(1)),
         ..Default::default()
     }
 }

@@ -19,7 +19,7 @@ use crate::ssh::CommandOutput;
 /// Poll interval for command status.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Maximum time to wait for command completion.
-const MAX_WAIT: Duration = Duration::from_secs(300);
+const MAX_WAIT: Duration = Duration::from_mins(5);
 
 /// Azure Run Command connection.
 ///
@@ -76,7 +76,7 @@ impl AzureRunConnection {
         let access_token = acquire_azure_token().await?;
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_mins(1))
             .build()
             .map_err(|e| BridgeError::SshExec {
                 reason: format!("Azure HTTP client error: {e}"),

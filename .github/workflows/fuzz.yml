@@ -15,21 +15,36 @@ on:
         required: false
         default: "30"
 
-# issues: write is required by the "Create issue on crash" step below.
-permissions:
-  contents: read
-  issues: write
+# Cancelling mid-run would lose the corpus the run just discovered (the
+# cache is only saved at job end), so serialise instead.
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+# Job-level permissions below (zizmor excessive-permissions): issues: write is
+# needed only by the "Create issue on crash" step.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  # libFuzzer needs nightly, and rust-toolchain.toml would otherwise pin this
+  # job to 1.94.0 regardless of what dtolnay/rust-toolchain installed. The
+  # explicit `cargo +nightly` calls below already win, but keeping the env in
+  # sync means `cargo install` and any future plain `cargo` call agree.
+  RUSTUP_TOOLCHAIN: nightly
 
 jobs:
   fuzz:
     name: Fuzz testing
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: write # file a bug when a fuzz target crashes
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@nightly
 
@@ -37,6 +52,7 @@ jobs:
         with:
           key: fuzz
 
+      # cargo-fuzz has no prebuilt binary in taiki-e/install-action.
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
@@ -82,7 +98,13 @@ jobs:
 
           if [ -n "$SPECIFIC_TARGET" ]; then
             echo "::group::Fuzzing $SPECIFIC_TARGET for ${DEFAULT_DURATION}s"
-            cargo +nightly fuzz run "$SPECIFIC_TARGET" -- -max_total_time="$DEFAULT_DURATION" 2>&1 || true
+            # Same crash bookkeeping as the all-targets branch below: this used
+            # to be `|| true`, so a crash found via workflow_dispatch was
+            # silently discarded and never filed an issue.
+            cargo +nightly fuzz run "$SPECIFIC_TARGET" -- -max_total_time="$DEFAULT_DURATION" 2>&1 || {
+              echo "::error::Crash found in $SPECIFIC_TARGET"
+              CRASHES_FOUND=true
+            }
             echo "::endgroup::"
           else
             for target in $(cargo +nightly fuzz list); do

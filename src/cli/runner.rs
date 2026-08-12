@@ -1372,7 +1372,7 @@ pub async fn run_describe_tool(
         }
 
         println!("\nUsage:");
-        println!("  bridge-mcp tool {tool_name} key=value ...",);
+        println!("  bridge-mcp tool {tool_name} key=value ...");
     }
 
     Ok(())

@@ -159,7 +159,7 @@ impl NotificationFanout {
     #[doc(hidden)]
     #[must_use]
     pub fn live_session_count(&self) -> usize {
-        self.senders.lock().map(|v| v.len()).unwrap_or(0)
+        self.senders.lock().map_or(0, |v| v.len())
     }
 }
 

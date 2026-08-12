@@ -86,7 +86,7 @@ impl StandardTool for GroupDeleteTool {
     /// global `security.require_elicitation_on_destructive` gate still
     /// applies in that case.
     async fn pre_execute(args: &Self::Args, ctx: &ToolContext) -> Result<Option<ToolCallResult>> {
-        let summary = format!("Delete group `{}` from host `{}`", args.name, args.host,);
+        let summary = format!("Delete group `{}` from host `{}`", args.name, args.host);
         match ctx.elicit_confirm(Self::NAME, &summary).await? {
             Some(false) => Ok(Some(ToolCallResult::error(
                 "User declined destructive operation".to_string(),

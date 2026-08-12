@@ -151,7 +151,7 @@ mod tests {
         let manager = TunnelManager::new(10);
         let info = make_info("t1");
         let handle = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_mins(1)).await;
         });
 
         manager.register(info, handle).await.unwrap();
@@ -186,7 +186,7 @@ mod tests {
         for i in 0..3 {
             let info = make_info(&format!("t{i}"));
             let handle = tokio::spawn(async {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(std::time::Duration::from_mins(1)).await;
             });
             manager.register(info, handle).await.unwrap();
         }
@@ -410,7 +410,7 @@ mod tests {
         for i in 0..2 {
             let info = make_info(&format!("d{i}"));
             let handle = tokio::spawn(async {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(std::time::Duration::from_mins(1)).await;
             });
             manager.register(info, handle).await.unwrap();
         }

@@ -32,7 +32,7 @@ use crate::config::{HostConfig, LimitsConfig};
 use crate::error::{BridgeError, Result};
 
 /// Default idle TTL for cached `kube::Client` entries.
-const DEFAULT_K8S_IDLE_TTL: Duration = Duration::from_secs(300);
+const DEFAULT_K8S_IDLE_TTL: Duration = Duration::from_mins(5);
 
 #[derive(Clone)]
 struct PooledClient {
@@ -217,6 +217,6 @@ mod tests {
     #[test]
     fn test_pool_config_default_ttl() {
         let cfg = K8sExecPoolConfig::default();
-        assert_eq!(cfg.max_idle, Duration::from_secs(300));
+        assert_eq!(cfg.max_idle, Duration::from_mins(5));
     }
 }

@@ -395,7 +395,7 @@ impl SftpClient {
         // Determine starting offset for resume mode
         let start_offset = if options.mode == TransferMode::Resume {
             if local_path.exists() {
-                std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0)
+                std::fs::metadata(local_path).map_or(0, |m| m.len())
             } else {
                 0
             }

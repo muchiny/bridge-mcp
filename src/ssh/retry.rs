@@ -111,8 +111,7 @@ fn rand_simple() -> f64 {
     use std::time::SystemTime;
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos());
     (f64::from(nanos) / f64::from(u32::MAX)).fract()
 }
 
@@ -331,8 +330,8 @@ mod tests {
         assert_eq!(config.delay_for_attempt(4), Duration::from_millis(800));
 
         // Capped at max
-        assert_eq!(config.delay_for_attempt(5), Duration::from_millis(1000));
-        assert_eq!(config.delay_for_attempt(10), Duration::from_millis(1000));
+        assert_eq!(config.delay_for_attempt(5), Duration::from_secs(1));
+        assert_eq!(config.delay_for_attempt(10), Duration::from_secs(1));
     }
 
     #[test]
@@ -614,7 +613,7 @@ mod tests {
 
         // Very high attempt number should still cap at max_delay_ms
         let delay = config.delay_for_attempt(100);
-        assert_eq!(delay, Duration::from_millis(5000));
+        assert_eq!(delay, Duration::from_secs(5));
     }
 
     #[test]
@@ -882,7 +881,7 @@ mod tests {
         };
 
         // With 0.5 multiplier, delays decrease: 1000, 500, 250, ...
-        assert_eq!(config.delay_for_attempt(1), Duration::from_millis(1000));
+        assert_eq!(config.delay_for_attempt(1), Duration::from_secs(1));
         assert_eq!(config.delay_for_attempt(2), Duration::from_millis(500));
         assert_eq!(config.delay_for_attempt(3), Duration::from_millis(250));
     }

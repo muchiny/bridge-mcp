@@ -1,5 +1,7 @@
 # Rust
 /target/
+# `make lint-stable` builds here so it does not evict target/'s MSRV artifacts
+/target-stable/
 *.rs.bk
 
 # Build artifacts

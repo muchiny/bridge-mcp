@@ -10,16 +10,34 @@ on:
       confirm:
         description: 'Type "publish" to confirm pushing server.json to the official registry'
         required: true
-        default: ''
+        default: ""
 
-permissions:
-  id-token: write   # for mcp-publisher github-oidc login
-  contents: read
+# One registry publish at a time, and never cancel one in flight.
+concurrency:
+  group: registry-publish
+  cancel-in-progress: false
+
+# Job-level permissions below (zizmor excessive-permissions): id-token: write
+# mints an OIDC token, which has no business being live for the whole workflow.
+permissions: {}
+
+env:
+  # Pinned, checksum-verified. This used to `curl | tar` the `latest` release
+  # with no verification and `sudo install` the result into a job holding an
+  # OIDC minting token — whatever upstream happened to publish that minute ran
+  # as root. Bump both values together; the checksum comes from
+  # registry_<version>_checksums.txt in the same release.
+  MCP_PUBLISHER_VERSION: "1.8.1"
+  MCP_PUBLISHER_SHA256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: registry   # protection rule -> manual approval gate
+    timeout-minutes: 20
+    environment: registry # protection rule -> manual approval gate
+    permissions:
+      contents: read
+      id-token: write # for mcp-publisher github-oidc login
     steps:
       - name: Guard confirmation input
         if: ${{ github.event.inputs.confirm != 'publish' }}
@@ -28,11 +46,13 @@ jobs:
           exit 1
 
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
       - name: Verify server.json is in sync with Cargo.toml
         run: |
@@ -42,8 +62,11 @@ jobs:
 
       - name: Install mcp-publisher
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
-            | tar xz mcp-publisher
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/${archive}"
+          echo "${MCP_PUBLISHER_SHA256}  ${archive}" | sha256sum --check --strict
+          tar xzf "$archive" mcp-publisher
           sudo install -m 0755 mcp-publisher /usr/local/bin/mcp-publisher
           mcp-publisher --version
 

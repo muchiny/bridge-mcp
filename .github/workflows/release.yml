@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
 
+# A publish must never be cancelled mid-flight; this only guards against two
+# runs racing on the same tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 # Job-level permissions below (zizmor excessive-permissions): only the
 # release job writes contents / mints attestations.
 permissions: {}
@@ -12,8 +18,39 @@ permissions: {}
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: bridge-mcp
+  # rust-toolchain.toml pins 1.94.0 and outranks the `rustup default` set by
+  # dtolnay/rust-toolchain, so shipped binaries were built with the MSRV
+  # compiler even though every step here asks for @stable. Release on stable,
+  # explicitly, and let the MSRV job in ci.yml own MSRV verification.
+  RUSTUP_TOOLCHAIN: stable
 
 jobs:
+  # A mistyped tag ships a binary whose name disagrees with its own
+  # --version. That has already happened once here: tag v1.19.0 was pushed on
+  # the commit titled "chore(release): v1.18.0".
+  version-gate:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare tag against the crate version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg n "$BINARY_NAME" '.packages[] | select(.name == $n) | .version')
+          if [ "$TAG" != "v$crate" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "tag $TAG matches Cargo.toml version $crate"
+
   # Tags can land on commits that never went through ci.yml (which only
   # triggers on push-to-main/PRs) — run the test suite before shipping
   # binaries, packages and provenance attestations.
@@ -25,6 +62,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # No rust-cache in this workflow: it publishes artifacts, and restoring
       # a branch-writable cache into a publishing pipeline is a
@@ -33,6 +72,7 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --all-targets --all-features
+      - run: cargo test --doc --all-features
 
   # The crate is not on crates.io, so the SemVer baseline is the previous
   # release tag. A breaking API change without a major bump fails the
@@ -47,6 +87,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -64,7 +105,7 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    needs: [test, semver]
+    needs: [version-gate, test, semver]
     timeout-minutes: 60
     permissions:
       contents: read
@@ -92,13 +133,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
+      # Matrix values reach the shell through env rather than `${{ }}`
+      # interpolation (zizmor template-injection): the expansion happens before
+      # the shell sees the script, so anything with a quote in it would splice
+      # into the command.
       - name: Ensure target is installed
-        run: rustup target add ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
 
       - name: Install cross
         if: matrix.cross
@@ -108,18 +157,24 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cross build --release --target "$TARGET"
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --target "$TARGET"
 
       - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+          NAME: ${{ matrix.name }}
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz ${{ env.BINARY_NAME }}
-          cd ../../..
-          sha256sum ${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz > ${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz.sha256
+          archive="${BINARY_NAME}-${NAME}.tar.gz"
+          tar czf "$archive" -C "target/${TARGET}/release" "$BINARY_NAME"
+          sha256sum "$archive" > "${archive}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -134,11 +189,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: write # create the GitHub Release and upload its assets
+      id-token: write # OIDC identity for the build-provenance attestation
+      attestations: write # record the provenance attestation on the repo
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -149,11 +206,6 @@ jobs:
       - name: List artifacts
         run: ls -lh artifacts/
 
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: "artifacts/${{ env.BINARY_NAME }}-*"
-
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-cyclonedx
@@ -161,7 +213,8 @@ jobs:
       - name: Generate SBOM
         run: |
           cargo cyclonedx --format json
-          find . -maxdepth 1 -name '*.cdx.json' -o -name 'bom.json' | head -1 | xargs -I{} cp {} artifacts/${{ env.BINARY_NAME }}-sbom.cdx.json
+          find . -maxdepth 1 -name '*.cdx.json' -o -name 'bom.json' \
+            | head -1 | xargs -I{} cp {} "artifacts/${BINARY_NAME}-sbom.cdx.json"
 
       - name: Verify discovery manifest versions
         run: |
@@ -172,25 +225,41 @@ jobs:
       - name: Build DXT packages
         run: |
           for arch in linux-x86_64 linux-arm64 macos-x86_64 macos-arm64; do
-            mkdir -p dist/dxt-${arch}
-            if [ -f "artifacts/${{ env.BINARY_NAME }}-${arch}.tar.gz" ]; then
-              tar xzf "artifacts/${{ env.BINARY_NAME }}-${arch}.tar.gz" -C dist/dxt-${arch}/
-              cp dxt/manifest.json dxt/icon.svg dist/dxt-${arch}/
-              cd dist && zip -r "../artifacts/${{ env.BINARY_NAME }}-${arch}.dxt" dxt-${arch}/ && cd ..
-            fi
+            tarball="artifacts/${BINARY_NAME}-${arch}.tar.gz"
+            [ -f "$tarball" ] || continue
+            mkdir -p "dist/dxt-${arch}"
+            tar xzf "$tarball" -C "dist/dxt-${arch}/"
+            cp dxt/manifest.json dxt/icon.svg "dist/dxt-${arch}/"
+            (cd dist && zip -r "../artifacts/${BINARY_NAME}-${arch}.dxt" "dxt-${arch}/")
+            # Same per-file convention as the tarballs; the .dxt used to ship
+            # with no checksum at all.
+            sha256sum "artifacts/${BINARY_NAME}-${arch}.dxt" \
+              > "artifacts/${BINARY_NAME}-${arch}.dxt.sha256"
           done
 
       - name: Build MCPB packages
         run: |
           for arch in linux-x86_64 linux-arm64 macos-x86_64 macos-arm64; do
-            mkdir -p dist/mcpb-${arch}
-            if [ -f "artifacts/${{ env.BINARY_NAME }}-${arch}.tar.gz" ]; then
-              tar xzf "artifacts/${{ env.BINARY_NAME }}-${arch}.tar.gz" -C dist/mcpb-${arch}/
-              cp dxt/manifest.json dxt/icon.svg server.json dist/mcpb-${arch}/
-              cd dist && zip -r "../artifacts/${{ env.BINARY_NAME }}-${arch}.mcpb" mcpb-${arch}/ && cd ..
-              sha256sum "artifacts/${{ env.BINARY_NAME }}-${arch}.mcpb" >> artifacts/mcpb-checksums.sha256
-            fi
+            tarball="artifacts/${BINARY_NAME}-${arch}.tar.gz"
+            [ -f "$tarball" ] || continue
+            mkdir -p "dist/mcpb-${arch}"
+            tar xzf "$tarball" -C "dist/mcpb-${arch}/"
+            cp dxt/manifest.json dxt/icon.svg server.json "dist/mcpb-${arch}/"
+            (cd dist && zip -r "../artifacts/${BINARY_NAME}-${arch}.mcpb" "mcpb-${arch}/")
+            sha256sum "artifacts/${BINARY_NAME}-${arch}.mcpb" >> artifacts/mcpb-checksums.sha256
           done
+
+      # Attest LAST. This step used to run before the SBOM and the .dxt/.mcpb
+      # packages existed, so `subject-path` matched only the tarballs and every
+      # other published file shipped with no provenance at all.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            artifacts/${{ env.BINARY_NAME }}-*.tar.gz
+            artifacts/${{ env.BINARY_NAME }}-*.dxt
+            artifacts/${{ env.BINARY_NAME }}-*.mcpb
+            artifacts/${{ env.BINARY_NAME }}-sbom.cdx.json
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

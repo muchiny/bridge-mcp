@@ -164,13 +164,13 @@ impl ActiveRequests {
     /// Number of currently-registered in-flight requests. Test helper.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.0.lock().map(|m| m.len()).unwrap_or(0)
+        self.0.lock().map_or(0, |m| m.len())
     }
 
     /// Snapshot of currently-registered request ids. Test helper.
     #[cfg(test)]
     fn contains(&self, id: &str) -> bool {
-        self.0.lock().map(|m| m.contains_key(id)).unwrap_or(false)
+        self.0.lock().is_ok_and(|m| m.contains_key(id))
     }
 }
 
@@ -479,7 +479,7 @@ impl McpServer {
         let requester = Arc::new(super::client_requester::ClientRequester::new(
             tx,
             pending,
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_mins(2),
         ));
         let elicitation = super::elicitation::ElicitationService::new(requester);
         elicitation.set_supported(true);
@@ -673,7 +673,7 @@ impl McpServer {
     fn spawn_cleanup_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
         let cleanup_sm = Arc::clone(&self.session_manager);
         let sm_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
             loop {
                 interval.tick().await;
                 cleanup_sm.cleanup().await;
@@ -682,7 +682,7 @@ impl McpServer {
 
         let cleanup_ts = Arc::clone(&self.task_store);
         let ts_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
             loop {
                 interval.tick().await;
                 cleanup_ts.cleanup().await;
@@ -691,7 +691,7 @@ impl McpServer {
 
         let cleanup_oc = Arc::clone(&self.output_cache);
         let oc_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
             loop {
                 interval.tick().await;
                 cleanup_oc.cleanup().await;
@@ -700,7 +700,7 @@ impl McpServer {
 
         let cleanup_cp = Arc::clone(&self.connection_pool);
         let cp_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
             loop {
                 interval.tick().await;
                 cleanup_cp.cleanup().await;

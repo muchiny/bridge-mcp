@@ -2256,14 +2256,14 @@ users:
     #[test]
     fn test_quoted_value_with_spaces_fully_redacted() {
         let sanitizer = Sanitizer::with_defaults();
-        let input = r#"password: "mon secret avec espaces""#;
+        let input = r#"password: "my secret with spaces""#;
         let result = sanitizer.sanitize(input);
         assert!(
-            !result.contains("mon secret"),
+            !result.contains("my secret"),
             "quoted value partially leaked: {result}"
         );
         assert!(
-            !result.contains("espaces"),
+            !result.contains("with spaces"),
             "quoted value tail leaked: {result}"
         );
     }

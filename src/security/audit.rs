@@ -885,7 +885,7 @@ mod tests {
         std::fs::write(&old_file, "old content").unwrap();
 
         // Set modification time to 100 days ago
-        let old_time = SystemTime::now() - Duration::from_secs(100 * 24 * 60 * 60);
+        let old_time = SystemTime::now() - Duration::from_hours(2400);
         filetime::set_file_mtime(&old_file, filetime::FileTime::from_system_time(old_time))
             .unwrap();
 
@@ -1024,7 +1024,7 @@ mod tests {
         // Create file just before cutoff (31 days ago, should definitely be deleted)
         let before_cutoff = temp_dir.path().join("audit.log.old31");
         std::fs::write(&before_cutoff, "31 days old").unwrap();
-        let old_time = SystemTime::now() - Duration::from_secs(31 * 24 * 60 * 60);
+        let old_time = SystemTime::now() - Duration::from_hours(744);
         filetime::set_file_mtime(
             &before_cutoff,
             filetime::FileTime::from_system_time(old_time),
@@ -1216,7 +1216,7 @@ mod tests {
         let old_file = temp_dir.path().join("old_audit.log");
         fs::write(&old_file, "old data").unwrap();
         let old_time = filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(31 * 86400),
+            std::time::SystemTime::now() - std::time::Duration::from_hours(744),
         );
         filetime::set_file_mtime(&old_file, old_time).unwrap();
 

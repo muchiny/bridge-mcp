@@ -206,6 +206,18 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Recent Changes
 
+- ci-hardening-2026-08: **`rust-toolchain.toml` outranks `rustup default`** — every
+  workflow now sets `RUSTUP_TOOLCHAIN` explicitly, because until now every CI job
+  silently ran 1.94.0 (MSRV job = duplicate of Tests; the stable/beta/nightly matrix
+  tested one compiler three times). Real stable exposed 48 style lints, all fixed.
+  Weekly mutation sweep re-scoped (8→24 shards, `--baseline skip`, budget enforced by
+  `timeout` inside the step so artifacts always upload — the old 8×300min matrix hit
+  the job timeout every week and produced nothing). Doctests now run (`cargo test
+  --doc`, 6 of them, never executed before: nextest skips doctests). Release attests
+  provenance AFTER the .dxt/.mcpb/SBOM exist, gates tag vs `Cargo.toml` version, and
+  ships `.dxt.sha256`. `mcp-publisher` pinned + checksum-verified. Scheduled Security
+  / Nightly failures now open a tracking issue. zizmor clean at `--persona=auditor
+  --min-severity low` (was 3 high + 29 artipacked).
 - token-efficiency-2026-07: truncation messages now suggest jq_filter/columns/limit per OutputKind; no-jq builds reject (and no longer advertise) jq params; per-param reduction adoption metrics; `tool_groups.listing: progressive` lists only 4 meta-schemas (vs ~140K tokens for the full registry) with `mcp_call_tool` dispatch; handler schemas say 40000 (real default), not 20000.
 - v1.20.0: russh 0.61->0.62 (channel-open callbacks take a `ChannelOpenHandle`), K3s/CRI/K8s-triage tool expansion (476 tools / 77 groups), CI hardening (least-privilege permissions, MSRV job, test-gated release/docker), `audit.path` tilde expansion, `df -hT` column-parse fix, session/tunnel `close` re-annotated non-destructive.
 - 001-winrm-psrp-integration: Added winrm-rs + psrp-rs protocol adapters (russh 0.58->0.60 originally; now 0.62).

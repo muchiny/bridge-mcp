@@ -99,7 +99,7 @@ impl Default for HttpTransportConfig {
         Self {
             bind: "127.0.0.1:3000".to_string(),
             max_body_size: 1_048_576,
-            session_timeout: Duration::from_secs(1800),
+            session_timeout: Duration::from_mins(30),
             max_sessions: 100,
             oauth: OAuthConfig::default(),
             allowed_origins: default_allowed_origins(),
@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn test_default_config_session_timeout() {
         let config = HttpTransportConfig::default();
-        assert_eq!(config.session_timeout, Duration::from_secs(1800));
+        assert_eq!(config.session_timeout, Duration::from_mins(30));
     }
 
     #[test]
@@ -698,7 +698,7 @@ mod tests {
         let config = HttpTransportConfig {
             bind: "127.0.0.1:8080".to_string(),
             max_body_size: 2_097_152,
-            session_timeout: Duration::from_secs(600),
+            session_timeout: Duration::from_mins(10),
             max_sessions: 50,
             oauth: OAuthConfig::default(),
             allowed_origins: Vec::new(),
@@ -706,7 +706,7 @@ mod tests {
         };
         assert_eq!(config.bind, "127.0.0.1:8080");
         assert_eq!(config.max_body_size, 2_097_152);
-        assert_eq!(config.session_timeout, Duration::from_secs(600));
+        assert_eq!(config.session_timeout, Duration::from_mins(10));
         assert_eq!(config.max_sessions, 50);
     }
 

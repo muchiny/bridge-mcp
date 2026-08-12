@@ -6,6 +6,11 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Same as release.yml: serialise per tag, never cancel a push in flight.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
 # Job-level permissions below (zizmor excessive-permissions): the test job
 # only reads, only build-scan-push needs packages/security-events write.
 permissions: {}
@@ -13,6 +18,9 @@ permissions: {}
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # rust-toolchain.toml outranks `rustup default` — see ci.yml. (Only affects
+  # the test job; the image itself pins its compiler in the Dockerfile.)
+  RUSTUP_TOOLCHAIN: stable
 
 jobs:
   # Tag pushes never go through ci.yml — run the test suite before an
@@ -25,6 +33,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # No rust-cache here: this workflow publishes artifacts on tag pushes,
       # and restoring a branch-writable cache into a publishing pipeline is
@@ -33,6 +43,7 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --all-targets --all-features
+      - run: cargo test --doc --all-features
 
   build-scan-push:
     name: Build, scan & push
@@ -41,11 +52,19 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-      packages: write
-      security-events: write
+      packages: write # push the scanned image to GHCR
+      security-events: write # upload the Trivy SARIF to code scanning
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
+      # NOTE: amd64 only. The image compiles the crate from source inside the
+      # builder stage, so a linux/arm64 variant would mean a full Rust build
+      # under QEMU (hours, not minutes) — and `load: true`, which the scan
+      # gate below depends on, does not accept multi-platform builds. Shipping
+      # arm64 needs the Dockerfile to consume the prebuilt aarch64 binary from
+      # release.yml instead; tracked separately, not a drive-by change.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
