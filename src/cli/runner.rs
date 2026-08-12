@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use crate::config::{Config, ShellType};
 use crate::domain::ExecuteCommandUseCase;
+use crate::domain::output_truncator::truncate_chars;
 use crate::domain::use_cases::shell;
 use crate::error::{BridgeError, Result};
 use crate::mcp::CommandHistory;
@@ -325,9 +326,11 @@ pub async fn run_list_tools(
             let reduce_marker = registry
                 .get(&tool.name)
                 .map_or("—", |h| h.output_kind().short_marker());
-            // Truncate description to 55 chars (a bit tighter to fit the new column)
-            let desc = if tool.description.len() > 55 {
-                format!("{}...", &tool.description[..52])
+            // Truncate description to 55 chars (a bit tighter to fit the new
+            // column). Character-wise, not byte-wise: descriptions contain `→`
+            // and a byte slice inside one panics (audit 2026-08-02).
+            let desc = if tool.description.chars().count() > 55 {
+                format!("{}...", truncate_chars(&tool.description, 52))
             } else {
                 tool.description.clone()
             };

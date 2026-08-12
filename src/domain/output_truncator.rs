@@ -161,11 +161,57 @@ pub fn ceil_char_boundary(s: &str, index: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// Keep the first `max_chars` **characters** of `s`.
+///
+/// Slicing a `&str` by byte index panics when the index falls inside a
+/// multi-byte character — which aborts the whole server, since the release
+/// profile treats panics as fatal. Descriptions in this crate contain `→`,
+/// `…` and accented text, so any display truncation must count characters.
+/// Callers append their own ellipsis.
+#[must_use]
+pub fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Write;
 
     use super::*;
+
+    #[test]
+    fn truncate_chars_leaves_short_input_untouched() {
+        assert_eq!(truncate_chars("short", 160), "short");
+        assert_eq!(truncate_chars("", 4), "");
+    }
+
+    #[test]
+    fn truncate_chars_counts_characters_not_bytes() {
+        // 6 chars, 12 bytes — a byte-index cut at 6 would land mid-char.
+        let s = "→→→→→→";
+        assert_eq!(truncate_chars(s, 3), "→→→");
+        assert_eq!(truncate_chars(s, 6), s);
+        assert_eq!(truncate_chars(s, 99), s);
+    }
+
+    /// Regression (audit 2026-08-02): `mcp_search_tools` aborted the whole
+    /// MCP server with `byte index 160 is not a char boundary; it is inside
+    /// '→'` whenever a match's description had a multi-byte char straddling
+    /// the cut. `ssh_crictl_inspect`'s description does exactly that.
+    #[test]
+    fn truncate_chars_never_splits_a_multibyte_char() {
+        let desc = "Inspect a CRI object (container, pod sandbox, or image) on a K3s node. \
+                    Maps `kind` to the correct crictl sub-command: `container` → `crictl \
+                    inspect`, `pod` → `crictl inspectp`, `image` → `crictl inspecti`.";
+        for max in 0..desc.chars().count() + 5 {
+            let cut = truncate_chars(desc, max);
+            assert!(desc.starts_with(&cut), "cut {max} is not a prefix");
+            assert_eq!(cut.chars().count(), max.min(desc.chars().count()));
+        }
+    }
 
     #[test]
     fn test_short_output_not_truncated() {

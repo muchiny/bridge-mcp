@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
 
 # Default target
 all: check lint test
@@ -179,6 +179,27 @@ security-tests:
 
 # Full security audit (dependency audit + security tests + unsafe scan)
 security-audit: audit deny security-tests geiger
+
+# Zeroization check — detect compiler-elided secret wipes by diffing MIR
+# between opt-level=0 and opt-level=2. The compiler may delete a non-volatile
+# memset it proves unobservable, silently leaving SSH credentials in memory.
+# Tooling salvaged from the trailofbits/zeroize-audit plugin (removed 2026-08-02).
+# CARGO_TARGET_DIR points at /var/tmp, never /tmp: /tmp is a 13GB RAM tmpfs here.
+ZEROIZE_DIFF ?= $(HOME)/.claude/salvage/diff_rust_mir.sh
+ZEROIZE_OUT ?= /var/tmp/bridge-mcp-mir
+
+zeroize-check:
+	@test -x "$(ZEROIZE_DIFF)" || { echo "missing $(ZEROIZE_DIFF) — see ~/.claude/salvage"; exit 2; }
+	@free -m | awk 'NR==2 { if ($$7 < 6*1024) { print "BLOCK: only " $$7 " MB free, need >=6GB for two MIR builds"; exit 1 } }'
+	@mkdir -p "$(ZEROIZE_OUT)"
+	@echo "==> MIR at opt-level=0"
+	@CARGO_TARGET_DIR="$(ZEROIZE_OUT)/O0" cargo rustc --lib -- --emit=mir -C opt-level=0 2>&1 | tail -3
+	@echo "==> MIR at opt-level=2"
+	@CARGO_TARGET_DIR="$(ZEROIZE_OUT)/O2" cargo rustc --lib -- --emit=mir -C opt-level=2 2>&1 | tail -3
+	@o0=$$(find "$(ZEROIZE_OUT)/O0" -name '*.mir' | head -1); \
+	o2=$$(find "$(ZEROIZE_OUT)/O2" -name '*.mir' | head -1); \
+	test -n "$$o0" && test -n "$$o2" || { echo "no .mir emitted — check the cargo rustc output above"; exit 2; }; \
+	"$(ZEROIZE_DIFF)" "$$o0" "$$o2"
 
 # Scan for unsafe code in dependencies (requires cargo-geiger)
 geiger:

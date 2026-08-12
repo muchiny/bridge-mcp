@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::timeout;
 
 use crate::config::{AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, SocksVersion};
+use crate::domain::output_truncator::truncate_chars;
 use crate::error::{BridgeError, Result};
 use crate::ssh::known_hosts;
 use crate::ssh::sftp::SftpClient;
@@ -26,9 +27,12 @@ fn sanitize_ssh_error(error: &impl std::fmt::Display) -> String {
     for method in &["publickey", "keyboard-interactive", "gssapi-with-mic"] {
         msg = msg.replace(method, "***");
     }
-    // Truncate overly long error messages that might contain data dumps
-    if msg.len() > 500 {
-        format!("{}... (truncated)", &msg[..500])
+    // Truncate overly long error messages that might contain data dumps.
+    // By CHARACTERS, not bytes: a remote banner or error string carrying
+    // non-ASCII would otherwise put byte 500 inside a multi-byte char, and
+    // the slice panics — fatal under the release profile's `panic = "abort"`.
+    if msg.chars().count() > 500 {
+        format!("{}... (truncated)", truncate_chars(&msg, 500))
     } else {
         msg
     }
@@ -1077,6 +1081,34 @@ impl SshClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============== sanitize_ssh_error Tests ==============
+
+    #[test]
+    fn test_sanitize_ssh_error_truncates_multibyte_without_panic() {
+        // Regression: the 500-char cap used to be a BYTE slice, so a remote
+        // error string carrying non-ASCII could put byte 500 inside a
+        // multi-byte char and panic — fatal under `panic = "abort"`.
+        // The pad loop shifts the prefix so at least one case lands mid-char.
+        for pad in 0..4_usize {
+            let raw = format!("{}{}", "x".repeat(pad), "é".repeat(600));
+            let sanitized = sanitize_ssh_error(&raw);
+            assert!(sanitized.ends_with("... (truncated)"));
+            assert_eq!(
+                sanitized
+                    .trim_end_matches("... (truncated)")
+                    .chars()
+                    .count(),
+                500
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_ssh_error_leaves_short_message_intact() {
+        let sanitized = sanitize_ssh_error(&"connexion refusée");
+        assert_eq!(sanitized, "connexion refusée");
+    }
 
     // ============== CommandOutput Tests ==============
 

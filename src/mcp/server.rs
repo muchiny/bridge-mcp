@@ -10,6 +10,7 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
 use crate::config::{Config, ConfigWatcher};
+use crate::domain::output_truncator::truncate_chars;
 use crate::domain::{ExecuteCommandUseCase, OutputCache, TaskStore, TunnelManager};
 use crate::error::Result;
 use crate::mcp::instructions;
@@ -173,13 +174,36 @@ impl ActiveRequests {
     }
 }
 
+/// Character cap on the serialized-arguments summary embedded in the
+/// destructive-confirmation prompt.
+const SUMMARY_MAX_CHARS: usize = 300;
+
+/// Character cap on the `command` rendered into the destructive-confirmation
+/// prompt. Mirrors the 4000-char cap `ElicitationService` already applies to
+/// the diff: an uncapped command produces a prompt the operator cannot read,
+/// let alone approve.
+const PLAN_COMMAND_MAX_CHARS: usize = 2000;
+
 /// Extract the `command` field from tool arguments for the destructive
 /// confirmation plan, if present and a string. Returns `None` otherwise.
+///
+/// The command is truncated by **characters**, never bytes — a byte slice
+/// through a multi-byte character panics, and the release profile aborts on
+/// panic.
 fn plan_command_from_args(arguments: Option<&Value>) -> Option<String> {
     arguments
         .and_then(|v| v.get("command"))
         .and_then(Value::as_str)
-        .map(str::to_string)
+        .map(|cmd| {
+            if cmd.chars().count() > PLAN_COMMAND_MAX_CHARS {
+                format!(
+                    "{}\n… (command truncated)",
+                    truncate_chars(cmd, PLAN_COMMAND_MAX_CHARS)
+                )
+            } else {
+                cmd.to_string()
+            }
+        })
 }
 
 impl McpServer {
@@ -440,8 +464,12 @@ impl McpServer {
             || "(no arguments)".to_string(),
             |v| {
                 let s = serde_json::to_string(v).unwrap_or_default();
-                if s.len() > 300 {
-                    format!("{}… (truncated)", &s[..300])
+                // Truncate by CHARACTERS: `&s[..300]` panics when byte 300
+                // lands inside a multi-byte char (accented args are routine),
+                // and `panic = "abort"` in the release profile turns that into
+                // a full server kill.
+                if s.chars().count() > SUMMARY_MAX_CHARS {
+                    format!("{}… (truncated)", truncate_chars(&s, SUMMARY_MAX_CHARS))
                 } else {
                     s
                 }
@@ -784,8 +812,7 @@ impl McpServer {
 
             match incoming {
                 IncomingMessage::Single(message) => {
-                    let Some(request) = self.route_incoming_message(message, &session_ctx).await
-                    else {
+                    let Some(request) = Self::route_incoming_message(message, &session_ctx) else {
                         continue;
                     };
 
@@ -950,8 +977,11 @@ impl McpServer {
     /// notifications are dispatched against THIS session's map only — a
     /// different client cannot cancel a request another session is
     /// running.
-    async fn route_incoming_message(
-        &self,
+    /// Synchronous by design (audit 2026-08-02): this runs inside
+    /// `serve_session`'s reader loop, so anything awaited here stalls the
+    /// only task able to read the client's next message. Work that needs
+    /// to await — including the `roots/list` round-trip — is spawned.
+    fn route_incoming_message(
         message: JsonRpcMessage,
         session: &SessionContext,
     ) -> Option<JsonRpcRequest> {
@@ -980,7 +1010,7 @@ impl McpServer {
 
         // Handle client notifications (no response needed per JSON-RPC 2.0)
         if message.method.as_deref() == Some("notifications/roots/list_changed") {
-            self.handle_roots_changed(session).await;
+            Self::handle_roots_changed(session);
             return None;
         }
         if message.method.as_deref() == Some("notifications/cancelled") {
@@ -991,7 +1021,7 @@ impl McpServer {
             return None;
         }
         if message.method.as_deref() == Some("notifications/initialized") {
-            self.handle_initialized_notification(session).await;
+            Self::handle_initialized_notification(session);
             return None;
         }
 
@@ -1004,6 +1034,29 @@ impl McpServer {
         })
     }
 
+    /// Start a roots fetch **off** the session reader loop.
+    ///
+    /// Audit 2026-08-02: [`Self::fetch_roots`] must never be awaited from
+    /// `route_incoming_message`, because that runs inside
+    /// `serve_session`'s reader loop — the only place the client's
+    /// `roots/list` *response* can be read. Awaiting inline deadlocked the
+    /// session against itself until the 10s `ClientRequester` timeout
+    /// expired, delaying the first `tools/list` of every session that
+    /// advertises the `roots` capability.
+    ///
+    /// Fire-and-forget is correct here: nothing in the request path reads
+    /// `session.roots` synchronously, and a client that never answers
+    /// simply leaves the slot empty.
+    fn spawn_fetch_roots(session: &SessionContext) {
+        if !session.caps.supports_roots() {
+            return;
+        }
+        let session = session.clone();
+        tokio::spawn(async move {
+            Self::fetch_roots(&session).await;
+        });
+    }
+
     /// Fetch roots from the client after initialization.
     ///
     /// Uses the SESSION-LOCAL pending-requests map so a `roots/list`
@@ -1012,7 +1065,10 @@ impl McpServer {
     /// stored on the session-local roots slot (FIND-037 audit
     /// 2026-05-09): a different client's `roots/list` response cannot
     /// overwrite this session's roots.
-    async fn fetch_roots(&self, session: &SessionContext) {
+    ///
+    /// Always call via [`Self::spawn_fetch_roots`] from the reader loop —
+    /// awaiting this inline deadlocks the session (audit 2026-08-02).
+    async fn fetch_roots(session: &SessionContext) {
         if !session.caps.supports_roots() {
             return;
         }
@@ -1037,16 +1093,16 @@ impl McpServer {
     }
 
     /// Handle `notifications/roots/list_changed` — re-fetch roots.
-    async fn handle_roots_changed(&self, session: &SessionContext) {
+    fn handle_roots_changed(session: &SessionContext) {
         info!("Client roots changed, re-fetching");
-        self.fetch_roots(session).await;
+        Self::spawn_fetch_roots(session);
     }
 
     /// Handle `notifications/initialized` — fetch client roots if supported.
     /// No response is emitted (per JSON-RPC 2.0 notification semantics).
-    async fn handle_initialized_notification(&self, session: &SessionContext) {
+    fn handle_initialized_notification(session: &SessionContext) {
         info!("Client sent notifications/initialized; fetching roots");
-        self.fetch_roots(session).await;
+        Self::spawn_fetch_roots(session);
     }
 
     /// Handle a single JSON-RPC request and return the response.
@@ -2716,6 +2772,114 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_plan_command_from_args_caps_by_chars() {
+        // Long ASCII command is capped and marked.
+        let args = json!({"command": "a".repeat(PLAN_COMMAND_MAX_CHARS + 500)});
+        let cmd = plan_command_from_args(Some(&args)).expect("command extracted");
+        assert!(cmd.ends_with("\n… (command truncated)"));
+        assert_eq!(
+            cmd.trim_end_matches("\n… (command truncated)")
+                .chars()
+                .count(),
+            PLAN_COMMAND_MAX_CHARS
+        );
+
+        // Multibyte command must not panic and must cap on chars, not bytes.
+        let args = json!({"command": "é".repeat(PLAN_COMMAND_MAX_CHARS + 500)});
+        let cmd = plan_command_from_args(Some(&args)).expect("command extracted");
+        assert_eq!(
+            cmd.trim_end_matches("\n… (command truncated)")
+                .chars()
+                .count(),
+            PLAN_COMMAND_MAX_CHARS
+        );
+
+        // Short command passes through untouched.
+        let args = json!({"command": "systemctl restart nginx"});
+        assert_eq!(
+            plan_command_from_args(Some(&args)).as_deref(),
+            Some("systemctl restart nginx")
+        );
+
+        // No `command` field, no plan.
+        assert!(plan_command_from_args(Some(&json!({"host": "prod"}))).is_none());
+        assert!(plan_command_from_args(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_destructive_elicitation_summary_survives_multibyte_args() {
+        // Regression: the destructive-gate summary used to slice the
+        // serialized args with `&s[..300]` — a BYTE index. Any multibyte
+        // char straddling byte 300 panicked ("byte index is not a char
+        // boundary"), and `panic = "abort"` made that kill the server.
+        // The pad loop flips the prefix parity so at least one iteration
+        // lands mid-char whatever the serializer's key order.
+        for pad in 0..4_usize {
+            let server = create_test_server();
+            let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+            let session_ctx = SessionContext::new(tx);
+            session_ctx.caps.set_supports_elicitation(true);
+
+            let params = json!({
+                "name": "ssh_cron_remove",
+                "arguments": {
+                    "host": "h".repeat(pad),
+                    "name": "é".repeat(400),
+                }
+            });
+            // After the fix this call blocks on the elicitation round-trip;
+            // the timeout is the "did not panic" success path.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                server.handle_tools_call(Some(json!(1)), Some(params), None, Some(&session_ctx)),
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_destructive_elicitation_prompt_is_bounded() {
+        // Regression: `plan_command_from_args` used to copy the whole
+        // `command` arg into the elicitation prompt with no cap (the diff
+        // next to it is capped at 4000), producing a prompt too large for
+        // the client to render or the operator to approve.
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_elicitation(true);
+
+        let params = json!({
+            "name": "ssh_cron_remove",
+            "arguments": {
+                "host": "prod",
+                "name": "x",
+                "command": "a".repeat(50_000),
+            }
+        });
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            server.handle_tools_call(Some(json!(1)), Some(params), None, Some(&session_ctx)),
+        )
+        .await;
+
+        let msg = rx
+            .try_recv()
+            .expect("elicitation/create must have been sent");
+        match msg {
+            WriterMessage::Request(req) => {
+                let params = req.params.expect("params");
+                let message = params["message"].as_str().expect("message").to_string();
+                assert!(
+                    message.len() < 10_000,
+                    "elicitation prompt must be bounded, got {} bytes",
+                    message.len()
+                );
+            }
+            _ => panic!("expected a WriterMessage::Request"),
+        }
+    }
+
     #[tokio::test]
     async fn test_destructive_gate_applies_through_call_tool() {
         // Regression test: Task 8 added an `mcp_call_tool` dispatcher that
@@ -2785,7 +2949,6 @@ mod tests {
         // Per JSON-RPC 2.0 / MCP spec, notifications carry no `id` and MUST NOT
         // receive a response. `route_incoming_message` must short-circuit
         // `notifications/initialized` so it never reaches the dispatcher.
-        let server = create_test_server();
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
@@ -2797,7 +2960,7 @@ mod tests {
         };
 
         let session_ctx = SessionContext::new(tx);
-        let routed = server.route_incoming_message(message, &session_ctx).await;
+        let routed = McpServer::route_incoming_message(message, &session_ctx);
 
         assert!(routed.is_none(), "notification must not be dispatched");
         assert!(
@@ -2812,10 +2975,9 @@ mod tests {
         // receiving `notifications/initialized` must trigger a server-initiated
         // `roots/list` request on the writer channel.
         //
-        // `fetch_roots` awaits the (never-arriving) client response, so we
-        // drive `route_incoming_message` in a background task and just verify
-        // the outbound `roots/list` shows up on tx.
-        let server = Arc::new(create_test_server());
+        // The fetch is spawned (audit 2026-08-02), so routing returns at
+        // once and the `roots/list` request lands on tx from the detached
+        // task.
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         session_ctx.caps.set_supports_roots(true);
@@ -2828,13 +2990,10 @@ mod tests {
             error: None,
         };
 
-        let server_bg = Arc::clone(&server);
-        let session_ctx_bg = session_ctx.clone();
-        let route_handle = tokio::spawn(async move {
-            server_bg
-                .route_incoming_message(message, &session_ctx_bg)
-                .await
-        });
+        assert!(
+            McpServer::route_incoming_message(message, &session_ctx).is_none(),
+            "a notification is never dispatched"
+        );
 
         let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
@@ -2846,8 +3005,62 @@ mod tests {
             }
             _ => panic!("expected WriterMessage::Request(roots/list)"),
         }
+    }
 
-        route_handle.abort();
+    /// Regression (audit 2026-08-02): `notifications/initialized` must NOT
+    /// block the session reader loop while the `roots/list` round-trip is
+    /// in flight.
+    ///
+    /// `route_incoming_message` runs *inside* `serve_session`'s reader loop.
+    /// When `fetch_roots` was awaited inline, the loop could not read the
+    /// client's `roots/list` response — the very message it was waiting
+    /// for — so every session stalled for the full `ClientRequester`
+    /// timeout (10s) before serving its first request. Claude Code
+    /// advertises the `roots` capability, so its `tools/list` health check
+    /// timed out with `MCP error -32001` on every connect.
+    ///
+    /// The fetch is fire-and-forget: routing returns immediately and the
+    /// roots land on the session slot whenever the client answers.
+    #[tokio::test]
+    async fn test_route_initialized_notification_does_not_block_reader_loop() {
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+        let message = super::super::protocol::JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: Some("notifications/initialized".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        // No client response is ever sent. Routing must still return well
+        // inside the 10s ClientRequester timeout — 500ms is two orders of
+        // magnitude below it, so this cannot flake on a slow machine
+        // without also being a real regression. `route_incoming_message`
+        // being synchronous is the structural half of the guarantee; this
+        // wall-clock bound is the behavioural half, and it survives a
+        // future refactor that makes the function async again.
+        let started = std::time::Instant::now();
+        let routed = McpServer::route_incoming_message(message, &session_ctx);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "initialized notification blocked the reader loop for {elapsed:?}"
+        );
+        assert!(routed.is_none(), "a notification is never dispatched");
+
+        // The fetch still happened — just off the reader loop.
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a roots/list request within 2s")
+            .expect("channel closed unexpectedly");
+        match sent {
+            WriterMessage::Request(req) => assert_eq!(req.method, "roots/list"),
+            _ => panic!("expected WriterMessage::Request(roots/list)"),
+        }
     }
 
     #[tokio::test]

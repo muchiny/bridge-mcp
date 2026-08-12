@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use super::protocol::{Tool, ToolExecution};
 use super::registry::{ToolRegistry, inject_reduction_schema, tool_group};
+use crate::domain::output_truncator::truncate_chars;
 use crate::ports::{ToolAnnotations, ToolCallResult, ToolContent};
 
 /// Tool name for the group-listing meta-tool.
@@ -258,8 +259,11 @@ fn search(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
         })
         .map(|t| {
             let group = tool_group(&t.name);
-            let short = if t.description.len() > 160 {
-                format!("{}…", &t.description[..160])
+            // Character-wise: several descriptions contain `→`, and a
+            // byte-index slice inside one aborts the server (audit
+            // 2026-08-02).
+            let short = if t.description.chars().count() > 160 {
+                format!("{}…", truncate_chars(&t.description, 160))
             } else {
                 t.description.clone()
             };
@@ -367,6 +371,41 @@ mod tests {
         let registry = create_all_enabled_registry();
         let result = execute(SEARCH_TOOLS, Some(&json!({})), &registry).expect("meta tool");
         assert_eq!(result.is_error, Some(true));
+    }
+
+    /// Regression (audit 2026-08-02): a match whose description carried a
+    /// multi-byte char across the 160-byte cut aborted the process —
+    /// `byte index 160 is not a char boundary; it is inside '→'`. With
+    /// `listing: progressive` the model reaches every tool through this
+    /// path, so one such search killed the whole MCP server.
+    #[test]
+    fn search_survives_multibyte_descriptions() {
+        let registry = create_all_enabled_registry();
+        // 'container' matches ssh_crictl_inspect, whose description uses `→`.
+        let result = execute(
+            SEARCH_TOOLS,
+            Some(&json!({"query": "container"})),
+            &registry,
+        )
+        .expect("meta");
+        assert_ne!(result.is_error, Some(true));
+        let payload = result.structured_content.expect("structured");
+        assert!(payload["total_matches"].as_u64().unwrap() > 0);
+
+        // Every emitted description must be valid, non-split UTF-8 and
+        // stay within the 160-char budget (+1 for the ellipsis).
+        for m in payload["results"].as_array().expect("results") {
+            let d = m["description"].as_str().expect("description");
+            assert!(d.chars().count() <= 161, "description over budget: {d}");
+        }
+    }
+
+    /// Same cut, the CLI's narrower 52-char budget.
+    #[test]
+    fn search_descriptions_are_char_truncated_not_byte_truncated() {
+        let long: String = "→".repeat(400);
+        assert_eq!(truncate_chars(&long, 160).chars().count(), 160);
+        assert!(truncate_chars(&long, 52).is_char_boundary(truncate_chars(&long, 52).len()));
     }
 
     #[test]
