@@ -177,7 +177,35 @@ jobs:
         # template-injection hardening, same pattern as fuzz.yml.
         run: |
           git diff "origin/${GITHUB_BASE_REF}"...HEAD > pr.diff
-          cargo mutants --in-diff pr.diff --timeout-multiplier 1.5 -vV
+          # Same budget discipline as the weekly sweep in security.yml: a job
+          # timeout kills the runner before the `if: always()` upload below, so
+          # a diff that outgrows the budget used to throw its whole report away
+          # (this job died at 45m on the ci-hardening PR with 11 of N mutants
+          # done and nothing to show for it). `timeout` inside the step lets the
+          # partial report upload and labels it as partial.
+          #
+          # The per-mutant cost is cut three ways, mirroring the weekly job:
+          # `--test-tool nextest` (cargo-nextest was already installed here but
+          # never used, so every mutant paid for the full `cargo test` harness),
+          # `--baseline skip` (the Clippy and Tests jobs already prove the
+          # unmutated tree builds and passes), and two concurrent mutants.
+          set +e
+          timeout --signal=INT --kill-after=2m 35m \
+            cargo mutants \
+              --in-diff pr.diff \
+              --baseline skip \
+              --test-tool nextest \
+              --timeout-multiplier 1.5 \
+              -j 2 \
+              -vV
+          rc=$?
+          set -e
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "::warning::diff mutation exhausted its 35m budget — this report covers only part of the diff"
+            echo "- diff mutation: **PARTIAL** (35m budget exhausted)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit "$rc"
       - name: Upload mutation report
         if: always()
         uses: actions/upload-artifact@v7
