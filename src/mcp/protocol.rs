@@ -1156,7 +1156,7 @@ mod tests {
     #[test]
     fn test_protocol_version_format() {
         // Protocol version should be a date in YYYY-MM-DD format
-        assert!(PROTOCOL_VERSION.len() == 10);
+        assert_eq!(PROTOCOL_VERSION.len(), 10);
         assert!(PROTOCOL_VERSION.contains('-'));
     }
 

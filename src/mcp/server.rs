@@ -667,9 +667,9 @@ impl McpServer {
         Ok(())
     }
 
-    /// Spawn the three per-server cleanup tasks (session manager, task
-    /// store, output cache) and return their join handles so the serve
-    /// loop can abort them on shutdown.
+    /// Spawn the four per-server cleanup tasks (session manager, task
+    /// store, output cache, connection pool) and return their join handles
+    /// so the serve loop can abort them on shutdown.
     fn spawn_cleanup_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
         let cleanup_sm = Arc::clone(&self.session_manager);
         let sm_handle = tokio::spawn(async move {
@@ -2297,6 +2297,32 @@ mod tests {
     fn create_test_server() -> McpServer {
         let (server, _audit_task) = McpServer::new(test_config());
         server
+    }
+
+    /// `spawn_cleanup_tasks` must actually spawn one loop per expiring
+    /// resource. Returning an empty vec compiles and lets the serve loop
+    /// run normally, but silently disables session/task/output-cache/pool
+    /// expiry for the lifetime of the process — nothing else in the tree
+    /// notices. Caught as a MISSED mutant on 2026-08-11.
+    #[tokio::test]
+    async fn test_spawn_cleanup_tasks_spawns_one_loop_per_resource() {
+        let server = create_test_server();
+        let handles = server.spawn_cleanup_tasks();
+
+        assert_eq!(
+            handles.len(),
+            4,
+            "expected one cleanup loop per expiring resource \
+             (session manager, task store, output cache, connection pool)"
+        );
+        assert!(
+            handles.iter().all(|h| !h.is_finished()),
+            "a cleanup loop exited immediately instead of ticking forever"
+        );
+
+        for handle in handles {
+            handle.abort();
+        }
     }
 
     #[tokio::test]
