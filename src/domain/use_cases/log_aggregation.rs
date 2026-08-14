@@ -60,7 +60,7 @@ const LOG_FILES_ALLOWED_PUNCT: &[char] = &[
 ///
 /// `log_files` is a whitespace-separated list of paths that the log builders
 /// interpolate as *multiple* shell words, so it cannot be wrapped in a single
-/// [`shell_escape`] call without destroying that meaning. It is validated
+/// `shell_escape` call without destroying that meaning. It is validated
 /// against a strict character allowlist instead: globbing keeps working while
 /// command substitution and command chaining become unrepresentable.
 ///

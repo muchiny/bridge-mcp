@@ -110,7 +110,7 @@ pub struct TransferOptions {
 impl TransferOptions {
     /// The chunk size actually used, clamped to a safe allocation range.
     ///
-    /// See [`clamp_chunk_size`]; `chunk_size` itself is caller-supplied and
+    /// See `clamp_chunk_size`; `chunk_size` itself is caller-supplied and
     /// deliberately left untouched so the request stays inspectable.
     #[must_use]
     pub const fn effective_chunk_size(&self) -> u64 {
