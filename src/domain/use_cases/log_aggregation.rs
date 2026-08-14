@@ -41,6 +41,64 @@ pub fn validate_pattern(pattern: &str) -> Result<()> {
     Ok(())
 }
 
+/// Maximum accepted length of the whole `log_files` argument.
+const MAX_LOG_FILES_LEN: usize = 4096;
+/// Maximum number of whitespace-separated paths in `log_files`.
+const MAX_LOG_FILES_COUNT: usize = 64;
+
+/// Characters allowed in a `log_files` argument, on top of ASCII alphanumerics.
+///
+/// `*`, `?`, `[` and `]` are kept so glob patterns still expand — the argument
+/// is deliberately interpolated *unquoted* as several shell words. Everything
+/// that could start a command (`$`, `` ` ``, `;`, `&`, `|`, `<`, `>`, `(`, `)`,
+/// `\`, quotes, braces, tilde, newline) is absent from this set.
+const LOG_FILES_ALLOWED_PUNCT: &[char] = &[
+    '.', '_', '-', '/', '*', '?', '[', ']', ':', '+', '@', ',', '=', '%',
+];
+
+/// Validate the `log_files` argument.
+///
+/// `log_files` is a whitespace-separated list of paths that the log builders
+/// interpolate as *multiple* shell words, so it cannot be wrapped in a single
+/// `shell_escape` call without destroying that meaning. It is validated
+/// against a strict character allowlist instead: globbing keeps working while
+/// command substitution and command chaining become unrepresentable.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the list is empty, too long, holds
+/// too many entries, or contains any character outside the allowlist.
+pub fn validate_log_files(log_files: &str) -> Result<()> {
+    if log_files.trim().is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "log_files must not be empty".to_string(),
+        });
+    }
+    if log_files.len() > MAX_LOG_FILES_LEN {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "log_files too long: {} chars (max {MAX_LOG_FILES_LEN})",
+                log_files.len()
+            ),
+        });
+    }
+    if let Some(bad) = log_files
+        .chars()
+        .find(|c| *c != ' ' && !c.is_ascii_alphanumeric() && !LOG_FILES_ALLOWED_PUNCT.contains(c))
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("log_files contains a disallowed character: {bad:?}"),
+        });
+    }
+    let count = log_files.split_whitespace().count();
+    if count > MAX_LOG_FILES_COUNT {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("log_files lists {count} paths (max {MAX_LOG_FILES_COUNT})"),
+        });
+    }
+    Ok(())
+}
+
 /// Validate the number of tail lines.
 ///
 /// # Errors
@@ -79,6 +137,7 @@ impl LogAggregationCommandBuilder {
         validate_pattern(pattern)?;
 
         let files = log_files.unwrap_or(DEFAULT_LOG_FILES);
+        validate_log_files(files)?;
         let escaped_pattern = shell_escape(pattern);
 
         let mut journal_cmd = format!("journalctl --no-pager -q --grep {escaped_pattern}");
@@ -94,10 +153,14 @@ impl LogAggregationCommandBuilder {
     /// Build a command to aggregate log statistics.
     ///
     /// Counts total lines, error lines, and warning lines across log files.
-    #[must_use]
-    pub fn build_log_aggregate_command(log_files: Option<&str>) -> String {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `log_files` fails [`validate_log_files`].
+    pub fn build_log_aggregate_command(log_files: Option<&str>) -> Result<String> {
         let files = log_files.unwrap_or(DEFAULT_LOG_FILES);
-        format!(
+        validate_log_files(files)?;
+        Ok(format!(
             "printf 'FILE\\tTOTAL\\tERRORS\\tWARNINGS\\n' && \
              for f in {files}; do \
                if [ -f \"$f\" ]; then \
@@ -107,7 +170,7 @@ impl LogAggregationCommandBuilder {
                  printf '%s\\t%s\\t%s\\t%s\\n' \"$f\" \"$total\" \"$errors\" \"$warnings\"; \
                fi; \
              done"
-        )
+        ))
     }
 
     /// Build a command to tail log files.
@@ -120,6 +183,7 @@ impl LogAggregationCommandBuilder {
         validate_lines(n)?;
 
         let files = log_files.unwrap_or(DEFAULT_LOG_FILES);
+        validate_log_files(files)?;
         Ok(format!("tail -n {n} {files} 2>/dev/null"))
     }
 }
@@ -256,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_defaults() {
-        let cmd = LogAggregationCommandBuilder::build_log_aggregate_command(None);
+        let cmd = LogAggregationCommandBuilder::build_log_aggregate_command(None).unwrap();
         assert!(cmd.contains("FILE"));
         assert!(cmd.contains("TOTAL"));
         assert!(cmd.contains("wc -l"));
@@ -269,7 +333,8 @@ mod tests {
     fn test_aggregate_custom_files() {
         let cmd = LogAggregationCommandBuilder::build_log_aggregate_command(Some(
             "/var/log/nginx/access.log",
-        ));
+        ))
+        .unwrap();
         assert!(cmd.contains("/var/log/nginx/access.log"));
     }
 
@@ -312,5 +377,86 @@ mod tests {
     fn test_tail_max_lines() {
         let cmd = LogAggregationCommandBuilder::build_log_tail_command(None, Some(5000)).unwrap();
         assert!(cmd.contains("tail -n 5000"));
+    }
+
+    // ── validate_log_files (AUDIT-2026-08 B1) ────────────────
+    //
+    // `log_files` is interpolated as *multiple* shell words, so it cannot be
+    // wrapped in a single `shell_escape`. It is validated against a strict
+    // character allowlist instead, which keeps globbing usable while making
+    // command substitution and command chaining unrepresentable.
+
+    #[test]
+    fn test_validate_log_files_accepts_plain_paths() {
+        assert!(validate_log_files("/var/log/syslog /var/log/auth.log").is_ok());
+    }
+
+    #[test]
+    fn test_validate_log_files_accepts_globs() {
+        assert!(validate_log_files("/var/log/nginx/*.log").is_ok());
+        assert!(validate_log_files("/var/log/pods/*/*.log").is_ok());
+        assert!(validate_log_files("/var/log/app-[0-9].log").is_ok());
+    }
+
+    #[test]
+    fn test_validate_log_files_rejects_command_substitution() {
+        assert!(validate_log_files("/var/log/syslog $(id > /tmp/pwn)").is_err());
+        assert!(validate_log_files("/var/log/`id`").is_err());
+        assert!(validate_log_files("/var/log/${IFS}x").is_err());
+    }
+
+    #[test]
+    fn test_validate_log_files_rejects_command_chaining() {
+        for evil in [
+            "/var/log/syslog; id",
+            "/var/log/syslog && id",
+            "/var/log/syslog | id",
+            "/var/log/syslog > /etc/passwd",
+            "/var/log/syslog\nid",
+        ] {
+            assert!(
+                validate_log_files(evil).is_err(),
+                "must reject log_files {evil:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_log_files_rejects_empty() {
+        assert!(validate_log_files("").is_err());
+        assert!(validate_log_files("   ").is_err());
+    }
+
+    #[test]
+    fn test_log_tail_rejects_injected_log_files() {
+        let result = LogAggregationCommandBuilder::build_log_tail_command(
+            Some("/var/log/syslog $(id > /tmp/pwn)"),
+            Some(10),
+        );
+        assert!(result.is_err(), "ssh_log_tail_multi must not build RCE");
+    }
+
+    #[test]
+    fn test_log_search_rejects_injected_log_files() {
+        let result = LogAggregationCommandBuilder::build_log_search_command(
+            "error",
+            Some("/var/log/syslog; id"),
+            None,
+        );
+        assert!(result.is_err(), "ssh_log_search_multi must not build RCE");
+    }
+
+    #[test]
+    fn test_log_aggregate_rejects_injected_log_files() {
+        let result =
+            LogAggregationCommandBuilder::build_log_aggregate_command(Some("/var/log/`id`"));
+        assert!(result.is_err(), "ssh_log_aggregate must not build RCE");
+    }
+
+    #[test]
+    fn test_log_aggregate_accepts_valid_files() {
+        let cmd = LogAggregationCommandBuilder::build_log_aggregate_command(Some("/var/log/a.log"))
+            .unwrap();
+        assert!(cmd.contains("for f in /var/log/a.log"));
     }
 }

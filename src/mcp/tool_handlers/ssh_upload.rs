@@ -64,7 +64,9 @@ impl SshUploadHandler {
             "chunk_size": {
                 "type": "integer",
                 "default": 1048576,
-                "description": "Chunk size in bytes for streaming (default: 1MB)"
+                "minimum": 4096,
+                "maximum": 67108864,
+                "description": "Chunk size in bytes for streaming (default: 1MB). Values outside 4KB..64MB are clamped into that range."
             },
             "verify_checksum": {
                 "type": "boolean",

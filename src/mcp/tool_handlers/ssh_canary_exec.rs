@@ -9,8 +9,12 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::domain::use_cases::orchestration::OrchestrationCommandBuilder;
 use crate::error::Result;
-use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::standard_tool::{
+    StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
+};
 use crate::mcp_standard_tool;
+use crate::ports::ToolContext;
 
 #[derive(Debug, Deserialize)]
 pub struct SshCanaryExecArgs {
@@ -87,6 +91,21 @@ impl StandardTool for CanaryExecTool {
         },
         "required": ["host", "command"]
     }"#;
+
+    /// `command` and `health_check` are free-form shell fragments straight from
+    /// the request, so they get the same whitelist treatment as `ssh_exec`
+    /// instead of the blacklist-only `validate_builtin` the pipeline applies to
+    /// builder-produced commands.
+    async fn pre_execute(
+        args: &SshCanaryExecArgs,
+        ctx: &ToolContext,
+    ) -> Result<Option<ToolCallResult>> {
+        validate_free_form_command(ctx, &args.host, &args.command)?;
+        if let Some(health_check) = args.health_check.as_deref().filter(|hc| !hc.is_empty()) {
+            validate_free_form_command(ctx, &args.host, health_check)?;
+        }
+        Ok(None)
+    }
 
     fn build_command(args: &SshCanaryExecArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(OrchestrationCommandBuilder::build_canary_command(
@@ -218,5 +237,52 @@ mod tests {
         assert!(cmd.contains("deploy.sh"));
         assert!(cmd.contains("curl localhost"));
         assert!(cmd.contains("|| true"));
+    }
+
+    // ── whitelist enforcement (AUDIT-2026-08 B1) ─────────────
+    //
+    // `command` and `health_check` are free-form shell fragments, exactly like
+    // `ssh_exec`. Running them through the `StandardToolHandler` pipeline alone
+    // would only apply `validate_builtin` (blacklist), silently exempting this
+    // tool from the whitelist that `ssh_exec` is subject to.
+
+    fn args_with(command: &str, health_check: Option<&str>) -> SshCanaryExecArgs {
+        SshCanaryExecArgs {
+            host: "server1".to_string(),
+            hosts: None,
+            command: command.to_string(),
+            health_check: health_check.map(ToString::to_string),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_command_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let result = CanaryExecTool::pre_execute(&args_with("id", None), &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "command must be whitelist-checked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_check_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let result = CanaryExecTool::pre_execute(&args_with("echo ok", Some("id")), &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "health_check must be whitelist-checked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_whitelisted_command_is_allowed() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let result =
+            CanaryExecTool::pre_execute(&args_with("echo ok", Some("echo healthy")), &ctx).await;
+        assert!(result.is_ok(), "got: {result:?}");
     }
 }

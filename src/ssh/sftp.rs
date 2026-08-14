@@ -28,6 +28,43 @@ fn validate_remote_path(path: &str) -> Result<()> {
 /// Default chunk size for streaming transfers (1 MB)
 pub const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
 
+/// Smallest chunk size a transfer will actually use (4 KB).
+///
+/// A zero chunk size used to make the copy loop exit immediately *after* the
+/// remote handle had been opened with `TRUNCATE`, which emptied the remote file
+/// and still reported success; `write_bytes` looped forever on it.
+pub const MIN_CHUNK_SIZE: u64 = 4096;
+
+/// Largest chunk size a transfer will actually use (64 MB).
+///
+/// The chunk size is used as a `Vec` allocation length; an unbounded value from
+/// the request aborts the process through `handle_alloc_error`.
+pub const MAX_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+
+const _: () = {
+    assert!(MIN_CHUNK_SIZE > 0);
+    assert!(MIN_CHUNK_SIZE <= DEFAULT_CHUNK_SIZE);
+    assert!(DEFAULT_CHUNK_SIZE <= MAX_CHUNK_SIZE);
+    // A clamped chunk always fits a `usize` allocation, 32-bit targets included.
+    assert!(MAX_CHUNK_SIZE <= u32::MAX as u64);
+};
+
+/// Clamp a caller-supplied chunk size into `MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE`.
+///
+/// Applied at every point of use rather than at construction, so all callers
+/// (MCP handlers, CLI runner, future ones) are covered by one check.
+#[must_use]
+pub const fn clamp_chunk_size(chunk_size: u64) -> u64 {
+    // `u64::clamp` is not const-stable in this MSRV.
+    if chunk_size < MIN_CHUNK_SIZE {
+        MIN_CHUNK_SIZE
+    } else if chunk_size > MAX_CHUNK_SIZE {
+        MAX_CHUNK_SIZE
+    } else {
+        chunk_size
+    }
+}
+
 /// Transfer mode for file operations
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +105,17 @@ pub struct TransferOptions {
     pub verify_checksum: bool,
     /// Preserve file permissions
     pub preserve_permissions: bool,
+}
+
+impl TransferOptions {
+    /// The chunk size actually used, clamped to a safe allocation range.
+    ///
+    /// See `clamp_chunk_size`; `chunk_size` itself is caller-supplied and
+    /// deliberately left untouched so the request stays inspectable.
+    #[must_use]
+    pub const fn effective_chunk_size(&self) -> u64 {
+        clamp_chunk_size(self.chunk_size)
+    }
 }
 
 impl Default for TransferOptions {
@@ -254,8 +302,9 @@ impl SftpClient {
                 })?;
         }
 
-        let mut reader = BufReader::with_capacity(options.chunk_size as usize, local_file);
-        let mut buffer = vec![0u8; options.chunk_size as usize];
+        let chunk_size = options.effective_chunk_size() as usize;
+        let mut reader = BufReader::with_capacity(chunk_size, local_file);
+        let mut buffer = vec![0u8; chunk_size];
         let mut total_written = start_offset;
 
         // Note: Checksum is disabled for Resume/Append modes because we can only hash
@@ -450,8 +499,9 @@ impl SftpClient {
                 })?,
         };
 
-        let mut writer = BufWriter::with_capacity(options.chunk_size as usize, local_file);
-        let mut buffer = vec![0u8; options.chunk_size as usize];
+        let chunk_size = options.effective_chunk_size() as usize;
+        let mut writer = BufWriter::with_capacity(chunk_size, local_file);
+        let mut buffer = vec![0u8; chunk_size];
         let mut total_read = start_offset;
 
         // Note: Checksum is disabled for Resume/Append modes because we can only hash
@@ -844,7 +894,8 @@ impl SftpClient {
             .await
             .map_err(sftp_error)?;
 
-        let chunk = chunk_size as usize;
+        // Clamped: a zero chunk made this loop spin forever.
+        let chunk = clamp_chunk_size(chunk_size) as usize;
         let mut offset = 0;
 
         while offset < data.len() {
@@ -1789,5 +1840,53 @@ mod tests {
             duration_ms: u64::MAX,
         };
         assert_eq!(result.files_transferred, u64::MAX);
+    }
+
+    // ── chunk_size clamping (AUDIT-2026-08 B2) ───────────────
+    //
+    // `chunk_size` arrives unvalidated from the MCP request and reaches
+    // `vec![0u8; n]`. Zero silently truncated the remote file (the handle is
+    // already open with TRUNCATE) and reported success; `u64::MAX` aborted the
+    // process through `handle_alloc_error`. `write_bytes` looped forever on 0.
+    // Clamping happens at the point of use so every construction site is
+    // covered, including the CLI runner.
+
+    #[test]
+    fn test_clamp_chunk_size_rejects_zero() {
+        assert_eq!(clamp_chunk_size(0), MIN_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn test_clamp_chunk_size_raises_tiny_values() {
+        assert_eq!(clamp_chunk_size(1), MIN_CHUNK_SIZE);
+        assert_eq!(clamp_chunk_size(MIN_CHUNK_SIZE - 1), MIN_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn test_clamp_chunk_size_caps_huge_values() {
+        assert_eq!(clamp_chunk_size(u64::MAX), MAX_CHUNK_SIZE);
+        assert_eq!(clamp_chunk_size(MAX_CHUNK_SIZE + 1), MAX_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn test_clamp_chunk_size_passes_through_sane_values() {
+        assert_eq!(clamp_chunk_size(DEFAULT_CHUNK_SIZE), DEFAULT_CHUNK_SIZE);
+        assert_eq!(clamp_chunk_size(MIN_CHUNK_SIZE), MIN_CHUNK_SIZE);
+        assert_eq!(clamp_chunk_size(MAX_CHUNK_SIZE), MAX_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn test_transfer_options_effective_chunk_size_is_clamped() {
+        let zero = TransferOptions {
+            chunk_size: 0,
+            ..Default::default()
+        };
+        assert_eq!(zero.effective_chunk_size(), MIN_CHUNK_SIZE);
+
+        let huge = TransferOptions {
+            chunk_size: u64::MAX,
+            ..Default::default()
+        };
+        assert_eq!(huge.effective_chunk_size(), MAX_CHUNK_SIZE);
     }
 }

@@ -138,9 +138,21 @@ fn write_pg_password_tempfile(
     let pgpass_pw = password.replace('\\', "\\\\").replace(':', "\\:");
     // POSIX single-quote escaping for the printf format-arg.
     let printf_pw = pgpass_pw.replace('\'', "'\\''");
-    let printf_host = db_host.replace('\\', "\\\\").replace(':', "\\:");
-    let printf_db = database.replace('\\', "\\\\").replace(':', "\\:");
-    let printf_user = db_user.replace('\\', "\\\\").replace(':', "\\:");
+    // pgpass-format escaping first, then the POSIX single-quote escape — the
+    // three values are emitted as single-quoted `printf` arguments just like
+    // the password, and a bare `'` used to close the quoting.
+    let printf_host = db_host
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "'\\''");
+    let printf_db = database
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "'\\''");
+    let printf_user = db_user
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "'\\''");
     let _ = write!(
         cmd,
         "TMPF=$(mktemp) && \
@@ -1217,6 +1229,107 @@ mod tests {
         assert!(
             cmd.contains("shred -u") || cmd.contains("rm -f"),
             "must clean up tempfile: {cmd}"
+        );
+    }
+
+    // ── pgpass injection hardening (AUDIT-2026-08 B1) ────────
+    //
+    // The pgpass line escapes `\` and `:` (the pgpass field format) for host,
+    // database and user, but not `'` — and each value is emitted as a
+    // single-quoted `printf` argument. Only the password got the POSIX
+    // single-quote escape.
+
+    /// Slice out just the `printf ... > $TMPF` pgpass line.
+    ///
+    /// The same values are also `shell_escape`d elsewhere in the command (for
+    /// the `psql` arguments), so asserting on the whole string would pass even
+    /// when the pgpass line itself is unescaped.
+    fn pgpass_line(cmd: &str) -> &str {
+        let start = cmd
+            .find(r"printf '%s:%s:%s:%s:%s\n'")
+            .expect("pgpass printf must be present");
+        let rest = &cmd[start..];
+        let end = rest
+            .find("> $TMPF")
+            .expect("pgpass redirect must be present");
+        &rest[..end]
+    }
+
+    #[test]
+    fn test_pgpass_host_single_quote_cannot_break_out() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "h' ; id ; '",
+            5432,
+            "postgres",
+            Some("pw"),
+            "app",
+            "SELECT 1",
+            None,
+        );
+        let line = pgpass_line(&cmd);
+        assert!(
+            !line.contains("'h' ; id ; ''"),
+            "db_host must not break out of the printf quoting: {line}"
+        );
+        assert!(line.contains(r"'h'\'' ; id ; '\'''"), "got: {line}");
+    }
+
+    #[test]
+    fn test_pgpass_database_single_quote_cannot_break_out() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "postgres",
+            Some("pw"),
+            "app' ; id ; '",
+            "SELECT 1",
+            None,
+        );
+        let line = pgpass_line(&cmd);
+        assert!(
+            !line.contains("'app' ; id ; ''"),
+            "database must not break out of the printf quoting: {line}"
+        );
+        assert!(line.contains(r"'app'\'' ; id ; '\'''"), "got: {line}");
+    }
+
+    #[test]
+    fn test_pgpass_user_single_quote_cannot_break_out() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "pg' ; id ; '",
+            Some("pw"),
+            "app",
+            "SELECT 1",
+            None,
+        );
+        let line = pgpass_line(&cmd);
+        assert!(
+            !line.contains("'pg' ; id ; ''"),
+            "db_user must not break out of the printf quoting: {line}"
+        );
+        assert!(line.contains(r"'pg'\'' ; id ; '\'''"), "got: {line}");
+    }
+
+    #[test]
+    fn test_pgpass_still_escapes_the_pgpass_field_separator() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "host:with:colons",
+            5432,
+            "postgres",
+            Some("pw"),
+            "app",
+            "SELECT 1",
+            None,
+        );
+        assert!(
+            pgpass_line(&cmd).contains(r"host\:with\:colons"),
+            "pgpass colon escaping must survive: {cmd}"
         );
     }
 }

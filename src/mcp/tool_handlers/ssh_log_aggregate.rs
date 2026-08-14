@@ -104,9 +104,7 @@ impl StandardTool for LogAggregateTool {
         crate::domain::output_kind::OutputKind::Tabular;
 
     fn build_command(args: &SshLogAggregateArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(LogAggregationCommandBuilder::build_log_aggregate_command(
-            args.log_files.as_deref(),
-        ))
+        LogAggregationCommandBuilder::build_log_aggregate_command(args.log_files.as_deref())
     }
 
     fn post_process(
@@ -491,13 +489,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_command_empty_log_files_string() {
+    fn test_build_command_empty_log_files_string_is_rejected() {
         let mut args = minimal_args();
         args.log_files = Some(String::new());
-        // An empty override is passed through verbatim (not replaced by defaults),
-        // so the default log paths must NOT appear in the generated command.
-        let cmd = LogAggregateTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("FILE"));
-        assert!(!cmd.contains("/var/log/syslog"));
+        // An empty override used to be passed through verbatim, producing
+        // `for f in ; do …` — a command that silently matched nothing. It is
+        // now a client error rather than a silent no-op.
+        let err = LogAggregateTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::CommandDenied { reason } if reason.contains("log_files")),
+            "got: {err:?}"
+        );
     }
 }
