@@ -196,6 +196,31 @@ pub trait StandardTool: Send + Sync + 'static {
     }
 }
 
+/// Validate a caller-supplied shell fragment against the **full** security
+/// policy (whitelist *and* blacklist), and audit the denial.
+///
+/// Step 6 of the pipeline below only applies `validate_builtin` — blacklist
+/// only — because it assumes the command came from a trusted domain builder.
+/// A handler that splices a raw command straight out of the request into that
+/// string is `ssh_exec` in disguise, and must call this from `pre_execute` so
+/// it is subject to the same whitelist `ssh_exec` is subject to.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] when the security policy rejects the
+/// fragment.
+pub fn validate_free_form_command(ctx: &ToolContext, host: &str, command: &str) -> Result<()> {
+    if let Err(e) = ctx.execute_use_case.validate(command) {
+        let reason = match &e {
+            BridgeError::CommandDenied { reason } => reason.clone(),
+            _ => e.to_string(),
+        };
+        ctx.execute_use_case.log_denied(host, command, &reason);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Generic handler that wraps a [`StandardTool`] and implements [`ToolHandler`].
 ///
 /// The 16-step execution pipeline is implemented once here and reused

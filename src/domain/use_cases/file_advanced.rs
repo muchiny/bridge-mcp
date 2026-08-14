@@ -71,8 +71,11 @@ impl FileAdvancedCommandBuilder {
             format!("{} && ", exports.join(" && "))
         };
 
+        // `output_path` is passed to `echo` as its own escaped argument; echo
+        // joins arguments with a single space, so the printed line is
+        // unchanged while a quote in the path can no longer close the string.
         Ok(format!(
-            "{export_str}envsubst < {escaped_template} > {escaped_output} && echo 'Template rendered to {output_path}'"
+            "{export_str}envsubst < {escaped_template} > {escaped_output} && echo 'Template rendered to' {escaped_output}"
         ))
     }
 }
@@ -167,5 +170,40 @@ mod tests {
             let r = FileAdvancedCommandBuilder::build_template_command("/etc/t", "/tmp/o", &vars);
             assert!(r.is_ok(), "key {ok} must be accepted");
         }
+    }
+
+    // ── injection hardening (AUDIT-2026-08 B1) ───────────────
+    //
+    // `output_path` was escaped for the redirection but the RAW value was
+    // re-inserted into the trailing confirmation `echo`, so a single quote
+    // closed the string and everything after it ran as a command.
+
+    #[test]
+    fn test_template_echo_does_not_reinsert_raw_output_path() {
+        let cmd = FileAdvancedCommandBuilder::build_template_command(
+            "/etc/nginx.tpl",
+            "/tmp/out'; id; '.conf",
+            &[],
+        )
+        .unwrap();
+        assert!(
+            !cmd.contains("Template rendered to /tmp/out'; id; '.conf"),
+            "raw output_path must not reach the echo: {cmd}"
+        );
+        // Exactly one escaped occurrence for the redirect, one for the echo.
+        assert_eq!(
+            cmd.matches(r"'/tmp/out'\''; id; '\''.conf'").count(),
+            2,
+            "both the redirect and the echo must use the escaped path: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_template_echo_still_reports_the_path() {
+        let cmd =
+            FileAdvancedCommandBuilder::build_template_command("/etc/n.tpl", "/tmp/out.conf", &[])
+                .unwrap();
+        assert!(cmd.contains("Template rendered to"));
+        assert!(cmd.contains("'/tmp/out.conf'"));
     }
 }

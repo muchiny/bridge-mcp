@@ -30,8 +30,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Result`; `truncate_output_with_cache` takes a 4th `reduction_tip` argument;
   `Metrics::record_pipeline_stats` takes a 5th `params_used` argument.
 
+### Security
+
+- **Command injection in five domain builders.** Arguments reaching the shell
+  unescaped are now either escaped or validated:
+  - `log_aggregation` — `log_files` was interpolated bare into `tail`,
+    `grep -r` and `for f in …` by `ssh_log_tail_multi`, `ssh_log_search_multi`
+    and `ssh_log_aggregate` (all annotated `read_only`, so exempt from the
+    destructive-elicitation prompt). A new `validate_log_files` enforces a
+    character allowlist that keeps globbing usable while making command
+    substitution and chaining unrepresentable. `build_log_aggregate_command`
+    now returns `Result<String>`, and an empty `log_files` is an error rather
+    than a silent no-op.
+  - `diagnostics` — `symptom` sat inside a *double-quoted* `echo`, where
+    command substitution needs no breakout at all; `since` sat inside single
+    quotes. Both are now `shell::escape`d.
+  - `database` — the pgpass tempfile escaped `\` and `:` for host, database
+    and user but not `'`, while emitting each as a single-quoted `printf`
+    argument. The POSIX single-quote escape is now applied to all three.
+  - `file_advanced` — `build_template_command` escaped `output_path` for the
+    redirection then re-inserted the raw value into the trailing `echo`.
+  - `orchestration` — `ssh_canary_exec`, `ssh_rolling_exec` and
+    `ssh_fleet_diff` take a free-form `command` (and `health_check`) exactly
+    like `ssh_exec`, but only went through the blacklist-only
+    `validate_builtin`, escaping the whitelist that `ssh_exec` is subject to.
+    They now validate those fragments with the full policy via a new
+    `standard_tool::validate_free_form_command`.
+- **Unvalidated `chunk_size` truncated remote files.** The value went straight
+  from the request to `vec![0u8; n]`. With `0`, the remote handle was already
+  open with `TRUNCATE` when the copy loop exited immediately: the remote file
+  was emptied and the call reported success (`write_bytes` looped forever
+  instead); with `u64::MAX`, allocation failure aborted the process. Chunk
+  sizes are now clamped to 4 KB..=64 MB at every point of use, and both the
+  upload and download schemas declare `minimum`/`maximum`.
+
 ### Fixed
 
+- **Test contexts ignored their own security config.** `create_test_context_with_config`
+  hardcoded `CommandValidator::new(&SecurityConfig::default())`, so no test
+  could exercise a custom whitelist or security mode and every assertion about
+  `validate()` was vacuous. It now builds the validator from the config passed in.
 - **jq error hint named a nonexistent param** — the hint referenced `fields`
   instead of the real `columns` param.
 - **Handler schemas understated the default output cap** — docs said

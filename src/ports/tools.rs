@@ -493,6 +493,21 @@ pub mod mock {
         })
     }
 
+    /// Create a test context whose validator runs in [`SecurityMode::Standard`]
+    /// with the given command whitelist, on top of the "server1" host.
+    ///
+    /// Used by handlers that take a free-form shell command and must therefore
+    /// go through `validate()` (whitelist + blacklist) rather than the
+    /// `validate_builtin()` path reserved for trusted command builders.
+    #[must_use]
+    pub fn create_test_context_with_whitelist(whitelist: &[&str]) -> ToolContext {
+        let base = create_test_context_with_host();
+        let mut config = (*base.config).clone();
+        config.security.mode = crate::config::SecurityMode::Standard;
+        config.security.whitelist = whitelist.iter().map(|s| (*s).to_string()).collect();
+        create_test_context_with_config(config)
+    }
+
     /// Create a test context with custom hosts
     #[must_use]
     #[allow(clippy::implicit_hasher)]
@@ -676,7 +691,11 @@ pub mod mock {
     /// Create a test context with a custom config
     #[must_use]
     pub fn create_test_context_with_config(config: Config) -> ToolContext {
-        let validator = Arc::new(CommandValidator::new(&SecurityConfig::default()));
+        // Build the validator from the config that was actually passed in —
+        // it used to be hardcoded to `SecurityConfig::default()`, so a test
+        // context could never exercise a custom whitelist or security mode and
+        // any assertion about `validate()` was vacuous.
+        let validator = Arc::new(CommandValidator::new(&config.security));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
         let audit_logger = Arc::new(AuditLogger::disabled());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
