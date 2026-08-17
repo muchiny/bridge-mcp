@@ -19,7 +19,9 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   # rust-toolchain.toml outranks `rustup default` — see ci.yml. (Only affects
-  # the test job; the image itself pins its compiler in the Dockerfile.)
+  # the test job. The Dockerfile's `FROM rust:<ver>-alpine` is not a real pin
+  # either: `COPY . .` brings the toolchain file in, so rustup resolves the
+  # compiler from it. Both are held at the MSRV so the two agree.)
   RUSTUP_TOOLCHAIN: stable
 
 jobs:

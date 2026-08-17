@@ -155,17 +155,23 @@ jobs:
         with:
           tool: cross
 
+      # `--features full` (cli, mimalloc, http, jq, otel). Without it the
+      # published binaries carry the default feature set — `cli` alone — so
+      # they have no HTTP transport and no jq/yq filtering, and reject the
+      # `jq_filter` / `output_format` params the README documents as the main
+      # token-reduction lever. `make release` and `make install` have always
+      # used `full`, which is why the gap never showed up in local testing.
       - name: Build (cross)
         if: matrix.cross
         env:
           TARGET: ${{ matrix.target }}
-        run: cross build --release --target "$TARGET"
+        run: cross build --release --features full --target "$TARGET"
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --target "$TARGET"
+        run: cargo build --release --features full --target "$TARGET"
 
       - name: Package
         env:
