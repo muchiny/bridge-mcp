@@ -111,10 +111,10 @@ fn exec_request() -> Request<Body> {
 /// response comes back.
 async fn wait_for_audit_lines(path: &std::path::Path) -> String {
     for _ in 0..100 {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if !contents.trim().is_empty() {
-                return contents;
-            }
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && !contents.trim().is_empty()
+        {
+            return contents;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

@@ -189,12 +189,24 @@ jobs:
           # never used, so every mutant paid for the full `cargo test` harness),
           # `--baseline skip` (the Clippy and Tests jobs already prove the
           # unmutated tree builds and passes), and two concurrent mutants.
+          #
+          # `--features http` because cargo-mutants finds mutants by parsing
+          # source, not by compiling it: a mutant inside a `#[cfg(feature =
+          # "http")]` module is generated, then "tested" against a build where
+          # neither that module nor the tests covering it exist — so it is
+          # always reported MISSED and can never be killed. That is how
+          # `serve -> Ok(())` in transport/http.rs showed up as a survivor even
+          # though `serve_refuses_public_bind_without_oauth` asserts on exactly
+          # that return value. `http` is cheap (axum/tower); the heavier
+          # optional features still have this blind spot and need the same
+          # treatment if a diff ever lands in them.
           set +e
           timeout --signal=INT --kill-after=2m 35m \
             cargo mutants \
               --in-diff pr.diff \
               --baseline skip \
               --test-tool nextest \
+              --features http \
               --timeout-multiplier 1.5 \
               -j 2 \
               -vV
