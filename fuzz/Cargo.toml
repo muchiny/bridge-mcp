@@ -1,3 +1,17 @@
+# Standalone workspace, as `cargo fuzz init` generates. Without this table the
+# crate sits under the root workspace directory without being one of its
+# members, and every cargo invocation against this manifest dies with:
+#
+#   error: current package believes it's in a workspace when it's not:
+#   current:   fuzz/Cargo.toml
+#   workspace: Cargo.toml
+#
+# `cargo fuzz run` swallows that into "failed to build fuzz script", and the
+# nightly workflow turns each failure into `CRASHES_FOUND=true` — so from
+# 2026-07-03 to 2026-08-17 the Fuzz job exited green in ~45 seconds, fuzzed
+# none of its 57 targets, and filed a "found crashes" issue every night.
+[workspace]
+
 [package]
 name = "bridge-mcp-fuzz"
 version = "0.0.0"

@@ -86,6 +86,23 @@ jobs:
             fi
           done
 
+      # Build before fuzzing, and fail the job outright if the harness does not
+      # compile. The run step below treats any non-zero exit from `cargo fuzz
+      # run` as a crash, and `cargo fuzz` reports a build failure through that
+      # same exit code — so a harness that stopped compiling looked exactly
+      # like 57 simultaneous crashes. It stayed that way from 2026-07-03 to
+      # 2026-08-17: the job exited green in ~45 seconds having fuzzed nothing,
+      # and filed a "found crashes" issue every night (47 of them, all false).
+      # Separating the two makes a broken harness a red job instead of a
+      # silent one.
+      - name: Build fuzz targets
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            echo "::group::Building $target"
+            cargo +nightly fuzz build "$target"
+            echo "::endgroup::"
+          done
+
       - name: Run fuzz targets
         # Dispatch inputs go through env so they are never interpolated
         # into the shell script (template-injection hardening).
