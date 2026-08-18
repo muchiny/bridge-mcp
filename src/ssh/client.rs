@@ -4,19 +4,61 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use russh::ChannelMsg;
 use russh::client::{self, Config, Handle, Handler};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{PublicKey, load_secret_key};
+use russh::{ChannelMsg, Sig};
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::config::{AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, SocksVersion};
 use crate::domain::output_truncator::truncate_chars;
 use crate::error::{BridgeError, Result};
 use crate::ssh::known_hosts;
 use crate::ssh::sftp::SftpClient;
+
+/// Exit code to report for a command killed by a signal.
+///
+/// Follows the shell convention of `128 + signal number`, so every existing
+/// consumer — all of which read `0` as success and anything else as failure —
+/// classifies it correctly with no change. The numbers are the Linux values;
+/// a vendor-specific signal name maps to 255 ("unknown fatal") rather than to
+/// anything that could be mistaken for success.
+const fn signal_exit_code(signal: &Sig) -> u32 {
+    match *signal {
+        Sig::HUP => 129,
+        Sig::INT => 130,
+        Sig::QUIT => 131,
+        Sig::ILL => 132,
+        Sig::ABRT => 134,
+        Sig::FPE => 136,
+        Sig::KILL => 137,
+        Sig::USR1 => 138,
+        Sig::SEGV => 139,
+        Sig::PIPE => 141,
+        Sig::ALRM => 142,
+        Sig::TERM => 143,
+        Sig::Custom(_) => 255,
+    }
+}
+
+/// Decide the terminal status of an exec channel from what it actually said.
+///
+/// `None` means the channel closed without reporting either an exit status or
+/// an exit signal — the command's fate is genuinely unknown, which is not the
+/// same thing as "it succeeded". Callers must not silently substitute 0.
+///
+/// A signal outranks an exit status: some servers send `exit-status 0` and then
+/// `exit-signal`, and the kill is the more specific fact.
+const fn resolve_exit_code(exit_status: Option<u32>, exit_signal: Option<u32>) -> Option<u32> {
+    match (exit_signal, exit_status) {
+        (Some(sig), _) => Some(sig),
+        (None, Some(status)) => Some(status),
+        (None, None) => None,
+    }
+}
 
 /// Sanitize SSH error messages to prevent credential leakage.
 /// Removes any potential password or key material from error strings,
@@ -880,7 +922,10 @@ impl SshClient {
     ) -> Result<(Vec<u8>, Vec<u8>, u32)> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut exit_code = 0u32;
+        // Both start unset: "the channel never said" and "the channel said 0"
+        // are different facts, and only one of them means success.
+        let mut exit_status: Option<u32> = None;
+        let mut exit_signal: Option<u32> = None;
         let mut total_bytes = 0usize;
         let command_timeout = Duration::from_secs(limits.command_timeout_seconds);
 
@@ -907,8 +952,28 @@ impl SshClient {
                             stderr.extend_from_slice(&data);
                         }
                     }
-                    Some(ChannelMsg::ExitStatus { exit_status }) => {
-                        exit_code = exit_status;
+                    Some(ChannelMsg::ExitStatus {
+                        exit_status: status,
+                    }) => {
+                        exit_status = Some(status);
+                    }
+                    // A command killed by a signal used to fall into the
+                    // catch-all arm below and be reported as exit code 0 —
+                    // i.e. a remote OOM-kill came back as a success with
+                    // truncated output.
+                    Some(ChannelMsg::ExitSignal {
+                        ref signal_name,
+                        core_dumped,
+                        ref error_message,
+                        ..
+                    }) => {
+                        warn!(
+                            signal = ?signal_name,
+                            core_dumped,
+                            error = %error_message,
+                            "Remote command was killed by a signal"
+                        );
+                        exit_signal = Some(signal_exit_code(signal_name));
                     }
                     None => {
                         break;
@@ -919,6 +984,19 @@ impl SshClient {
                     _ => {}
                 }
             }
+            // A channel that closed without reporting either is not a success;
+            // we simply do not know. Reporting 0 anyway is the safer of two
+            // imperfect options — some non-OpenSSH servers (network appliances
+            // in particular) close an exec channel without ever sending
+            // `exit-status`, and turning that into a hard error would break
+            // them — but it is logged rather than assumed silently.
+            let exit_code = resolve_exit_code(exit_status, exit_signal).unwrap_or_else(|| {
+                warn!(
+                    "Channel closed without exit-status or exit-signal; \
+                     reporting 0, but the command's outcome is unknown"
+                );
+                0
+            });
             Ok((stdout, stderr, exit_code))
         })
         .await;
@@ -1738,5 +1816,67 @@ mod tests {
         let sanitized = sanitize_ssh_error(&error);
         assert!(!sanitized.contains("publickey"));
         assert!(sanitized.contains("(truncated)"));
+    }
+
+    // ── terminal status of an exec channel (AUDIT-2026-08 R3) ─
+    //
+    // `read_command_output` seeded `exit_code = 0` and only ever wrote it from
+    // `ChannelMsg::ExitStatus`. `ExitSignal` fell into the catch-all arm and
+    // a channel that closed without either produced `Ok((stdout, stderr, 0))`.
+    // A remote OOM-kill, or a connection dropped mid-command, therefore came
+    // back as a SUCCESS with truncated output — `execute_command` emits
+    // `"success": true`, `record_success` fires, and the audit log agrees.
+    //
+    // The decision is split out as a pure function so it is testable without
+    // an SSH server, and killable by mutation testing.
+
+    #[test]
+    fn signal_exit_code_uses_the_128_plus_n_convention() {
+        assert_eq!(signal_exit_code(&Sig::HUP), 129);
+        assert_eq!(signal_exit_code(&Sig::INT), 130);
+        assert_eq!(signal_exit_code(&Sig::QUIT), 131);
+        assert_eq!(signal_exit_code(&Sig::ILL), 132);
+        assert_eq!(signal_exit_code(&Sig::ABRT), 134);
+        assert_eq!(signal_exit_code(&Sig::FPE), 136);
+        assert_eq!(signal_exit_code(&Sig::KILL), 137);
+        assert_eq!(signal_exit_code(&Sig::SEGV), 139);
+        assert_eq!(signal_exit_code(&Sig::PIPE), 141);
+        assert_eq!(signal_exit_code(&Sig::ALRM), 142);
+        assert_eq!(signal_exit_code(&Sig::TERM), 143);
+        assert_eq!(signal_exit_code(&Sig::USR1), 138);
+    }
+
+    #[test]
+    fn signal_exit_code_is_never_zero_even_for_unknown_signals() {
+        // A vendor-specific signal name still means "killed", so it must not
+        // land on 0 — every consumer reads 0 as success.
+        let code = signal_exit_code(&Sig::Custom("WEIRD".to_string()));
+        assert_ne!(code, 0);
+        assert!(code > 128, "got {code}");
+    }
+
+    #[test]
+    fn resolve_exit_code_prefers_an_explicit_exit_status() {
+        assert_eq!(resolve_exit_code(Some(0), None), Some(0));
+        assert_eq!(resolve_exit_code(Some(1), None), Some(1));
+        assert_eq!(resolve_exit_code(Some(127), None), Some(127));
+    }
+
+    #[test]
+    fn resolve_exit_code_reports_a_signal_death_as_failure() {
+        assert_eq!(resolve_exit_code(None, Some(137)), Some(137));
+    }
+
+    #[test]
+    fn resolve_exit_code_lets_a_signal_win_over_a_stale_zero_status() {
+        // Servers may send exit-status 0 and then exit-signal; the kill is the
+        // more specific fact and must not be reported as success.
+        assert_eq!(resolve_exit_code(Some(0), Some(137)), Some(137));
+    }
+
+    #[test]
+    fn resolve_exit_code_is_none_when_the_channel_said_nothing() {
+        // This is the case that used to silently become 0.
+        assert_eq!(resolve_exit_code(None, None), None);
     }
 }

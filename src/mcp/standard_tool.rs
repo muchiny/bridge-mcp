@@ -16,7 +16,7 @@ use crate::domain::output_truncator::truncate_output_with_cache;
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
-use crate::ssh::{is_retryable_error, with_retry_if};
+use crate::ssh::{is_retryable_error_for, with_retry_if};
 
 /// Trait for accessing common fields present in all standard tool args.
 pub trait CommonArgs {
@@ -408,6 +408,18 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // is cancelled. We poison the pooled connection with
         // `mark_failed()` to prevent reuse of a potentially half-closed
         // channel on the next request.
+        // Replaying a command is only safe when doing so cannot change the
+        // outcome. A timeout does NOT prove the command did not run, so for a
+        // non-idempotent or destructive tool the retry loop was re-issuing an
+        // identical `ssh_db_restore` / `ssh_file_patch` / `ssh_helm_rollback`
+        // up to `max_attempts` times — and since the destructive-confirmation
+        // prompt lives in `pre_execute`, above this loop, a single human "yes"
+        // authorised every one of them.
+        let annotations = crate::mcp::registry::tool_annotations(T::NAME);
+        let safe_to_replay = annotations.read_only_hint == Some(true)
+            || (annotations.idempotent_hint == Some(true)
+                && annotations.destructive_hint != Some(true));
+
         let cancel_token = ctx.cancel_token.clone();
         let output = with_retry_if(
             &retry_config,
@@ -438,7 +450,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                     }
                 }
             },
-            is_retryable_error,
+            |e| is_retryable_error_for(e, safe_to_replay),
         )
         .await;
 

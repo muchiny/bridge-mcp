@@ -25,6 +25,35 @@ fn validate_remote_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Join a directory-entry name supplied by the remote server onto a local
+/// directory, or return `None` when the name is not a single, ordinary path
+/// component.
+///
+/// Directory listings arrive over the wire, so `name` is attacker-controlled
+/// whenever the peer is hostile or compromised. Two `std` behaviours make a
+/// naive `local_dir.join(name)` dangerous:
+///
+/// - joining an **absolute** path discards the base entirely, so a listing
+///   entry called `/home/user/.ssh/authorized_keys` writes exactly there;
+/// - `..` walks out of the destination directory.
+///
+/// This is the scp/rsync class of bug tracked as CVE-2019-6111: the client
+/// must never trust the server to describe where a file belongs. A directory
+/// entry is one path component by definition, so anything else is rejected
+/// rather than sanitised — there is no legitimate caller that needs it.
+fn safe_local_join(local_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    if name.trim().is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(local_dir.join(name))
+}
+
 /// Default chunk size for streaming transfers (1 MB)
 pub const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
 
@@ -814,7 +843,15 @@ impl SftpClient {
                     continue;
                 }
 
-                let local_entry_path = local_dir.join(&entry.name);
+                // `entry.name` came off the wire; see `safe_local_join`.
+                let Some(local_entry_path) = safe_local_join(&local_dir, &entry.name) else {
+                    errors.push(format!(
+                        "Refused directory entry with an unsafe name from {remote_dir}: {:?} \
+                         (a listing entry must be a single path component)",
+                        entry.name
+                    ));
+                    continue;
+                };
 
                 if entry.is_dir {
                     // Create local directory and push to stack
@@ -1888,5 +1925,111 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(huge.effective_chunk_size(), MAX_CHUNK_SIZE);
+    }
+
+    // ── server-supplied entry names (AUDIT-2026-08 R4) ───────
+    //
+    // `read_dir` takes `file_name()` straight off the wire, and
+    // `download_directory` used to feed it to `local_dir.join(...)`. `join`
+    // with an absolute path DISCARDS the base entirely, and `..` walks out of
+    // it — so a hostile or compromised SFTP server could answer a listing with
+    // `/home/user/.ssh/authorized_keys` and have the bridge write there under
+    // its own identity. Same shape as CVE-2019-6111 (scp).
+
+    #[test]
+    fn safe_local_join_accepts_ordinary_names() {
+        let base = std::path::Path::new("/tmp/sync");
+        assert_eq!(
+            safe_local_join(base, "notes.txt"),
+            Some(std::path::PathBuf::from("/tmp/sync/notes.txt"))
+        );
+        assert_eq!(
+            safe_local_join(base, "a file with spaces.log"),
+            Some(std::path::PathBuf::from("/tmp/sync/a file with spaces.log"))
+        );
+        assert_eq!(
+            safe_local_join(base, ".hidden"),
+            Some(std::path::PathBuf::from("/tmp/sync/.hidden"))
+        );
+        assert_eq!(
+            safe_local_join(base, "café-résumé.txt"),
+            Some(std::path::PathBuf::from("/tmp/sync/café-résumé.txt"))
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::join_absolute_paths,
+        reason = "the assertion below exists precisely to pin the std behaviour this lint warns \
+                  about — joining an absolute path silently discards the base. That is the \
+                  footgun `safe_local_join` guards against, and demonstrating it here is what \
+                  stops a future reader from deleting the guard as redundant."
+    )]
+    fn safe_local_join_rejects_absolute_names() {
+        let base = std::path::Path::new("/tmp/sync");
+        // The bug: `Path::join` with an absolute argument throws the base away.
+        assert_eq!(
+            base.join("/home/user/.ssh/authorized_keys"),
+            std::path::PathBuf::from("/home/user/.ssh/authorized_keys"),
+            "this is the std behaviour the guard exists for"
+        );
+        assert_eq!(
+            safe_local_join(base, "/home/user/.ssh/authorized_keys"),
+            None
+        );
+        assert_eq!(safe_local_join(base, "/etc/passwd"), None);
+    }
+
+    #[test]
+    fn safe_local_join_rejects_traversal() {
+        let base = std::path::Path::new("/tmp/sync");
+        assert_eq!(safe_local_join(base, ".."), None);
+        assert_eq!(safe_local_join(base, "."), None);
+        assert_eq!(safe_local_join(base, "../../etc/cron.d/pwn"), None);
+    }
+
+    #[test]
+    fn safe_local_join_rejects_multi_component_names() {
+        let base = std::path::Path::new("/tmp/sync");
+        // A directory entry is one component by definition; anything with a
+        // separator in it was fabricated by the peer.
+        assert_eq!(safe_local_join(base, "sub/dir"), None);
+        assert_eq!(safe_local_join(base, "sub\\dir"), None);
+    }
+
+    #[test]
+    fn safe_local_join_rejects_empty_and_control_characters() {
+        let base = std::path::Path::new("/tmp/sync");
+        assert_eq!(safe_local_join(base, ""), None);
+        assert_eq!(safe_local_join(base, "   "), None);
+        assert_eq!(safe_local_join(base, "evil\nname"), None);
+        assert_eq!(safe_local_join(base, "nul\0byte"), None);
+    }
+
+    #[test]
+    fn safe_local_join_result_always_stays_under_the_base() {
+        let base = std::path::Path::new("/tmp/sync");
+        for name in [
+            "ok.txt",
+            "/etc/passwd",
+            "..",
+            "../escape",
+            "a/b",
+            "",
+            "\n",
+            "café.txt",
+        ] {
+            if let Some(joined) = safe_local_join(base, name) {
+                assert!(
+                    joined.starts_with(base),
+                    "{name:?} produced {joined:?}, which escapes {base:?}"
+                );
+                assert_eq!(
+                    joined.components().count(),
+                    base.components().count() + 1,
+                    "{name:?} must add exactly one component"
+                );
+            }
+        }
     }
 }
