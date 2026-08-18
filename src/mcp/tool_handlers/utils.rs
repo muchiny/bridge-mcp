@@ -539,6 +539,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_parse_transfer_mode_allows_append_when_checksum_disabled() {
+        assert_eq!(
+            parse_transfer_mode_checked("append", false, "received").unwrap(),
+            TransferMode::Append
+        );
+    }
+
     /// The CLI spells this mode with dashes and the MCP schema with
     /// underscores; both reach the same helper, so both must parse.
     #[test]
