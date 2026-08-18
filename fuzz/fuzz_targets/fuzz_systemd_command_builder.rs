@@ -35,8 +35,11 @@ fuzz_target!(|data: &str| {
     assert_eq!(cmd, "systemctl daemon-reload");
 
     // list
-    let cmd = SystemdCommandBuilder::build_list_command(Some(data), true, Some(data));
-    assert!(cmd.contains("systemctl"), "list must contain 'systemctl': {cmd}");
+    // Returns Result: the builder validates `state` and `unit_type`, so an
+    // arbitrary fuzz string is expected to be rejected most of the time.
+    if let Ok(cmd) = SystemdCommandBuilder::build_list_command(Some(data), true, Some(data)) {
+        assert!(cmd.contains("systemctl"), "list must contain 'systemctl': {cmd}");
+    }
 
     // logs
     let cmd = SystemdCommandBuilder::build_logs_command(

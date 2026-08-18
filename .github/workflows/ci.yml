@@ -72,6 +72,33 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # The fuzz harness is a separate workspace that nothing in this workflow
+  # compiled, so it drifted out of sync with the API it exercises and only
+  # fuzz.yml — nightly, ASan, ~40 minutes — would have noticed. It did not:
+  # a manifest error made every target fail to build, `cargo fuzz run` reports
+  # that through the same exit code it uses for a crash, and the job stayed
+  # green for six weeks while fuzzing nothing.
+  #
+  # This is the cheap half of that check, on every PR: stable, no nightly, no
+  # sanitizer, no fuzzing — just "do the 57 targets still typecheck against
+  # the current API". It catches signature drift the day it lands instead of
+  # six weeks later.
+  fuzz-harness:
+    name: Fuzz harness compiles
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-harness
+      - run: cargo check --manifest-path fuzz/Cargo.toml --all-targets
+
   lint:
     name: Clippy
     runs-on: ubuntu-latest

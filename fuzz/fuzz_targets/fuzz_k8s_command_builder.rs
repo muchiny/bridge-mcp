@@ -120,6 +120,7 @@ fuzz_target!(|data: &str| {
         Some("kubectl"),
         data,       // resource_type
         Some(data), // namespace
+        true,       // all_namespaces
         Some(data), // sort_by
         true,       // containers
     );
