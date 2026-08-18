@@ -29,6 +29,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   params in `tools/list`. Lib API: `DataReductionArgs::extract` now returns
   `Result`; `truncate_output_with_cache` takes a 4th `reduction_tip` argument;
   `Metrics::record_pipeline_stats` takes a 5th `params_used` argument.
+- **BREAKING: `rbac.enabled: true` is now rejected at config load** — a
+  config file that loaded successfully before this change can now fail to
+  load. Nothing in the request path ever called `RbacEnforcer::is_allowed`
+  — no `ToolContext`, `SessionContext` nor `Session` carries a principal
+  to check against — so `enabled: true` granted unrestricted access while
+  reading as an active security control. `validate_config` now refuses it
+  with: "security.rbac is not enforced by this build: `rbac.enabled: true`
+  would grant unrestricted access. Set it to false and restrict access
+  with `tool_groups.groups` (unlisted groups are already disabled),
+  `security.mode` + whitelist/blacklist, or per-host configuration."
+- **`verify_checksum` with `mode=resume` or `mode=append` is now
+  refused** — instead of silently returning `checksum: None`. No transfer
+  mode has ever compared the computed hash against anything on the
+  remote host: `verify_checksum` has always been a local
+  (upload)/received-bytes (download) SHA256 only, never a
+  source-vs-destination comparison. In `resume`/`append` the hash was
+  not even computed. The tool now says so explicitly instead of
+  returning a success an operator could read as "integrity verified" —
+  full remote-side verification is not implemented. Applies to both MCP
+  handlers (`ssh_upload`, `ssh_download`) and the CLI
+  (`bridge-mcp upload`/`download`). The new shared error message also
+  fixed a wording split between the two surfaces: the MCP schema
+  accepted `fail_if_exists` while the CLI accepted `fail-if-exists` for
+  the same mode — both spellings are named in the message and both
+  still parse.
 
 ### Security
 
