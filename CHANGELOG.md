@@ -88,6 +88,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead); with `u64::MAX`, allocation failure aborted the process. Chunk
   sizes are now clamped to 4 KB..=64 MB at every point of use, and both the
   upload and download schemas declare `minimum`/`maximum`.
+- **AWX bearer token stored verbatim in command history.** `process_success`
+  and `log_failure` (`src/domain/use_cases/execute_command.rs`) passed the
+  *raw* command to `AuditEvent::new`, `CommandHistory::record_success` /
+  `record_failure`, and the returned `command` field — only the command
+  *output* was sanitized. `AuditLogger` already re-sanitized `event.command`
+  defensively before writing, but `CommandHistory` had no sanitizer at all,
+  so a token typed on the command line (e.g. an AWX
+  `-H 'Authorization: Bearer {token}'`) was re-exported verbatim by
+  `ssh_history` and the `history://recent` MCP resource, both enabled by
+  default. The command is now sanitized once at the fan-out point, before it
+  reaches audit, history, or the response.
+  **Behaviour change:** `SanitizeConfig::default()` has `entropy_detection:
+  true` (threshold 4.5, min length 16). Commands are now fed through that
+  detector too, so any opaque argument 16+ characters long with high
+  entropy — a base64 blob, a generated ID, a UUID without hyphens — will be
+  replaced with a redaction marker in `ssh_history` output and the
+  `history://recent` resource, even when it wasn't a secret. Ordinary
+  commands (paths, flags, hostnames) are unaffected.
 
 ### Fixed
 
