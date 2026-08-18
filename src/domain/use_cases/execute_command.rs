@@ -180,10 +180,16 @@ impl ExecuteCommandUseCase {
         command: &str,
         output: &CommandOutput,
     ) -> ExecuteCommandResponse {
+        // Redact secrets (e.g. an AWX bearer token typed on the command line)
+        // from the command itself before it ever reaches audit or history —
+        // both re-export `command` verbatim, and only the *output* used to be
+        // sanitized (audit 2026-08-13, B5/B6).
+        let redacted = self.sanitizer.sanitize(command);
+
         // Log successful execution
         self.audit_logger.log(AuditEvent::new(
             host,
-            command,
+            &redacted,
             CommandResult::Success {
                 exit_code: output.exit_code,
                 duration_ms: output.duration_ms,
@@ -192,7 +198,7 @@ impl ExecuteCommandUseCase {
 
         // Record in history
         self.history
-            .record_success(host, command, output.exit_code, output.duration_ms);
+            .record_success(host, &redacted, output.exit_code, output.duration_ms);
 
         // Format and sanitize the result
         let result = Self::format_output(host, command, output);
@@ -209,21 +215,24 @@ impl ExecuteCommandUseCase {
             stdout: sanitized_stdout,
             stderr: sanitized_stderr,
             host: host.to_string(),
-            command: command.to_string(),
+            command: redacted.into_owned(),
         }
     }
 
     /// Log a failed command execution
     pub fn log_failure(&self, host: &str, command: &str, error: &str) {
+        // Same redaction as `process_success` — see its comment.
+        let redacted = self.sanitizer.sanitize(command);
+
         self.audit_logger.log(AuditEvent::new(
             host,
-            command,
+            &redacted,
             CommandResult::Error {
                 message: error.to_string(),
             },
         ));
 
-        self.history.record_failure(host, command);
+        self.history.record_failure(host, &redacted);
     }
 
     /// Format command output for display
