@@ -208,16 +208,62 @@ jobs:
           # `--baseline skip` drops one full build+test per shard. It is safe
           # here because the `security-tests` job in this same workflow already
           # proves the unmutated tree builds and passes.
+          #
+          # `--baseline skip` also disables `--timeout-multiplier` (it has no
+          # baseline duration to multiply — cargo-mutants falls back to a flat
+          # 300s test timeout instead) and forces the *build* phase to
+          # recompile from scratch for every mutant instead of incrementally.
+          #
+          # `--timeout 900` replaces the dead multiplier. The number is
+          # measured, not guessed, and the measurement is the reason it is not
+          # the 60s an earlier draft of this change proposed:
+          #   full suite, --all-features, 32 test threads .... 52s
+          #   full suite, --features http, 32 test threads ... 52s
+          #   same suite pinned to 2 test threads ........... 334s
+          # (bridge-mcp, 32-core dev box, 9485-9676 tests). Feature selection
+          # barely moves it; thread count moves it 6x. This job runs `-j 2`
+          # CONCURRENT MUTANTS, so on a 4-core runner each mutant's nextest
+          # gets ~2 cores — the 334s column, on slower cores. 60s would have
+          # timed out essentially every mutant, and the 300s fallback it
+          # replaced was already marginal. That is a second, independent cause
+          # of the empty sweeps, on top of the build-phase bug below.
+          #
+          # 900s is ~2.5x the 334s figure: enough headroom for slower CI cores,
+          # still tight enough that a mutant which hangs dies in 15 minutes.
+          # REVISE IT from the first real sweep: `-vV` logs each mutant's
+          # actual test duration.
+          #
+          # Honest throughput note: at ~400s per mutant a 150-minute shard
+          # covers roughly 20 mutants, so 24 shards sample ~500 per week. That
+          # is a real sample, not full coverage of src/{domain,security,config}
+          # — do not read a clean weekly report as "these directories are
+          # mutation-tested".
+          #
+          # `--all-features` must be a native cargo-mutants flag, not `--
+          # --all-features`: anything after `--` is forwarded only to the
+          # `cargo test` invocation, so the build phase compiled with default
+          # features while the test phase alone recompiled everything against
+          # `--all-features` inside the timeout — the actual root cause of
+          # every shard exhausting its budget without finishing.
+          #
+          # `-f GLOB` (repeatable) replaces `--re REGEX`: `-f` filters by file
+          # path before mutants are even generated, while `--re` filters by
+          # matching the full mutant name (path + function + description)
+          # after generation — `-f` is the documented, purpose-built mechanism
+          # for "only these directories" and doesn't depend on the file path
+          # happening to be a prefix of the mutant name string.
           set +e
           timeout --signal=INT --kill-after=2m 150m \
             cargo mutants \
               --baseline skip \
-              --re '^src/(domain|security|config)/' \
+              -f 'src/domain/**' \
+              -f 'src/security/**' \
+              -f 'src/config/**' \
               --shard "$SHARD/24" \
               --test-tool nextest \
-              --timeout-multiplier 2.0 \
+              --timeout 900 \
               -j 2 \
-              -- --all-features
+              --all-features
           rc=$?
           set -e
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then

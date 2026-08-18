@@ -1,3 +1,0 @@
-# cargo-mutants configuration
-exclude_globs = ["target/**", "fuzz/target/**", "fuzz/corpus/**", "fuzz/artifacts/**"]
-additional_cargo_args = ["--all-features"]

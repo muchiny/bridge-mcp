@@ -227,6 +227,21 @@ jobs:
           # that return value. `http` is cheap (axum/tower); the heavier
           # optional features still have this blind spot and need the same
           # treatment if a diff ever lands in them.
+          #
+          # `--timeout-multiplier` is dead here too: with `--baseline skip`
+          # there is no baseline duration to multiply against, so
+          # cargo-mutants ignores it and falls back to a flat 300s test
+          # timeout. `--timeout 900` replaces it explicitly, on the same
+          # measurement as the weekly sweep (see security.yml for the table):
+          # the suite is 52s at 32 test threads but 334s pinned to 2, and this
+          # job also runs two concurrent mutants, so each one sees roughly two
+          # cores of a shared runner.
+          #
+          # The trade-off differs from the weekly job: this budget is 35m, so
+          # one hung mutant burns nearly half of it before the timeout fires.
+          # That is still the right side to err on — a mutant killed by an
+          # over-tight timeout is reported as caught when nothing caught it,
+          # which is worse than a partial report that says it is partial.
           set +e
           timeout --signal=INT --kill-after=2m 35m \
             cargo mutants \
@@ -234,7 +249,7 @@ jobs:
               --baseline skip \
               --test-tool nextest \
               --features http \
-              --timeout-multiplier 1.5 \
+              --timeout 900 \
               -j 2 \
               -vV
           rc=$?
