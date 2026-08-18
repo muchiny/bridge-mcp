@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
             use bridge_mcp::mcp::transport::http as http_transport;
             use bridge_mcp::mcp::transport::oauth::OAuthConfig as TransportOAuthConfig;
 
-            let (server, _audit_task) = McpServer::new((*config).clone());
+            let (server, audit_task) = McpServer::new((*config).clone());
             let server = Arc::new(server);
 
             let oauth = TransportOAuthConfig {
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
                 allow_unsafe_bind: insecure_bind || config.http.allow_unsafe_bind,
             };
 
-            http_transport::serve(server, http_config).await?;
+            http_transport::serve(server, http_config, audit_task).await?;
         }
         Some(Commands::Exec {
             host,

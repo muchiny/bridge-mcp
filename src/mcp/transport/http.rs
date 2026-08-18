@@ -316,11 +316,24 @@ pub fn build_router_with_store(
 /// reads the boot-time key map instead of constructing an empty validator
 /// per request (FIND-006). Fails closed at boot when OAuth is enabled but
 /// no static keys are configured.
+///
+/// `audit_task` is the writer half returned by [`McpServer::new`] and is
+/// spawned here, mirroring [`McpServer::serve`]. It is a parameter rather
+/// than something the caller is trusted to spawn because the caller used to
+/// bind it to `_audit_task` and drop it on the spot: the channel then closed
+/// and every event was discarded by `let _ = send(...)`, leaving `audit.log`
+/// created-but-empty on the one transport whose selling point is the audit
+/// trail. Pass `None` only when auditing is genuinely disabled.
 pub async fn serve(
     server: Arc<McpServer>,
     config: HttpTransportConfig,
+    audit_task: Option<crate::security::AuditWriterTask>,
 ) -> crate::error::Result<()> {
     refuse_unsafe_bind(&config)?;
+
+    if let Some(task) = audit_task {
+        tokio::spawn(task.run());
+    }
 
     let bind = config.bind.clone();
 
@@ -928,7 +941,7 @@ mod tests {
         let cfg_main = crate::config::Config::default();
         let (server, _audit_task) = crate::mcp::McpServer::new(cfg_main);
         let server = std::sync::Arc::new(server);
-        let r = serve(server, cfg).await;
+        let r = serve(server, cfg, None).await;
         assert!(r.is_err(), "must refuse 0.0.0.0 bind without OAuth");
         let msg = format!("{}", r.err().unwrap());
         assert!(msg.contains("loopback") || msg.contains("OAuth") || msg.contains("oauth"));
@@ -945,7 +958,7 @@ mod tests {
         let cfg_main = crate::config::Config::default();
         let (server, _audit_task) = crate::mcp::McpServer::new(cfg_main);
         let server = std::sync::Arc::new(server);
-        let handle = tokio::spawn(async move { serve(server, cfg).await });
+        let handle = tokio::spawn(async move { serve(server, cfg, None).await });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         handle.abort();
         // If serve returned an Err synchronously the abort wouldn't have helped — and

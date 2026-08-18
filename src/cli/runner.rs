@@ -513,6 +513,14 @@ fn create_context(config: Arc<Config>) -> ToolContext {
         .with_known_secrets(&known_secrets),
     );
     // For CLI mode, we don't spawn the audit writer task (short-lived process).
+    //
+    // KNOWN GAP (audit 2026-08-13): the consequence is that `audit.path`
+    // receives nothing at all from CLI invocations — every event is dropped by
+    // `let _ = send(...)` once the writer half goes out of scope here. Only the
+    // tracing sink below sees them. Closing this properly means returning the
+    // task from `create_context`, then dropping the logger and joining the
+    // writer before the process exits, across all six production call sites.
+    //
     // Wire the sanitizer so event.command is masked on the tracing sink too
     // (audit 2026-07-05 finding 1 — MCP mode already does this in server.rs).
     let audit_sanitizer =
