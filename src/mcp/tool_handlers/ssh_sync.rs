@@ -108,6 +108,20 @@ impl ToolHandler for SshSyncHandler {
         validate_path(&args.source)?;
         validate_path(&args.destination)?;
 
+        // Root-scope the remote side. Every other file tool does this
+        // (ssh_upload, ssh_download, ssh_ls, ssh_find, ssh_file_write);
+        // ssh_sync was the one that did not, so the workspace roots a client
+        // declares over MCP did not constrain it — and it is the tool that
+        // walks whole directory trees. Which argument is remote depends on the
+        // direction: on upload the destination is remote, on download the
+        // source is.
+        let remote_path = if args.direction == "upload" {
+            &args.destination
+        } else {
+            &args.source
+        };
+        ctx.validate_root_scope(remote_path)?;
+
         // Get host config
         let host_config =
             ctx.config
