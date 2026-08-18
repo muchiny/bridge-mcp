@@ -12,7 +12,13 @@
 //! docs/superpowers/plans/2026-08-18-audit-remediation.md, Wave 6.
 //!
 //! Do not delete this module: it is re-exported at `src/security/mod.rs:12`
-//! and 63 `Config { .. }` literals construct `RbacConfig`.
+//! and `rbac` is a field of `Config`, so every `Config { .. }` literal in the
+//! tree — production and test alike — has to name it.
+//!
+//! (This line used to carry a count. It said 63 and was already wrong when
+//! written; it is the kind of claim that rots on the next test added, which is
+//! a poor thing to ship in the module documenting a security control that
+//! enforced nothing.)
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
