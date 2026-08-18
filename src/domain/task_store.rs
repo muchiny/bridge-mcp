@@ -495,7 +495,11 @@ mod tests {
         // Complete in exactly the window the old code lost: after the guard would
         // have been released, before the waiter parks.
         store.complete_task(&id, test_result()).await;
-        let got = tokio::time::timeout(Duration::from_secs(3600), store.wait_for_result(&id))
+        // 5s to match this file's other guards. The clock is paused, so this
+        // never costs wall-clock; a round hour here trips a stable-only clippy
+        // lint that wants `Duration::from_hours`, an API this crate's MSRV
+        // (1.94) cannot be assumed to have.
+        let got = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
             .await
             .expect("must not hang");
         assert!(got.is_some());
