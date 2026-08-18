@@ -45,6 +45,14 @@ fn history_redacts_awx_bearer_token_on_success() {
         "bearer token leaked into ExecuteCommandResponse.command: {}",
         response.command
     );
+    // Nor must the formatted `output` field, which embeds "Command: {command}"
+    // — `format_output` must receive the already-redacted command, not rely
+    // solely on the outer `sanitize(&result)` pass to catch it a second time.
+    assert!(
+        !response.output.contains(token),
+        "bearer token leaked into ExecuteCommandResponse.output: {}",
+        response.output
+    );
 
     let recent = history.recent(1);
     assert_eq!(recent.len(), 1);
@@ -92,4 +100,51 @@ fn history_benign_command_round_trips_byte_identical() {
     let recent = history.recent(1);
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].command, "ls -la");
+}
+
+/// Pins the behaviour change documented in CHANGELOG.md under `## [Unreleased]`
+/// -> `### Security`: `Sanitizer::with_defaults()` / `SanitizeConfig::default()`
+/// has `entropy_detection: true` (threshold 4.5, min length 16), and commands
+/// now go through the same sanitizer as output. An opaque, high-entropy
+/// argument 16+ characters long — not a recognized secret pattern, no
+/// "password"/"token"/"secret"/"key"/"bearer" keyword anywhere in the command
+/// — must still be redacted purely by the entropy detector. This is NOT a
+/// vulnerability; it is the documented, intentional trade-off. If this test
+/// starts failing, the CHANGELOG entry is now false and must be corrected
+/// (not the other way around).
+#[test]
+fn history_entropy_detection_redacts_opaque_high_entropy_argument() {
+    let (use_case, history) = use_case_with_history();
+
+    // High-entropy, 30-char opaque argument (mixed-case alphanumeric), well
+    // over the default min_length of 16 — same shape used by
+    // `EntropyDetector`'s own unit tests (src/security/entropy.rs).
+    let opaque_arg = "a8Kz9xQ2m4Fp7Lw1Bn3Yd5Rj6Gt0Hv";
+    let command = format!("deploy-cli push --build {opaque_arg} --env staging");
+    let output = CommandOutput {
+        stdout: "deployed".to_string(),
+        stderr: String::new(),
+        exit_code: 0,
+        duration_ms: 8,
+    };
+
+    let response = use_case.process_success("host1", &command, &output);
+
+    assert!(
+        !response.command.contains(opaque_arg),
+        "expected the opaque high-entropy argument to be redacted from \
+         ExecuteCommandResponse.command per the documented entropy-detection \
+         side effect, but it survived: {}",
+        response.command
+    );
+
+    let recent = history.recent(1);
+    assert_eq!(recent.len(), 1);
+    assert!(
+        !recent[0].command.contains(opaque_arg),
+        "expected the opaque high-entropy argument to be redacted from the \
+         CommandHistory entry per the documented entropy-detection side \
+         effect, but it survived: {}",
+        recent[0].command
+    );
 }

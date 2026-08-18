@@ -200,8 +200,12 @@ impl ExecuteCommandUseCase {
         self.history
             .record_success(host, &redacted, output.exit_code, output.duration_ms);
 
-        // Format and sanitize the result
-        let result = Self::format_output(host, command, output);
+        // Format and sanitize the result. Pass the already-redacted command so
+        // the raw value never appears in `result` even transiently — the
+        // outer `sanitize(&result)` below still runs (it has stdout/stderr
+        // secrets to catch), but the "no raw command past this point"
+        // invariant no longer depends on that second pass alone.
+        let result = Self::format_output(host, &redacted, output);
         let sanitized = self.sanitizer.sanitize(&result).into_owned();
 
         // Also sanitize stdout/stderr separately for structured content
