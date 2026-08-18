@@ -50,10 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full remote-side verification is not implemented. Applies to both MCP
   handlers (`ssh_upload`, `ssh_download`) and the CLI
   (`bridge-mcp upload`/`download`). The new shared error message also
-  fixed a wording split between the two surfaces: the MCP schema
-  accepted `fail_if_exists` while the CLI accepted `fail-if-exists` for
-  the same mode — both spellings are named in the message and both
-  still parse.
+  fixed a wording split between the two surfaces: both have always
+  accepted `fail_if_exists` and `fail-if-exists` alike (they share one
+  `TransferMode::parse`), but each *advertised* only its own spelling in
+  the "valid modes" error text. The shared message now names both.
 
 ### Security
 
