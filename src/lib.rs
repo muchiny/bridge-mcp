@@ -86,9 +86,16 @@ pub use security::{AuditEvent, CommandResult, CommandValidator, RateLimiter};
 #[doc(hidden)]
 pub use ssh::TransferMode;
 // Protocol types for fuzzing (MCP Tasks + Completions + Logging + Elicitation + Sampling)
+//
+// `ElicitationCreateParams` and `SamplingCreateMessageParams` are `Serialize`
+// only: they are server->client *requests*, so nothing here ever parses them.
+// The inbound halves — the client's replies, which a hostile or buggy client
+// controls — are `ElicitationCreateResult` and `SamplingCreateMessageResult`,
+// and those are what the fuzz targets need.
 #[doc(hidden)]
 pub use mcp::protocol::{
-    CompletionsCompleteParams, ElicitationCreateParams, InitializeParams, LoggingSetLevelParams,
-    PromptsGetParams, ResourcesReadParams, SamplingCreateMessageParams, TaskCancelParams,
-    TaskGetParams, TaskListParams, TaskRequest, TaskResultParams,
+    CompletionsCompleteParams, ElicitationCreateParams, ElicitationCreateResult, InitializeParams,
+    LoggingSetLevelParams, PromptsGetParams, ResourcesReadParams, SamplingCreateMessageParams,
+    SamplingCreateMessageResult, TaskCancelParams, TaskGetParams, TaskListParams, TaskRequest,
+    TaskResultParams,
 };

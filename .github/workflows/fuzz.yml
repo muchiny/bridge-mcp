@@ -95,13 +95,13 @@ jobs:
       # and filed a "found crashes" issue every night (47 of them, all false).
       # Separating the two makes a broken harness a red job instead of a
       # silent one.
+      # One invocation, not one per target: `cargo fuzz build` with no TARGET
+      # builds them all. The per-target loop this replaces re-entered cargo 57
+      # times and, worse, stopped at the first failure under `bash -e` — so the
+      # first run after the harness was unblocked reported exactly one broken
+      # target and hid however many followed it.
       - name: Build fuzz targets
-        run: |
-          for target in $(cargo +nightly fuzz list); do
-            echo "::group::Building $target"
-            cargo +nightly fuzz build "$target"
-            echo "::endgroup::"
-          done
+        run: cargo +nightly fuzz build
 
       - name: Run fuzz targets
         # Dispatch inputs go through env so they are never interpolated

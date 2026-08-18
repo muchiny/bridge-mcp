@@ -26,6 +26,9 @@ fuzz_target!(|data: &str| {
         true,                // use_become
         Some(data),          // become_user
         Some(data),          // working_dir
+        Some(data),          // callback
+        Some(data),          // vault_password_file
+        Some(data),          // vault_id
     );
     assert!(cmd.contains("ansible-playbook"),
         "playbook must contain 'ansible-playbook': {cmd}");
@@ -62,13 +65,15 @@ fuzz_target!(|data: &str| {
         Some(5),    // forks
         Some(2),    // verbose
         true,       // check
+        Some(data), // vault_password_file
+        Some(data), // vault_id
     );
     assert!(cmd.starts_with("ansible "),
         "adhoc must start with 'ansible ': {cmd}");
 
     // Test with no optional args
     let cmd = AnsibleCommandBuilder::build_adhoc_command(
-        data, "ping", None, None, false, None, None, None, None, false,
+        data, "ping", None, None, false, None, None, None, None, false, None, None,
     );
     assert!(cmd.contains("-m 'ping'"),
         "adhoc ping must contain -m 'ping'");
