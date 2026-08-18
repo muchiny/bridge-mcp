@@ -42,7 +42,7 @@ jobs:
       contents: read
       issues: write # file a bug when a fuzz target crashes
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -62,7 +62,7 @@ jobs:
       # this, every nightly run restarts coverage-guided exploration from
       # zero and 30s/target only ever scratches the same shallow surface.
       - name: Restore fuzz corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}
