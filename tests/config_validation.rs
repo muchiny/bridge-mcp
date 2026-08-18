@@ -387,8 +387,9 @@ rbac:
 
 #[test]
 fn rbac_disabled_still_loads() {
-    assert!(load_yaml(
-        r#"
+    assert!(
+        load_yaml(
+            r#"
 hosts:
   server1:
     hostname: 192.0.2.1
@@ -398,14 +399,16 @@ hosts:
 rbac:
   enabled: false
 "#,
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn rbac_absent_still_loads() {
-    assert!(load_yaml(
-        r#"
+    assert!(
+        load_yaml(
+            r#"
 hosts:
   server1:
     hostname: 192.0.2.1
@@ -413,6 +416,7 @@ hosts:
     auth:
       type: agent
 "#,
-    )
-    .is_ok());
+        )
+        .is_ok()
+    );
 }
