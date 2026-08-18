@@ -111,10 +111,34 @@ jobs:
           key: geiger
       # cargo-geiger has no prebuilt binary in taiki-e/install-action, so it is
       # the one tool here that still pays a from-source build.
+      #
+      # Version-pinned on purpose. `cargo install cargo-geiger --locked` floats
+      # to whatever is newest at run time, and this job is scheduled — so an
+      # upstream release turns a green main red with no change on our side,
+      # exactly the hazard typos.toml already documents for crate-ci/typos.
+      # Bump this deliberately.
       - name: Install cargo-geiger
-        run: cargo install cargo-geiger --locked
+        run: cargo install cargo-geiger --version 0.13.0 --locked
       - name: Scan for unsafe code in dependencies
-        run: cargo geiger --all-features --output-format ascii
+        # `--output-format` values are CamelCase (Ascii, GitHubMarkdown, Json,
+        # Utf8, Ratio) and parsed case-sensitively. This step passed `ascii`
+        # and had been panicking on every weekly run since at least 2026-07-20:
+        #   Utf8ArgumentParsingFailed { value: "ascii", cause: "Matching variant not found" }
+        # The Makefile's `geiger` target has always had the capitalisation
+        # right; only the workflow drifted.
+        #
+        # The `cargo fetch` + `--forbid-only` fallback mirrors that same target
+        # (FIND-021, audit 2026-05-09): the cloud features pull nkeys 0.4.5,
+        # which cargo-geiger fails to extract on a cold dependency graph — and
+        # a CI runner is always cold. Falling back keeps the scan meaningful
+        # (the workspace itself is `#![forbid(unsafe_code)]`) instead of
+        # failing the job, but says so loudly.
+        run: |
+          cargo fetch >/dev/null 2>&1 || true
+          if ! cargo geiger --all-features --output-format Ascii; then
+            echo "::warning::full --all-features scan failed to extract; falling back to --forbid-only"
+            cargo geiger --forbid-only --output-format Ascii
+          fi
 
   # Weekly mutation sweep over the pure-logic layers (domain, security,
   # config — tool_handlers are thin adapters with poor mutation ROI).
