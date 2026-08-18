@@ -213,8 +213,31 @@ jobs:
           # baseline duration to multiply — cargo-mutants falls back to a flat
           # 300s test timeout instead) and forces the *build* phase to
           # recompile from scratch for every mutant instead of incrementally.
-          # `--timeout 60` replaces the dead multiplier: the full lib suite is
-          # ~9000 tests in ~33s, so 60s is generous per mutant.
+          #
+          # `--timeout 900` replaces the dead multiplier. The number is
+          # measured, not guessed, and the measurement is the reason it is not
+          # the 60s an earlier draft of this change proposed:
+          #   full suite, --all-features, 32 test threads .... 52s
+          #   full suite, --features http, 32 test threads ... 52s
+          #   same suite pinned to 2 test threads ........... 334s
+          # (bridge-mcp, 32-core dev box, 9485-9676 tests). Feature selection
+          # barely moves it; thread count moves it 6x. This job runs `-j 2`
+          # CONCURRENT MUTANTS, so on a 4-core runner each mutant's nextest
+          # gets ~2 cores — the 334s column, on slower cores. 60s would have
+          # timed out essentially every mutant, and the 300s fallback it
+          # replaced was already marginal. That is a second, independent cause
+          # of the empty sweeps, on top of the build-phase bug below.
+          #
+          # 900s is ~2.5x the 334s figure: enough headroom for slower CI cores,
+          # still tight enough that a mutant which hangs dies in 15 minutes.
+          # REVISE IT from the first real sweep: `-vV` logs each mutant's
+          # actual test duration.
+          #
+          # Honest throughput note: at ~400s per mutant a 150-minute shard
+          # covers roughly 20 mutants, so 24 shards sample ~500 per week. That
+          # is a real sample, not full coverage of src/{domain,security,config}
+          # — do not read a clean weekly report as "these directories are
+          # mutation-tested".
           #
           # `--all-features` must be a native cargo-mutants flag, not `--
           # --all-features`: anything after `--` is forwarded only to the
@@ -238,7 +261,7 @@ jobs:
               -f 'src/config/**' \
               --shard "$SHARD/24" \
               --test-tool nextest \
-              --timeout 60 \
+              --timeout 900 \
               -j 2 \
               --all-features
           rc=$?
