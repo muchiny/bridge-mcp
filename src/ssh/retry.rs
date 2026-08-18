@@ -142,6 +142,37 @@ pub fn is_retryable_error(error: &BridgeError) -> bool {
     }
 }
 
+/// Check if an error is retryable **for an operation that may not be safe to
+/// run twice**.
+///
+/// [`is_retryable_error`] answers a transport question — "might this work if I
+/// try again?" — and the exec pipeline was using it to answer a second,
+/// different question: "is it safe to run this command again?". Those diverge
+/// exactly where it matters.
+///
+/// A timeout proves nothing about whether the remote command ran; the command
+/// may well be running still. Same for a channel that died mid-flight. Only a
+/// failure to *connect* proves the command never started, and that one stays
+/// retryable for everything.
+///
+/// `safe_to_replay` should be true only when repeating the call cannot change
+/// the outcome — read-only tools, and mutating ones whose effect converges
+/// (`kubectl apply`, `systemctl restart`). It must be false for anything
+/// non-idempotent or destructive: `ssh_db_restore`, `ssh_file_patch`,
+/// `ssh_helm_rollback` (whose `revision` defaults to "previous", so three
+/// replays walk three revisions back).
+#[must_use]
+pub fn is_retryable_error_for(error: &BridgeError, safe_to_replay: bool) -> bool {
+    match error {
+        // Never connected, so the command never ran: replaying is safe
+        // regardless of what it does.
+        BridgeError::SshConnection { .. } => true,
+        _ if safe_to_replay => is_retryable_error(error),
+        // Timeouts and mid-flight channel failures leave the outcome unknown.
+        _ => false,
+    }
+}
+
 /// Execute an async operation with retry logic
 ///
 /// # Errors
@@ -984,6 +1015,110 @@ mod tests {
             let val = rand_simple();
             assert!(val >= 0.0, "rand_simple produced negative value: {val}");
             assert!(val < 1.0, "rand_simple produced value >= 1.0: {val}");
+        }
+    }
+
+    // ── replay safety (AUDIT-2026-08 R2) ─────────────────────
+    //
+    // `is_retryable_error` answers a transport question: "might this work if
+    // I try again?". It is not the same question as "is it safe to run this
+    // command a second time?", and the exec pipeline was using it for both.
+    //
+    // A timeout is the dangerous case: it proves nothing about whether the
+    // remote command ran. `command_timeout_seconds` elapsing on
+    // `ssh_db_restore`, `ssh_file_patch` or `ssh_helm_rollback` re-issued the
+    // identical command up to `max_attempts` times — and because the
+    // destructive-confirmation prompt happens in `pre_execute`, one human
+    // "yes" authorised all three.
+
+    #[test]
+    fn connection_failures_are_replayable_for_any_operation() {
+        // Failing to connect proves the command never started, so replaying
+        // it is safe no matter what the command does.
+        let err = BridgeError::SshConnection {
+            host: "h".to_string(),
+            reason: "refused".to_string(),
+        };
+        assert!(is_retryable_error_for(&err, true));
+        assert!(is_retryable_error_for(&err, false));
+    }
+
+    #[test]
+    fn timeouts_are_replayable_only_when_replay_is_safe() {
+        let err = BridgeError::SshTimeout { seconds: 30 };
+        assert!(
+            is_retryable_error_for(&err, true),
+            "a read-only or idempotent command may be retried after a timeout"
+        );
+        assert!(
+            !is_retryable_error_for(&err, false),
+            "a timeout does not prove the command did not run"
+        );
+    }
+
+    #[test]
+    fn mid_flight_channel_errors_are_replayable_only_when_replay_is_safe() {
+        // The channel died after the command was already on its way; whether
+        // it ran is unknown.
+        let err = BridgeError::SshExec {
+            reason: "channel closed".to_string(),
+        };
+        assert!(is_retryable_error_for(&err, true));
+        assert!(!is_retryable_error_for(&err, false));
+    }
+
+    #[test]
+    fn cancellation_is_never_replayed() {
+        assert!(!is_retryable_error_for(&BridgeError::Cancelled, true));
+        assert!(!is_retryable_error_for(&BridgeError::Cancelled, false));
+    }
+
+    #[test]
+    fn replay_safe_mode_matches_the_old_transport_predicate() {
+        // Nothing changes for read-only and idempotent tools: that is the
+        // whole point, the fix must not cost them their resilience.
+        for err in [
+            BridgeError::SshTimeout { seconds: 5 },
+            BridgeError::SshConnection {
+                host: "h".to_string(),
+                reason: "r".to_string(),
+            },
+            BridgeError::SshExec {
+                reason: "channel".to_string(),
+            },
+            BridgeError::SshExec {
+                reason: "unrelated failure".to_string(),
+            },
+            BridgeError::Cancelled,
+        ] {
+            assert_eq!(
+                is_retryable_error_for(&err, true),
+                is_retryable_error(&err),
+                "replay-safe path must be identical to the old behaviour for {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsafe_replay_never_retries_more_than_the_safe_path() {
+        // The guard may only ever *remove* retries, never add one.
+        for err in [
+            BridgeError::SshTimeout { seconds: 5 },
+            BridgeError::SshConnection {
+                host: "h".to_string(),
+                reason: "r".to_string(),
+            },
+            BridgeError::SshExec {
+                reason: "connection reset".to_string(),
+            },
+            BridgeError::Cancelled,
+        ] {
+            if is_retryable_error_for(&err, false) {
+                assert!(
+                    is_retryable_error_for(&err, true),
+                    "{err:?} retried when unsafe but not when safe"
+                );
+            }
         }
     }
 }
