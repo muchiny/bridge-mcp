@@ -231,17 +231,27 @@ jobs:
           # `--timeout-multiplier` is dead here too: with `--baseline skip`
           # there is no baseline duration to multiply against, so
           # cargo-mutants ignores it and falls back to a flat 300s test
-          # timeout. `--timeout 900` replaces it explicitly, on the same
-          # measurement as the weekly sweep (see security.yml for the table):
-          # the suite is 52s at 32 test threads but 334s pinned to 2, and this
-          # job also runs two concurrent mutants, so each one sees roughly two
-          # cores of a shared runner.
+          # timeout. `--timeout 900` replaces it explicitly.
           #
-          # The trade-off differs from the weekly job: this budget is 35m, so
-          # one hung mutant burns nearly half of it before the timeout fires.
-          # That is still the right side to err on — a mutant killed by an
-          # over-tight timeout is reported as caught when nothing caught it,
-          # which is worse than a partial report that says it is partial.
+          # Measured on this job's own first real run (PR #131, ubuntu-24.04,
+          # `-j 2`), which is what the number is set from rather than from a
+          # local extrapolation:
+          #   build phase per mutant ......... 210-369s
+          #   test phase per CAUGHT mutant ...    5-25s
+          # The build dominates by an order of magnitude, and the `--timeout`
+          # does not apply to it — it bounds the TEST phase only. A caught
+          # mutant exits at the first failing test, which is why its test
+          # phase is seconds.
+          #
+          # What is NOT measured: a MISSED mutant runs the suite to completion,
+          # and every mutant in that run was caught, so there is no observation
+          # of that upper bound yet. 900s is deliberately over-generous until
+          # there is one. Do not tighten it on the strength of the 5-25s
+          # figure — that is the fast path, not the worst case.
+          #
+          # The real throughput constraint is therefore the build, not this
+          # timeout: that run completed 10 of 21 mutants before exhausting its
+          # 35m budget and reported PARTIAL, as designed.
           set +e
           timeout --signal=INT --kill-after=2m 35m \
             cargo mutants \

@@ -228,16 +228,24 @@ jobs:
           # replaced was already marginal. That is a second, independent cause
           # of the empty sweeps, on top of the build-phase bug below.
           #
-          # 900s is ~2.5x the 334s figure: enough headroom for slower CI cores,
-          # still tight enough that a mutant which hangs dies in 15 minutes.
-          # REVISE IT from the first real sweep: `-vV` logs each mutant's
-          # actual test duration.
+          # CORRECTION from the first real CI run (PR #131's diff job, same
+          # cargo-mutants shape, ubuntu-24.04, `-j 2`). The local table above
+          # measures the wrong phase for this flag:
+          #   build phase per mutant ......... 210-369s
+          #   test phase per CAUGHT mutant ...    5-25s
+          # `--timeout` bounds the TEST phase only, and the build dominates it
+          # tenfold. A caught mutant exits at its first failing test, hence
+          # seconds. No MISSED mutant appeared in that run, so the full-suite
+          # upper bound this timeout must clear is still unmeasured — 900s stays
+          # deliberately over-generous until it is, and must NOT be tightened
+          # toward the 5-25s fast path.
           #
-          # Honest throughput note: at ~400s per mutant a 150-minute shard
-          # covers roughly 20 mutants, so 24 shards sample ~500 per week. That
-          # is a real sample, not full coverage of src/{domain,security,config}
-          # — do not read a clean weekly report as "these directories are
-          # mutation-tested".
+          # Throughput, now observed rather than estimated: that job completed 10
+          # of 21 mutants in 35 minutes (~3.5 min each, build-bound). A 150-minute
+          # shard therefore covers roughly 40, so 24 shards sample ~1000 per week.
+          # A sample, not coverage of src/{domain,security,config} — do not read a
+          # clean weekly report as "these directories are mutation-tested".
+          # Cutting the per-mutant BUILD is the only thing that moves this.
           #
           # `--all-features` must be a native cargo-mutants flag, not `--
           # --all-features`: anything after `--` is forwarded only to the
