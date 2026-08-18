@@ -208,16 +208,39 @@ jobs:
           # `--baseline skip` drops one full build+test per shard. It is safe
           # here because the `security-tests` job in this same workflow already
           # proves the unmutated tree builds and passes.
+          #
+          # `--baseline skip` also disables `--timeout-multiplier` (it has no
+          # baseline duration to multiply — cargo-mutants falls back to a flat
+          # 300s test timeout instead) and forces the *build* phase to
+          # recompile from scratch for every mutant instead of incrementally.
+          # `--timeout 60` replaces the dead multiplier: the full lib suite is
+          # ~9000 tests in ~33s, so 60s is generous per mutant.
+          #
+          # `--all-features` must be a native cargo-mutants flag, not `--
+          # --all-features`: anything after `--` is forwarded only to the
+          # `cargo test` invocation, so the build phase compiled with default
+          # features while the test phase alone recompiled everything against
+          # `--all-features` inside the timeout — the actual root cause of
+          # every shard exhausting its budget without finishing.
+          #
+          # `-f GLOB` (repeatable) replaces `--re REGEX`: `-f` filters by file
+          # path before mutants are even generated, while `--re` filters by
+          # matching the full mutant name (path + function + description)
+          # after generation — `-f` is the documented, purpose-built mechanism
+          # for "only these directories" and doesn't depend on the file path
+          # happening to be a prefix of the mutant name string.
           set +e
           timeout --signal=INT --kill-after=2m 150m \
             cargo mutants \
               --baseline skip \
-              --re '^src/(domain|security|config)/' \
+              -f 'src/domain/**' \
+              -f 'src/security/**' \
+              -f 'src/config/**' \
               --shard "$SHARD/24" \
               --test-tool nextest \
-              --timeout-multiplier 2.0 \
+              --timeout 60 \
               -j 2 \
-              -- --all-features
+              --all-features
           rc=$?
           set -e
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
