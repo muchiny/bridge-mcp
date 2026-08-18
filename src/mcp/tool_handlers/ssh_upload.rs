@@ -59,7 +59,7 @@ impl SshUploadHandler {
                 "type": "string",
                 "enum": ["overwrite", "append", "resume", "fail_if_exists"],
                 "default": "overwrite",
-                "description": "Transfer mode: 'overwrite' (default) replaces the remote file entirely; 'fail_if_exists' aborts if the remote file already exists; 'resume' continues an interrupted transfer from the last byte written (byte-offset only, no checksum comparison — enable verify_checksum=true to detect corruption after resume); 'append' concatenates local content to an existing remote file (text files only — silently corrupts binary files)."
+                "description": "Transfer mode: 'overwrite' (default) replaces the remote file entirely; 'fail_if_exists' aborts if the remote file already exists; 'resume' continues an interrupted transfer from the last byte written (byte-offset only, no checksum comparison — verify_checksum is rejected in this mode); 'append' concatenates local content to an existing remote file (text files only — silently corrupts binary files; verify_checksum is rejected in this mode too)."
             },
             "chunk_size": {
                 "type": "integer",
@@ -71,7 +71,7 @@ impl SshUploadHandler {
             "verify_checksum": {
                 "type": "boolean",
                 "default": false,
-                "description": "Verify SHA256 checksum after transfer"
+                "description": "Compute a SHA256 checksum of the LOCAL source file after transfer and report it in the result. This is not a verification: the checksum is never compared against anything on the remote host, so it cannot detect corruption introduced in transit. Rejected when mode is resume or append (only a partial hash could be computed there)."
             },
             "preserve_permissions": {
                 "type": "boolean",
@@ -135,6 +135,22 @@ impl ToolHandler for SshUploadHandler {
                     "Invalid transfer mode: {mode_str}. Valid modes: overwrite, append, resume, fail_if_exists"
                 ),
             })?;
+
+        // `verify_checksum` never compared anything against the remote host, and
+        // in resume/append the hash was not even computed
+        // (`can_compute_full_checksum` in src/ssh/sftp.rs). Refusing loudly beats
+        // returning a success the operator will read as "integrity verified".
+        if args.verify_checksum.unwrap_or(false)
+            && matches!(transfer_mode, TransferMode::Resume | TransferMode::Append)
+        {
+            return Err(BridgeError::FileTransfer {
+                reason: "verify_checksum is not supported with mode=resume or mode=append: \
+                         only the bytes sent in this session could be hashed, and no \
+                         comparison against the remote host is performed. Transfer with \
+                         mode=overwrite to get a source-side SHA256."
+                    .to_string(),
+            });
+        }
 
         // Expand local path (`~` -> home dir; non-tilde inputs are passed through).
         let local_path = crate::path_utils::home_expand_or_input(&args.local_path);
@@ -362,5 +378,32 @@ mod tests {
         let handler = SshUploadHandler;
         assert!(handler.description().contains("Upload"));
         assert!(handler.description().contains("SFTP"));
+    }
+
+    #[tokio::test]
+    async fn verify_checksum_is_refused_in_resume_mode() {
+        // `resume` is the one mode whose schema text tells the operator to turn
+        // verify_checksum on, and the one mode where the hash is silently skipped.
+        let handler = SshUploadHandler;
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1",
+                    "local_path": "/tmp/x",
+                    "remote_path": "/tmp/y",
+                    "mode": "resume",
+                    "verify_checksum": true
+                })),
+                &ctx,
+            )
+            .await;
+        match result {
+            Err(BridgeError::FileTransfer { reason }) => {
+                assert!(reason.contains("verify_checksum"), "got: {reason}");
+                assert!(reason.contains("resume"), "got: {reason}");
+            }
+            other => panic!("expected an explicit refusal, got: {other:?}"),
+        }
     }
 }
