@@ -8,6 +8,15 @@
 targets = []
 # Exclude dev-dependencies from checks
 exclude-dev = false
+# Match what CI actually analyses. Without this, a local `cargo deny` resolves
+# only the default feature set — 333 packages against CI's 587 — so the whole
+# optional surface (aws-sdk/ssm, kube, winrm, psrp) is invisible locally and
+# the local gate is a strict SUBSET of the remote one. That is how
+# RUSTSEC-2026-0258 (h2 0.3.27, reachable only via aws-smithy) turned main red
+# while `cargo deny check advisories` reported "advisories ok" on a dev
+# machine, complete with an `advisory-not-detected` warning on the very entry
+# that was needed.
+all-features = true
 
 # =============================================================================
 # Advisories - check for known vulnerabilities
@@ -40,6 +49,18 @@ ignore = [
     # the dep here and removing these two entries. Same list as audit.toml.
     "RUSTSEC-2026-0194",   # quick-xml quadratic duplicate-attribute check — transitive via psrp-rs
     "RUSTSEC-2026-0195",   # quick-xml unbounded namespace alloc (DoS) — transitive via psrp-rs
+    # h2 unbounded empty DATA frames (published 2026-08-18), patched in h2
+    # >=0.4.16 ONLY. This lockfile is already on 0.4.16, so the entry below
+    # suppresses exactly one remaining match: h2 0.3.27, which has no patched
+    # release on its own major line and is pulled transitively by
+    # aws-smithy-http-client 1.1.13 -> aws-smithy-runtime -> aws-config /
+    # aws-sdk-ssm. Same shape and same reachability as the webpki entries
+    # above: OPTIONAL `ssm`/`cloud` features only — default, `full` and
+    # air-gapped builds never compile it. `cargo-deny` cannot scope an
+    # advisory ignore to a version (the crate@version form is for yanked
+    # crates only), so removing this entry is the check that the aws-smithy
+    # stack has moved off h2 0.3.
+    "RUSTSEC-2026-0258",   # h2 0.3 unbounded empty DATA frames — transitive via aws-smithy, no 0.3 fix
     # Verified no longer matched (kept here as historical context):
     # - RUSTSEC-2025-0134 (rustls-pemfile unmaintained)
     # - RUSTSEC-2026-0049 (rustls-webpki CRL matching)

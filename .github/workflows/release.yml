@@ -74,6 +74,35 @@ jobs:
       - run: cargo nextest run --all-targets --all-features
       - run: cargo test --doc --all-features
 
+  # Tag pushes bypass ci.yml, and ci.yml is where `Deny` lives — so nothing
+  # stopped a tag from publishing binaries built on a dependency with a known
+  # advisory. That is not hypothetical: RUSTSEC-2026-0258 (h2) landed on
+  # 2026-08-18 and turned main red while this pipeline would still have
+  # shipped. Same reasoning as the `test` job above.
+  deny:
+    name: Advisories + licenses before release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # cargo-audit reads .cargo/audit.toml and cargo-deny reads deny.toml;
+      # the two ignore lists are duplicated by design and must agree, or one
+      # gate goes red while the other stays green.
+      - name: Check RUSTSEC ignore lists stay in sync
+        run: |
+          extract() { grep -v '^[[:space:]]*#' "$1" | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]+' | sort -u; }
+          if ! diff <(extract deny.toml) <(extract .cargo/audit.toml); then
+            echo "::error::RUSTSEC ignore lists differ between deny.toml and .cargo/audit.toml"
+            exit 1
+          fi
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
   # The crate is not on crates.io, so the SemVer baseline is the previous
   # release tag. A breaking API change without a major bump fails the
   # release before any binary is built.
@@ -105,7 +134,7 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    needs: [version-gate, test, semver]
+    needs: [version-gate, test, semver, deny]
     timeout-minutes: 60
     permissions:
       contents: read

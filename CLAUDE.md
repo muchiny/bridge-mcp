@@ -173,13 +173,18 @@ tool-driven (`ssh_recording_*` + `MCP_RECORDING_KEY`).
 
 ## Known Advisories
 
-6 advisories actively ignored in `deny.toml` + `.cargo/audit.toml` (keep both files in sync):
+7 advisories actively ignored in `deny.toml` + `.cargo/audit.toml` (keep both files in sync):
 
 - RUSTSEC-2023-0071 — Marvin Attack on RSA (transitive via russh, no upstream fix)
 - RUSTSEC-2026-0098 / 0099 / 0104 — rustls-webpki 0.101, pinned by the aws-smithy
   stack (re-triggered by the v1.19.0 dep bumps; `ssm`/`cloud` features only)
 - RUSTSEC-2026-0194 / 0195 — quick-xml 0.36 DoS (transitive via psrp-rs;
   `psrp`/`all-protocols` features only). Remove once psrp-rs bumps quick-xml >=0.41.
+- RUSTSEC-2026-0258 — h2 unbounded empty DATA frames. Patched in h2 >=0.4.16 only,
+  and the lockfile is there; the ignore covers the remaining h2 0.3.27, pulled by
+  aws-smithy-http-client with no patched 0.3 release (`ssm`/`cloud` features only).
+  cargo-deny cannot scope an advisory ignore to a version, so dropping this entry is
+  the test that aws-smithy has left h2 0.3.
 
 Previously ignored (resolved after dep-updates-2026-05-30):
 RUSTSEC-2025-0134, RUSTSEC-2026-0049, RUSTSEC-2026-0074

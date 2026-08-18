@@ -71,7 +71,7 @@ russh-sftp = "2.1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde-saphyr = "0.0.29"
+serde-saphyr = "1.0"
 
 # Error handling
 thiserror = "2"
@@ -148,7 +148,7 @@ tracing-opentelemetry = { version = "0.33", optional = true }
 similar = "3"
 inventory = "0.3"
 bridge-mcp-macros = { version = "0.1.0", path = "crates/bridge-mcp-macros" }
-jsonwebtoken = { version = "10", features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "11", features = ["rust_crypto", "use_pem"] }
 
 [dev-dependencies]
 # test-util enables tokio::time::pause/advance for deterministic TTL tests
@@ -159,7 +159,7 @@ filetime = "0.2"
 tracing-test = "0.2"
 proptest = "1"
 insta = { version = "1", features = ["json", "yaml"] }
-base64 = "0.22.1"
+base64 = "0.23"
 
 [[bench]]
 name = "validator_bench"
