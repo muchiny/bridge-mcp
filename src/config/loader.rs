@@ -215,6 +215,25 @@ fn validate_config(config: &Config) -> Result<()> {
         })?;
     }
 
+    // `rbac` is parsed into a fully-formed `RbacConfig` and `RbacEnforcer`
+    // implements deny-over-allow — but nothing in the request path ever calls
+    // `is_allowed`. There is no principal to check against: neither
+    // `ToolContext`, `SessionContext` nor `Session` carries a subject, and the
+    // one transport that authenticates discards its claims
+    // (src/mcp/transport/oauth.rs). Accepting `enabled: true` therefore hands
+    // the operator a security control that does nothing, which is worse than
+    // having none: it stops them looking for a real one.
+    if config.rbac.enabled {
+        return Err(BridgeError::ConfigInvalid {
+            field: "rbac.enabled".to_string(),
+            reason: "security.rbac is not enforced by this build: `rbac.enabled: true` \
+                     would grant unrestricted access. Set it to false and restrict access \
+                     with `tool_groups.groups` (unlisted groups are already disabled), \
+                     `security.mode` + whitelist/blacklist, or per-host configuration."
+                .to_string(),
+        });
+    }
+
     Ok(())
 }
 

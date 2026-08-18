@@ -2,6 +2,17 @@
 //!
 //! Defines roles with allowed/denied tool patterns and host patterns.
 //! Checked before tool execution to enforce access policies.
+//!
+//! # NOT WIRED
+//!
+//! `RbacEnforcer` is complete and unit-tested, but no production code path
+//! calls it, and `validate_config` rejects `rbac.enabled: true` for that
+//! reason (src/config/loader.rs). Wiring it requires a principal in the
+//! request path, which does not exist today — see
+//! docs/superpowers/plans/2026-08-18-audit-remediation.md, Wave 6.
+//!
+//! Do not delete this module: it is re-exported at `src/security/mod.rs:12`
+//! and 63 `Config { .. }` literals construct `RbacConfig`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
