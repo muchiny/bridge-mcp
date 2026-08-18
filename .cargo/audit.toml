@@ -26,6 +26,12 @@ ignore = [
     # remove once psrp-rs bumps quick-xml. Same list as deny.toml.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # h2 unbounded empty DATA frames (2026-08-18). Patched in h2 >=0.4.16
+    # only; the lockfile is already there. The remaining match is h2 0.3.27,
+    # transitive via aws-smithy-http-client -> aws-config / aws-sdk-ssm, with
+    # no patched 0.3 release. Optional `ssm`/`cloud` features only. Remove
+    # once the aws-smithy stack leaves h2 0.3. Same list as deny.toml.
+    "RUSTSEC-2026-0258",
 ]
 
 # Warn instead of error for informational advisories
