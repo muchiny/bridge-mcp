@@ -15,9 +15,9 @@ use crate::mcp::protocol::ToolCallResult;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::security::{AuditEvent, CommandResult as AuditCommandResult};
-use crate::ssh::{DEFAULT_CHUNK_SIZE, TransferMode, TransferOptions, TransferProgress};
+use crate::ssh::{DEFAULT_CHUNK_SIZE, TransferOptions, TransferProgress};
 
-use super::utils::{connect_with_jump, validate_path};
+use super::utils::{connect_with_jump, parse_transfer_mode_checked, validate_path};
 
 /// Arguments for `ssh_upload` tool
 #[derive(Debug, Deserialize)]
@@ -130,27 +130,7 @@ impl ToolHandler for SshUploadHandler {
         // Parse transfer mode
         let mode_str = args.mode.as_deref().unwrap_or("overwrite");
         let transfer_mode =
-            TransferMode::parse(mode_str).ok_or_else(|| BridgeError::FileTransfer {
-                reason: format!(
-                    "Invalid transfer mode: {mode_str}. Valid modes: overwrite, append, resume, fail_if_exists"
-                ),
-            })?;
-
-        // `verify_checksum` never compared anything against the remote host, and
-        // in resume/append the hash was not even computed
-        // (`can_compute_full_checksum` in src/ssh/sftp.rs). Refusing loudly beats
-        // returning a success the operator will read as "integrity verified".
-        if args.verify_checksum.unwrap_or(false)
-            && matches!(transfer_mode, TransferMode::Resume | TransferMode::Append)
-        {
-            return Err(BridgeError::FileTransfer {
-                reason: "verify_checksum is not supported with mode=resume or mode=append: \
-                         only the bytes sent in this session could be hashed, and no \
-                         comparison against the remote host is performed. Transfer with \
-                         mode=overwrite to get a source-side SHA256."
-                    .to_string(),
-            });
-        }
+            parse_transfer_mode_checked(mode_str, args.verify_checksum.unwrap_or(false), "sent")?;
 
         // Expand local path (`~` -> home dir; non-tilde inputs are passed through).
         let local_path = crate::path_utils::home_expand_or_input(&args.local_path);

@@ -2,7 +2,7 @@
 
 use crate::config::{Config, HostConfig, LimitsConfig, ShellType};
 use crate::error::{BridgeError, Result};
-use crate::ssh::SshClient;
+use crate::ssh::{SshClient, TransferMode};
 
 /// Validate a file path for potential path traversal attacks.
 ///
@@ -16,6 +16,56 @@ pub fn validate_path(path: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Parse a transfer mode, refusing `verify_checksum` with `resume`/`append`.
+///
+/// Both checks live together because the second one is only meaningful once
+/// the first has succeeded, and because all four transfer entry points
+/// (`ssh_upload`, `ssh_download`, and the CLI's `run_upload`/`run_download`)
+/// need exactly this pair. Keeping it in one place is what stops the two
+/// surfaces from drifting apart in wording again.
+///
+/// `verify_checksum` is refused in `resume`/`append` because neither mode
+/// computes a full-file hash (`can_compute_full_checksum` in
+/// `src/ssh/sftp.rs` disables it there), and no mode ever compares the hash
+/// against anything on the remote host. Returning this explicit refusal
+/// beats a silent `checksum: None` the operator reads as "integrity
+/// verified".
+///
+/// `direction` is the past-tense verb for what happened to the bytes that
+/// *could* have been hashed: `"sent"` for uploads, `"received"` for
+/// downloads. It is user-facing, so keep it specific rather than flattening
+/// upload/download into one generic word.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::FileTransfer`] when `mode_str` names no known
+/// mode, or when `verify_checksum` is combined with `resume`/`append`.
+pub fn parse_transfer_mode_checked(
+    mode_str: &str,
+    verify_checksum: bool,
+    direction: &str,
+) -> Result<TransferMode> {
+    let mode = TransferMode::parse(mode_str).ok_or_else(|| BridgeError::FileTransfer {
+        reason: format!(
+            "Invalid transfer mode: {mode_str}. Valid modes: overwrite, append, resume, \
+             fail_if_exists (also accepted as fail-if-exists)"
+        ),
+    })?;
+
+    if verify_checksum && matches!(mode, TransferMode::Resume | TransferMode::Append) {
+        return Err(BridgeError::FileTransfer {
+            reason: format!(
+                "verify_checksum is not supported with mode=resume or mode=append: \
+                 only the bytes {direction} in this session could be hashed, and no \
+                 comparison against the remote host is performed. Transfer with \
+                 mode=overwrite to get a source-side SHA256."
+            ),
+        });
+    }
+
+    Ok(mode)
 }
 
 /// Shell escape a string for safe use in shell commands
@@ -447,6 +497,73 @@ pub fn parse_fixed_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_transfer_mode_rejects_verify_checksum_with_resume() {
+        let err = parse_transfer_mode_checked("resume", true, "sent").unwrap_err();
+        match err {
+            BridgeError::FileTransfer { reason } => {
+                assert!(reason.contains("verify_checksum"));
+                assert!(reason.contains("resume"));
+                assert!(reason.contains("sent"));
+            }
+            e => panic!("expected FileTransfer, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_transfer_mode_rejects_append_with_direction_word() {
+        let err = parse_transfer_mode_checked("append", true, "received").unwrap_err();
+        match err {
+            BridgeError::FileTransfer { reason } => {
+                assert!(reason.contains("append"));
+                assert!(reason.contains("received"));
+            }
+            e => panic!("expected FileTransfer, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_transfer_mode_allows_verify_checksum_with_overwrite() {
+        assert_eq!(
+            parse_transfer_mode_checked("overwrite", true, "sent").unwrap(),
+            TransferMode::Overwrite
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_mode_allows_resume_when_checksum_disabled() {
+        assert_eq!(
+            parse_transfer_mode_checked("resume", false, "sent").unwrap(),
+            TransferMode::Resume
+        );
+    }
+
+    /// The CLI spells this mode with dashes and the MCP schema with
+    /// underscores; both reach the same helper, so both must parse.
+    #[test]
+    fn test_parse_transfer_mode_accepts_both_fail_if_exists_spellings() {
+        assert_eq!(
+            parse_transfer_mode_checked("fail_if_exists", false, "sent").unwrap(),
+            TransferMode::FailIfExists
+        );
+        assert_eq!(
+            parse_transfer_mode_checked("fail-if-exists", false, "sent").unwrap(),
+            TransferMode::FailIfExists
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_mode_rejects_unknown_mode() {
+        let err = parse_transfer_mode_checked("teleport", false, "sent").unwrap_err();
+        match err {
+            BridgeError::FileTransfer { reason } => {
+                assert!(reason.contains("Invalid transfer mode"));
+                assert!(reason.contains("teleport"));
+            }
+            e => panic!("expected FileTransfer, got: {e:?}"),
+        }
+    }
 
     #[test]
     fn test_shell_escape_simple() {

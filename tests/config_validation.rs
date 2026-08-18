@@ -366,7 +366,7 @@ security:
 #[test]
 fn rbac_enabled_true_is_rejected_because_nothing_enforces_it() {
     let err = load_yaml(
-        r#"
+        r"
 hosts:
   server1:
     hostname: 192.0.2.1
@@ -375,7 +375,7 @@ hosts:
       type: agent
 rbac:
   enabled: true
-"#,
+",
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -389,7 +389,7 @@ rbac:
 fn rbac_disabled_still_loads() {
     assert!(
         load_yaml(
-            r#"
+            r"
 hosts:
   server1:
     hostname: 192.0.2.1
@@ -398,7 +398,7 @@ hosts:
       type: agent
 rbac:
   enabled: false
-"#,
+",
         )
         .is_ok()
     );
@@ -408,14 +408,14 @@ rbac:
 fn rbac_absent_still_loads() {
     assert!(
         load_yaml(
-            r#"
+            r"
 hosts:
   server1:
     hostname: 192.0.2.1
     user: nobody
     auth:
       type: agent
-"#,
+",
         )
         .is_ok()
     );

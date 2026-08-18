@@ -23,8 +23,7 @@ use crate::security::{
     AuditEvent, AuditLogger, CommandResult, CommandValidator, RateLimiter, Sanitizer,
 };
 use crate::ssh::{
-    SessionManager, SshClient, TransferMode, TransferOptions, TransferProgress, is_retryable_error,
-    with_retry_if,
+    SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error, with_retry_if,
 };
 
 /// Try to forward a `tools/call` request to a running daemon over its
@@ -845,26 +844,11 @@ pub async fn run_upload(
             host: host.to_string(),
         })?;
 
-    // Parse transfer mode
-    let transfer_mode = TransferMode::parse(mode).ok_or_else(|| BridgeError::FileTransfer {
-        reason: format!(
-            "Invalid transfer mode: {mode}. Valid modes: overwrite, append, resume, fail-if-exists"
-        ),
-    })?;
-
-    // `verify_checksum` never compared anything against the remote host, and
-    // in resume/append the hash was not even computed
-    // (`can_compute_full_checksum` in src/ssh/sftp.rs). Refusing loudly beats
-    // returning a success the operator will read as "integrity verified".
-    if verify_checksum && matches!(transfer_mode, TransferMode::Resume | TransferMode::Append) {
-        return Err(BridgeError::FileTransfer {
-            reason: "verify_checksum is not supported with mode=resume or mode=append: \
-                     only the bytes sent in this session could be hashed, and no \
-                     comparison against the remote host is performed. Transfer with \
-                     mode=overwrite to get a source-side SHA256."
-                .to_string(),
-        });
-    }
+    let transfer_mode = crate::mcp::tool_handlers::utils::parse_transfer_mode_checked(
+        mode,
+        verify_checksum,
+        "sent",
+    )?;
 
     // Expand and check local path (`~` -> home dir; pass-through otherwise).
     let local_path_str = local_path.to_string_lossy();
@@ -1025,26 +1009,11 @@ pub async fn run_download(
             host: host.to_string(),
         })?;
 
-    // Parse transfer mode
-    let transfer_mode = TransferMode::parse(mode).ok_or_else(|| BridgeError::FileTransfer {
-        reason: format!(
-            "Invalid transfer mode: {mode}. Valid modes: overwrite, append, resume, fail-if-exists"
-        ),
-    })?;
-
-    // `verify_checksum` never compared anything against the remote host, and
-    // in resume/append the hash was not even computed
-    // (`can_compute_full_checksum` in src/ssh/sftp.rs). Refusing loudly beats
-    // returning a success the operator will read as "integrity verified".
-    if verify_checksum && matches!(transfer_mode, TransferMode::Resume | TransferMode::Append) {
-        return Err(BridgeError::FileTransfer {
-            reason: "verify_checksum is not supported with mode=resume or mode=append: \
-                     only the bytes received in this session could be hashed, and no \
-                     comparison against the remote host is performed. Transfer with \
-                     mode=overwrite to get a source-side SHA256."
-                .to_string(),
-        });
-    }
+    let transfer_mode = crate::mcp::tool_handlers::utils::parse_transfer_mode_checked(
+        mode,
+        verify_checksum,
+        "received",
+    )?;
 
     // Expand local path (`~` -> home dir; pass-through otherwise).
     let local_path_str = local_path.to_string_lossy();
