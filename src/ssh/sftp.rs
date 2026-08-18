@@ -1958,6 +1958,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::join_absolute_paths,
+        reason = "the assertion below exists precisely to pin the std behaviour this lint warns \
+                  about — joining an absolute path silently discards the base. That is the \
+                  footgun `safe_local_join` guards against, and demonstrating it here is what \
+                  stops a future reader from deleting the guard as redundant."
+    )]
     fn safe_local_join_rejects_absolute_names() {
         let base = std::path::Path::new("/tmp/sync");
         // The bug: `Path::join` with an absolute argument throws the base away.
