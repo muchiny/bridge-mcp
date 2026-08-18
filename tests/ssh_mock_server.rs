@@ -36,7 +36,7 @@
     clippy::return_self_not_must_use
 )]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -359,6 +359,7 @@ impl Server for MockServer {
             exec_response: self.exec_response.clone(),
             sftp_root: self.sftp_root.clone(),
             channels: Arc::new(Mutex::new(HashMap::new())),
+            tunnel_channels: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -368,6 +369,12 @@ struct MockSession {
     exec_response: ExecResponse,
     sftp_root: Arc<TempDir>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    /// Channel ids opened via `channel_open_direct_tcpip`. `channel_eof`
+    /// force-closes exec channels the moment the client is done writing
+    /// (matching a one-shot exec session), but a tunnel channel is still
+    /// expected to echo data back after the client's write side reaches
+    /// EOF — so those ids are exempted from that auto-close.
+    tunnel_channels: Arc<Mutex<HashSet<ChannelId>>>,
 }
 
 impl ServerHandler for MockSession {
@@ -463,7 +470,50 @@ impl ServerHandler for MockSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // A tunnel channel is still expected to echo data back after the
+        // client's write side reaches EOF; its own task drives the close
+        // once it has finished draining (see `channel_open_direct_tcpip`).
+        if self.tunnel_channels.lock().await.contains(&channel) {
+            return Ok(());
+        }
         session.close(channel)?;
+        Ok(())
+    }
+
+    /// Accept every direct-tcpip ("local forwarding") request and echo
+    /// whatever bytes it receives back on the same channel.
+    ///
+    /// Used by the tunnel round-trip test (`ssh_client_mock.rs`) to exercise
+    /// `SshClient::forward_tcp_connection` end to end: the target host/port
+    /// are ignored, this mock never actually dials out.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let channel_id = channel.id();
+        self.tunnel_channels.lock().await.insert(channel_id);
+
+        reply.accept().await;
+        // Spawn so we don't block the connection's read loop while echoing
+        // (same reasoning as `exec_request` above).
+        let tunnel_channels = self.tunnel_channels.clone();
+        tokio::spawn(async move {
+            let stream = channel.into_stream();
+            let (mut read_half, mut write_half) = tokio::io::split(stream);
+            let _ = tokio::io::copy(&mut read_half, &mut write_half).await;
+            // Propagate EOF back to the client once the copy loop drains,
+            // so `copy_bidirectional` on the client side can observe channel
+            // EOF and complete the reverse direction.
+            use tokio::io::AsyncWriteExt;
+            let _ = write_half.shutdown().await;
+            tunnel_channels.lock().await.remove(&channel_id);
+        });
         Ok(())
     }
 }

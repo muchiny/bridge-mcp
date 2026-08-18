@@ -1,7 +1,5 @@
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use russh::ChannelMsg;
@@ -9,7 +7,6 @@ use russh::client::{self, Config, Handle, Handler};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{PublicKey, load_secret_key};
 use russh_sftp::client::SftpSession;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::timeout;
 
 use crate::config::{AuthConfig, HostConfig, HostKeyVerification, LimitsConfig, SocksVersion};
@@ -118,105 +115,6 @@ pub fn build_russh_client_config(limits: &LimitsConfig) -> Config {
         preferred: hardened_preferred(),
         limits: russh::Limits::new(1 << 30, 1 << 30, Duration::from_hours(1)),
         ..Default::default()
-    }
-}
-
-/// A wrapper around a russh Channel that implements `AsyncRead` and `AsyncWrite`
-/// for use as a transport stream for tunneled SSH connections.
-struct ChannelStream {
-    channel: russh::Channel<russh::client::Msg>,
-    read_buffer: Vec<u8>,
-    read_pos: usize,
-}
-
-impl ChannelStream {
-    #[allow(clippy::missing_const_for_fn)] // Vec::new() is not const
-    fn new(channel: russh::Channel<russh::client::Msg>) -> Self {
-        Self {
-            channel,
-            read_buffer: Vec::new(),
-            read_pos: 0,
-        }
-    }
-}
-
-impl AsyncRead for ChannelStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-
-        // If we have buffered data, return it first
-        if this.read_pos < this.read_buffer.len() {
-            let remaining = &this.read_buffer[this.read_pos..];
-            let to_copy = std::cmp::min(remaining.len(), buf.remaining());
-            buf.put_slice(&remaining[..to_copy]);
-            this.read_pos += to_copy;
-            if this.read_pos >= this.read_buffer.len() {
-                this.read_buffer.clear();
-                this.read_pos = 0;
-            }
-            return Poll::Ready(Ok(()));
-        }
-
-        // Try to receive more data from the channel
-        let fut = this.channel.wait();
-        tokio::pin!(fut);
-
-        match fut.poll(cx) {
-            Poll::Ready(Some(ChannelMsg::Data { data })) => {
-                let to_copy = std::cmp::min(data.len(), buf.remaining());
-                buf.put_slice(&data[..to_copy]);
-                if to_copy < data.len() {
-                    this.read_buffer = data[to_copy..].to_vec();
-                    this.read_pos = 0;
-                }
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Some(ChannelMsg::Eof) | None) => Poll::Ready(Ok(())),
-            Poll::Ready(Some(_)) => {
-                // Other message types, try again
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl AsyncWrite for ChannelStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-        let fut = this.channel.data(buf);
-        tokio::pin!(fut);
-
-        match fut.poll(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        let fut = this.channel.eof();
-        tokio::pin!(fut);
-
-        match fut.poll(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
-            Poll::Pending => Poll::Pending,
-        }
     }
 }
 
@@ -365,8 +263,13 @@ impl SshClient {
                 reason: format!("Failed to open tunnel through {jump_host_name}: {e}"),
             })?;
 
-        // 3. Wrap the channel as a stream for SSH transport
-        let stream = ChannelStream::new(channel);
+        // 3. Wrap the channel as a stream for SSH transport. `into_stream()`
+        // returns russh's own `ChannelStream`, whose `AsyncWrite` tracks the
+        // SSH flow-control window across polls (unlike the hand-rolled
+        // wrapper this replaced, which rebuilt `channel.data(buf)` on every
+        // poll and silently dropped in-flight state on `Pending` — see the
+        // `forward_tcp_connection` call site below for the full rationale).
+        let stream = channel.into_stream();
 
         // 4. Establish SSH connection through the tunnel
         // FIND-008: hardened algo allowlist + rekey limits via shared helper.
@@ -1030,7 +933,13 @@ impl SshClient {
                 reason: format!("Failed to open channel to {remote_host}:{remote_port}: {e}"),
             })?;
 
-        let mut channel_stream = ChannelStream::new(channel);
+        // `into_stream()` — see the rationale on the `connect_via_jump`
+        // call site above. This is the reachable-from-a-tool path
+        // (`ssh_tunnel_create`): a peer that stalls reads long enough to
+        // exhaust the SSH channel window used to hit `Pending` mid-write on
+        // the old hand-rolled wrapper and silently re-send the same prefix
+        // on the next poll, corrupting the tunneled byte stream.
+        let mut channel_stream = channel.into_stream();
         let _ = tokio::io::copy_bidirectional(&mut tcp_stream, &mut channel_stream)
             .await
             .map_err(|e| BridgeError::Tunnel {
@@ -1294,20 +1203,6 @@ mod tests {
         let handler = ClientHandler::new("::1".to_string(), 22, HostKeyVerification::Strict);
 
         assert_eq!(handler.hostname, "::1");
-    }
-
-    // ============== ChannelStream Tests ==============
-
-    #[test]
-    fn test_channel_stream_buffer_initialization() {
-        // Note: We can't fully test ChannelStream without a real channel,
-        // but we document the expected behavior here.
-        // The buffer should start empty with position 0.
-
-        // This test validates our understanding of the internal state.
-        // In production, ChannelStream::new() creates:
-        // - read_buffer: Vec::new() (empty)
-        // - read_pos: 0
     }
 
     // ============== sanitize_ssh_error Tests ==============
