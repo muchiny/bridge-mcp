@@ -47,10 +47,7 @@ struct TaskEntry {
 
 impl TaskEntry {
     fn is_terminal(&self) -> bool {
-        matches!(
-            self.info.status,
-            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
-        )
+        is_terminal_status(self.info.status)
     }
 
     fn is_expired(&self) -> bool {
@@ -601,33 +598,34 @@ mod tests {
         assert!(got.into_result().is_some());
     }
 
-    // A dropped `Sender` (entry evicted from the map) must resolve a parked
-    // waiter with `None`, not park it forever. Non-zero TTL and no
-    // `start_paused`: a 0ms TTL would make this vacuous (see task-7-report.md),
-    // and TTL checks use `std::time::Instant`, which the paused tokio clock
-    // does not advance.
-    /// Issue #132, narrowed by G-1 (audit 2026-08-19).
+    /// Issue #132 (commit `8a7e90e`), made deterministic for G-1's bounded
+    /// wait (audit 2026-08-19, task 12 fix round). The invariant: a
+    /// published result must reach the waiter as an owned value already in
+    /// hand, never through a second lookup into `self.tasks` — a `retain`
+    /// or `remove` interposing between the wake and that second lookup
+    /// turns a real result into `None`, indistinguishable from "never had
+    /// one".
     ///
-    /// The original scenario here — complete the task only after its
-    /// nominal TTL has already lapsed, and still expect `wait_for_result`
-    /// to return the result — is no longer reachable. `wait_for_result` is
-    /// now bounded by `remaining_ttl` (see
-    /// `wait_for_result_never_waits_past_the_remaining_ttl`), so a
-    /// completion that arrives after the entry's TTL can never be
-    /// observed by that same wait call: the wait itself has already given
-    /// up by then. TTL and the wait's own timeout are the same clock now,
-    /// so "completed after TTL, observed by a wait that started before
-    /// TTL" is a contradiction in terms, not a timing/flakiness problem —
-    /// no combination of constants produces it.
+    /// This test used to drive that race with real sleeps and a completion
+    /// arriving after the entry's nominal TTL. Once `wait_for_result` grew
+    /// its own TTL-bounded timeout, that scenario stopped being reachable
+    /// by construction: the wait's budget is `<= remaining_ttl`, so it
+    /// always gives up no later than the instant eviction becomes
+    /// possible — the two events could never actually race, and the test
+    /// passed unchanged whether or not the channel-read fix was present.
     ///
-    /// What issue #132 actually demanded is still true and still worth
-    /// proving: a result delivered through the channel is an owned value,
-    /// read once and handed back — never a second lookup into the map.
-    /// This proves it survives the entry being swept out from under it
-    /// immediately afterward.
+    /// This version drives completion and eviction from a single held
+    /// write-lock critical section with no `.await` inside it, which
+    /// deterministically happens-before any re-read the woken waiter might
+    /// attempt — no TTL, no sleep, no flakiness. The waiter is spawned and
+    /// yielded to first, so it has already subscribed to the channel and
+    /// parked on `changed()` before this task ever takes the write lock;
+    /// everything from taking that lock to dropping it is synchronous, so
+    /// the waiter cannot be scheduled again until the entry is already
+    /// gone.
     #[tokio::test]
     async fn wait_for_result_yields_the_result_even_if_evicted_before_the_reread() {
-        let store = Arc::new(TaskStore::new(10, 200, 2_000));
+        let store = Arc::new(TaskStore::new(10, 60_000, 2_000));
         let (id, _) = store.create_task(None).await.unwrap();
 
         let store2 = Arc::clone(&store);
@@ -636,31 +634,58 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
         });
 
-        // Complete comfortably inside the 200ms budget, so the channel —
-        // not the internal timeout — is what resolves the wait.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        store.complete_task(&id, test_result()).await;
+        // Let the waiter actually run: it subscribes to the channel under
+        // a read guard, then parks on `rx.changed()` — the first genuinely
+        // pending await in `wait_for_result`. Only once that has happened
+        // does taking the write lock below guarantee this critical section
+        // happens-before any re-read the waiter might attempt.
+        tokio::task::yield_now().await;
+
+        {
+            let mut tasks = store.tasks.write().await;
+            let entry = tasks.get_mut(&id).expect("task must still be present");
+            entry.info.status = TaskStatus::Completed;
+            entry.result = Some(test_result());
+            // Wakes the parked waiter, but it cannot act on the wake until
+            // it is next polled — which cannot happen before this block
+            // ends, since nothing here is an `.await`.
+            entry.result_ready.send_replace(entry.result.clone());
+            // Evict before the waiter ever gets a chance to look the entry
+            // up again.
+            tasks.remove(&id);
+        }
 
         let result = waiter.await.unwrap().expect("must not hang");
         assert_eq!(
             result
                 .into_result()
-                .expect("a completed task must not resolve to None")["content"][0]["text"],
+                .expect("a result delivered through the channel must survive eviction")["content"]
+                [0]["text"],
             "ok"
         );
-
-        // Now let TTL lapse and sweep the entry. The value above was
-        // already read out of the channel, not the map, so this cannot
-        // retroactively touch it — it only confirms cleanup still works
-        // on a terminal, already-delivered task.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        store.cleanup().await;
-        assert!(store.is_empty().await, "entry should have been evicted");
+        assert!(store.is_empty().await, "entry should already be evicted");
     }
 
+    /// A dropped `Sender` (entry evicted from the map) must resolve a
+    /// parked waiter with `NotFound`, not hang it forever.
+    ///
+    /// G-1 (audit 2026-08-19) gave `wait_for_result` its own bound,
+    /// `min(poll_interval * 30, remaining_ttl)`. That bound tracks the same
+    /// clock TTL expiry does, so "genuinely parked on the channel" and
+    /// "TTL has actually elapsed" are now mutually exclusive (see
+    /// `wait_for_result_never_waits_past_the_remaining_ttl`) — a real TTL
+    /// wall-clock expiry followed by `cleanup()` can no longer land while a
+    /// waiter is still parked; the waiter's own internal timeout always
+    /// fires first, and this test would silently stop exercising the
+    /// dropped-`Sender` arm at all. A large TTL and a small poll interval
+    /// keep the internal bound comfortably longer than this test needs, and
+    /// the entry is evicted by a direct removal from the map rather than by
+    /// real TTL expiry — the `watch::Sender` drops either way, so this
+    /// still exercises exactly what a real `cleanup()` eviction does to a
+    /// parked waiter, without the now-impossible race.
     #[tokio::test]
     async fn wait_for_result_returns_none_when_evicted_while_parked() {
-        let store = Arc::new(TaskStore::new(10, 50, 2_000));
+        let store = Arc::new(TaskStore::new(10, 60_000, 10));
         let (id, _) = store.create_task(None).await.unwrap();
 
         let store2 = Arc::clone(&store);
@@ -669,12 +694,10 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
         });
 
-        // Give the waiter time to read the still-`Working` entry and park on
-        // it, then let the 50ms TTL genuinely elapse (real wall-clock sleep)
-        // and force the lazy-cleanup eviction.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        store.cleanup().await;
-        assert!(store.is_empty().await, "entry should have been evicted");
+        // Let the waiter subscribe and park on `rx.changed()` before the
+        // entry is removed out from under it.
+        tokio::task::yield_now().await;
+        store.tasks.write().await.remove(&id);
 
         let result = waiter
             .await
