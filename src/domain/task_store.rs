@@ -31,7 +31,14 @@ struct TaskEntry {
     /// any later send, and dropping this sender (which happens exactly when
     /// the entry leaves the map) resolves parked waiters instead of
     /// stranding them.
-    result_ready: watch::Sender<bool>,
+    ///
+    /// It carries the RESULT, not a bare flag. A flag forced the woken waiter
+    /// to look the entry up again, and TTL eviction winning that second race
+    /// turned a genuinely completed task into `None` — indistinguishable from
+    /// "never had a result" (issue #132). Publishing the value through the
+    /// channel removes the second lookup entirely rather than narrowing the
+    /// window.
+    result_ready: watch::Sender<Option<Value>>,
     /// Monotonic creation time for TTL checks.
     created: Instant,
     /// Per-task TTL.
@@ -91,7 +98,7 @@ impl TaskStore {
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let cancel_token = CancellationToken::new();
-        let (result_ready, _) = watch::channel(false);
+        let (result_ready, _) = watch::channel(None);
 
         let entry = TaskEntry {
             info: TaskInfo {
@@ -138,7 +145,7 @@ impl TaskStore {
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.result = Some(result);
-        entry.result_ready.send_replace(true);
+        entry.result_ready.send_replace(entry.result.clone());
 
         Some(entry.info.clone())
     }
@@ -157,7 +164,7 @@ impl TaskStore {
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.result = Some(result);
-        entry.result_ready.send_replace(true);
+        entry.result_ready.send_replace(entry.result.clone());
 
         Some(entry.info.clone())
     }
@@ -181,7 +188,7 @@ impl TaskStore {
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.cancel_token.cancel();
-        entry.result_ready.send_replace(true);
+        entry.result_ready.send_replace(entry.result.clone());
 
         Ok(entry.info.clone())
     }
@@ -238,8 +245,9 @@ impl TaskStore {
             return None;
         }
 
-        let tasks = self.tasks.read().await;
-        tasks.get(task_id).and_then(|e| e.result.clone())
+        // Read the value out of the channel, not out of the map. The entry may
+        // already have been evicted by TTL — see the field's doc comment.
+        rx.borrow_and_update().clone()
     }
 
     /// List tasks with cursor-based pagination.
@@ -510,6 +518,38 @@ mod tests {
     // `start_paused`: a 0ms TTL would make this vacuous (see task-7-report.md),
     // and TTL checks use `std::time::Instant`, which the paused tokio clock
     // does not advance.
+    /// Issue #132. A task that genuinely completed must return its result even
+    /// if TTL eviction removes the entry before the woken waiter re-reads the
+    /// map. The old code signalled with a bare flag and then looked the entry
+    /// up again, so losing that race turned a real result into `None` —
+    /// indistinguishable from "this task never had one".
+    #[tokio::test]
+    async fn wait_for_result_yields_the_result_even_if_evicted_before_the_reread() {
+        let store = Arc::new(TaskStore::new(10, 50, 2_000));
+        let (id, _) = store.create_task(None).await.unwrap();
+
+        let store2 = Arc::clone(&store);
+        let id2 = id.clone();
+        let waiter = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
+        });
+
+        // Park the waiter AND let the 50ms TTL lapse first, so that complete
+        // and evict can then run back-to-back with no sleep between them —
+        // a sleep there hands the waiter its re-read and hides the race.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        store.complete_task(&id, test_result()).await;
+        store.cleanup().await;
+        assert!(store.is_empty().await, "entry should have been evicted");
+
+        let result = waiter.await.unwrap().expect("must not hang");
+        assert_eq!(
+            result.expect("a completed task must not resolve to None")["content"][0]["text"],
+            "ok"
+        );
+    }
+
     #[tokio::test]
     async fn wait_for_result_returns_none_when_evicted_while_parked() {
         let store = Arc::new(TaskStore::new(10, 50, 2_000));
