@@ -1823,6 +1823,55 @@ mod tests {
         );
     }
 
+    /// Regression test for the "build.rs did not rerun after a same-branch
+    /// commit" bug (see `build.rs`'s `rerun-if-changed` comment). `BUILD_REV`
+    /// is a compile-time `env!()` constant, baked in whenever build.rs last
+    /// ran; the git commands below run fresh every time this test *executes*,
+    /// with no Cargo caching in between. If a future change to build.rs's
+    /// `rerun-if-changed` set ever again fails to invalidate on a commit —
+    /// exactly what happened when it only watched `.git/HEAD` — a stale
+    /// compiled-in `BUILD_REV` and this live-computed value will diverge and
+    /// this test will fail, even though nothing needed recompiling.
+    ///
+    /// This is a no-op within a single fresh `cargo test` run from a clean
+    /// checkout (adding/editing this test is itself a `src` change, which
+    /// unconditionally forces build.rs to rerun) — its value is catching
+    /// regressions in long-lived local clones and in CI under
+    /// `Swatinem/rust-cache`, which persists `target/` across commits on the
+    /// same branch, i.e. precisely the reuse pattern the bug depended on.
+    #[test]
+    fn test_build_rev_matches_live_head_or_is_unknown() {
+        if BUILD_REV == "unknown" {
+            // Built outside a git checkout; nothing live to compare against.
+            return;
+        }
+        let Some(head) = git_output(&["rev-parse", "--short=12", "HEAD"]) else {
+            // git unavailable to the *test* process is an environment fact,
+            // not something this test can assert on.
+            return;
+        };
+        let dirty = git_output(&["status", "--porcelain", "--untracked-files=no"])
+            .is_some_and(|s| !s.is_empty());
+        let live = if dirty { format!("{head}-dirty") } else { head };
+
+        assert_eq!(
+            BUILD_REV, live,
+            "BUILD_REV ({BUILD_REV}) does not match the live working tree \
+             ({live}) — build.rs did not rerun after the tree changed. This is \
+             the exact staleness bug build.rs exists to prevent."
+        );
+    }
+
+    fn git_output(args: &[&str]) -> Option<String> {
+        let out = std::process::Command::new("git").args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
     #[test]
     fn test_build_meta_key_is_vendor_namespaced() {
         // MCP reserves the `io.modelcontextprotocol/` prefix; ours must be a

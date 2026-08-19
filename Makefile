@@ -116,7 +116,12 @@ BIN ?= $(HOME)/.local/bin/bridge-mcp
 # with the wrong feature set, and vice versa.
 verify-install:
 	@test -x "$(BIN)" || { echo "verify-install: no executable at $(BIN)"; exit 1; }
-	@head_sha=$$(git rev-parse --short=12 HEAD); \
+	@head_sha=$$(git rev-parse --short=12 HEAD 2>/dev/null); \
+	if [ -z "$$head_sha" ]; then \
+		echo "verify-install: FAIL - could not determine the working tree's git revision."; \
+		echo "  Is git installed, and is $(CURDIR) a git checkout?"; \
+		exit 1; \
+	fi; \
 	if [ -n "$$(git status --porcelain --untracked-files=no)" ]; then \
 		expected="$$head_sha-dirty"; \
 	else \

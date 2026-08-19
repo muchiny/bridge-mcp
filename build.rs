@@ -11,7 +11,21 @@ use std::process::Command;
 fn main() {
     // Re-run when the checked-out commit changes, and when any source file
     // changes — the latter is what keeps the `-dirty` suffix honest.
-    println!("cargo::rerun-if-changed=.git/HEAD");
+    //
+    // Watching the literal path `.git/HEAD` is not enough: committing again
+    // on the same branch rewrites `refs/heads/<branch>` (or the reftable
+    // backend), not `.git/HEAD` itself, so Cargo never notices and keeps
+    // serving a stale rev forever after the first build. `logs/HEAD` (the
+    // reflog) is appended on every commit regardless of branch or ref
+    // backend, so it is the one that actually catches this. Resolving both
+    // through `git rev-parse --git-path` rather than hardcoding `.git/...`
+    // also makes this correct inside a linked worktree, where `.git` is a
+    // gitlink file and the real per-worktree HEAD lives elsewhere.
+    for p in ["HEAD", "logs/HEAD"] {
+        if let Some(path) = run(&["rev-parse", "--git-path", p]) {
+            println!("cargo::rerun-if-changed={path}");
+        }
+    }
     println!("cargo::rerun-if-changed=src");
     println!("cargo::rerun-if-env-changed=BRIDGE_MCP_BUILD_REV");
 
