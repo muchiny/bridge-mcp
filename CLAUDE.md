@@ -167,9 +167,12 @@ dxt/                              # DXT packaging (Claude Desktop extension)
 
 YAML config at `~/.config/bridge-mcp/config.yaml`. See `config/config.example.yaml`.
 Key sections: `hosts`, `security`, `limits`, `audit`, `sessions`, `tool_groups`,
-`ssh_config`, `http`, `rbac`, `awx` (full schema: `Config` in `src/config/types.rs`,
+`ssh_config`, `http`, `awx` (full schema: `Config` in `src/config/types.rs`,
 `deny_unknown_fields`). Session recording is not a YAML section — it is runtime/
-tool-driven (`ssh_recording_*` + `MCP_RECORDING_KEY`).
+tool-driven (`ssh_recording_*` + `MCP_RECORDING_KEY`). `rbac` still parses (it is
+a real `Config` field) but `rbac.enabled: true` is rejected at load time —
+nothing in the request path enforces it yet (`src/config/loader.rs`,
+`src/security/rbac.rs`).
 
 ## Known Advisories
 

@@ -352,3 +352,71 @@ security:
     assert!(!config.tool_groups.is_group_enabled("ansible"));
     assert!(config.tool_groups.is_group_enabled("core")); // Unlisted = enabled
 }
+
+// ============== RBAC (not wired) ==============
+
+// NOTE: the RBAC briefs' fixture used `auth: agent` (bare string) and a
+// `denied_tools` field directly on `rbac:`. Neither parses in this codebase:
+// `AuthConfig` is an internally-tagged enum (`auth: { type: agent }`, as every
+// other test in this file uses) and `denied_tools` lives on `Role`, not on
+// `RbacConfig` (`#[serde(deny_unknown_fields)]` on both — see
+// src/security/rbac.rs:10-24). Fixed the fixture syntax below; the RBAC
+// assertions themselves are unchanged from the brief.
+
+#[test]
+fn rbac_enabled_true_is_rejected_because_nothing_enforces_it() {
+    let err = load_yaml(
+        r"
+hosts:
+  server1:
+    hostname: 192.0.2.1
+    user: nobody
+    auth:
+      type: agent
+rbac:
+  enabled: true
+",
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("rbac") && msg.contains("not enforced"),
+        "the error must say why, not just that: {msg}"
+    );
+}
+
+#[test]
+fn rbac_disabled_still_loads() {
+    assert!(
+        load_yaml(
+            r"
+hosts:
+  server1:
+    hostname: 192.0.2.1
+    user: nobody
+    auth:
+      type: agent
+rbac:
+  enabled: false
+",
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn rbac_absent_still_loads() {
+    assert!(
+        load_yaml(
+            r"
+hosts:
+  server1:
+    hostname: 192.0.2.1
+    user: nobody
+    auth:
+      type: agent
+",
+        )
+        .is_ok()
+    );
+}

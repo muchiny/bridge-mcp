@@ -11,6 +11,8 @@
 #[path = "ssh_mock_server.rs"]
 mod helpers;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use bridge_mcp::config::{AuthConfig, HostKeyVerification};
 use bridge_mcp::error::BridgeError;
 use bridge_mcp::ssh::SshClient;
@@ -220,6 +222,81 @@ async fn auth_config_password_round_trip() {
         .close()
         .await
         .ok();
+}
+
+// Regression test for the hand-rolled `ChannelStream` replaced by
+// `Channel::into_stream()` in `src/ssh/client.rs`. The old wrapper rebuilt
+// `channel.data(buf)` on every `poll_write` and dropped the in-flight
+// future on `Pending`, so a retry after backpressure could re-send an
+// already-queued prefix. This test proves a plain round trip through
+// `forward_tcp_connection` is byte-exact; it does NOT reproduce the
+// duplicated-prefix bug itself — see the comment below for why.
+#[tokio::test]
+async fn forward_tcp_connection_round_trips_without_duplicated_prefix() {
+    let (addr, _server, _root) = MockSshServerBuilder::new().start().await;
+    let host = mock_host_config(addr, "tester", "testpass");
+    let limits = mock_limits();
+    let client = SshClient::connect("mock", &host, &limits)
+        .await
+        .expect("connect");
+
+    // Local TCP pair: `tunnel_side` is handed to `forward_tcp_connection`
+    // (the "local" end of the tunnel); `test_side` stays here to act as the
+    // application writing into, and reading back out of, the tunnel.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local listener");
+    let local_addr = listener.local_addr().expect("local_addr");
+    let mut test_side = tokio::net::TcpStream::connect(local_addr)
+        .await
+        .expect("connect local");
+    let (tunnel_side, _peer) = listener.accept().await.expect("accept local");
+
+    // 64 KiB spans multiple SSH channel data packets (russh's default
+    // `maximum_packet_size` is far smaller than this), so `poll_write` gets
+    // called more than once — a minimal single-write test would never
+    // exercise the loop at all, fixed or not.
+    let payload: Vec<u8> = (0..64u32 * 1024).map(|i| (i % 251) as u8).collect();
+
+    let (forward_result, io_result) = tokio::join!(
+        client.forward_tcp_connection(tunnel_side, "echo-target", 4242),
+        async {
+            test_side.write_all(&payload).await?;
+            // Half-close so the mock's echo loop sees EOF and shuts its
+            // side down in turn, letting `copy_bidirectional` complete.
+            test_side.shutdown().await?;
+            let mut echoed = Vec::new();
+            test_side.read_to_end(&mut echoed).await?;
+            Ok::<_, std::io::Error>(echoed)
+        }
+    );
+
+    forward_result.expect("forward_tcp_connection failed");
+    let echoed = io_result.expect("local I/O failed");
+
+    assert_eq!(
+        echoed.len(),
+        payload.len(),
+        "echoed length must match sent length (no dropped or duplicated bytes)"
+    );
+    assert_eq!(
+        echoed, payload,
+        "echoed bytes must equal sent bytes with no duplicated prefix"
+    );
+
+    let _ = client.close().await;
+
+    // NOT covered by this test, and not fakeable in this mock (per the
+    // task brief):
+    // - The jump-host transport path (`connect_via_jump` / `SshClient::connect`
+    //   through a tunnel) would need two nested mock SSH servers.
+    // - The actual livelock this fix addresses only manifests once the SSH
+    //   channel *window* is exhausted (peer stops reading faster than the
+    //   sender writes). This mock's echo loop always keeps reading, so the
+    //   window is never exhausted and `poll_write` never observes `Pending`
+    //   here. The fix is verified against the upstream contract (see the
+    //   commit message's context7 finding + the vendored `ChannelTx::poll_write`
+    //   source), not by reproducing the race in a test.
 }
 
 #[tokio::test]

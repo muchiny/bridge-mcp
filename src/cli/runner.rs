@@ -23,8 +23,7 @@ use crate::security::{
     AuditEvent, AuditLogger, CommandResult, CommandValidator, RateLimiter, Sanitizer,
 };
 use crate::ssh::{
-    SessionManager, SshClient, TransferMode, TransferOptions, TransferProgress, is_retryable_error,
-    with_retry_if,
+    SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error, with_retry_if,
 };
 
 /// Try to forward a `tools/call` request to a running daemon over its
@@ -845,12 +844,11 @@ pub async fn run_upload(
             host: host.to_string(),
         })?;
 
-    // Parse transfer mode
-    let transfer_mode = TransferMode::parse(mode).ok_or_else(|| BridgeError::FileTransfer {
-        reason: format!(
-            "Invalid transfer mode: {mode}. Valid modes: overwrite, append, resume, fail-if-exists"
-        ),
-    })?;
+    let transfer_mode = crate::mcp::tool_handlers::utils::parse_transfer_mode_checked(
+        mode,
+        verify_checksum,
+        "sent",
+    )?;
 
     // Expand and check local path (`~` -> home dir; pass-through otherwise).
     let local_path_str = local_path.to_string_lossy();
@@ -1011,12 +1009,11 @@ pub async fn run_download(
             host: host.to_string(),
         })?;
 
-    // Parse transfer mode
-    let transfer_mode = TransferMode::parse(mode).ok_or_else(|| BridgeError::FileTransfer {
-        reason: format!(
-            "Invalid transfer mode: {mode}. Valid modes: overwrite, append, resume, fail-if-exists"
-        ),
-    })?;
+    let transfer_mode = crate::mcp::tool_handlers::utils::parse_transfer_mode_checked(
+        mode,
+        verify_checksum,
+        "received",
+    )?;
 
     // Expand local path (`~` -> home dir; pass-through otherwise).
     let local_path_str = local_path.to_string_lossy();
@@ -2481,6 +2478,75 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_run_upload_verify_checksum_rejected_in_resume_mode() {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "test".to_string(),
+            HostConfig {
+                hostname: "test.local".to_string(),
+                port: 22,
+                user: "user".to_string(),
+                auth: AuthConfig::Agent,
+                description: None,
+                host_key_verification: HostKeyVerification::Off,
+                proxy_jump: None,
+                socks_proxy: None,
+                sudo_password: None,
+                tags: Vec::new(),
+                os_type: OsType::Linux,
+                shell: None,
+                retry: None,
+                protocol: crate::config::Protocol::default(),
+                #[cfg(feature = "winrm")]
+                winrm_use_tls: None,
+                #[cfg(feature = "winrm")]
+                winrm_accept_invalid_certs: None,
+                #[cfg(feature = "winrm")]
+                winrm_operation_timeout_secs: None,
+                #[cfg(feature = "winrm")]
+                winrm_max_envelope_size: None,
+            },
+        );
+
+        let config = Config {
+            hosts,
+            security: SecurityConfig::default(),
+            limits: LimitsConfig::default(),
+            audit: AuditConfig::default(),
+            sessions: SessionConfig::default(),
+            tool_groups: ToolGroupsConfig::default(),
+            ssh_config: SshConfigDiscovery::default(),
+            http: HttpTransportConfig::default(),
+            rbac: crate::security::rbac::RbacConfig::default(),
+            awx: None,
+        };
+
+        // The guard must fire before the local-file-exists check, so this
+        // nonexistent path never gets a chance to produce "not found" instead.
+        let result = run_upload(
+            Arc::new(config),
+            "test",
+            Path::new("/nonexistent/file/that/does/not/exist.txt"),
+            "/remote/file",
+            "resume",
+            1024 * 1024,
+            true,
+            true,
+            false,
+        )
+        .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BridgeError::FileTransfer { reason } => {
+                assert!(reason.contains("verify_checksum"), "got: {reason}");
+                assert!(reason.contains("resume"), "got: {reason}");
+            }
+            e => panic!("Expected FileTransfer error, got: {e:?}"),
+        }
+    }
+
     // ============== run_download Error Cases (async) ==============
 
     #[tokio::test]
@@ -2581,6 +2647,76 @@ mod tests {
         match result.unwrap_err() {
             BridgeError::FileTransfer { reason } => {
                 assert!(reason.contains("Invalid transfer mode"));
+            }
+            e => panic!("Expected FileTransfer error, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_download_verify_checksum_rejected_in_resume_mode() {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "test".to_string(),
+            HostConfig {
+                hostname: "test.local".to_string(),
+                port: 22,
+                user: "user".to_string(),
+                auth: AuthConfig::Agent,
+                description: None,
+                host_key_verification: HostKeyVerification::Off,
+                proxy_jump: None,
+                socks_proxy: None,
+                sudo_password: None,
+                tags: Vec::new(),
+                os_type: OsType::Linux,
+                shell: None,
+                retry: None,
+                protocol: crate::config::Protocol::default(),
+                #[cfg(feature = "winrm")]
+                winrm_use_tls: None,
+                #[cfg(feature = "winrm")]
+                winrm_accept_invalid_certs: None,
+                #[cfg(feature = "winrm")]
+                winrm_operation_timeout_secs: None,
+                #[cfg(feature = "winrm")]
+                winrm_max_envelope_size: None,
+            },
+        );
+
+        let config = Config {
+            hosts,
+            security: SecurityConfig::default(),
+            limits: LimitsConfig::default(),
+            audit: AuditConfig::default(),
+            sessions: SessionConfig::default(),
+            tool_groups: ToolGroupsConfig::default(),
+            ssh_config: SshConfigDiscovery::default(),
+            http: HttpTransportConfig::default(),
+            rbac: crate::security::rbac::RbacConfig::default(),
+            awx: None,
+        };
+
+        // The guard must fire before any connection attempt, so this points at
+        // a host that would otherwise fail with a connection error, not
+        // "verify_checksum"/"resume".
+        let result = run_download(
+            Arc::new(config),
+            "test",
+            "/remote/file",
+            Path::new("/local/file"),
+            "append",
+            1024 * 1024,
+            true,
+            true,
+            false,
+        )
+        .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BridgeError::FileTransfer { reason } => {
+                assert!(reason.contains("verify_checksum"), "got: {reason}");
+                assert!(reason.contains("append"), "got: {reason}");
             }
             e => panic!("Expected FileTransfer error, got: {e:?}"),
         }

@@ -171,7 +171,10 @@ pub enum Commands {
         #[arg(long, default_value = "1048576")]
         chunk_size: u64,
 
-        /// Verify SHA256 checksum after transfer
+        /// Compute a SHA256 checksum after transfer and print it. Not a
+        /// verification: it is never compared against a remote-side hash, and
+        /// is rejected when mode is resume or append (only a partial hash
+        /// could be computed there).
         #[arg(long)]
         verify_checksum: bool,
 
@@ -272,7 +275,10 @@ pub enum Commands {
         #[arg(long, default_value = "1048576")]
         chunk_size: u64,
 
-        /// Verify SHA256 checksum after transfer
+        /// Compute a SHA256 checksum after transfer and print it. Not a
+        /// verification: it is never compared against a remote-side hash, and
+        /// is rejected when mode is resume or append (only a partial hash
+        /// could be computed there).
         #[arg(long)]
         verify_checksum: bool,
 

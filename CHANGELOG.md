@@ -29,6 +29,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   params in `tools/list`. Lib API: `DataReductionArgs::extract` now returns
   `Result`; `truncate_output_with_cache` takes a 4th `reduction_tip` argument;
   `Metrics::record_pipeline_stats` takes a 5th `params_used` argument.
+- **BREAKING: `rbac.enabled: true` is now rejected at config load** — a
+  config file that loaded successfully before this change can now fail to
+  load. Nothing in the request path ever called `RbacEnforcer::is_allowed`
+  — no `ToolContext`, `SessionContext` nor `Session` carries a principal
+  to check against — so `enabled: true` granted unrestricted access while
+  reading as an active security control. `validate_config` now refuses it
+  with: "security.rbac is not enforced by this build: `rbac.enabled: true`
+  would grant unrestricted access. Set it to false and restrict access
+  with `tool_groups.groups` (unlisted groups are already disabled),
+  `security.mode` + whitelist/blacklist, or per-host configuration."
+- **`verify_checksum` with `mode=resume` or `mode=append` is now
+  refused** — instead of silently returning `checksum: None`. No transfer
+  mode has ever compared the computed hash against anything on the
+  remote host: `verify_checksum` has always been a local
+  (upload)/received-bytes (download) SHA256 only, never a
+  source-vs-destination comparison. In `resume`/`append` the hash was
+  not even computed. The tool now says so explicitly instead of
+  returning a success an operator could read as "integrity verified" —
+  full remote-side verification is not implemented. Applies to both MCP
+  handlers (`ssh_upload`, `ssh_download`) and the CLI
+  (`bridge-mcp upload`/`download`). The new shared error message also
+  fixed a wording split between the two surfaces: both have always
+  accepted `fail_if_exists` and `fail-if-exists` alike (they share one
+  `TransferMode::parse`), but each *advertised* only its own spelling in
+  the "valid modes" error text. The shared message now names both.
 
 ### Security
 
@@ -63,6 +88,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead); with `u64::MAX`, allocation failure aborted the process. Chunk
   sizes are now clamped to 4 KB..=64 MB at every point of use, and both the
   upload and download schemas declare `minimum`/`maximum`.
+- **AWX bearer token stored verbatim in command history.** `process_success`
+  and `log_failure` (`src/domain/use_cases/execute_command.rs`) passed the
+  *raw* command to `AuditEvent::new`, `CommandHistory::record_success` /
+  `record_failure`, and the returned `command` field — only the command
+  *output* was sanitized. `AuditLogger` already re-sanitized `event.command`
+  defensively before writing, but `CommandHistory` had no sanitizer at all,
+  so a token typed on the command line (e.g. an AWX
+  `-H 'Authorization: Bearer {token}'`) was re-exported verbatim by
+  `ssh_history` and the `history://recent` MCP resource, both enabled by
+  default. The command is now sanitized once at the fan-out point, before it
+  reaches audit, history, or the response.
+  **Behaviour change:** `SanitizeConfig::default()` has `entropy_detection:
+  true` (threshold 4.5, min length 16). Commands are now fed through that
+  detector too, so any opaque argument 16+ characters long with high
+  entropy — a base64 blob, a generated ID, a UUID without hyphens — will be
+  replaced with a redaction marker in `ssh_history` output and the
+  `history://recent` resource, even when it wasn't a secret. Ordinary
+  commands (paths, flags, hostnames) are unaffected.
 
 ### Fixed
 

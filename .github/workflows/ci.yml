@@ -227,6 +227,31 @@ jobs:
           # that return value. `http` is cheap (axum/tower); the heavier
           # optional features still have this blind spot and need the same
           # treatment if a diff ever lands in them.
+          #
+          # `--timeout-multiplier` is dead here too: with `--baseline skip`
+          # there is no baseline duration to multiply against, so
+          # cargo-mutants ignores it and falls back to a flat 300s test
+          # timeout. `--timeout 900` replaces it explicitly.
+          #
+          # Measured on this job's own first real run (PR #131, ubuntu-24.04,
+          # `-j 2`), which is what the number is set from rather than from a
+          # local extrapolation:
+          #   build phase per mutant ......... 210-369s
+          #   test phase per CAUGHT mutant ...    5-25s
+          # The build dominates by an order of magnitude, and the `--timeout`
+          # does not apply to it — it bounds the TEST phase only. A caught
+          # mutant exits at the first failing test, which is why its test
+          # phase is seconds.
+          #
+          # What is NOT measured: a MISSED mutant runs the suite to completion,
+          # and every mutant in that run was caught, so there is no observation
+          # of that upper bound yet. 900s is deliberately over-generous until
+          # there is one. Do not tighten it on the strength of the 5-25s
+          # figure — that is the fast path, not the worst case.
+          #
+          # The real throughput constraint is therefore the build, not this
+          # timeout: that run completed 10 of 21 mutants before exhausting its
+          # 35m budget and reported PARTIAL, as designed.
           set +e
           timeout --signal=INT --kill-after=2m 35m \
             cargo mutants \
@@ -234,7 +259,7 @@ jobs:
               --baseline skip \
               --test-tool nextest \
               --features http \
-              --timeout-multiplier 1.5 \
+              --timeout 900 \
               -j 2 \
               -vV
           rc=$?

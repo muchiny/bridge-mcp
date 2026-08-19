@@ -21,14 +21,13 @@ bridge-mcp --config /path/to/config.yaml
 The configuration file is organised in these top-level sections:
 
 - **hosts** — SSH host definitions (hostname, port, user, auth, jump, etc.)
-- **security** — Command validation (mode, whitelist, blacklist, RBAC)
+- **security** — Command validation (mode, whitelist, blacklist)
 - **limits** — Timeouts, output limits, retry, rate-limit settings
 - **audit** — Audit logging configuration (path, format, redaction)
 - **sessions** — Persistent tmux session configuration
 - **tool_groups** — Per-group feature flags (disable what you don't need)
 - **ssh_config** — Auto-discovery from `~/.ssh/config`
 - **http** — Optional Streamable HTTP transport + OAuth 2.1 settings
-- **rbac** — Role-based access control
 - **awx** — Optional AWX/Ansible Tower integration
 
 Observability (OpenTelemetry tracing + Prometheus metrics) is configured
