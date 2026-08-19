@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-08-19
+## [2.2.0] - 2026-08-19
 
 Major version because this release breaks compatibility in seven places, four
-of them in the public library API. Every one is listed under **BREAKING** below
+of them in the public library API. Numbered **2.2.0** rather than 2.0.0: the
+changelog already carries 2.0.0, 2.0.1 and 2.1.0 from an earlier 2.x line that
+was never tagged, and reusing those numbers would make two different releases
+share one version string. 1.20.0 is the last tagged release; 2.0.0 through
+2.1.0 are skipped, not repeated. Every one is listed under **BREAKING** below
 with what to do about it. See "Migrating from 1.20.0" at the end of this
 section.
 
@@ -1560,8 +1564,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v2.0.0
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v2.2.0
 [1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/muchiny/bridge-mcp/compare/v1.17.0...v1.18.0

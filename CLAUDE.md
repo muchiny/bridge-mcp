@@ -214,7 +214,7 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Recent Changes
 
-- **v2.0.0 (2026-08-19)** — major bump for seven breaking changes, four in the
+- **v2.2.0 (2026-08-19)** — major bump for seven breaking changes, four in the
   public lib API. `rbac.enabled: true` is rejected at load (it was never
   enforced and granted full access); `verify_checksum` refuses `resume`/`append`
   instead of returning a checksum-free success; no-`jq` builds error on

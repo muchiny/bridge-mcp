@@ -21,7 +21,7 @@ The `manifest.json` file describes the extension to Claude Desktop:
   "dxt_version": "0.1",
   "name": "bridge-mcp",
   "display_name": "Bridge MCP",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "description": "Execute commands securely on remote servers via SSH. 476 tools for Linux, Windows, Docker, Kubernetes, and more.",
   "author": {
     "name": "muchiny"
