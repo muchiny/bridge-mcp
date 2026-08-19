@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-19
+
+Major version because this release breaks compatibility in seven places, four
+of them in the public library API. Numbered **2.2.0** rather than 2.0.0: the
+changelog already carries 2.0.0, 2.0.1 and 2.1.0 from an earlier 2.x line that
+was never tagged, and reusing those numbers would make two different releases
+share one version string. 1.20.0 is the last tagged release; 2.0.0 through
+2.1.0 are skipped, not repeated. Every one is listed under **BREAKING** below
+with what to do about it. See "Migrating from 1.20.0" at the end of this
+section.
+
 ### Added
 
 - **`tool_groups.listing: progressive`** — `tools/list` exposes only the 3
@@ -39,8 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would grant unrestricted access. Set it to false and restrict access
   with `tool_groups.groups` (unlisted groups are already disabled),
   `security.mode` + whitelist/blacklist, or per-host configuration."
-- **`verify_checksum` with `mode=resume` or `mode=append` is now
-  refused** — instead of silently returning `checksum: None`. No transfer
+- **BREAKING: `verify_checksum` with `mode=resume` or `mode=append` is
+  now refused** — instead of silently returning `checksum: None`. No transfer
   mode has ever compared the computed hash against anything on the
   remote host: `verify_checksum` has always been a local
   (upload)/received-bytes (download) SHA256 only, never a
@@ -65,8 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     destructive-elicitation prompt). A new `validate_log_files` enforces a
     character allowlist that keeps globbing usable while making command
     substitution and chaining unrepresentable. `build_log_aggregate_command`
-    now returns `Result<String>`, and an empty `log_files` is an error rather
-    than a silent no-op.
+    now returns `Result<String>` (**BREAKING**, lib API), and an empty
+    `log_files` is now an error rather than a silent no-op (**BREAKING**:
+    a call that previously succeeded doing nothing now fails).
   - `diagnostics` — `symptom` sat inside a *double-quoted* `echo`, where
     command substitution needs no breakout at all; `since` sat inside single
     quotes. Both are now `shell::escape`d.
@@ -87,7 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was emptied and the call reported success (`write_bytes` looped forever
   instead); with `u64::MAX`, allocation failure aborted the process. Chunk
   sizes are now clamped to 4 KB..=64 MB at every point of use, and both the
-  upload and download schemas declare `minimum`/`maximum`.
+  upload and download schemas declare `minimum`/`maximum`. **BREAKING** for
+  any caller passing a value outside that range: it is silently clamped
+  rather than honoured.
 - **AWX bearer token stored verbatim in command history.** `process_success`
   and `log_failure` (`src/domain/use_cases/execute_command.rs`) passed the
   *raw* command to `AuditEvent::new`, `CommandHistory::record_success` /
@@ -99,7 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ssh_history` and the `history://recent` MCP resource, both enabled by
   default. The command is now sanitized once at the fan-out point, before it
   reaches audit, history, or the response.
-  **Behaviour change:** `SanitizeConfig::default()` has `entropy_detection:
+  **BREAKING (output shape):** `SanitizeConfig::default()` has `entropy_detection:
   true` (threshold 4.5, min length 16). Commands are now fed through that
   detector too, so any opaque argument 16+ characters long with high
   entropy — a base64 blob, a generated ID, a UUID without hyphens — will be
@@ -117,6 +131,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of the real `columns` param.
 - **Handler schemas understated the default output cap** — docs said
   "typically 20000" while the real default is 40000.
+
+### Migrating from 1.20.0
+
+Seven breaking changes, four of them in the public library API. In rough order
+of how likely you are to hit them.
+
+**1. `rbac.enabled: true` no longer loads.** If your config has it, the server
+now refuses to start. There is no drop-in replacement, because there never was
+a working implementation: nothing in the request path ever consulted
+`RbacEnforcer`, so the setting granted unrestricted access while reading as a
+security control. Set `enabled: false` and express the restriction with what is
+actually enforced — `tool_groups.groups` (anything unlisted is already
+disabled), `security.mode` with the whitelist/blacklist, or per-host config.
+
+**2. `verify_checksum` with `mode=resume` or `mode=append` now errors.** It
+previously returned success with `checksum: null`. Drop `verify_checksum`, or
+transfer with `mode=overwrite` to get a source-side SHA256. Be aware of what
+that SHA256 is and is not: it hashes the local file on upload, or the received
+bytes on download. **No mode has ever compared it against the remote host.**
+Remote-side verification is not implemented in 2.0.0.
+
+**3. Builds without the `jq` feature reject reduction params.** `jq_filter`,
+`yq_filter` and `output_format` used to be accepted and silently ignored; they
+now error, and no longer appear in `tools/list`. Either build with `--features
+jq` or stop sending them.
+
+**4. `ssh_history` output changes shape.** Commands now pass through the same
+sanitizer as output, and `SanitizeConfig::default()` enables entropy detection
+(threshold 4.5, minimum length 16). Any opaque argument of 16+ characters — a
+base64 blob, a generated ID, a hyphen-less UUID — is replaced by a redaction
+marker even when it is not a secret. If you parse `ssh_history` or
+`history://recent` programmatically and depend on exact command text, this will
+break you. It is deliberate: an AWX bearer token typed on a command line used
+to be stored and re-exported verbatim.
+
+**5. `chunk_size` outside 4 KB..=64 MB is clamped, not honoured.** Previously
+any value was passed through to `vec![0u8; n]`; `0` truncated the remote file
+and reported success, and `u64::MAX` aborted the process.
+
+**Library API** (only if you depend on `bridge-mcp` as a crate):
+
+| Item | 1.20.0 | 2.0.0 |
+|---|---|---|
+| `DataReductionArgs::extract` | returns the args | returns `Result<_>` |
+| `truncate_output_with_cache` | 3 arguments | 4 — adds `reduction_tip` |
+| `Metrics::record_pipeline_stats` | 4 arguments | 5 — adds `params_used` |
+| `build_log_aggregate_command` | returns `String` | returns `Result<String>` |
+
+An empty `log_files` passed to `build_log_aggregate_command` is now an error
+rather than producing a command that did nothing.
+
+**What has NOT changed, despite appearances.** Refusing the dishonest
+`verify_checksum` modes is not the same as implementing honest verification,
+and rejecting `rbac.enabled` is not the same as enforcing RBAC. Both are
+fail-closed stopgaps. If you were relying on either as a security control, you
+were not protected in 1.20.0 either — you now get an error instead of a false
+assurance.
 
 ## [1.20.0] - 2026-07-02
 
@@ -1493,7 +1564,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v2.2.0
 [1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/muchiny/bridge-mcp/compare/v1.17.0...v1.18.0

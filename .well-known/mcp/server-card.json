@@ -1,6 +1,6 @@
 {
   "name": "bridge-mcp",
-  "version": "1.20.0",
+  "version": "2.2.0",
   "description": "Secure SSH bridge for AI-powered remote server management. 476 tools across 77 groups covering Linux, Windows, Docker, Kubernetes, and more.",
   "capabilities": {
     "tools": true,
