@@ -19,6 +19,15 @@ pub use runner::{
 #[command(name = "bridge-mcp")]
 #[command(about = "MCP server for SSH access to air-gapped environments")]
 #[command(version)]
+// `-V` keeps the bare semver; `--version` adds the revision. Two builds of the
+// same release are otherwise byte-identical in their version output, which is
+// exactly how a 23-commit-stale binary went unnoticed for 17 days.
+#[command(long_version = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (rev ",
+    env!("BRIDGE_MCP_BUILD_REV"),
+    ")"
+))]
 #[command(after_help = "EXAMPLES:
     # Start MCP server (default mode, for Claude Code integration)
     bridge-mcp

@@ -249,6 +249,13 @@ pub struct ServerInfo {
     /// Optional icons for client display (SEP-973).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icons: Option<Vec<Icon>>,
+    /// Vendor-namespaced build provenance, keyed by [`BUILD_META_KEY`].
+    /// Puts the compiled-from revision on the wire so a stale deployment is
+    /// visible to a client, not only to whoever ran `make verify-install`.
+    /// `#[serde(rename)]` is required: `rename_all = "camelCase"` would emit
+    /// `meta`, and the spec field is `_meta`.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
 /// Icon metadata (SEP-973). Used by `Tool`, `Resource`, `Prompt`, and
@@ -895,6 +902,14 @@ pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
 pub const SERVER_NAME: &str = "bridge-mcp";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Git revision this binary was compiled from: 12 hex chars, optionally
+/// suffixed `-dirty`, or `unknown` when built outside a git checkout.
+/// Emitted by `build.rs`. This is the only thing that distinguishes two
+/// builds of the same `CARGO_PKG_VERSION`.
+pub const BUILD_REV: &str = env!("BRIDGE_MCP_BUILD_REV");
+/// Vendor-namespaced `_meta` key carrying build provenance in `serverInfo`.
+/// Matches the reverse-DNS package name in `server.json`.
+pub const BUILD_META_KEY: &str = "io.github.muchiny/build";
 /// URL of the server icon advertised in `ServerInfo` (SEP-973). Points at the
 /// committed `dxt/icon.svg`, served raw from GitHub `main`.
 pub const SERVER_ICON_URL: &str =
@@ -1066,6 +1081,7 @@ mod tests {
                 description: None,
                 website_url: None,
                 icons: None,
+                meta: None,
             },
             instructions: None,
         };
@@ -1191,6 +1207,7 @@ mod tests {
             description: Some("A test server".to_string()),
             website_url: Some("https://example.com".to_string()),
             icons: None,
+            meta: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"description\""));
@@ -1206,6 +1223,7 @@ mod tests {
             description: None,
             website_url: None,
             icons: None,
+            meta: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(!json.contains("description"));
@@ -1282,6 +1300,7 @@ mod tests {
                 sizes: None,
                 theme: None,
             }]),
+            meta: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert!(json["icons"].is_array());
@@ -1786,5 +1805,29 @@ mod tests {
         let params = n.params.unwrap();
         assert_eq!(params["taskId"], "task-99");
         assert_eq!(params["status"], "completed");
+    }
+
+    #[test]
+    fn test_build_rev_is_a_git_sha_or_unknown() {
+        // Either a 12-char hex sha (optionally "-dirty"), or "unknown" when
+        // the crate was built outside a git checkout (crates.io tarball,
+        // vendored source). Anything else means build.rs mis-parsed git.
+        let core = BUILD_REV.strip_suffix("-dirty").unwrap_or(BUILD_REV);
+        assert!(
+            core == "unknown" || (core.len() == 12 && core.chars().all(|c| c.is_ascii_hexdigit())),
+            "BUILD_REV must be 12 hex chars, 12 hex chars + \"-dirty\", or \"unknown\"; got {BUILD_REV:?}"
+        );
+        assert!(
+            !BUILD_REV.is_empty(),
+            "BUILD_REV is empty: build.rs did not emit cargo::rustc-env"
+        );
+    }
+
+    #[test]
+    fn test_build_meta_key_is_vendor_namespaced() {
+        // MCP reserves the `io.modelcontextprotocol/` prefix; ours must be a
+        // reverse-DNS namespace we own, matching server.json's package name.
+        assert_eq!(BUILD_META_KEY, "io.github.muchiny/build");
+        assert!(!BUILD_META_KEY.starts_with("io.modelcontextprotocol/"));
     }
 }

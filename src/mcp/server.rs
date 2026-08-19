@@ -30,9 +30,9 @@ use super::transport::{Session, Transport, stdio::StdioTransport};
 use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
-    ClientInfo, CompletionRef, CompletionResult, CompletionsCapability, CompletionsCompleteParams,
-    CompletionsCompleteResult, CreateTaskResult, Icon, InitializeParams, InitializeResult,
-    JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
+    BUILD_META_KEY, BUILD_REV, ClientInfo, CompletionRef, CompletionResult, CompletionsCapability,
+    CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult, Icon, InitializeParams,
+    InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
     LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION, PromptsCapability,
     PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
@@ -1328,6 +1328,7 @@ impl McpServer {
                     sizes: Some(vec!["any".to_string()]),
                     theme: None,
                 }]),
+                meta: Some(build_provenance_meta()),
             },
             instructions: Some(instructions),
         };
@@ -2255,6 +2256,22 @@ impl McpServer {
 
         JsonRpcResponse::success(id, json!({}))
     }
+}
+
+/// Vendor-namespaced build provenance for `serverInfo._meta`.
+///
+/// Built through `serde_json::Map` rather than `json!` so the key stays a
+/// single source of truth (`BUILD_META_KEY`) instead of a duplicated literal.
+fn build_provenance_meta() -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        BUILD_META_KEY.to_string(),
+        json!({
+            "rev": BUILD_REV,
+            "version": SERVER_VERSION,
+        }),
+    );
+    Value::Object(map)
 }
 
 #[cfg(test)]
@@ -4810,5 +4827,32 @@ mod tests {
         let args = serde_json::json!({ "host": "prod" });
         assert!(super::plan_command_from_args(Some(&args)).is_none());
         assert!(super::plan_command_from_args(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_server_info_meta_carries_build_rev() {
+        let server = create_test_server();
+        let params = json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+            }
+        });
+
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
+
+        let result = response.result.unwrap();
+        let build = &result["serverInfo"]["_meta"]["io.github.muchiny/build"];
+        assert!(
+            build.is_object(),
+            "serverInfo._meta must carry build provenance, got: {}",
+            result["serverInfo"]
+        );
+        assert_eq!(build["rev"], BUILD_REV);
+        assert_eq!(build["version"], SERVER_VERSION);
     }
 }

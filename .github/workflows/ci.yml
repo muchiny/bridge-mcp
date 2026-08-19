@@ -132,6 +132,11 @@ jobs:
       # renders them — without this step the compiled examples in src/ are never
       # built or executed by anything.
       - run: cargo test --doc --all-features
+      # `cargo nextest run --all-targets` already built target/debug/bridge-mcp,
+      # so this costs a shell invocation. It proves build.rs actually stamped
+      # this checkout's SHA rather than silently falling back to "unknown".
+      - name: Binary embeds this checkout's commit
+        run: make verify-install BIN=target/debug/bridge-mcp
 
   msrv:
     name: MSRV (1.94)

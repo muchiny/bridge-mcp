@@ -31,9 +31,23 @@ section.
 - **Truncation messages now suggest a next step** — each truncated response
   appends an `OutputKind`-specific tip recommending `jq_filter`/`columns`/`limit`
   as appropriate.
+- **`serverInfo._meta["io.github.muchiny/build"]`** — every `initialize`
+  response now carries the git revision the binary was compiled from
+  (`{"rev": "8cf1940713bd", "version": "2.2.0"}`; `rev` gains a `-dirty`
+  suffix for uncommitted trees, and is `unknown` when built outside a git
+  checkout). `bridge-mcp --version` prints the same revision, and
+  `make verify-install` exits non-zero when the installed binary was not
+  built from the current tree. Added because the binary deployed to
+  `~/.local/bin` sat 23 commits stale for 17 days with nothing able to
+  detect it: `CARGO_PKG_VERSION` is byte-identical across every build of a
+  release, so `--version` could not tell the two apart.
 
 ### Changed
 
+- **BREAKING (lib API)**: `ServerInfo` gained a public
+  `meta: Option<serde_json::Value>` field, serialized as `_meta`. Any
+  struct-literal construction of `ServerInfo` outside this crate must add
+  `meta: None`.
 - **BREAKING (no-`jq` builds)**: binaries built without the `jq` feature now
   return an explicit error when `jq_filter`, `yq_filter`, or `output_format`
   are supplied (previously silently ignored), and no longer advertise those

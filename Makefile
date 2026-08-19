@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install
 
 # Default target
 all: check lint test
@@ -105,6 +105,35 @@ install: release
 # identical across every build of a release). Override the binary with BIN=...
 probe-install:
 	@scripts/probe_installed_binary.sh $(BIN)
+
+# Which binary `verify-install` inspects. Defaults to the deployed one; CI
+# overrides it with the freshly built debug binary.
+BIN ?= $(HOME)/.local/bin/bridge-mcp
+
+# Fail loudly when the binary was not built from the current working tree.
+# This is the identity check; `probe-install` is the behaviour check. Neither
+# subsumes the other: a binary can carry the right SHA and have been built
+# with the wrong feature set, and vice versa.
+verify-install:
+	@test -x "$(BIN)" || { echo "verify-install: no executable at $(BIN)"; exit 1; }
+	@head_sha=$$(git rev-parse --short=12 HEAD); \
+	if [ -n "$$(git status --porcelain --untracked-files=no)" ]; then \
+		expected="$$head_sha-dirty"; \
+	else \
+		expected="$$head_sha"; \
+	fi; \
+	actual=$$("$(BIN)" --version | sed -n 's/.*(rev \(.*\))$$/\1/p'); \
+	if [ -z "$$actual" ]; then \
+		echo "verify-install: FAIL - $(BIN) prints no build revision at all."; \
+		echo "  It predates build.rs. Rebuild: CARGO_BUILD_JOBS=2 make install"; \
+		exit 1; \
+	fi; \
+	if [ "$$actual" != "$$expected" ]; then \
+		echo "verify-install: FAIL - $(BIN) was built from $$actual, tree is $$expected."; \
+		echo "  Rebuild and reinstall: CARGO_BUILD_JOBS=2 make install"; \
+		exit 1; \
+	fi; \
+	echo "verify-install: OK - $(BIN) built from $$expected"
 
 # Development mode with auto-reload
 dev:
@@ -363,6 +392,7 @@ help:
 	@echo "  clean            - Clean build artifacts"
 	@echo "  install          - Build (--features full) + install to ~/.local/bin"
 	@echo "  probe-install    - Fingerprint-probe the installed binary for staleness"
+	@echo "  verify-install   - Fail unless the installed binary was built from HEAD"
 	@echo ""
 	@echo "Quality:"
 	@echo "  test             - Run tests"
