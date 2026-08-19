@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install
 
 # Default target
 all: check lint test
@@ -91,9 +91,20 @@ clean:
 # Install to ~/.local/bin (in PATH ahead of ~/.cargo/bin on most setups).
 # Uses the release target above which builds with --features full so server-side
 # jq filtering is available.
+#
+# `install -m 0755` rather than `cp`: cp preserves the destination inode and
+# leaves whatever mode was already there, so a previously-installed binary with
+# a wrong mode silently keeps it. install(1) replaces the file atomically and
+# sets the mode explicitly.
 install: release
 	@mkdir -p ~/.local/bin
-	cp target/release/bridge-mcp ~/.local/bin/
+	install -m 0755 target/release/bridge-mcp ~/.local/bin/bridge-mcp
+
+# Behavioural fingerprint probes: does the INSTALLED binary actually contain
+# the current behaviour? `--version` cannot answer this (CARGO_PKG_VERSION is
+# identical across every build of a release). Override the binary with BIN=...
+probe-install:
+	@scripts/probe_installed_binary.sh $(BIN)
 
 # Development mode with auto-reload
 dev:
@@ -350,7 +361,8 @@ help:
 	@echo "  release-target   - Build specific target (TARGET=...)"
 	@echo "  check            - Check compilation"
 	@echo "  clean            - Clean build artifacts"
-	@echo "  install          - Install to ~/.cargo/bin"
+	@echo "  install          - Build (--features full) + install to ~/.local/bin"
+	@echo "  probe-install    - Fingerprint-probe the installed binary for staleness"
 	@echo ""
 	@echo "Quality:"
 	@echo "  test             - Run tests"
