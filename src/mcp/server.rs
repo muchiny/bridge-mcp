@@ -11,7 +11,9 @@ use tracing::{Instrument, debug, error, info, warn};
 
 use crate::config::{Config, ConfigWatcher};
 use crate::domain::output_truncator::truncate_chars;
-use crate::domain::{ExecuteCommandUseCase, OutputCache, TaskStore, TunnelManager};
+use crate::domain::{
+    ExecuteCommandUseCase, OutputCache, TaskStore, TaskWaitOutcome, TunnelManager,
+};
 use crate::error::Result;
 use crate::mcp::instructions;
 use crate::ports::ExecutorRouter;
@@ -2089,16 +2091,12 @@ impl McpServer {
         };
 
         // Wait for the task's result, bounded by the store's poll budget.
-        // Task 13 replaces this `.into_result()` with a real match on
-        // `TaskWaitOutcome` so a timed-out poll answers with the task's
-        // current status instead of a "not found" error.
         match self
             .task_store
             .wait_for_result(&result_params.task_id)
             .await
-            .into_result()
         {
-            Some(result) => {
+            TaskWaitOutcome::Ready(result) => {
                 // Inject task correlation metadata
                 let mut response = result;
                 if let Some(obj) = response.as_object_mut() {
@@ -2113,7 +2111,30 @@ impl McpServer {
                 }
                 JsonRpcResponse::success(id, response)
             }
-            None => JsonRpcResponse::error(
+            // G-1: the poll budget elapsed with the task still running.
+            // Hand back the current status so the client stays in a normal
+            // poll loop — erroring here would make a slow task look like a
+            // missing one.
+            TaskWaitOutcome::TimedOut(info) => {
+                let Ok(mut response) = serde_json::to_value(&*info) else {
+                    return JsonRpcResponse::error(
+                        id,
+                        JsonRpcError::internal_error("Failed to serialize task status"),
+                    );
+                };
+                if let Some(obj) = response.as_object_mut() {
+                    obj.insert(
+                        "_meta".to_string(),
+                        json!({
+                            "io.modelcontextprotocol/related-task": {
+                                "taskId": result_params.task_id
+                            }
+                        }),
+                    );
+                }
+                JsonRpcResponse::success(id, response)
+            }
+            TaskWaitOutcome::NotFound => JsonRpcResponse::error(
                 id,
                 JsonRpcError::invalid_params(format!("Task not found: {}", result_params.task_id)),
             ),
@@ -2346,6 +2367,18 @@ mod tests {
 
     fn create_test_server() -> McpServer {
         let (server, _audit_task) = McpServer::new(test_config());
+        server
+    }
+
+    /// Same fixture as `create_test_server`, with the limits block swapped.
+    /// Used by tests that need a poll budget measured in milliseconds
+    /// rather than the production 60 s (2 000 ms poll interval x 30).
+    fn create_test_server_with_limits(limits: LimitsConfig) -> McpServer {
+        let config = Config {
+            limits,
+            ..test_config()
+        };
+        let (server, _audit_task) = McpServer::new(config);
         server
     }
 
@@ -4119,6 +4152,49 @@ mod tests {
 
         // Cancelled tasks have no stored result — handler returns error
         assert!(response.error.is_some());
+    }
+
+    /// G-1 (audit 2026-08-19): a `tasks/result` poll whose budget elapses
+    /// must answer with the task's CURRENT status. Returning "Task not
+    /// found" would tell the client its running task had vanished, and
+    /// returning nothing at all is what used to park the request forever.
+    #[tokio::test]
+    async fn test_tasks_result_times_out_with_current_status() {
+        // 10ms poll interval => 300ms wait budget.
+        let limits = LimitsConfig {
+            task_poll_interval_ms: 10,
+            ..LimitsConfig::default()
+        };
+        let server = create_test_server_with_limits(limits);
+
+        // A task nobody will ever complete.
+        let (task_id, _cancel) = server.task_store.create_task(Some(60_000)).await.unwrap();
+
+        let started = Instant::now();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.handle_tasks_result(Some(json!(1)), Some(json!({ "taskId": task_id }))),
+        )
+        .await
+        .expect("tasks/result must not park forever");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "poll should end after ~300ms, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            response.error.is_none(),
+            "a timed-out poll is not an error: {:?}",
+            response.error
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result["taskId"], task_id);
+        assert_eq!(result["status"], "working");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
+            task_id
+        );
     }
 
     #[tokio::test]
