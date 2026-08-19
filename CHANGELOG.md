@@ -33,7 +33,7 @@ section.
   as appropriate.
 - **`serverInfo._meta["io.github.muchiny/build"]`** — every `initialize`
   response now carries the git revision the binary was compiled from
-  (`{"rev": "8cf1940713bd", "version": "2.2.0"}`; `rev` gains a `-dirty`
+  (`{"rev": "8f75f0aa35c7", "version": "2.2.0"}`; `rev` gains a `-dirty`
   suffix for uncommitted trees, and is `unknown` when built outside a git
   checkout). `bridge-mcp --version` prints the same revision, and
   `make verify-install` exits non-zero when the installed binary was not
