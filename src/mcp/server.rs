@@ -742,6 +742,27 @@ impl McpServer {
         .ok()
     }
 
+    /// Methods that must never queue behind the command-concurrency
+    /// semaphore.
+    ///
+    /// G-1 (audit 2026-08-19): `limits.max_concurrent_commands` exists to
+    /// cap concurrent *command execution*. Applying it to every method
+    /// froze whole sessions, because the reader loop acquires the permit
+    /// BEFORE it spawns the handler — so N parked `tasks/result` long
+    /// polls (N = the limit, 5 by default) meant the client's next message
+    /// was never read at all. Measured: N=4 still answered `ping`; N=5
+    /// answered neither `ping` nor `tasks/cancel` — the one request that
+    /// could have released the parked polls — and was still dead after
+    /// 208 s.
+    ///
+    /// Neither `ping` nor any `tasks/*` method does remote work, so
+    /// exempting them costs no concurrency budget. Task-augmented
+    /// `tools/call` work is governed instead by the permit the task worker
+    /// itself takes in `handle_tools_call_async`.
+    fn is_concurrency_exempt(method: &str) -> bool {
+        method == "ping" || method.starts_with("tasks/")
+    }
+
     /// Drive one full client session: spawn a per-session writer task,
     /// then run the reader loop dispatching JSON-RPC requests.
     ///
@@ -816,8 +837,15 @@ impl McpServer {
                         continue;
                     };
 
-                    // Acquire permit (blocks if at concurrency limit)
-                    let Ok(permit) = self.concurrent_limit.clone().acquire_owned().await else {
+                    // Acquire permit (blocks if at concurrency limit).
+                    // Control-plane methods are exempt — see
+                    // `is_concurrency_exempt` for why blocking here is a
+                    // whole-session freeze and not just a queue.
+                    let permit = if Self::is_concurrency_exempt(&request.method) {
+                        None
+                    } else if let Ok(permit) = self.concurrent_limit.clone().acquire_owned().await {
+                        Some(permit)
+                    } else {
                         error!("Semaphore closed unexpectedly");
                         break;
                     };
@@ -2281,6 +2309,7 @@ mod tests {
         AuditConfig, HttpTransportConfig, LimitsConfig, SecurityConfig, SessionConfig,
         SshConfigDiscovery, ToolGroupsConfig,
     };
+    use crate::mcp::transport::{SessionReader, SessionWriter};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -2314,6 +2343,140 @@ mod tests {
     fn create_test_server() -> McpServer {
         let (server, _audit_task) = McpServer::new(test_config());
         server
+    }
+
+    // ================= in-memory session harness (G-1 / G-9) =================
+    //
+    // `serve_session` is the only place the concurrency semaphore is taken,
+    // so a test that calls the handlers directly cannot see the freeze at
+    // all. These two adapters let a test drive the real reader loop with a
+    // scripted message sequence and read back everything it writes.
+
+    /// Feeds `serve_session` a scripted sequence of client messages.
+    struct ChannelReader {
+        rx: mpsc::UnboundedReceiver<IncomingMessage>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionReader for ChannelReader {
+        async fn recv(&mut self) -> Option<std::result::Result<IncomingMessage, String>> {
+            self.rx.recv().await.map(Ok)
+        }
+    }
+
+    /// Collects everything the session writes back.
+    struct ChannelWriter {
+        tx: mpsc::UnboundedSender<WriterMessage>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionWriter for ChannelWriter {
+        async fn send(&mut self, msg: WriterMessage) -> crate::error::Result<()> {
+            let _ = self.tx.send(msg);
+            Ok(())
+        }
+    }
+
+    /// Build an in-memory `Session` plus the two ends used to drive it:
+    /// a sender that plays the client, and a receiver of server output.
+    fn in_memory_session() -> (
+        Session,
+        mpsc::UnboundedSender<IncomingMessage>,
+        mpsc::UnboundedReceiver<WriterMessage>,
+    ) {
+        let (client_tx, client_rx) = mpsc::unbounded_channel::<IncomingMessage>();
+        let (server_tx, server_rx) = mpsc::unbounded_channel::<WriterMessage>();
+        let session = Session {
+            reader: Box::new(ChannelReader { rx: client_rx }),
+            writer: Box::new(ChannelWriter { tx: server_tx }),
+        };
+        (session, client_tx, server_rx)
+    }
+
+    /// One JSON-RPC request, shaped exactly as a reader hands it to the loop.
+    fn client_request(id: i64, method: &str, params: Option<Value>) -> IncomingMessage {
+        IncomingMessage::Single(JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(id)),
+            method: Some(method.to_string()),
+            params,
+            result: None,
+            error: None,
+        })
+    }
+
+    /// G-1 regression, straight from the audit's own reproduction.
+    ///
+    /// `tasks/result` is a long poll. It used to take a permit from
+    /// `limits.max_concurrent_commands` (default 5) INSIDE the reader loop,
+    /// so N parked polls froze the entire session: the loop blocks on
+    /// `acquire_owned()` before it spawns the handler, so the client's next
+    /// message is never read. The audit measured the boundary exactly —
+    /// N=4 still answered `ping`, N=5 answered neither `ping` nor
+    /// `tasks/cancel` (the one call that could have released the polls),
+    /// and it was still dead 208 s later. This table walks across it.
+    #[tokio::test]
+    async fn ping_survives_parked_task_polls_at_and_past_the_concurrency_limit() {
+        for parked_polls in [1_usize, 2, 3, 4, 5, 6] {
+            let server = Arc::new(create_test_server());
+            assert_eq!(
+                server.concurrent_limit.available_permits(),
+                5,
+                "fixture must keep the default max_concurrent_commands"
+            );
+
+            // Tasks nobody will ever complete: every `tasks/result` parks.
+            let mut task_ids = Vec::new();
+            for _ in 0..parked_polls {
+                let (task_id, _cancel) =
+                    server.task_store.create_task(Some(600_000)).await.unwrap();
+                task_ids.push(task_id);
+            }
+
+            let (session, client_tx, mut server_rx) = in_memory_session();
+            let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+
+            let mut next_id: i64 = 1;
+            for task_id in &task_ids {
+                client_tx
+                    .send(client_request(
+                        next_id,
+                        "tasks/result",
+                        Some(json!({ "taskId": task_id })),
+                    ))
+                    .unwrap();
+                next_id += 1;
+            }
+
+            // Let the reader loop consume every poll before the ping arrives.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            client_tx.send(client_request(9999, "ping", None)).unwrap();
+
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "session froze with {parked_polls} parked tasks/result polls: \
+                     ping was never answered"
+                    )
+                })
+                .expect("session writer channel closed");
+
+            match msg {
+                WriterMessage::Response(response) => {
+                    assert_eq!(
+                        response.id,
+                        Some(json!(9999)),
+                        "the first answer must be the ping, not a parked poll"
+                    );
+                    assert!(response.error.is_none(), "ping must succeed");
+                }
+                _ => panic!("expected a ping response, got a notification or a batch"),
+            }
+
+            serve.abort();
+        }
     }
 
     /// `spawn_cleanup_tasks` must actually spawn one loop per expiring
