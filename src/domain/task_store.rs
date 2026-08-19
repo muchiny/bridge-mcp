@@ -623,6 +623,10 @@ mod tests {
     /// everything from taking that lock to dropping it is synchronous, so
     /// the waiter cannot be scheduled again until the entry is already
     /// gone.
+    ///
+    /// Relies on `#[tokio::test]`'s default `current_thread` flavor: under
+    /// `multi_thread`, a single `yield_now()` no longer guarantees the
+    /// waiter has reached that parked state before this task resumes.
     #[tokio::test]
     async fn wait_for_result_yields_the_result_even_if_evicted_before_the_reread() {
         let store = Arc::new(TaskStore::new(10, 60_000, 2_000));
@@ -642,6 +646,8 @@ mod tests {
         tokio::task::yield_now().await;
 
         {
+            // No `.await` anywhere in this block — that is what makes it
+            // atomic with respect to the waiter (see doc comment above).
             let mut tasks = store.tasks.write().await;
             let entry = tasks.get_mut(&id).expect("task must still be present");
             entry.info.status = TaskStatus::Completed;
@@ -676,16 +682,30 @@ mod tests {
     /// `wait_for_result_never_waits_past_the_remaining_ttl`) — a real TTL
     /// wall-clock expiry followed by `cleanup()` can no longer land while a
     /// waiter is still parked; the waiter's own internal timeout always
-    /// fires first, and this test would silently stop exercising the
-    /// dropped-`Sender` arm at all. A large TTL and a small poll interval
-    /// keep the internal bound comfortably longer than this test needs, and
-    /// the entry is evicted by a direct removal from the map rather than by
-    /// real TTL expiry — the `watch::Sender` drops either way, so this
-    /// still exercises exactly what a real `cleanup()` eviction does to a
-    /// parked waiter, without the now-impossible race.
+    /// fires first. So eviction here is a direct removal from the map
+    /// rather than real TTL expiry — the `watch::Sender` drops either way,
+    /// which is exactly what a real `cleanup()` eviction does to a parked
+    /// waiter.
+    ///
+    /// The poll interval (2000ms, a ~60s internal budget) is not merely
+    /// "large enough" — it must dwarf the 5s outer `tokio::time::timeout`
+    /// guard below. An earlier version of this test used a 10ms poll
+    /// interval (300ms budget), which is *shorter* than that outer guard —
+    /// under that version, a wake path that silently did nothing (e.g. the
+    /// `Sender` failing to actually close the channel) was indistinguishable
+    /// from a working one: both eventually resolve to `NotFound`, one via
+    /// `Ok(Err(_))` from the closed channel, the other via the internal
+    /// timeout's own `outcome_without_result` fallback once `get_task` sees
+    /// the entry is gone. Only with the internal budget comfortably
+    /// outliving the outer guard does a broken wake path actually trip the
+    /// outer guard's `Elapsed` and fail the `.expect` below, instead of
+    /// quietly landing on the same `NotFound` a working wake would give.
+    ///
+    /// Relies on `#[tokio::test]`'s default `current_thread` flavor for the
+    /// same `yield_now()` ordering guarantee as the test above.
     #[tokio::test]
     async fn wait_for_result_returns_none_when_evicted_while_parked() {
-        let store = Arc::new(TaskStore::new(10, 60_000, 10));
+        let store = Arc::new(TaskStore::new(10, 60_000, 2_000));
         let (id, _) = store.create_task(None).await.unwrap();
 
         let store2 = Arc::clone(&store);
