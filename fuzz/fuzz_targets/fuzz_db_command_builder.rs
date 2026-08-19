@@ -22,8 +22,14 @@ fuzz_target!(|data: &str| {
     // Invariants:
     // - Must contain the mysql command
     assert!(cmd.contains("mysql"), "MySQL query must contain 'mysql'");
-    // - Must contain password env var when password is set
-    assert!(cmd.contains("MYSQL_PWD="), "Must set MYSQL_PWD");
+    // - The password must NEVER reach the command line or an env var.
+    //   FIND-031 moved these builders to `--defaults-extra-file` (MySQL) and
+    //   `PGPASSFILE` (PostgreSQL) precisely so the secret stays out of the
+    //   process table. This target used to assert `cmd.contains("MYSQL_PWD=")`
+    //   — the pre-fix shape — so it demanded the vulnerability back. It would
+    //   have failed on every input, and did not, because the fuzz harness had
+    //   not compiled for six weeks.
+    assert!(!cmd.contains("MYSQL_PWD"), "password must not travel in MYSQL_PWD: {cmd}");
 
     // 2. Fuzz query command for PostgreSQL
     let cmd = DatabaseCommandBuilder::build_query_command(
@@ -37,7 +43,7 @@ fuzz_target!(|data: &str| {
         None,
     );
     assert!(cmd.contains("psql"), "PostgreSQL query must contain 'psql'");
-    assert!(cmd.contains("PGPASSWORD="), "Must set PGPASSWORD");
+    assert!(!cmd.contains("PGPASSWORD"), "password must not travel in PGPASSWORD: {cmd}");
 
     // 3. Fuzz dump command
     let tables = vec![data.to_string()];
