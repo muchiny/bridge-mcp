@@ -214,6 +214,19 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Recent Changes
 
+- **v2.0.0 (2026-08-19)** — major bump for seven breaking changes, four in the
+  public lib API. `rbac.enabled: true` is rejected at load (it was never
+  enforced and granted full access); `verify_checksum` refuses `resume`/`append`
+  instead of returning a checksum-free success; no-`jq` builds error on
+  reduction params; `ssh_history` redacts the command itself, so entropy
+  detection now masks opaque 16+ char arguments; `chunk_size` is clamped to
+  4 KB..=64 MB. Lib: `DataReductionArgs::extract` and
+  `build_log_aggregate_command` return `Result`, `truncate_output_with_cache`
+  and `Metrics::record_pipeline_stats` gained a parameter. Also fixes a
+  permanent hang in `TaskStore::wait_for_result` on TTL eviction, five
+  command-injection sites, and a mutation sweep whose flags cargo-mutants
+  silently ignored. Full migration notes in CHANGELOG.md.
+
 - ci-hardening-2026-08: **`rust-toolchain.toml` outranks `rustup default`** — every
   workflow now sets `RUSTUP_TOOLCHAIN` explicitly, because until now every CI job
   silently ran 1.94.0 (MSRV job = duplicate of Tests; the stable/beta/nightly matrix
