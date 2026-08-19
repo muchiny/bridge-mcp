@@ -69,6 +69,45 @@ pub struct TaskStore {
     default_poll_interval_ms: u64,
 }
 
+/// Outcome of a bounded wait on a task's result.
+///
+/// G-1 (audit 2026-08-19): the wait used to be unbounded and returned a
+/// bare `Option<Value>`, which had no way to say "still running" — so the
+/// only honest thing it could do was park forever. Three outcomes make the
+/// bound expressible.
+#[derive(Debug, Clone)]
+pub enum TaskWaitOutcome {
+    /// The task reached a terminal state and published a result.
+    Ready(Value),
+    /// The wait budget elapsed with the task still running. Carries the
+    /// task's current status so the caller can answer the poll instead of
+    /// erroring.
+    TimedOut(Box<TaskInfo>),
+    /// No such task, the entry expired, or it is terminal with no stored
+    /// result (a cancelled task). Callers map all three to the same
+    /// "no result" answer they always have.
+    NotFound,
+}
+
+impl TaskWaitOutcome {
+    /// The stored result, if the wait resolved with one.
+    #[must_use]
+    pub fn into_result(self) -> Option<Value> {
+        match self {
+            Self::Ready(value) => Some(value),
+            Self::TimedOut(_) | Self::NotFound => None,
+        }
+    }
+}
+
+/// Terminal-status predicate usable without a `TaskEntry` in hand.
+const fn is_terminal_status(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+    )
+}
+
 impl TaskStore {
     /// Create a new task store.
     ///
@@ -217,37 +256,80 @@ impl TaskStore {
         entry.result.clone()
     }
 
-    /// Wait until the task reaches a terminal state, then return the result.
+    /// Wait for the task's result, bounded by `min(poll_interval * 30,
+    /// remaining_ttl)`.
     ///
-    /// Returns `None` if the task doesn't exist.
-    pub async fn wait_for_result(&self, task_id: &str) -> Option<Value> {
+    /// G-1 (audit 2026-08-19): this used to have no timeout at all, so a
+    /// `tasks/result` poll against a task that never terminates parked
+    /// forever — and with TTLs up to an hour the client had no way out.
+    /// The bound never outlives the entry: once the TTL lapses there is
+    /// nothing left that could ever publish a result.
+    ///
+    /// Returns [`TaskWaitOutcome::TimedOut`] with the task's CURRENT status
+    /// when the budget elapses; a slow task is not a missing one.
+    pub async fn wait_for_result(&self, task_id: &str) -> TaskWaitOutcome {
         // Subscribe while still holding the read guard. The terminal check
         // and the subscription are therefore atomic with respect to the
         // writers, which all take the write guard — so a completion cannot
         // slip through between the two.
-        let mut rx = {
+        let (mut rx, budget) = {
             let tasks = self.tasks.read().await;
-            let entry = tasks.get(task_id)?;
+            let Some(entry) = tasks.get(task_id) else {
+                return TaskWaitOutcome::NotFound;
+            };
 
             if entry.is_terminal() {
-                return entry.result.clone();
+                return match entry.result.clone() {
+                    Some(result) => TaskWaitOutcome::Ready(result),
+                    None => TaskWaitOutcome::NotFound,
+                };
             }
 
-            entry.result_ready.subscribe()
+            let remaining_ttl = entry.ttl.saturating_sub(entry.created.elapsed());
+            let budget = Duration::from_millis(entry.info.poll_interval.saturating_mul(30))
+                .min(remaining_ttl);
+
+            (entry.result_ready.subscribe(), budget)
         };
 
-        // `changed()` errors only once every sender is gone, which happens
-        // exactly when the entry is dropped from the map — TTL eviction while
-        // this waiter was parked. Resolving with `None` is the honest answer;
-        // the previous code waited forever for a notification nothing could
-        // still send.
-        if rx.changed().await.is_err() {
-            return None;
+        match tokio::time::timeout(budget, rx.changed()).await {
+            // `changed()` errors only once every sender is gone, which
+            // happens exactly when the entry is dropped from the map — TTL
+            // eviction while this waiter was parked.
+            Ok(Err(_)) => TaskWaitOutcome::NotFound,
+            // Read the value out of the channel, not out of the map. The
+            // entry may already have been evicted by TTL — see the field's
+            // doc comment.
+            //
+            // The clone is bound to `value` before matching on it, rather
+            // than matching on `rx.borrow_and_update().clone()` directly:
+            // a match scrutinee keeps its temporaries alive for the whole
+            // match, so the `watch::Ref` guard borrowed here would
+            // otherwise still be live across the `.await` in the `None`
+            // arm below and make this function's future `!Send`.
+            Ok(Ok(())) => {
+                let value = rx.borrow_and_update().clone();
+                match value {
+                    Some(result) => TaskWaitOutcome::Ready(result),
+                    // Woken with no value: a cancellation, which stores no
+                    // result. Fall through to the same re-read as a timeout.
+                    None => self.outcome_without_result(task_id).await,
+                }
+            }
+            Err(_) => self.outcome_without_result(task_id).await,
         }
+    }
 
-        // Read the value out of the channel, not out of the map. The entry may
-        // already have been evicted by TTL — see the field's doc comment.
-        rx.borrow_and_update().clone()
+    /// Classify a wake or timeout that produced no result value.
+    async fn outcome_without_result(&self, task_id: &str) -> TaskWaitOutcome {
+        match self.get_task(task_id).await {
+            // Terminal with nothing stored (a cancelled task): there is no
+            // result to hand back, and the caller maps this exactly as it
+            // always has.
+            Some(info) if is_terminal_status(info.status) => TaskWaitOutcome::NotFound,
+            Some(info) => TaskWaitOutcome::TimedOut(Box::new(info)),
+            None => TaskWaitOutcome::NotFound,
+        }
     }
 
     /// List tasks with cursor-based pagination.
@@ -463,6 +545,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
             .await
             .expect("must not hang")
+            .into_result()
             .unwrap();
         assert_eq!(result["content"][0]["text"], "ok");
     }
@@ -482,7 +565,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         store.complete_task(&id, test_result()).await;
 
-        let result = waiter.await.unwrap().expect("must not hang").unwrap();
+        let result = waiter
+            .await
+            .unwrap()
+            .expect("must not hang")
+            .into_result()
+            .unwrap();
         assert_eq!(result["content"][0]["text"], "ok");
     }
 
@@ -510,7 +598,7 @@ mod tests {
         let got = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
             .await
             .expect("must not hang");
-        assert!(got.is_some());
+        assert!(got.into_result().is_some());
     }
 
     // A dropped `Sender` (entry evicted from the map) must resolve a parked
@@ -518,14 +606,28 @@ mod tests {
     // `start_paused`: a 0ms TTL would make this vacuous (see task-7-report.md),
     // and TTL checks use `std::time::Instant`, which the paused tokio clock
     // does not advance.
-    /// Issue #132. A task that genuinely completed must return its result even
-    /// if TTL eviction removes the entry before the woken waiter re-reads the
-    /// map. The old code signalled with a bare flag and then looked the entry
-    /// up again, so losing that race turned a real result into `None` —
-    /// indistinguishable from "this task never had one".
+    /// Issue #132, narrowed by G-1 (audit 2026-08-19).
+    ///
+    /// The original scenario here — complete the task only after its
+    /// nominal TTL has already lapsed, and still expect `wait_for_result`
+    /// to return the result — is no longer reachable. `wait_for_result` is
+    /// now bounded by `remaining_ttl` (see
+    /// `wait_for_result_never_waits_past_the_remaining_ttl`), so a
+    /// completion that arrives after the entry's TTL can never be
+    /// observed by that same wait call: the wait itself has already given
+    /// up by then. TTL and the wait's own timeout are the same clock now,
+    /// so "completed after TTL, observed by a wait that started before
+    /// TTL" is a contradiction in terms, not a timing/flakiness problem —
+    /// no combination of constants produces it.
+    ///
+    /// What issue #132 actually demanded is still true and still worth
+    /// proving: a result delivered through the channel is an owned value,
+    /// read once and handed back — never a second lookup into the map.
+    /// This proves it survives the entry being swept out from under it
+    /// immediately afterward.
     #[tokio::test]
     async fn wait_for_result_yields_the_result_even_if_evicted_before_the_reread() {
-        let store = Arc::new(TaskStore::new(10, 50, 2_000));
+        let store = Arc::new(TaskStore::new(10, 200, 2_000));
         let (id, _) = store.create_task(None).await.unwrap();
 
         let store2 = Arc::clone(&store);
@@ -534,20 +636,26 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
         });
 
-        // Park the waiter AND let the 50ms TTL lapse first, so that complete
-        // and evict can then run back-to-back with no sleep between them —
-        // a sleep there hands the waiter its re-read and hides the race.
-        tokio::time::sleep(Duration::from_millis(120)).await;
-
+        // Complete comfortably inside the 200ms budget, so the channel —
+        // not the internal timeout — is what resolves the wait.
+        tokio::time::sleep(Duration::from_millis(20)).await;
         store.complete_task(&id, test_result()).await;
-        store.cleanup().await;
-        assert!(store.is_empty().await, "entry should have been evicted");
 
         let result = waiter.await.unwrap().expect("must not hang");
         assert_eq!(
-            result.expect("a completed task must not resolve to None")["content"][0]["text"],
+            result
+                .into_result()
+                .expect("a completed task must not resolve to None")["content"][0]["text"],
             "ok"
         );
+
+        // Now let TTL lapse and sweep the entry. The value above was
+        // already read out of the channel, not the map, so this cannot
+        // retroactively touch it — it only confirms cleanup still works
+        // on a terminal, already-delivered task.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.cleanup().await;
+        assert!(store.is_empty().await, "entry should have been evicted");
     }
 
     #[tokio::test]
@@ -572,7 +680,7 @@ mod tests {
             .await
             .unwrap()
             .expect("eviction must wake the parked waiter, not hang it");
-        assert!(result.is_none());
+        assert!(result.into_result().is_none());
     }
 
     #[tokio::test]
@@ -582,7 +690,58 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), store.wait_for_result("nonexistent"))
                 .await
                 .expect("must not hang");
-        assert!(result.is_none());
+        assert!(result.into_result().is_none());
+    }
+
+    /// G-1 (audit 2026-08-19). `wait_for_result` had no timeout, so a
+    /// `tasks/result` poll against a task that never completes parked
+    /// forever. The bound is 30 poll intervals, and the timeout must hand
+    /// back the task's CURRENT status: a slow task is not a missing one.
+    #[tokio::test]
+    async fn wait_for_result_gives_up_after_thirty_poll_intervals() {
+        // poll_interval 10ms => 300ms budget. The 60s TTL never binds.
+        let store = TaskStore::new(10, 60_000, 10);
+        let (id, _cancel) = store.create_task(None).await.unwrap();
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
+            .await
+            .expect("wait_for_result must not park forever");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "wait should end after ~300ms, took {:?}",
+            started.elapsed()
+        );
+        match outcome {
+            TaskWaitOutcome::TimedOut(info) => {
+                assert_eq!(info.task_id, id);
+                assert_eq!(info.status, TaskStatus::Working);
+            }
+            other => panic!("expected TimedOut with the current status, got {other:?}"),
+        }
+    }
+
+    /// The budget must never outlive the entry. With a 200ms TTL and a
+    /// 2s poll interval the naive `poll_interval * 30` budget would be 60s,
+    /// i.e. 300x longer than the entry can possibly exist.
+    #[tokio::test]
+    async fn wait_for_result_never_waits_past_the_remaining_ttl() {
+        let store = TaskStore::new(10, 200, 2_000);
+        let (id, _cancel) = store.create_task(None).await.unwrap();
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
+            .await
+            .expect("wait_for_result must not park past the TTL");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "wait should end with the 200ms TTL, took {:?}",
+            started.elapsed()
+        );
+        // The entry has expired, so there is genuinely nothing to report.
+        assert!(matches!(outcome, TaskWaitOutcome::NotFound));
     }
 
     #[tokio::test]
@@ -772,6 +931,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
             .await
             .expect("must not hang")
+            .into_result()
             .unwrap();
         assert_eq!(result["isError"], true);
     }
@@ -786,7 +946,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
             .await
             .expect("must not hang");
-        assert!(result.is_none());
+        assert!(result.into_result().is_none());
     }
 
     #[tokio::test]
@@ -804,7 +964,7 @@ mod tests {
         store.cancel_task(&id).await.unwrap();
 
         let result = waiter.await.unwrap().expect("must not hang");
-        assert!(result.is_none());
+        assert!(result.into_result().is_none());
     }
 
     // ============== Pagination Edge Cases ==============

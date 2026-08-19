@@ -2088,11 +2088,15 @@ impl McpServer {
             }
         };
 
-        // Block until the task reaches a terminal state
+        // Wait for the task's result, bounded by the store's poll budget.
+        // Task 13 replaces this `.into_result()` with a real match on
+        // `TaskWaitOutcome` so a timed-out poll answers with the task's
+        // current status instead of a "not found" error.
         match self
             .task_store
             .wait_for_result(&result_params.task_id)
             .await
+            .into_result()
         {
             Some(result) => {
                 // Inject task correlation metadata

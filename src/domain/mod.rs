@@ -20,7 +20,7 @@ pub mod yq_filter;
 
 pub use history::{CommandHistory, HistoryConfig, HistoryEntry};
 pub use output_cache::OutputCache;
-pub use task_store::TaskStore;
+pub use task_store::{TaskStore, TaskWaitOutcome};
 pub use use_cases::database::{DatabaseCommandBuilder, DatabaseType};
 pub use use_cases::execute_command::{
     ExecuteCommandRequest, ExecuteCommandResponse, ExecuteCommandUseCase,
