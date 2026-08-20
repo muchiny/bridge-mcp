@@ -191,8 +191,15 @@ fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<()>
     std::fs::rename(path, path.with_file_name(rotated_name))
 }
 
-/// Remove files in the audit directory whose mtime predates the retention
+/// Remove this log's own rotated archives whose mtime predates the retention
 /// cutoff. `retain_days == 0` disables cleanup.
+///
+/// CRITICAL (fix round 1 of the 2026-08-19 audit corrections): this used to
+/// delete EVERY file in `path`'s parent directory older than `retain_days`,
+/// with no filename check — `audit.path: ~/audit.log` swept the operator's
+/// entire home directory. Only files matching `<live file name>.<suffix>`
+/// (the shape `rename_with_timestamp` produces) are eligible; nothing else
+/// in that directory belongs to this writer.
 fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
     if retain_days == 0 {
         return;
@@ -201,11 +208,22 @@ fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
     let Some(parent) = path.parent() else {
         return;
     };
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let own_archive_prefix = format!("{file_name}.");
 
     let cutoff = now - chrono::Duration::days(i64::from(retain_days));
 
     if let Ok(entries) = std::fs::read_dir(parent) {
         for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&own_archive_prefix)
+            {
+                continue;
+            }
             if let Ok(metadata) = entry.metadata()
                 && let Ok(modified) = metadata.modified()
             {
@@ -1225,6 +1243,77 @@ mod tests {
         );
     }
 
+    /// CRITICAL (fix round 1 of the 2026-08-19 audit corrections):
+    /// `cleanup_old_audit_files` deleted EVERY file in `audit.path`'s parent
+    /// directory older than `retain_days`, with no filename check at all —
+    /// via `let _ = std::fs::remove_file(...)`, silently. It had no
+    /// production caller before the G-26 fix wired `rotate_if_needed` into
+    /// the writer task; it now runs on every rotation. With a config like
+    /// `path: ~/audit.log`, that swept the operator's entire home directory.
+    /// Cleanup must only ever touch this log's OWN rotated archives, named
+    /// `<file name>.<suffix>` by `rename_with_timestamp` — nothing else in
+    /// that directory is this writer's to delete.
+    #[test]
+    fn test_cleanup_old_files_never_deletes_files_outside_its_own_lineage() {
+        use std::time::{Duration, SystemTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+        std::fs::write(&audit_path, "current log").unwrap();
+
+        // A legitimate rotated archive of THIS log: must still be removed
+        // once past retention -- the fix must not overcorrect into deleting
+        // nothing.
+        let own_archive = temp_dir.path().join("audit.log.20200101_000000");
+        std::fs::write(&own_archive, "old archive").unwrap();
+
+        // Files this writer never created, sitting in the same directory --
+        // exactly the shape of `audit.path: ~/audit.log`, where the parent
+        // directory is $HOME.
+        let foreign_dotfile = temp_dir.path().join(".bash_history");
+        std::fs::write(&foreign_dotfile, "some shell history").unwrap();
+        let foreign_doc = temp_dir.path().join("quarterly-report.pdf");
+        std::fs::write(&foreign_doc, "not ours").unwrap();
+        // Shares the live log's name as a literal prefix but is not one of
+        // its rotated archives (no "." separator after "audit.log") --
+        // must also survive.
+        let lookalike = temp_dir.path().join("audit.log-backup");
+        std::fs::write(&lookalike, "not a rotated archive").unwrap();
+
+        let old_time = SystemTime::now() - Duration::from_hours(2400); // 100 days
+        for f in [&own_archive, &foreign_dotfile, &foreign_doc, &lookalike] {
+            filetime::set_file_mtime(f, filetime::FileTime::from_system_time(old_time)).unwrap();
+        }
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path,
+            max_size_mb: 10,
+            retain_days: 30,
+        };
+
+        let (logger, _) = AuditLogger::new(&config).unwrap();
+        logger.cleanup_old_files();
+
+        assert!(
+            !own_archive.exists(),
+            "its own expired rotated archive must still be removed"
+        );
+        assert!(
+            foreign_dotfile.exists(),
+            "a file this writer never created must survive no matter how old"
+        );
+        assert!(
+            foreign_doc.exists(),
+            "a file this writer never created must survive no matter how old"
+        );
+        assert!(
+            lookalike.exists(),
+            "a name that merely starts with the live log's name, but isn't \
+             <name>.<suffix>, must survive"
+        );
+    }
+
     #[test]
     fn test_needs_rotation_size_calculation() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1389,16 +1478,23 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let audit_path = temp_dir.path().join("audit.log");
 
-        // Create a file and backdate it to 31 days ago
-        let old_file = temp_dir.path().join("old_audit.log");
+        // Create a rotated archive of THIS log and backdate it to 31 days
+        // ago. Fix round 1 (audit 2026-08-19): these used to be named
+        // `old_audit.log` / `recent_audit.log` -- filenames that are NOT
+        // `<live file name>.<suffix>`, which only ever passed because
+        // `cleanup_old_audit_files` had no filename filter at all (the
+        // CRITICAL bug fixed alongside this test). Renamed to real rotated
+        // archives of `audit.log` so this test exercises the retention
+        // boundary through code that would now reject the old names.
+        let old_file = temp_dir.path().join("audit.log.old31");
         fs::write(&old_file, "old data").unwrap();
         let old_time = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - std::time::Duration::from_hours(744),
         );
         filetime::set_file_mtime(&old_file, old_time).unwrap();
 
-        // Create a recent file (today)
-        let recent_file = temp_dir.path().join("recent_audit.log");
+        // Create a recent rotated archive (today)
+        let recent_file = temp_dir.path().join("audit.log.recent");
         fs::write(&recent_file, "recent data").unwrap();
 
         let config = AuditConfig {

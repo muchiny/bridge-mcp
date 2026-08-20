@@ -270,21 +270,45 @@ section.
   `src/mcp/registry.rs`'s group-icon `ICON_BASE_URL` gets the same
   org-spelling fix and nothing more — it still 404s because `dxt/icons/`
   does not exist, which its own doc comment already documents as tolerated.
-- **Audit `max_size_mb`/`retain_days` were documented settings with no
-  effect (G-26).** `rotate()` and `needs_rotation()` existed and were
-  correct — eight passing tests already covered them — but had no
-  production caller in any branch or tag, so a log configured with
-  `max_size_mb: 100` grew without bound. Decision: wire it rather than
-  delete the keys — `AuditConfig` is `deny_unknown_fields`, so deleting
-  would break every existing `config.yaml` carrying those keys, in
-  exchange for less functionality than adding one caller. `AuditWriterTask`
-  — the owner of the open file handle, so the only place that can safely
-  rename and reopen without leaving later events appended to a renamed
-  inode — now calls `rotate_if_needed()` after every write;
-  `max_size_mb: 0` disables rotation rather than rotating on every event.
-  Growth is slow (roughly 350 bytes/line, ~300k commands to reach the
-  100 MB default), so this was not urgent, but the config keys are now
-  honest.
+- **BREAKING: audit `retain_days` starts deleting files for the first time
+  ever (G-26; corrected in fix round 1 — see below).** `rotate()`,
+  `needs_rotation()` and `cleanup_old_files()` existed and were correct in
+  isolation — eight passing tests already covered them — but had no
+  production caller in any branch or tag. `max_size_mb` promising a bounded
+  file was a documented lie with no effect; wiring it is a correction.
+  `retain_days` promising **deletion** of old archives is different: that
+  code had never executed once in any release, so turning it on is not
+  correcting a claim, it is performing a destructive operation for the
+  first time. Three things make this BREAKING rather than a quiet fix:
+  (1) deletion is silent (`let _ = std::fs::remove_file(...)`, no log line);
+  (2) `AuditWriterTask::written_bytes` is seeded from the live file's
+  existing length at startup, so an operator already carrying a log over
+  `max_size_mb` gets rotation — and therefore the retention sweep — on the
+  very FIRST event after upgrading, not gradually; (3) fix round 1 of this
+  audit's review caught that the sweep, as first wired, deleted **every
+  file in `audit.path`'s parent directory** older than `retain_days`, with
+  no filename check — with `audit.path: ~/audit.log`, that would have swept
+  the operator's entire home directory. It is now scoped to only this log's
+  own rotated archives, matching the exact `<file name>.<suffix>` shape
+  `rename_with_timestamp` produces; nothing else in that directory is ever
+  touched. **Before upgrading**: confirm `audit.path` lives in a directory
+  dedicated to the audit log, not a shared directory like `$HOME` — the
+  filename filter protects unrelated files, but a stray file that happens
+  to be named `<your audit file name>.anything` is not distinguishable from
+  a real rotated archive. **Opt out**: set `retain_days: 0`, which disables
+  the retention sweep entirely; rotation by `max_size_mb` still runs.
+  Decision to wire rather than delete the keys outright: `AuditConfig` is
+  `deny_unknown_fields`, so removing `max_size_mb`/`retain_days` would break
+  every existing `config.yaml` that sets them, for less functionality than
+  adding one caller. `AuditWriterTask` — the owner of the open file handle,
+  so the only place that can safely rename and reopen without leaving later
+  events appended to a renamed inode — now calls `rotate_if_needed()` after
+  every write; `max_size_mb: 0` disables rotation (and therefore the sweep,
+  since nothing ever rotates) rather than rotating on every event. Growth is
+  otherwise slow on the rotation side (roughly 350 bytes/line, ~300k
+  commands to reach the 100 MB default `max_size_mb`) — but the retention
+  sweep is a one-time step function at upgrade for anyone already over the
+  limit, not a gradual thing, which is exactly why this needed the marker.
 - **`bridge-mcp status` claimed CLI audit events are persisted when they are
   not (G-13).** `create_context` binds the `AuditWriterTask` to `_audit_task`
   and drops it, so `AuditLogger::log`'s `let _ = sender.send(event)` discards
