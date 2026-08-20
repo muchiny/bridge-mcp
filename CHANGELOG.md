@@ -230,6 +230,19 @@ section.
   `crate::domain`. **Wire-visible**: a `tasks/list` call with a cursor that
   names no live task previously succeeded with page 1; it now returns
   `-32602`.
+- **`initialize` advertised `resources.subscribe: true` with no emitter
+  behind it (G-6).** `notifications/resources/updated` had zero occurrences
+  in the whole repo — `SessionContext::resource_subs` was written on
+  `resources/subscribe` and removed on `resources/unsubscribe`, but never
+  read anywhere else, so a client that trusted the capability and
+  subscribed would wait forever for a notification that could never arrive.
+  `resources/subscribe` and `resources/unsubscribe` still work exactly as
+  before (they only ever managed that map); only the handshake's claim
+  changes. The sibling `listChanged` flag stays `true` — config reload
+  really does broadcast `notifications/resources/list_changed`. **Wire-visible**:
+  `capabilities.resources.subscribe` in the `initialize` response flips from
+  `true` to `false`; no client could have relied on a notification that was
+  never sent, so nothing that worked stops working.
 
 ### Migrating from 1.20.0
 

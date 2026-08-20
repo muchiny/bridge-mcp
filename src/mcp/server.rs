@@ -1413,7 +1413,14 @@ impl McpServer {
                 tools: Some(ToolsCapability { list_changed: true }),
                 prompts: Some(PromptsCapability { list_changed: true }),
                 resources: Some(ResourcesCapability {
-                    subscribe: true,
+                    // G-6 (audit 2026-08-19): NOT `true`. Nothing in this
+                    // crate ever sends `notifications/resources/updated` —
+                    // `resource_subs` is a write-only map. `listChanged`
+                    // stays true because `spawn_config_watcher` really does
+                    // broadcast `resources_list_changed` on reload.
+                    // Flip this back to `true` in the same commit that adds
+                    // the emitter, never before.
+                    subscribe: false,
                     list_changed: true,
                 }),
                 tasks: Some(TasksCapability {
@@ -2711,6 +2718,45 @@ mod tests {
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
         assert_eq!(result["serverInfo"]["version"], SERVER_VERSION);
         assert!(result["capabilities"]["tools"].is_object());
+    }
+
+    /// G-6 (audit 2026-08-19): the handshake advertised
+    /// `resources.subscribe: true` while the server has no emitter at all —
+    /// `notifications/resources/updated` appears nowhere in the tree, and
+    /// `SessionContext::resource_subs` is written and never read. A client
+    /// that trusts the flag subscribes and then waits forever. Advertise the
+    /// truth until an emitter exists.
+    #[tokio::test]
+    async fn test_initialize_does_not_advertise_resource_subscriptions() {
+        let server = create_test_server();
+        let params = json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+            }
+        });
+
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+
+        assert_eq!(
+            result["capabilities"]["resources"]["subscribe"],
+            json!(false),
+            "resources.subscribe must stay false until the server actually \
+             emits notifications/resources/updated"
+        );
+        assert_eq!(
+            result["capabilities"]["resources"]["listChanged"],
+            json!(true),
+            "listChanged IS honored (config reload broadcasts \
+             resources_list_changed) and must stay advertised"
+        );
     }
 
     #[tokio::test]
