@@ -231,18 +231,28 @@ section.
   names no live task previously succeeded with page 1; it now returns
   `-32602`.
 - **`initialize` advertised `resources.subscribe: true` with no emitter
-  behind it (G-6).** `notifications/resources/updated` had zero occurrences
-  in the whole repo — `SessionContext::resource_subs` was written on
+  behind it (G-6; corrected in fix round 1 — see below).**
+  `notifications/resources/updated` had zero occurrences in the whole
+  repo — `SessionContext::resource_subs` was written on
   `resources/subscribe` and removed on `resources/unsubscribe`, but never
   read anywhere else, so a client that trusted the capability and
   subscribed would wait forever for a notification that could never arrive.
-  `resources/subscribe` and `resources/unsubscribe` still work exactly as
-  before (they only ever managed that map); only the handshake's claim
-  changes. The sibling `listChanged` flag stays `true` — config reload
-  really does broadcast `notifications/resources/list_changed`. **Wire-visible**:
+  The sibling `listChanged` flag stays `true` — config reload really does
+  broadcast `notifications/resources/list_changed`. **Wire-visible**:
   `capabilities.resources.subscribe` in the `initialize` response flips from
   `true` to `false`; no client could have relied on a notification that was
-  never sent, so nothing that worked stops working.
+  never sent, so nothing that worked stops working. Fix round 1 closed the
+  other half of this: `resources/subscribe` originally kept handing out a
+  `subscriptionId` even after the handshake stopped advertising the
+  capability — a client that ignored the handshake and called it anyway
+  still got told to wait for a notification that could never come. It now
+  refuses every call with `-32601 Method not found`, matching what a
+  client should expect from a capability the server does not advertise, and
+  writes nothing into the per-session map. `resources/unsubscribe` is
+  unaffected and still functions (clearing a now purely hypothetical
+  subscription id is harmless). **Wire-visible**: a client that called
+  `resources/subscribe` despite the `false` capability previously got a
+  `subscriptionId` back; it now gets `-32601`.
 - **The published resource template was `ssh://{host}/{path}`, a scheme no
   handler answers (G-7).** `create_default_resource_registry` never
   registered an `ssh` handler, so every expansion of the one template

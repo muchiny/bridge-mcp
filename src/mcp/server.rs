@@ -1254,10 +1254,7 @@ impl McpServer {
             }
             "logging/setLevel" => self.handle_logging_set_level(id, request.params, session),
             "resources/templates/list" => self.handle_resource_templates_list(id),
-            "resources/subscribe" => {
-                self.handle_resource_subscribe(id, request.params, session)
-                    .await
-            }
+            "resources/subscribe" => Self::handle_resource_subscribe(id, request.params, session),
             "resources/unsubscribe" => {
                 self.handle_resource_unsubscribe(id, request.params, session)
                     .await
@@ -2094,43 +2091,26 @@ impl McpServer {
 
     /// Subscribe to resource notifications.
     ///
-    /// FIND-036 (audit 2026-05-09): subscriptions are now per-session.
-    /// The previous server-wide `HashMap<String, Vec<String>>` keyed on
-    /// URI alone leaked sub-ids across clients — two clients subscribing
-    /// to the same URI shared the Vec, and one client's `unsubscribe`
-    /// could remove the other's entries. Each session now has its own
-    /// map, so there is no cross-session interference.
-    async fn handle_resource_subscribe(
-        &self,
+    /// IMPORTANT (fix round 1 of the 2026-08-19 audit corrections, task 31
+    /// follow-up): `handle_initialize` advertises
+    /// `resources.subscribe: false` (G-6) because nothing in this crate
+    /// ever emits `notifications/resources/updated` — but this handler used
+    /// to hand out a `subscriptionId` regardless (writing it into the
+    /// per-session `resource_subs` map added for FIND-036, audit
+    /// 2026-05-09), promising a notification the handshake had just
+    /// disclaimed. Refuse the call outright: a client should get the same
+    /// response it would get for any method the server does not implement.
+    /// Takes no `&self` (clippy `unused_self`) while it is just a constant
+    /// refusal; restore the real body (uri parsing, per-session
+    /// `resource_subs` write) in the SAME commit that adds the notification
+    /// emitter, never before — see git history for the previous
+    /// implementation.
+    fn handle_resource_subscribe(
         id: Option<Value>,
-        params: Option<Value>,
-        session: Option<&SessionContext>,
+        _params: Option<Value>,
+        _session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
-        let uri = params
-            .as_ref()
-            .and_then(|p| p.get("uri"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if uri.is_empty() {
-            return JsonRpcResponse::error(id, JsonRpcError::invalid_params("uri is required"));
-        }
-        let Some(session) = session else {
-            // Without a session there's no per-session subscription map
-            // to write into. Subscriptions are only meaningful in a live
-            // session anyway.
-            return JsonRpcResponse::error(
-                id,
-                JsonRpcError::invalid_request("resources/subscribe requires an active MCP session"),
-            );
-        };
-        let sub_id = uuid::Uuid::new_v4().to_string();
-        {
-            let mut subs = session.resource_subs.write().await;
-            subs.entry(uri.to_string())
-                .or_default()
-                .push(sub_id.clone());
-        }
-        JsonRpcResponse::success(id, json!({"subscriptionId": sub_id}))
+        JsonRpcResponse::error(id, JsonRpcError::method_not_found("resources/subscribe"))
     }
 
     /// Unsubscribe from resource notifications.
@@ -5243,54 +5223,77 @@ mod tests {
 
     // ============== Resource Subscribe/Unsubscribe Tests ==============
 
+    /// IMPORTANT (fix round 1 of the 2026-08-19 audit corrections, task 31
+    /// follow-up): `handle_initialize` now advertises
+    /// `resources.subscribe: false` (G-6) because nothing in this crate
+    /// ever emits `notifications/resources/updated` — but this handler kept
+    /// handing out a `subscriptionId` anyway, promising a notification the
+    /// handshake had just disclaimed. `resources/subscribe` must refuse
+    /// every call with `-32601 Method not found`, matching what a client
+    /// should expect from a capability the server does not advertise, and
+    /// must write nothing into the per-session map (there is nothing left
+    /// to unsubscribe from later).
+    ///
+    /// Before: pinned that a valid subscribe call succeeds and lands in the
+    /// per-session `resource_subs` map (FIND-036). Now: pins that it is
+    /// unconditionally refused and the map stays empty — real coverage of
+    /// the opposite behavior, not a relaxed version of the old assertion.
     #[tokio::test]
-    async fn test_resource_subscribe_valid() {
+    async fn test_resource_subscribe_always_returns_method_not_found() {
         let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         let params = json!({ "uri": "health://server" });
 
-        let response = server
-            .handle_resource_subscribe(Some(json!(1)), Some(params), Some(&session_ctx))
-            .await;
+        let response =
+            McpServer::handle_resource_subscribe(Some(json!(1)), Some(params), Some(&session_ctx));
 
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["subscriptionId"].is_string());
-        // The subscription must land in THIS session's per-session map
-        // (FIND-036) — verify it's there.
+        let error = response.error.expect("subscribe must be refused");
+        assert_eq!(error.code, -32601);
+        assert!(error.message.contains("resources/subscribe"));
         let subs = session_ctx.resource_subs.read().await;
-        assert!(subs.contains_key("health://server"));
+        assert!(
+            subs.is_empty(),
+            "a refused subscribe must not write a subscription id anyone could later unsubscribe"
+        );
     }
 
+    /// Before: pinned that a MISSING `uri` param specifically produces
+    /// `-32602 Invalid params`, i.e. that param validation ran. Now: the
+    /// capability gate fires before any param is even looked at, so a
+    /// missing `uri` gets the same `-32601` as a well-formed call — pinning
+    /// that the refusal is unconditional, not parameter-dependent.
     #[tokio::test]
-    async fn test_resource_subscribe_missing_uri() {
+    async fn test_resource_subscribe_missing_uri_still_refused_as_method_not_found() {
         let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         let params = json!({});
 
-        let response = server
-            .handle_resource_subscribe(Some(json!(1)), Some(params), Some(&session_ctx))
-            .await;
+        let response =
+            McpServer::handle_resource_subscribe(Some(json!(1)), Some(params), Some(&session_ctx));
 
-        assert!(response.error.is_some());
-        let error = response.error.unwrap();
-        assert_eq!(error.code, -32602);
+        let error = response.error.expect("subscribe must be refused");
+        assert_eq!(error.code, -32601);
     }
 
+    /// `resources/unsubscribe` is untouched by this fix — a client can
+    /// still clear a (now purely hypothetical) subscription id. Since
+    /// `resources/subscribe` can no longer be used to seed one, this test
+    /// seeds the per-session map directly to keep exercising the actual
+    /// removal path in `handle_resource_unsubscribe` instead of degrading
+    /// into a no-op-on-an-empty-map test.
     #[tokio::test]
     async fn test_resource_unsubscribe() {
         let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-        // First subscribe
-        let sub_params = json!({ "uri": "health://server" });
-        server
-            .handle_resource_subscribe(Some(json!(1)), Some(sub_params), Some(&session_ctx))
-            .await;
+        session_ctx
+            .resource_subs
+            .write()
+            .await
+            .insert("health://server".to_string(), vec!["sub-1".to_string()]);
 
-        // Then unsubscribe
         let unsub_params = json!({ "uri": "health://server" });
         let response = server
             .handle_resource_unsubscribe(Some(json!(2)), Some(unsub_params), Some(&session_ctx))
@@ -5304,15 +5307,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_resource_subscribe_without_session_rejected() {
-        // FIND-036: subscription is per-session and meaningless without
-        // a live session. Calls from non-MCP code paths must be refused
-        // rather than silently forced through a non-existent global map.
+        // Still refused without a session -- now unconditionally, via the
+        // same -32601 capability gate rather than a session-specific check.
         let server = create_test_server();
         let params = json!({ "uri": "health://server" });
-        let response = server
-            .handle_resource_subscribe(Some(json!(1)), Some(params), None)
-            .await;
-        assert!(response.error.is_some());
+        let response = McpServer::handle_resource_subscribe(Some(json!(1)), Some(params), None);
+        let error = response.error.expect("subscribe must be refused");
+        assert_eq!(error.code, -32601);
     }
 
     // ============== Completions Tests ==============
