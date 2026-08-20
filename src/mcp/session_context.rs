@@ -24,6 +24,7 @@ use tokio::sync::{RwLock, mpsc};
 
 use super::pending_requests::PendingRequests;
 use super::protocol::{LogLevel, RootEntry, WriterMessage};
+use super::request_meta::RequestMeta;
 use super::session_capabilities::SessionCapabilities;
 
 /// All per-session state bundled into one cloneable handle.
@@ -58,6 +59,15 @@ pub struct SessionContext {
     /// `Arc<AtomicU8>` on `McpServer`, so client B's setLevel could
     /// mute client A's notifications.
     pub log_level: Arc<AtomicU8>,
+    /// The `_meta` envelope of the ONE request currently being handled
+    /// (MCP 2026-07-28). `None` on the session-level bundle and on every
+    /// request from a Legacy client.
+    ///
+    /// This field is deliberately NOT `Arc`-shared with the session:
+    /// [`Self::with_request_meta`] clones the bundle and replaces only this
+    /// slot, so a per-request envelope can never leak into the session or
+    /// into a concurrently running sibling request.
+    pub request_meta: Option<Arc<RequestMeta>>,
 }
 
 impl SessionContext {
@@ -74,7 +84,64 @@ impl SessionContext {
             resource_subs: Arc::new(RwLock::new(HashMap::new())),
             roots: Arc::new(RwLock::new(Vec::new())),
             log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
+            request_meta: None,
         }
+    }
+
+    /// Clone this bundle and attach ONE request's `_meta` envelope.
+    ///
+    /// Called once per incoming request at the dispatch chokepoint. Every
+    /// other field is `Arc`-shared with the original, so the clone is cheap
+    /// and session state stays common; only `request_meta` diverges.
+    #[must_use]
+    pub fn with_request_meta(&self, meta: RequestMeta) -> Self {
+        let mut scoped = self.clone();
+        scoped.request_meta = Some(Arc::new(meta));
+        scoped
+    }
+
+    /// Whether the client supports `elicitation/create` for THIS request.
+    ///
+    /// Precedence — this is the compatibility seam that lets Modern and
+    /// Legacy clients coexist while the handshake is being removed:
+    /// 1. the request's own `_meta` envelope, when it declared capabilities
+    ///    (including an authoritative `{}` meaning "none");
+    /// 2. otherwise the flags this session's `initialize` handshake set.
+    #[must_use]
+    pub fn supports_elicitation(&self) -> bool {
+        self.request_meta
+            .as_ref()
+            .and_then(|m| m.declares_elicitation())
+            .unwrap_or_else(|| self.caps.supports_elicitation())
+    }
+
+    /// Whether the client supports `sampling/createMessage` for THIS request.
+    /// See [`Self::supports_elicitation`] for the precedence rule.
+    #[must_use]
+    pub fn supports_sampling(&self) -> bool {
+        self.request_meta
+            .as_ref()
+            .and_then(|m| m.declares_sampling())
+            .unwrap_or_else(|| self.caps.supports_sampling())
+    }
+
+    /// Whether the client supports `roots/list` for THIS request.
+    /// See [`Self::supports_elicitation`] for the precedence rule.
+    #[must_use]
+    pub fn supports_roots(&self) -> bool {
+        self.request_meta
+            .as_ref()
+            .and_then(|m| m.declares_roots())
+            .unwrap_or_else(|| self.caps.supports_roots())
+    }
+
+    /// The client name declared in THIS request's `_meta` envelope.
+    ///
+    /// Modern clients never send `initialize`, so this is the only place a
+    /// client name is available once the handshake is gone.
+    #[must_use]
+    pub fn request_client_name(&self) -> Option<&str> {
+        self.request_meta.as_ref().and_then(|m| m.client_name())
     }
 }
 
@@ -315,5 +382,91 @@ mod tests {
 
         // Dead sender pruned, live sender remains.
         assert_eq!(f.live_session_count(), 1);
+    }
+
+    #[test]
+    fn request_meta_defaults_to_absent() {
+        let ctx = SessionContext::new(dummy_writer_tx());
+        assert!(ctx.request_meta.is_none());
+        assert!(ctx.request_client_name().is_none());
+        // With neither handshake nor envelope, everything is false.
+        assert!(!ctx.supports_elicitation());
+        assert!(!ctx.supports_sampling());
+        assert!(!ctx.supports_roots());
+    }
+
+    #[test]
+    fn per_request_meta_grants_capability_without_any_handshake() {
+        // This is the compatibility seam: no `initialize` ever ran, so every
+        // SessionCapabilities AtomicBool is false, yet the request's own
+        // `_meta` envelope declares elicitation.
+        let base = SessionContext::new(dummy_writer_tx());
+        assert!(!base.caps.supports_elicitation());
+
+        let params = serde_json::json!({
+            "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} },
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "ExampleClient",
+                    "version": "1.0.0"
+                }
+            }
+        });
+        let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
+
+        assert!(scoped.supports_elicitation());
+        assert!(!scoped.supports_sampling());
+        assert!(!scoped.supports_roots());
+        assert_eq!(scoped.request_client_name(), Some("ExampleClient"));
+    }
+
+    #[test]
+    fn absent_envelope_falls_back_to_handshake_flags() {
+        // Legacy client: `initialize` set the flags, requests carry no `_meta`.
+        let base = SessionContext::new(dummy_writer_tx());
+        base.caps.set_supports_elicitation(true);
+
+        let params = serde_json::json!({ "name": "ssh_exec" });
+        let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
+
+        assert!(scoped.supports_elicitation());
+    }
+
+    #[test]
+    fn declared_envelope_overrides_handshake_flags() {
+        // Modern client that supports nothing: `{}` is an authoritative
+        // denial for THIS request and must win over a stale handshake flag.
+        let base = SessionContext::new(dummy_writer_tx());
+        base.caps.set_supports_elicitation(true);
+        base.caps.set_supports_sampling(true);
+
+        let params = serde_json::json!({
+            "_meta": { "io.modelcontextprotocol/clientCapabilities": {} }
+        });
+        let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
+
+        assert!(!scoped.supports_elicitation());
+        assert!(!scoped.supports_sampling());
+    }
+
+    #[tokio::test]
+    async fn with_request_meta_does_not_mutate_the_session() {
+        let base = SessionContext::new(dummy_writer_tx());
+        let params = serde_json::json!({
+            "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} }
+            }
+        });
+        let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
+
+        // The per-request slot is NOT shared: the session and any sibling
+        // request clone still see no envelope.
+        assert!(scoped.request_meta.is_some());
+        assert!(base.request_meta.is_none());
+        assert!(!base.supports_elicitation());
+
+        // The Arc-wrapped state IS still shared, as before.
+        *scoped.runtime_max_output.write().await = Some(4096);
+        assert_eq!(*base.runtime_max_output.read().await, Some(4096));
     }
 }
