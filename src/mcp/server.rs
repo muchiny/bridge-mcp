@@ -3679,6 +3679,37 @@ mod tests {
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
     }
 
+    #[tokio::test]
+    async fn test_initialize_recovers_capabilities_when_only_client_version_missing() {
+        // Fix-round follow-up to G-18: the original fix only recovered
+        // `protocolVersion` off the raw Value. `ClientInfo.version` had no
+        // serde default, so a client that omits ONLY `clientInfo.version`
+        // still failed the typed deserialize and still lost `capabilities`
+        // and `clientInfo` entirely — including `capabilities.elicitation`,
+        // which the destructive-tool gate depends on
+        // (`require_elicitation_on_destructive` defaults to true).
+        let server = create_test_server();
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        let params = json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "elicitation": {} },
+            "clientInfo": { "name": "test-client" }
+        });
+
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), Some(&session_ctx))
+            .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2025-06-18");
+        assert!(
+            session_ctx.caps.supports_elicitation(),
+            "omitting only clientInfo.version must not drop capabilities.elicitation"
+        );
+    }
+
     // ============== Additional Tools Tests ==============
 
     #[tokio::test]

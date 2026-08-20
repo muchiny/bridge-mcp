@@ -188,6 +188,13 @@ pub struct RootsCapability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInfo {
     pub name: String,
+    // A client that omits only `clientInfo.version` used to fail the whole
+    // `InitializeParams` typed deserialize, silently dropping
+    // `capabilities` (elicitation, sampling, roots) with it — see
+    // `McpServer::handle_initialize`. `version` is metadata we log, not
+    // something we validate, so defaulting it to "" keeps the rest of the
+    // client's declared capabilities intact instead of discarding them.
+    #[serde(default)]
     pub version: String,
 }
 
