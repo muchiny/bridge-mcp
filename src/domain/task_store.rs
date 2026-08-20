@@ -13,6 +13,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ports::protocol::{TaskInfo, TaskStatus};
 
+/// Returned by [`TaskStore::list_tasks`] when the supplied pagination cursor
+/// names no live task.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Invalid pagination cursor: {cursor}")]
+pub struct InvalidCursor {
+    /// The cursor value the client sent.
+    pub cursor: String,
+}
+
 /// Internal task entry stored in the registry.
 struct TaskEntry {
     info: TaskInfo,
@@ -333,11 +342,18 @@ impl TaskStore {
     ///
     /// Tasks are sorted by creation time (task ID is UUID, so we sort by
     /// `created_at`). Returns `(tasks, next_cursor)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidCursor`] when `cursor` names no live task. Clamping
+    /// to the head instead replayed a page the client had already consumed,
+    /// and TTL eviction can stale a cursor mid-loop, so the two cases must
+    /// be distinguishable.
     pub async fn list_tasks(
         &self,
         cursor: Option<&str>,
         page_size: usize,
-    ) -> (Vec<TaskInfo>, Option<String>) {
+    ) -> Result<(Vec<TaskInfo>, Option<String>), InvalidCursor> {
         let tasks = self.tasks.read().await;
 
         let mut entries: Vec<_> = tasks
@@ -349,12 +365,15 @@ impl TaskStore {
         // Sort by creation time for stable pagination
         entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
-        // Apply cursor: skip entries until we find the cursor task_id
+        // Apply cursor: skip entries up to and including the cursor task_id
         let start = if let Some(cursor_id) = cursor {
             entries
                 .iter()
                 .position(|info| info.task_id == cursor_id)
-                .map_or(0, |pos| pos + 1)
+                .ok_or_else(|| InvalidCursor {
+                    cursor: cursor_id.to_string(),
+                })?
+                + 1
         } else {
             0
         };
@@ -372,7 +391,7 @@ impl TaskStore {
             None
         };
 
-        (page, next_cursor)
+        Ok((page, next_cursor))
     }
 
     /// Remove all expired tasks.
@@ -790,7 +809,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_tasks_empty() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (tasks, cursor) = store.list_tasks(None, 10).await;
+        let (tasks, cursor) = store.list_tasks(None, 10).await.unwrap();
         assert!(tasks.is_empty());
         assert!(cursor.is_none());
     }
@@ -802,7 +821,7 @@ mod tests {
         store.create_task(None).await.unwrap();
         store.create_task(None).await.unwrap();
 
-        let (tasks, cursor) = store.list_tasks(None, 10).await;
+        let (tasks, cursor) = store.list_tasks(None, 10).await.unwrap();
         assert_eq!(tasks.len(), 3);
         assert!(cursor.is_none());
     }
@@ -814,15 +833,15 @@ mod tests {
             store.create_task(None).await.unwrap();
         }
 
-        let (page1, cursor1) = store.list_tasks(None, 2).await;
+        let (page1, cursor1) = store.list_tasks(None, 2).await.unwrap();
         assert_eq!(page1.len(), 2);
         assert!(cursor1.is_some());
 
-        let (page2, cursor2) = store.list_tasks(cursor1.as_deref(), 2).await;
+        let (page2, cursor2) = store.list_tasks(cursor1.as_deref(), 2).await.unwrap();
         assert_eq!(page2.len(), 2);
         assert!(cursor2.is_some());
 
-        let (page3, cursor3) = store.list_tasks(cursor2.as_deref(), 2).await;
+        let (page3, cursor3) = store.list_tasks(cursor2.as_deref(), 2).await.unwrap();
         assert_eq!(page3.len(), 1);
         assert!(cursor3.is_none());
     }
@@ -1013,14 +1032,37 @@ mod tests {
     // ============== Pagination Edge Cases ==============
 
     #[tokio::test]
-    async fn test_list_tasks_with_stale_cursor() {
+    async fn test_list_tasks_with_stale_cursor_is_rejected() {
         let store = TaskStore::new(10, 60_000, 2_000);
         store.create_task(None).await.unwrap();
         store.create_task(None).await.unwrap();
 
-        // Use a non-existent cursor — should return from the start
-        let (tasks, _) = store.list_tasks(Some("stale-cursor-id"), 10).await;
-        assert_eq!(tasks.len(), 2);
+        // A cursor naming no live task used to silently restart from the
+        // head, replaying a page the client had already consumed. TTL
+        // eviction can stale a cursor mid-loop, so the caller must be able
+        // to tell "start over" from "your cursor is gone".
+        let err = store
+            .list_tasks(Some("stale-cursor-id"), 10)
+            .await
+            .expect_err("a stale cursor must be an error, not a silent restart");
+        assert_eq!(err.cursor, "stale-cursor-id");
+        assert!(err.to_string().contains("stale-cursor-id"));
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_valid_cursor_still_paginates() {
+        let store = TaskStore::new(10, 60_000, 2_000);
+        for _ in 0..3 {
+            store.create_task(None).await.unwrap();
+        }
+
+        let (page1, cursor1) = store.list_tasks(None, 2).await.unwrap();
+        assert_eq!(page1.len(), 2);
+        let cursor1 = cursor1.expect("first page must yield a cursor");
+
+        let (page2, cursor2) = store.list_tasks(Some(&cursor1), 2).await.unwrap();
+        assert_eq!(page2.len(), 1);
+        assert!(cursor2.is_none());
     }
 
     #[tokio::test]
@@ -1035,7 +1077,7 @@ mod tests {
         store.cancel_task(&id3).await.unwrap();
 
         // All should be listed regardless of status
-        let (tasks, _) = store.list_tasks(None, 10).await;
+        let (tasks, _) = store.list_tasks(None, 10).await.unwrap();
         assert_eq!(tasks.len(), 3);
 
         let statuses: Vec<_> = tasks.iter().map(|t| t.status).collect();

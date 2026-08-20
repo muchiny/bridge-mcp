@@ -212,6 +212,24 @@ section.
   MUST violation staying in place because it agreed with another MUST
   violation is exactly the failure shape this corrections pass exists to
   remove. Both arms move to `202` together so they cannot re-diverge.
+- **An invalid pagination cursor was silently clamped instead of rejected
+  (G-16).** `TaskStore::list_tasks` mapped a cursor naming no live task to
+  "start from the head" (`.map_or(0, |pos| pos + 1)`), which is
+  indistinguishable from a legitimate first page — a client polling
+  `tasks/list` whose cursor went stale mid-loop (TTL eviction can do this)
+  silently replayed page 1 instead of learning its cursor was gone.
+  `list_tasks` now returns `Err(InvalidCursor)` for an unknown cursor, and
+  `handle_tasks_list` turns that into `-32602 Invalid params` naming the
+  offending cursor. `handle_tools_list`'s cursor parse had the same
+  `unwrap_or(0)` shape for a non-numeric cursor and is fixed the same way,
+  though it is unreachable in practice — this server's own pagination only
+  ever emits numeric cursors, so the fix only matters against a
+  hand-crafted request. **BREAKING (lib API)**: `TaskStore::list_tasks` now
+  returns `Result<(Vec<TaskInfo>, Option<String>), InvalidCursor>` instead
+  of a bare tuple; `InvalidCursor` is a new public type re-exported from
+  `crate::domain`. **Wire-visible**: a `tasks/list` call with a cursor that
+  names no live task previously succeeded with page 1; it now returns
+  `-32602`.
 
 ### Migrating from 1.20.0
 

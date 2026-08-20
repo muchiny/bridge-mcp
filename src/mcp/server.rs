@@ -1512,7 +1512,16 @@ impl McpServer {
             .and_then(|c| c.as_str());
 
         let (page, next_cursor) = if let Some(cursor_val) = cursor {
-            let start = cursor_val.parse::<usize>().unwrap_or(0);
+            // `unwrap_or(0)` silently turned a garbage cursor into "start
+            // over", which is indistinguishable from a legitimate first page.
+            let Ok(start) = cursor_val.parse::<usize>() else {
+                return JsonRpcResponse::error(
+                    id,
+                    JsonRpcError::invalid_params(format!(
+                        "Invalid pagination cursor: {cursor_val}"
+                    )),
+                );
+            };
             let end = (start + page_size).min(all_tools.len());
             let page = if start < all_tools.len() {
                 all_tools[start..end].to_vec()
@@ -2271,10 +2280,19 @@ impl McpServer {
             .and_then(|p| serde_json::from_value(p).ok())
             .unwrap_or(TaskListParams { cursor: None });
 
-        let (tasks, next_cursor) = self
+        let (tasks, next_cursor) = match self
             .task_store
             .list_tasks(list_params.cursor.as_deref(), 20)
-            .await;
+            .await
+        {
+            Ok(page) => page,
+            Err(e) => {
+                // A cursor naming no live task is a client error, not a
+                // reason to silently replay page 1. TTL eviction can stale a
+                // cursor between two polls of the same loop.
+                return JsonRpcResponse::error(id, JsonRpcError::invalid_params(e.to_string()));
+            }
+        };
 
         let result = TaskListResult { tasks, next_cursor };
         JsonRpcResponse::success_or_serialize_error(id, &result)
@@ -4405,6 +4423,44 @@ mod tests {
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         assert_eq!(result["tasks"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_tasks_list_invalid_cursor_returns_invalid_params() {
+        let server = create_test_server();
+        let params = json!({ "cursor": "no-such-task-id" });
+
+        let response = server.handle_tasks_list(Some(json!(1)), Some(params)).await;
+
+        let error = response
+            .error
+            .expect("an unknown tasks/list cursor must be a JSON-RPC error");
+        assert_eq!(error.code, -32602);
+        assert!(
+            error.message.contains("no-such-task-id"),
+            "error must name the offending cursor, got: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_non_numeric_cursor_returns_invalid_params() {
+        let server = create_test_server();
+        let params = json!({ "cursor": "not-a-number" });
+
+        let response = server
+            .handle_tools_list(Some(json!(1)), Some(&params))
+            .await;
+
+        let error = response
+            .error
+            .expect("a non-numeric tools/list cursor must be a JSON-RPC error");
+        assert_eq!(error.code, -32602);
+        assert!(
+            error.message.contains("not-a-number"),
+            "error must name the offending cursor, got: {}",
+            error.message
+        );
     }
 
     #[tokio::test]
