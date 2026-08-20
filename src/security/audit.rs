@@ -142,15 +142,28 @@ impl AuditWriterTask {
     /// handle — renaming the path from anywhere else would leave every later
     /// event appended to the renamed inode.
     ///
-    /// A rotation failure is logged and swallowed: dropping audit events
-    /// because a rename failed would be strictly worse than an oversized log.
+    /// A rotation failure never drops audit events -- that would be strictly
+    /// worse than an oversized log. But it does permanently disable rotation
+    /// for this task (see `reopen_after_rotation` for the same reasoning on
+    /// the sibling arm): the causes of a failing `rename(2)` here are all
+    /// persistent (EROFS remount, permission change, parent directory moved
+    /// or deleted, MAC denial, an external logrotate that removed the live
+    /// log), so retrying once per event would issue an unbounded stream of
+    /// doomed syscalls and `warn!` lines that can never succeed.
     fn rotate_if_needed(&mut self) {
         if self.max_bytes == 0 || self.written_bytes < self.max_bytes {
             return;
         }
 
         if let Err(e) = rename_with_timestamp(&self.path, Utc::now()) {
-            warn!(error = %e, "Failed to rotate audit log; continuing on the current file");
+            error!(
+                error = %e,
+                path = %self.path.display(),
+                "Failed to rotate audit log; disabling further rotation for \
+                 this run (events keep landing in the current, oversized file \
+                 until the process restarts)"
+            );
+            self.max_bytes = 0;
             return;
         }
         cleanup_old_audit_files(&self.path, self.retain_days, Utc::now());
@@ -1003,6 +1016,62 @@ mod tests {
              attempts instead of retry-looping a rename that can only fail \
              the same way forever"
         );
+    }
+
+    /// F1 (re-review of the 2026-08-19 audit corrections): the reopen arm
+    /// was hardened to disable rotation after a failure, but the RENAME arm
+    /// kept `warn!`-and-return with `written_bytes` and `max_bytes` left
+    /// untouched. `rotate_if_needed`'s guard (`written_bytes < max_bytes`)
+    /// therefore never short-circuits again, so every subsequent audit
+    /// event issues another doomed `rename(2)` plus another `warn!` --
+    /// forever. An EROFS remount, a permission change, a moved or deleted
+    /// directory, a MAC denial, or an external logrotate removing the live
+    /// log all reach this arm. Both arms must degrade identically: log once
+    /// at `error!`, then permanently disable rotation for this task.
+    #[test]
+    fn test_rename_failure_disables_further_rotation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Parent directory does not exist, so `rename(2)` on this source
+        // fails with ENOENT every single time -- a permanently failing
+        // rotation, deterministic and portable, without manufacturing
+        // disk-full or a read-only mount on a shared dev VM.
+        let unreachable_path = temp_dir.path().join("missing-dir").join("audit.log");
+
+        // Placeholder handle for the `file` field; only `path` is under test.
+        let placeholder_path = temp_dir.path().join("placeholder.log");
+        let file = open_audit_file(&placeholder_path).unwrap();
+
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut task = AuditWriterTask {
+            rx,
+            file,
+            sanitizer: None,
+            path: unreachable_path,
+            max_bytes: 1,
+            retain_days: 7,
+            written_bytes: 999,
+        };
+
+        task.rotate_if_needed();
+
+        assert_eq!(
+            task.max_bytes, 0,
+            "a rename failure must permanently disable further rotation, \
+             not leave the guard armed so that every later event re-issues \
+             the same doomed rename(2)"
+        );
+
+        // With rotation disabled the guard clause must short-circuit even
+        // when the byte counter is back above the (now zero) threshold, so
+        // repeated events cannot resurrect the retry loop.
+        for _ in 0..4 {
+            task.written_bytes = 999;
+            task.rotate_if_needed();
+            assert_eq!(
+                task.max_bytes, 0,
+                "rotation must stay permanently disabled once it has failed"
+            );
+        }
     }
 
     /// `max_size_mb: 0` must DISABLE rotation in the writer task rather than

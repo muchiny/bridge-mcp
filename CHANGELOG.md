@@ -357,7 +357,13 @@ section.
   so the only place that can safely rename and reopen without leaving later
   events appended to a renamed inode — now calls `rotate_if_needed()` after
   every write; `max_size_mb: 0` disables rotation (and therefore the sweep,
-  since nothing ever rotates) rather than rotating on every event. Growth is
+  since nothing ever rotates) rather than rotating on every event. A rotation
+  that fails — on either the rename or the reopen — is logged once at
+  `error!` and then disables rotation for the remainder of the process:
+  every cause of a failing rotation here is persistent (read-only remount,
+  permission change, parent directory moved or deleted), so retrying once
+  per audit event would emit an unbounded stream of doomed syscalls that can
+  never succeed. Events keep being written either way. Growth is
   otherwise slow on the rotation side (roughly 350 bytes/line, ~300k
   commands to reach the 100 MB default `max_size_mb`) — but the retention
   sweep is a one-time step function at upgrade for anyone already over the
