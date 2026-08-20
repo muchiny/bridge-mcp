@@ -1256,8 +1256,7 @@ impl McpServer {
             "resources/templates/list" => self.handle_resource_templates_list(id),
             "resources/subscribe" => Self::handle_resource_subscribe(id, request.params, session),
             "resources/unsubscribe" => {
-                self.handle_resource_unsubscribe(id, request.params, session)
-                    .await
+                Self::handle_resource_unsubscribe(id, request.params, session)
             }
             "ping" => JsonRpcResponse::success(id, json!({})),
             _ => {
@@ -2125,25 +2124,29 @@ impl McpServer {
 
     /// Unsubscribe from resource notifications.
     ///
-    /// FIND-036 (audit 2026-05-09): operates on this session's map only.
-    async fn handle_resource_unsubscribe(
-        &self,
+    /// IMPORTANT (F9 of the 2026-08-19 batch H re-review): this used to
+    /// return `{}` success while its sibling `handle_resource_subscribe`
+    /// returned -32601, so a client probing which half of the subscription
+    /// pair exists got two contradictory answers about ONE disclaimed
+    /// capability. `handle_initialize` advertises
+    /// `resources.subscribe: false`; reference MCP servers register neither
+    /// handler when `subscribe` is undeclared, so both answer
+    /// method-not-found. Succeeding at cancelling a subscription that can
+    /// never be created is the same honesty defect G-6 was raised about,
+    /// one method over.
+    ///
+    /// Takes no `&self` and is no longer `async` (clippy `unused_self`)
+    /// while it is just a constant refusal. Restore the real body — uri
+    /// parsing and the per-session `resource_subs` removal added for
+    /// FIND-036, audit 2026-05-09 — in the SAME commit that adds the
+    /// notification emitter and restores `handle_resource_subscribe`,
+    /// never before. See git history for the previous implementation.
+    fn handle_resource_unsubscribe(
         id: Option<Value>,
-        params: Option<Value>,
-        session: Option<&SessionContext>,
+        _params: Option<Value>,
+        _session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
-        let uri = params
-            .as_ref()
-            .and_then(|p| p.get("uri"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !uri.is_empty()
-            && let Some(session) = session
-        {
-            let mut subs = session.resource_subs.write().await;
-            subs.remove(uri);
-        }
-        JsonRpcResponse::success(id, json!({}))
+        JsonRpcResponse::error(id, JsonRpcError::method_not_found("resources/unsubscribe"))
     }
 
     // =========================================================================
@@ -5426,15 +5429,18 @@ mod tests {
         assert_eq!(error.code, -32601);
     }
 
-    /// `resources/unsubscribe` is untouched by this fix — a client can
-    /// still clear a (now purely hypothetical) subscription id. Since
-    /// `resources/subscribe` can no longer be used to seed one, this test
-    /// seeds the per-session map directly to keep exercising the actual
-    /// removal path in `handle_resource_unsubscribe` instead of degrading
-    /// into a no-op-on-an-empty-map test.
+    /// `resources/unsubscribe` is refused with the same -32601 as
+    /// `resources/subscribe` (F9). The pair must agree: the handshake
+    /// disclaims `resources.subscribe`, so neither half of the
+    /// subscription protocol exists, and a client probing for one must not
+    /// be told that cancelling works while creating does not.
+    ///
+    /// The session is seeded with a subscription anyway, so this test also
+    /// proves the refusal is UNCONDITIONAL rather than an accident of the
+    /// map being empty — and that the entry is left untouched rather than
+    /// silently removed by a handler that claims not to exist.
     #[tokio::test]
-    async fn test_resource_unsubscribe() {
-        let server = create_test_server();
+    async fn test_resource_unsubscribe_is_refused_like_subscribe() {
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         session_ctx
@@ -5444,14 +5450,29 @@ mod tests {
             .insert("health://server".to_string(), vec!["sub-1".to_string()]);
 
         let unsub_params = json!({ "uri": "health://server" });
-        let response = server
-            .handle_resource_unsubscribe(Some(json!(2)), Some(unsub_params), Some(&session_ctx))
-            .await;
+        let response = McpServer::handle_resource_unsubscribe(
+            Some(json!(2)),
+            Some(unsub_params),
+            Some(&session_ctx),
+        );
 
-        assert!(response.error.is_none());
-        // Map must now be empty for that URI (FIND-036).
+        let error = response
+            .error
+            .expect("unsubscribe must be refused while the capability is disclaimed");
+        assert_eq!(error.code, -32601);
+        assert!(
+            error.message.contains("resources/unsubscribe"),
+            "the refusal must name the method the client called, not its sibling: {}",
+            error.message
+        );
+
+        // The seeded entry survives: a method that does not exist must not
+        // have had a side effect.
         let subs = session_ctx.resource_subs.read().await;
-        assert!(!subs.contains_key("health://server"));
+        assert!(
+            subs.contains_key("health://server"),
+            "a refused unsubscribe must not mutate the session map"
+        );
     }
 
     #[tokio::test]
@@ -5823,6 +5844,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_resources_unsubscribe_dispatch() {
+        // F9 (2026-08-19 batch H re-review): the dispatch arm must carry the
+        // refusal too, not just the handler. `resources.subscribe` is
+        // disclaimed at the handshake, so BOTH halves of the subscription
+        // pair answer method-not-found — this used to assert success while
+        // its `resources/subscribe` sibling immediately above asserted an
+        // error, which is exactly the contradiction F9 removes.
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -5833,7 +5860,10 @@ mod tests {
 
         let response = server.handle_request(request).await;
 
-        assert!(response.error.is_none());
+        let error = response
+            .error
+            .expect("unsubscribe must be refused while the capability is disclaimed");
+        assert_eq!(error.code, -32601);
     }
 
     #[tokio::test]
