@@ -3,8 +3,10 @@
 #
 # G-27 (audit 2026-08-19): `serverInfo.icons[0].src` shipped a hard 404 because
 # src/mcp/protocol.rs used `muchini` while every other repository URL used
-# `muchiny`. CHANGELOG.md:206 records an EARLIER sweep of the same typo that
-# missed two constants — this guard makes a third occurrence impossible.
+# `muchiny`. The 1.19.0 CHANGELOG entry records an EARLIER sweep of the same
+# typo that missed two constants — this guard makes a third occurrence
+# impossible. (Referenced by release, not by line number: the line moved once
+# already, and a stale pointer into a growing changelog is worse than none.)
 #
 # Only URL contexts are matched: `muchini` is also the maintainer's unix
 # username and appears legitimately in `ps` output fixtures

@@ -57,8 +57,9 @@ jobs:
       - name: Verify server.json is in sync with Cargo.toml
         run: |
           python3 scripts/sync-server-json.py
-          git diff --exit-code server.json \
-            || { echo "::error::server.json drifted — run 'make sync-server-json' and commit"; exit 1; }
+          git diff --exit-code server.json .well-known/mcp/server-card.json dxt/manifest.json \
+            .claude-plugin/marketplace.json plugin/.claude-plugin/plugin.json dxt/README.md \
+            || { echo "::error::manifest version drift — run 'make sync-server-json' and commit"; exit 1; }
 
       - name: Install mcp-publisher
         run: |

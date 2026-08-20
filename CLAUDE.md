@@ -214,11 +214,12 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Recent Changes
 
-- **v2.2.0 (2026-08-19)** — major bump for **23 breaking changes, nine in the
-  public lib API**. (An earlier draft of this line, and of the CHANGELOG
-  preamble, said "seven, four in the lib API"; that count never reconciled
-  against its own numbered list and was already wrong before the conformance
-  audit began.) Config/wire: `rbac.enabled: true` is rejected at load (it was
+- **v2.2.0 (2026-08-19)** — major bump for **21 breaking changes, ten in the
+  public lib API**. (Two earlier drafts of this line were wrong: "seven, four"
+  never reconciled against the CHANGELOG's own numbered list, and "23, nine"
+  came from counting `grep -c BREAKING` LINES instead of distinct changes. The
+  CHANGELOG now prints the arithmetic — 14 marked bullets + 10 table rows − 3
+  in both.) Config/wire: `rbac.enabled: true` is rejected at load (it was
   never enforced and granted full access); `verify_checksum` refuses
   `resume`/`append` instead of returning a checksum-free success; no-`jq` builds
   error on reduction params; `ssh_history` redacts the command itself, so

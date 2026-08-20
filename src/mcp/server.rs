@@ -1410,8 +1410,12 @@ impl McpServer {
                 prompts: Some(PromptsCapability { list_changed: true }),
                 resources: Some(ResourcesCapability {
                     // G-6 (audit 2026-08-19): NOT `true`. Nothing in this
-                    // crate ever sends `notifications/resources/updated` —
-                    // `resource_subs` is a write-only map. `listChanged`
+                    // crate ever sends `notifications/resources/updated`, and
+                    // since both `resources/subscribe` and
+                    // `resources/unsubscribe` now refuse with -32601,
+                    // `resource_subs` is neither written nor read by any
+                    // request path — it survives only for the handlers that
+                    // will restore it alongside an emitter. `listChanged`
                     // stays true because `spawn_config_watcher` really does
                     // broadcast `resources_list_changed` on reload.
                     // Flip this back to `true` in the same commit that adds
@@ -2813,9 +2817,10 @@ mod tests {
     /// G-6 (audit 2026-08-19): the handshake advertised
     /// `resources.subscribe: true` while the server has no emitter at all —
     /// `notifications/resources/updated` appears nowhere in the tree, and
-    /// `SessionContext::resource_subs` is written and never read. A client
-    /// that trusts the flag subscribes and then waits forever. Advertise the
-    /// truth until an emitter exists.
+    /// `SessionContext::resource_subs` is now neither written nor read — both
+    /// `resources/subscribe` and `resources/unsubscribe` refuse with -32601.
+    /// A client that trusted the flag would subscribe and then wait forever.
+    /// Advertise the truth until an emitter exists.
     #[tokio::test]
     async fn test_initialize_does_not_advertise_resource_subscriptions() {
         let server = create_test_server();

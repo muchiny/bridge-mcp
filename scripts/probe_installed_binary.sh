@@ -2,7 +2,8 @@
 # Behavioural fingerprint probes for an installed bridge-mcp binary.
 #
 # `bridge-mcp --version` CANNOT answer "is this binary current?": it prints
-# CARGO_PKG_VERSION (src/mcp/protocol.rs:897), which is identical for every
+# CARGO_PKG_VERSION (`SERVER_VERSION` in src/mcp/protocol.rs), which is
+# identical for every
 # build of a given release. The binary installed on 2026-08-02 printed
 # "bridge-mcp 1.20.0"; every build of the current 2.2.0 tree prints
 # "bridge-mcp 2.2.0", whether it is the cut commit or twenty commits later.

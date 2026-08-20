@@ -38,9 +38,14 @@ pub fn is_meta_tool(name: &str) -> bool {
 /// The `execution.taskSupport` value advertised for `tool_name`.
 ///
 /// The three meta-tools are dispatched before the task branch in
-/// `handle_tools_call`, so they cannot honor a task and say so. Everything else
-/// — including the `mcp_call_tool` dispatcher, whose rewritten inner name does
-/// reach the task branch — supports tasks optionally.
+/// `handle_tools_call`, so they cannot honor a task and say so. Everything
+/// else supports tasks optionally, including the `mcp_call_tool` dispatcher —
+/// but with one carve-out this function cannot express, because it keys on a
+/// single name: when `mcp_call_tool` WRAPS one of the three meta-tools, the
+/// rewrite assigns the inner name and the meta-tool guard fires first, so the
+/// call still returns `-32601`. The dispatcher's own `description` in
+/// `call_tool_definition` states that exception, and
+/// `task_support_is_coherent_with_dispatch` pins it.
 #[must_use]
 pub fn task_support(tool_name: &str) -> &'static str {
     if is_meta_tool(tool_name) {

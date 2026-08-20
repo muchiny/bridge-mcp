@@ -1433,8 +1433,9 @@ mod tests {
 
     /// G-27 (audit 2026-08-19): `serverInfo.icons[0].src` pointed at the
     /// `muchini` org — a hard 404 — while `serverInfo.websiteUrl`
-    /// (src/mcp/server.rs) used `muchiny`, which resolves. CHANGELOG.md:206
-    /// records an earlier sweep of this exact typo that missed the constant.
+    /// (src/mcp/server.rs) used `muchiny`, which resolves. The 1.19.0
+    /// CHANGELOG entry records an earlier sweep of this exact typo that missed
+    /// the constant. (Referenced by release, not line number — it has moved.)
     #[test]
     fn test_server_icon_url_uses_the_canonical_github_org() {
         assert!(
