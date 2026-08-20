@@ -5204,9 +5204,18 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "completion/complete".to_string(),
+            // `environment` is a static-list argument (`complete_from_list`
+            // in `DefaultCompletionProvider`), not `host` — `test_config()`
+            // sets `hosts: HashMap::new()`, so a `host` argument here would
+            // legitimately return an empty array regardless of whether
+            // dispatch reached the real provider at all, which is exactly
+            // the false-positive `result["completion"]["values"].is_array()`
+            // used to let through (an empty array also satisfies `is_array`
+            // and is what both the `try_read` fallback and
+            // `unwrap_or_default()` produce).
             params: Some(json!({
                 "ref": { "type": "ref/prompt", "name": "diagnose_host" },
-                "argument": { "name": "host", "value": "" }
+                "argument": { "name": "environment", "value": "" }
             })),
         };
 
@@ -5214,9 +5223,17 @@ mod tests {
 
         assert!(response.error.is_none(), "error: {:?}", response.error);
         let result = response.result.unwrap();
-        assert!(
-            result["completion"]["values"].is_array(),
-            "completion/complete must return a completion.values array, got: {result}"
+        let values: Vec<&str> = result["completion"]["values"]
+            .as_array()
+            .unwrap_or_else(|| panic!("completion.values must be an array, got: {result}"))
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            values,
+            vec!["dev", "staging", "production"],
+            "completion/complete must return DefaultCompletionProvider's real \
+             values, not an empty/fallback array; got: {result}"
         );
     }
 
