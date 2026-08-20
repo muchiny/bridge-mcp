@@ -232,6 +232,30 @@ fn list_groups(registry: &ToolRegistry) -> ToolCallResult {
     success_json(payload)
 }
 
+/// Relevance tier for one tool against a lowercased query. Lower sorts first;
+/// `None` means "no match".
+///
+/// Tiers: exact name, name prefix, name substring, description substring. The
+/// MCP search path had no ranking at all and cut with `Vec::truncate`, so the
+/// best hit was routinely thrown away (audit G-14, 2026-08-19). The CLI path
+/// (`src/cli/runner.rs`) already sorted by name; this adds the tiers on top.
+fn relevance_rank(name: &str, description: &str, query_lower: &str) -> Option<u8> {
+    let name_lower = name.to_lowercase();
+    if name_lower == query_lower {
+        return Some(0);
+    }
+    if name_lower.starts_with(query_lower) {
+        return Some(1);
+    }
+    if name_lower.contains(query_lower) {
+        return Some(2);
+    }
+    if description.to_lowercase().contains(query_lower) {
+        return Some(3);
+    }
+    None
+}
+
 fn search(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
     let args = args.and_then(Value::as_object);
     let Some(query) = args
@@ -249,15 +273,22 @@ fn search(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
         .max(1);
 
     let query_lower = query.to_lowercase();
-    let mut matches: Vec<Value> = registry
+    let mut ranked: Vec<(u8, Tool)> = registry
         .list_tools()
         .into_iter()
-        .filter(|t| {
-            group_filter.is_none_or(|g| tool_group(&t.name) == g)
-                && (t.name.to_lowercase().contains(&query_lower)
-                    || t.description.to_lowercase().contains(&query_lower))
-        })
-        .map(|t| {
+        .filter(|t| group_filter.is_none_or(|g| tool_group(&t.name) == g))
+        .filter_map(|t| relevance_rank(&t.name, &t.description, &query_lower).map(|r| (r, t)))
+        .collect();
+    // `list_tools()` is name-sorted and `sort_by_key` is stable, so ties inside
+    // a tier stay alphabetical: identical input gives identical output on every
+    // call and in every process.
+    ranked.sort_by_key(|(rank, _)| *rank);
+
+    let total = ranked.len();
+    let matches: Vec<Value> = ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, t)| {
             let group = tool_group(&t.name);
             // Character-wise: several descriptions contain `→`, and a
             // byte-index slice inside one aborts the server (audit
@@ -274,9 +305,6 @@ fn search(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
             })
         })
         .collect();
-
-    let total = matches.len();
-    matches.truncate(limit);
 
     let payload = json!({
         "query": query,
@@ -442,6 +470,67 @@ mod tests {
         .expect("meta tool");
         // Empty query is explicitly rejected — this asserts that guard.
         assert_eq!(result.is_error, Some(true));
+    }
+
+    /// Collect just the tool names returned by `mcp_search_tools`, in order.
+    fn search_names(registry: &ToolRegistry, query: &str, limit: u64) -> Vec<String> {
+        let result = execute(
+            SEARCH_TOOLS,
+            Some(&json!({"query": query, "limit": limit})),
+            registry,
+        )
+        .expect("meta tool");
+        result.structured_content.expect("structured")["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .map(|e| e["name"].as_str().expect("name").to_string())
+            .collect()
+    }
+
+    /// G-14 (audit 2026-08-19). `ToolRegistry.handlers` is a `HashMap` with
+    /// `RandomState`, `list_tools()` never ordered, and `search` truncated with
+    /// `matches.truncate(limit)` and no ranking. Six fresh processes returned
+    /// six different result sets for `{query:"restart",limit:5}`, and the best
+    /// hit `ssh_service_restart` survived only 2 runs out of 9. Truncation is
+    /// the common case: "list" matches 117 tools, "file" 75, "status" 55.
+    #[test]
+    fn search_is_deterministic_and_ranks_name_matches_first() {
+        let registry = create_all_enabled_registry();
+
+        // 1. The source of the instability: registry listing order.
+        let listed: Vec<String> = registry.list_tools().into_iter().map(|t| t.name).collect();
+        let mut sorted = listed.clone();
+        sorted.sort();
+        assert_eq!(
+            listed, sorted,
+            "ToolRegistry::list_tools must be name-sorted"
+        );
+
+        // 2. Determinism: repeated calls in one process return the same list.
+        let first = search_names(&registry, "restart", 5);
+        for _ in 0..5 {
+            assert_eq!(search_names(&registry, "restart", 5), first);
+        }
+
+        // 3. Name matches outrank description-only matches, so the three tools
+        //    whose NAME contains "restart" all survive limit = 5.
+        assert!(
+            first.contains(&"ssh_service_restart".to_string()),
+            "got: {first:?}"
+        );
+        assert!(
+            first.contains(&"ssh_iis_restart".to_string()),
+            "got: {first:?}"
+        );
+        assert!(
+            first.contains(&"ssh_win_service_restart".to_string()),
+            "got: {first:?}"
+        );
+
+        // 4. An exact name match survives the hardest possible truncation.
+        let exact = search_names(&registry, "ssh_service_restart", 1);
+        assert_eq!(exact, vec!["ssh_service_restart".to_string()]);
     }
 
     #[test]

@@ -151,7 +151,8 @@ impl ToolRegistry {
     /// Get all registered tools as MCP Tool definitions
     #[must_use]
     pub fn list_tools(&self) -> Vec<Tool> {
-        self.handlers
+        let mut tools: Vec<Tool> = self
+            .handlers
             .values()
             .map(|handler| {
                 let schema = handler.schema();
@@ -186,7 +187,13 @@ impl ToolRegistry {
                     meta: tool_meta(schema.name),
                 }
             })
-            .collect()
+            .collect();
+        // `handlers` is a `HashMap` with `RandomState`: iteration order is
+        // different in every process. Sorting by name makes `tools/list`
+        // cursor pagination and `mcp_search_tools` reproducible (audit G-14,
+        // 2026-08-19).
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        tools
     }
 
     /// Get the number of registered tools
