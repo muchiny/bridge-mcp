@@ -11,9 +11,7 @@ use tracing::{Instrument, debug, error, info, warn};
 
 use crate::config::{Config, ConfigWatcher};
 use crate::domain::output_truncator::truncate_chars;
-use crate::domain::{
-    ExecuteCommandUseCase, OutputCache, TaskStore, TaskWaitOutcome, TunnelManager,
-};
+use crate::domain::{ExecuteCommandUseCase, OutputCache, TaskStore, TunnelManager};
 use crate::error::Result;
 use crate::mcp::instructions;
 use crate::ports::ExecutorRouter;
@@ -41,8 +39,8 @@ use super::protocol::{
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, ResultType, SERVER_ICON_URL,
     SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo,
     TaskCancelParams, TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability,
-    TaskResultParams, TaskToolsCapability, TasksCapability, ToolCallParams, ToolCallResult,
-    ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
+    TaskResultParams, TaskStatus, TaskToolsCapability, TasksCapability, ToolCallParams,
+    ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -2301,6 +2299,14 @@ impl McpServer {
         }
     }
 
+    /// Poll a task for its result.
+    ///
+    /// MCP 2026-07-28 moved Tasks out of core into a POLLED extension, so this
+    /// answers with whatever state the task is in right now and never waits.
+    /// The pre-3.0.0 handler called `TaskStore::wait_for_result`, which parked
+    /// the caller — and, because the request held a concurrency permit, parked
+    /// the whole session with it (G-1 / issue #131). There is nothing left to
+    /// bound: the wait is gone, not shortened.
     async fn handle_tasks_result(
         &self,
         id: Option<Value>,
@@ -2320,93 +2326,70 @@ impl McpServer {
             }
         };
 
-        // Wait for the task's result, bounded by the store's poll budget.
-        match self
-            .task_store
-            .wait_for_result(&result_params.task_id)
-            .await
-        {
-            TaskWaitOutcome::Ready(result) => {
-                // Inject task correlation metadata
-                let mut response = result;
-                if let Some(obj) = response.as_object_mut() {
-                    obj.insert(
-                        "_meta".to_string(),
-                        json!({
-                            "io.modelcontextprotocol/related-task": {
-                                "taskId": result_params.task_id
-                            }
-                        }),
-                    );
-                }
-                JsonRpcResponse::success(id, response)
-            }
-            // G-1: the poll budget elapsed with the task still running.
-            // Hand back the current status so the client stays in a normal
-            // poll loop — erroring here would make a slow task look like a
-            // missing one.
-            TaskWaitOutcome::TimedOut(info) => {
-                let Ok(mut response) = serde_json::to_value(&*info) else {
-                    return JsonRpcResponse::error(
-                        id,
-                        JsonRpcError::internal_error("Failed to serialize task status"),
-                    );
-                };
-                if let Some(obj) = response.as_object_mut() {
-                    obj.insert(
-                        "_meta".to_string(),
-                        json!({
-                            "io.modelcontextprotocol/related-task": {
-                                "taskId": result_params.task_id
-                            }
-                        }),
-                    );
-                }
-                JsonRpcResponse::success(id, response)
-            }
-            TaskWaitOutcome::NotFound => {
-                // A cancelled task is still in the store and still visible via
-                // `tasks/get` and `tasks/list`; `cancel_task` simply never sets
-                // `entry.result`. Reporting "Task not found" contradicted both
-                // other endpoints (audit G-23, 2026-08-19). Storing a terminal
-                // result for cancelled tasks is deliberately out of scope here.
-                //
-                // The "(cancelled tasks record none)" parenthetical below is
-                // only true while `complete_task` and `fail_task` both always
-                // assign `entry.result` — `Cancelled` is the sole status that
-                // can reach this arm. Give either of them an early return and
-                // the wording becomes a lie; the `status` field in `data` will
-                // still be right.
-                let (message, data) = match self.task_store.get_task(&result_params.task_id).await {
-                    Some(info) => {
-                        // Wire spelling, not `{:?}`: `TaskStatus` carries
-                        // `#[serde(rename_all = "lowercase")]`, so Debug said
-                        // `Cancelled` here while `tasks/get` said `cancelled`
-                        // for the same task (audit D-F3, 2026-08-20).
-                        let status = serde_json::to_value(info.status).unwrap_or(Value::Null);
-                        let status_text = status.as_str().unwrap_or("unknown");
-                        (
-                            format!(
-                                "Task {} reached terminal state {status_text} without storing a \
-                                 result (cancelled tasks record none); use tasks/get for its \
-                                 status",
-                                result_params.task_id
-                            ),
-                            Some(json!({
-                                "taskId": result_params.task_id,
-                                "status": status,
-                            })),
-                        )
-                    }
-                    None => (format!("Task not found: {}", result_params.task_id), None),
-                };
-                let mut error = JsonRpcError::invalid_params(message);
-                if let Some(data) = data {
-                    error = error.with_data(data);
-                }
-                JsonRpcResponse::error(id, error)
-            }
+        let task_id = result_params.task_id;
+
+        let Some(info) = self.task_store.get_task(&task_id).await else {
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params(format!("Task not found: {task_id}")),
+            );
+        };
+
+        let related = json!({
+            "io.modelcontextprotocol/related-task": { "taskId": task_id }
+        });
+
+        // Still running: hand back the current TaskInfo so the client knows
+        // when to poll again (`pollInterval`), not an error and not a wait.
+        if !matches!(
+            info.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            return JsonRpcResponse::success_or_serialize_error(
+                id,
+                &json!({
+                    "resultType": ResultType::Working,
+                    "task": info,
+                    "_meta": related,
+                }),
+            );
         }
+
+        // Terminal but no stored result. Today the only way to reach this is
+        // a cancelled task: `cancel_task` never assigns `entry.result`, so it
+        // is still visible via `tasks/get`/`tasks/list` but has nothing here
+        // (audit G-23, 2026-08-19). Reporting "Task not found" would
+        // contradict both other endpoints. Task 24 gives cancellation a
+        // stored terminal result, which will close this arm off for
+        // `Cancelled`; until then keep the wire-spelled, machine-readable
+        // error those audits required.
+        let Some(result) = self.task_store.get_result(&task_id).await else {
+            // Wire spelling, not `{:?}`: `TaskStatus` carries
+            // `#[serde(rename_all = "lowercase")]`, so Debug would say
+            // `Cancelled` here while `tasks/get` says `cancelled` for the
+            // same task (audit D-F3, 2026-08-20).
+            let status = serde_json::to_value(info.status).unwrap_or(Value::Null);
+            let status_text = status.as_str().unwrap_or("unknown");
+            let message = format!(
+                "Task {task_id} reached terminal state {status_text} without storing a result \
+                 (cancelled tasks record none); use tasks/get for its status"
+            );
+            let error = JsonRpcError::invalid_params(message).with_data(json!({
+                "taskId": task_id,
+                "status": status,
+            }));
+            return JsonRpcResponse::error(id, error);
+        };
+
+        let mut response = result;
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "resultType".to_string(),
+                serde_json::to_value(ResultType::Complete).unwrap_or(Value::Null),
+            );
+            obj.insert("_meta".to_string(), related);
+        }
+        JsonRpcResponse::success(id, response)
     }
 
     async fn handle_tasks_list(&self, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
@@ -2653,18 +2636,6 @@ mod tests {
         server
     }
 
-    /// Same fixture as `create_test_server`, with the limits block swapped.
-    /// Used by tests that need a poll budget measured in milliseconds
-    /// rather than the production 60 s (2 000 ms poll interval x 30).
-    fn create_test_server_with_limits(limits: LimitsConfig) -> McpServer {
-        let config = Config {
-            limits,
-            ..test_config()
-        };
-        let (server, _audit_task) = McpServer::new(config);
-        server
-    }
-
     // ================= in-memory session harness (G-1 / G-9) =================
     //
     // `serve_session`'s reader loop is one of two places the concurrency
@@ -2730,76 +2701,103 @@ mod tests {
 
     /// G-1 regression, straight from the audit's own reproduction.
     ///
-    /// `tasks/result` is a long poll. It used to take a permit from
+    /// `tasks/result` used to be a long poll that took a permit from
     /// `limits.max_concurrent_commands` (default 5) INSIDE the reader loop,
     /// so N parked polls froze the entire session: the loop blocks on
     /// `acquire_owned()` before it spawns the handler, so the client's next
     /// message is never read. The audit measured the boundary exactly —
     /// N=4 still answered `ping`, N=5 answered neither `ping` nor
     /// `tasks/cancel` (the one call that could have released the polls),
-    /// and it was still dead 208 s later. This table walks across it.
+    /// and it was still dead 208 s later.
+    ///
+    /// 3.0.0 (task 22) deletes the long poll itself: `tasks/result` now
+    /// always answers immediately, so nothing parks, and the original
+    /// reproduction (many never-completing tasks, each held open by a
+    /// blocking `tasks/result` call) no longer creates the condition it
+    /// tested — every handler in it is instant now, so "which answer comes
+    /// back first" degenerates into a race between equally fast spawns
+    /// instead of a proof of anything.
+    ///
+    /// The exemption this guards, `is_concurrency_exempt`, is untouched by
+    /// task 22 and still load-bearing — it is unconditional on method name,
+    /// so what actually needs proving is that `ping` and `tasks/*` never go
+    /// through `acquire_owned()` at all. This re-anchors the same shape as
+    /// the original: N `tasks/result` polls at and past the concurrency
+    /// limit (5), all held off by an entirely separate mechanism (every
+    /// permit taken by ordinary means, nothing to do with tasks/result),
+    /// plus a `ping`. All of them must still answer — none of them may
+    /// queue behind the held permits.
     #[tokio::test]
-    async fn ping_survives_parked_task_polls_at_and_past_the_concurrency_limit() {
-        for parked_polls in [1_usize, 2, 3, 4, 5, 6] {
-            let server = Arc::new(create_test_server());
-            assert_eq!(
-                server.concurrent_limit.available_permits(),
-                5,
-                "fixture must keep the default max_concurrent_commands"
-            );
+    async fn ping_and_tasks_result_survive_a_full_concurrency_semaphore() {
+        let server = Arc::new(create_test_server());
+        assert_eq!(
+            server.concurrent_limit.available_permits(),
+            5,
+            "fixture must keep the default max_concurrent_commands"
+        );
 
-            // Tasks nobody will ever complete: every `tasks/result` parks.
-            let mut task_ids = Vec::new();
-            for _ in 0..parked_polls {
-                let (task_id, _cancel) =
-                    server.task_store.create_task(Some(600_000)).await.unwrap();
-                task_ids.push(task_id);
-            }
+        // Hold every permit: no ordinary (non-exempt) command may run.
+        let permits = Arc::clone(&server.concurrent_limit)
+            .acquire_many_owned(5)
+            .await
+            .unwrap();
 
-            let (session, client_tx, mut server_rx) = in_memory_session();
-            let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        // 6 tasks, one past the 5-permit limit — the same "at and past"
+        // shape the original `parked_polls` table walked.
+        let mut task_ids = Vec::new();
+        for _ in 0..6 {
+            let (task_id, _cancel) = server.task_store.create_task(Some(600_000)).await.unwrap();
+            task_ids.push(task_id);
+        }
 
-            let mut next_id: i64 = 1;
-            for task_id in &task_ids {
-                client_tx
-                    .send(client_request(
-                        next_id,
-                        "tasks/result",
-                        Some(json!({ "taskId": task_id })),
-                    ))
-                    .unwrap();
-                next_id += 1;
-            }
+        let (session, client_tx, mut server_rx) = in_memory_session();
+        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
 
-            // Let the reader loop consume every poll before the ping arrives.
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut expected_ids: std::collections::HashSet<Option<Value>> =
+            std::collections::HashSet::new();
+        for (i, task_id) in task_ids.iter().enumerate() {
+            let id = i64::try_from(i).unwrap();
+            client_tx
+                .send(client_request(
+                    id,
+                    "tasks/result",
+                    Some(json!({ "taskId": task_id })),
+                ))
+                .unwrap();
+            expected_ids.insert(Some(json!(id)));
+        }
+        client_tx.send(client_request(9999, "ping", None)).unwrap();
+        expected_ids.insert(Some(json!(9999)));
 
-            client_tx.send(client_request(9999, "ping", None)).unwrap();
-
+        let mut answered = std::collections::HashSet::new();
+        while answered.len() < expected_ids.len() {
             let msg = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
                 .await
                 .unwrap_or_else(|_| {
                     panic!(
-                        "session froze with {parked_polls} parked tasks/result polls: \
-                     ping was never answered"
+                        "session froze with every concurrency permit held: only answered \
+                         {answered:?} of {expected_ids:?} so far"
                     )
                 })
                 .expect("session writer channel closed");
 
             match msg {
                 WriterMessage::Response(response) => {
-                    assert_eq!(
-                        response.id,
-                        Some(json!(9999)),
-                        "the first answer must be the ping, not a parked poll"
-                    );
-                    assert!(response.error.is_none(), "ping must succeed");
+                    assert!(response.error.is_none(), "unexpected error: {response:?}");
+                    answered.insert(response.id.clone());
                 }
-                _ => panic!("expected a ping response, got a notification or a batch"),
+                _ => panic!("expected a response, got a notification or a batch"),
             }
-
-            serve.abort();
         }
+
+        assert_eq!(
+            answered, expected_ids,
+            "every tasks/result poll and the ping must all be answered despite every \
+             concurrency permit being held"
+        );
+
+        drop(permits);
+        serve.abort();
     }
 
     /// `spawn_cleanup_tasks` must actually spawn one loop per expiring
@@ -4784,7 +4782,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tasks_result_waits_for_completion() {
+    async fn test_tasks_result_polls_until_terminal() {
         let server = create_test_server();
         let params = json!({
             "name": "ssh_status",
@@ -4800,21 +4798,32 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // tasks/result blocks until terminal
-        let result_params = json!({"taskId": task_id});
-        let response = server
-            .handle_tasks_result(Some(json!(2)), Some(result_params))
-            .await;
+        // Each call answers immediately; the CLIENT loops, not the server.
+        let mut terminal = json!(null);
+        for _ in 0..200 {
+            let response = server
+                .handle_tasks_result(Some(json!(2)), Some(json!({"taskId": task_id})))
+                .await;
+            assert!(response.error.is_none());
+            let body = response.result.unwrap();
+            if body["resultType"] == "complete" {
+                terminal = body;
+                break;
+            }
+            assert_eq!(body["resultType"], "working");
+            assert_eq!(body["task"]["taskId"], task_id.as_str());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        // Should have _meta with related-task
         assert_eq!(
-            result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id
+            terminal["resultType"], "complete",
+            "worker never reached a terminal state within 2s"
         );
-        // Should have content from the tool execution
-        assert!(result["content"].is_array());
+        assert_eq!(
+            terminal["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
+            task_id.as_str()
+        );
+        assert!(terminal["content"].is_array());
     }
 
     #[tokio::test]
@@ -4827,6 +4836,32 @@ mod tests {
             .await;
 
         assert!(response.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_tasks_result_returns_working_immediately_for_a_live_task() {
+        // MCP 2026-07-28: tasks are POLLED. `tasks/result` must answer with
+        // the state at call time. The pre-3.0.0 handler parked here until the
+        // task went terminal, which is the G-1 freeze (issue #131).
+        let server = create_test_server();
+        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            server.handle_tasks_result(Some(json!(1)), Some(json!({"taskId": task_id}))),
+        )
+        .await
+        .expect("tasks/result must not block on a working task");
+
+        assert!(response.error.is_none());
+        let body = response.result.unwrap();
+        assert_eq!(body["resultType"], "working");
+        assert_eq!(body["task"]["status"], "working");
+        assert_eq!(body["task"]["taskId"], task_id.as_str());
+        assert_eq!(
+            body["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
+            task_id.as_str()
+        );
     }
 
     #[tokio::test]
@@ -4956,49 +4991,6 @@ mod tests {
             error.message.contains("Task not found"),
             "got: {}",
             error.message
-        );
-    }
-
-    /// G-1 (audit 2026-08-19): a `tasks/result` poll whose budget elapses
-    /// must answer with the task's CURRENT status. Returning "Task not
-    /// found" would tell the client its running task had vanished, and
-    /// returning nothing at all is what used to park the request forever.
-    #[tokio::test]
-    async fn test_tasks_result_times_out_with_current_status() {
-        // 10ms poll interval => 300ms wait budget.
-        let limits = LimitsConfig {
-            task_poll_interval_ms: 10,
-            ..LimitsConfig::default()
-        };
-        let server = create_test_server_with_limits(limits);
-
-        // A task nobody will ever complete.
-        let (task_id, _cancel) = server.task_store.create_task(Some(60_000)).await.unwrap();
-
-        let started = Instant::now();
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            server.handle_tasks_result(Some(json!(1)), Some(json!({ "taskId": task_id }))),
-        )
-        .await
-        .expect("tasks/result must not park forever");
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "poll should end after ~300ms, took {:?}",
-            started.elapsed()
-        );
-        assert!(
-            response.error.is_none(),
-            "a timed-out poll is not an error: {:?}",
-            response.error
-        );
-        let result = response.result.unwrap();
-        assert_eq!(result["taskId"], task_id);
-        assert_eq!(result["status"], "working");
-        assert_eq!(
-            result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id
         );
     }
 
