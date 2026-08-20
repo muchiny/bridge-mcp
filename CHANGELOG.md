@@ -170,6 +170,13 @@ section.
 
 ### Fixed
 
+- **`tools/list` panicked on a huge pagination cursor.** A cursor of
+  `18446744073709551615` parses cleanly to `usize::MAX`, and the page end was
+  computed as `start + page_size` *before* being clamped to the tool count —
+  an "attempt to add with overflow" panic in debug builds, and in release a
+  wrap to `49` that the `start < len` guard happened to render as an empty
+  page. Now `saturating_add`, so both profiles return the same empty page a
+  past-the-end cursor already did.
 - **Test contexts ignored their own security config.** `create_test_context_with_config`
   hardcoded `CommandValidator::new(&SecurityConfig::default())`, so no test
   could exercise a custom whitelist or security mode and every assertion about

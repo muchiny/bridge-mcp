@@ -1526,7 +1526,11 @@ impl McpServer {
                     )),
                 );
             };
-            let end = (start + page_size).min(all_tools.len());
+            // Saturating: a cursor of `usize::MAX` parses cleanly, and the
+            // plain `start + page_size` overflowed before `.min()` could clamp
+            // it — panic in debug, silent wrap in release (audit D-F7,
+            // 2026-08-20).
+            let end = start.saturating_add(page_size).min(all_tools.len());
             let page = if start < all_tools.len() {
                 all_tools[start..end].to_vec()
             } else {
@@ -5634,6 +5638,27 @@ mod tests {
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
         assert!(tools.is_empty());
+    }
+
+    /// D-F7 (audit 2026-08-20): `"18446744073709551615"` parses cleanly to
+    /// `usize::MAX`, so the cursor guard let it through and `start + page_size`
+    /// overflowed BEFORE `.min(len)` clamped it — a panic in debug builds, and
+    /// in release a silent wrap to 49 that the `start < len` guard happened to
+    /// turn into an empty page. `saturating_add` makes both profiles agree with
+    /// `test_tools_list_cursor_past_end_returns_empty`.
+    #[tokio::test]
+    async fn test_tools_list_cursor_usize_max_does_not_overflow() {
+        let server = create_test_server();
+
+        let params = json!({ "cursor": usize::MAX.to_string() });
+        let response = server
+            .handle_tools_list(Some(json!(1)), Some(&params))
+            .await;
+
+        assert!(response.error.is_none(), "got: {:?}", response.error);
+        let result = response.result.unwrap();
+        assert!(result["tools"].as_array().unwrap().is_empty());
+        assert!(result["nextCursor"].is_null());
     }
 
     #[tokio::test]
