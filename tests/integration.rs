@@ -105,7 +105,17 @@ fn create_test_config() -> Config {
             ..SecurityConfig::default()
         },
         limits: LimitsConfig::default(),
-        audit: AuditConfig::default(),
+        audit: AuditConfig {
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Since G-26 wired
+            // max_size_mb and retain_days into the writer task, a fixture
+            // inheriting that default can rotate and sweep a developer's
+            // actual audit directory. No test here asserts anything about
+            // audit persistence, so turn it off explicitly rather than
+            // pointing at a temp path that nothing reads.
+            enabled: false,
+            ..AuditConfig::default()
+        },
         sessions: SessionConfig::default(),
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
@@ -553,7 +563,17 @@ fn test_proxy_jump_config() {
         hosts,
         security: SecurityConfig::default(),
         limits: LimitsConfig::default(),
-        audit: AuditConfig::default(),
+        audit: AuditConfig {
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Since G-26 wired
+            // max_size_mb and retain_days into the writer task, a fixture
+            // inheriting that default can rotate and sweep a developer's
+            // actual audit directory. No test here asserts anything about
+            // audit persistence, so turn it off explicitly rather than
+            // pointing at a temp path that nothing reads.
+            enabled: false,
+            ..AuditConfig::default()
+        },
         sessions: SessionConfig::default(),
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
@@ -644,7 +664,17 @@ fn test_proxy_jump_resolution() {
         hosts,
         security: SecurityConfig::default(),
         limits: LimitsConfig::default(),
-        audit: AuditConfig::default(),
+        audit: AuditConfig {
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Since G-26 wired
+            // max_size_mb and retain_days into the writer task, a fixture
+            // inheriting that default can rotate and sweep a developer's
+            // actual audit directory. No test here asserts anything about
+            // audit persistence, so turn it off explicitly rather than
+            // pointing at a temp path that nothing reads.
+            enabled: false,
+            ..AuditConfig::default()
+        },
         sessions: SessionConfig::default(),
         tool_groups: ToolGroupsConfig::default(),
         ssh_config: SshConfigDiscovery::default(),
