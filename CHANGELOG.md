@@ -145,6 +145,18 @@ section.
   instead of the real `columns` param.
 - **Handler schemas understated the default output cap** — docs said
   "typically 20000" while the real default is 40000.
+- **The server answered JSON-RPC notifications (G-3).** `route_incoming_message`
+  special-cased three known notification methods and then unconditionally built
+  a request from whatever was left, copying `message.id` with no check — so an
+  unrecognized notification (the reachable case: `notifications/progress`
+  against a server-issued `progressToken`) got dispatched and answered, in
+  violation of JSON-RPC 2.0 §4.1 ("the receiver must not send a response to a
+  notification"). `route_incoming_message` now drops any message with no `id`
+  before dispatch, regardless of method name. Wire-visible in passing:
+  `JsonRpcResponse.id` no longer carries `#[serde(skip_serializing_if)]`, so a
+  Response whose id could not be determined (e.g. a JSON parse error) now
+  serializes an explicit `"id": null` instead of omitting the key — JSON-RPC
+  2.0 §5 requires the member to always be present.
 
 ### Migrating from 1.20.0
 

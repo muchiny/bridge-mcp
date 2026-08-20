@@ -17,7 +17,10 @@ pub struct JsonRpcRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// JSON-RPC 2.0 §5 makes `id` REQUIRED on every Response, and Null when
+    /// the id of the offending request could not be determined. It therefore
+    /// carries NO `skip_serializing_if`: omitting the key entirely produced a
+    /// Response object no conforming client can correlate or reject.
     pub id: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
@@ -1018,6 +1021,28 @@ mod tests {
     fn test_error_invalid_params_code() {
         let error = JsonRpcError::invalid_params("host is required");
         assert_eq!(error.code, -32602);
+    }
+
+    #[test]
+    fn test_response_always_serializes_an_id_member() {
+        // JSON-RPC 2.0 §5: the `id` member MUST be present on every
+        // Response object, and MUST be Null when the id could not be
+        // determined (e.g. a parse error). Omitting the key produced a
+        // Response no conforming client can match.
+        let response = JsonRpcResponse::error(None, JsonRpcError::parse_error("bad json"));
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(
+            serialized.as_object().unwrap().contains_key("id"),
+            "`id` must be present on every JSON-RPC Response, got: {serialized}"
+        );
+        assert!(
+            serialized["id"].is_null(),
+            "absent id must serialize as null"
+        );
+
+        let ok = JsonRpcResponse::success(Some(json!(42)), json!({}));
+        let ok_serialized = serde_json::to_value(&ok).unwrap();
+        assert_eq!(ok_serialized["id"], 42);
     }
 
     #[test]

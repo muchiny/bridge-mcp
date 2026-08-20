@@ -1055,6 +1055,19 @@ impl McpServer {
             return None;
         }
 
+        // Anything still here with no `id` is a JSON-RPC Notification we do
+        // not act on — `notifications/progress` against a server-issued
+        // progressToken is the reachable case. JSON-RPC 2.0 §4.1 forbids
+        // replying to a Notification; the old code fell through and built a
+        // request whose response carried no id at all.
+        if message.id.is_none() {
+            debug!(
+                method = message.method.as_deref().unwrap_or("<none>"),
+                "Ignoring unhandled JSON-RPC notification (no id, no response sent)"
+            );
+            return None;
+        }
+
         // It's a client request — convert to JsonRpcRequest
         Some(JsonRpcRequest {
             jsonrpc: message.jsonrpc,
@@ -3483,7 +3496,13 @@ mod tests {
         let response = server.handle_initialize(None, None, None).await;
 
         assert!(response.error.is_none());
-        assert!(response.id.is_none());
+        // G-3: `route_incoming_message` now drops id-less messages, so the
+        // stdio path can no longer reach this handler with `id: None`. The
+        // handler must still emit a spec-legal `"id": null` for direct
+        // callers (HTTP, tests).
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(serialized.as_object().unwrap().contains_key("id"));
+        assert!(serialized["id"].is_null());
     }
 
     #[tokio::test]
@@ -3543,7 +3562,11 @@ mod tests {
         let response = server.handle_tools_list(None, None).await;
 
         assert!(response.error.is_none());
-        assert!(response.id.is_none());
+        // G-3: id-less messages never reach here from stdio any more; the
+        // response must still serialize `"id": null` rather than omit it.
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(serialized.as_object().unwrap().contains_key("id"));
+        assert!(serialized["id"].is_null());
     }
 
     #[tokio::test]
@@ -3698,7 +3721,78 @@ mod tests {
         let response = server.handle_request(request).await;
 
         assert!(response.error.is_none());
-        assert!(response.id.is_none());
+        // G-3: `handle_request` is a raw dispatch entry point and still
+        // answers. The filtering happens one layer up, in
+        // `route_incoming_message` — see
+        // `test_route_incoming_message_drops_unhandled_notification`.
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(serialized.as_object().unwrap().contains_key("id"));
+        assert!(serialized["id"].is_null());
+    }
+
+    // ============== Notification Routing (G-3) ==============
+
+    #[test]
+    fn test_route_incoming_message_drops_unhandled_notification() {
+        // JSON-RPC 2.0 §4.1: a Notification is a Request without `id` and
+        // the server MUST NOT reply to it. `notifications/progress` is the
+        // reachable case — a client reports progress against a
+        // server-issued progressToken and we used to answer it with a
+        // Response carrying no id at all.
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let message = JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: Some("notifications/progress".to_string()),
+            params: Some(json!({ "progressToken": "tok-1", "progress": 1 })),
+            result: None,
+            error: None,
+        };
+
+        let routed = McpServer::route_incoming_message(message, &session_ctx);
+        assert!(
+            routed.is_none(),
+            "a JSON-RPC notification must not be dispatched as a request"
+        );
+    }
+
+    #[test]
+    fn test_route_incoming_message_drops_unknown_method_notification() {
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let message = JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: Some("notifications/something/we/do/not/know".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        assert!(McpServer::route_incoming_message(message, &session_ctx).is_none());
+    }
+
+    #[test]
+    fn test_route_incoming_message_keeps_request_with_id() {
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let message = JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(7)),
+            method: Some("ping".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        let routed =
+            McpServer::route_incoming_message(message, &session_ctx).expect("request must route");
+        assert_eq!(routed.method, "ping");
+        assert_eq!(routed.id, Some(json!(7)));
     }
 
     #[tokio::test]
@@ -4474,7 +4568,10 @@ mod tests {
         let response = server.handle_resources_list(None).await;
 
         assert!(response.error.is_none());
-        assert!(response.id.is_none());
+        // G-3: `"id": null` must be present, not omitted.
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(serialized.as_object().unwrap().contains_key("id"));
+        assert!(serialized["id"].is_null());
     }
 
     #[tokio::test]
@@ -4555,7 +4652,10 @@ mod tests {
         let response = server.handle_resource_templates_list(None);
 
         assert!(response.error.is_none());
-        assert!(response.id.is_none());
+        // G-3: `"id": null` must be present, not omitted.
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert!(serialized.as_object().unwrap().contains_key("id"));
+        assert!(serialized["id"].is_null());
     }
 
     // ============== Resource Subscribe/Unsubscribe Tests ==============
