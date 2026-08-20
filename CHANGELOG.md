@@ -165,6 +165,22 @@ section.
   Response whose id could not be determined (e.g. a JSON parse error) now
   serializes an explicit `"id": null` instead of omitting the key — JSON-RPC
   2.0 §5 requires the member to always be present.
+- **`completion/complete` (singular) was unreachable — the whole
+  `DefaultCompletionProvider` was dead code over the wire.** The MCP
+  2025-06-18 schema names this method `completion/complete`, and the
+  installed Claude Code client sends only that spelling; the router matched
+  only the plural `completions/complete` carried over from an earlier
+  draft, so every real completion request got `-32601 Method not found`.
+  Both spellings now dispatch to the same handler.
+- **A cancelled request still got answered (G-17).** After
+  `notifications/cancelled`, the spec says the receiver SHOULD NOT send a
+  result or an error for that request id — we were still returning a
+  `-32800 Request cancelled` response. The stdio transport now suppresses
+  that write-back. **Wire-visible**: a stdio client that relied on reading
+  the `-32800` response as its cancellation confirmation now gets nothing
+  at all for that request id, per spec. The HTTP transport is unaffected —
+  it has no `notifications/cancelled` path and still returns the `-32800`
+  envelope as its terminal answer.
 
 ### Migrating from 1.20.0
 
