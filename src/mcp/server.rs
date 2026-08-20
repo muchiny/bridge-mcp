@@ -4450,6 +4450,14 @@ mod tests {
         assert!(result["capabilities"]["tasks"]["requests"]["tools"]["call"].is_object());
     }
 
+    /// NOT a mirror of dispatch, despite appearances: production never calls
+    /// `task_support()` to build the listing — three independent hardcoded
+    /// literals do — so this only proves the listing and the helper agree.
+    /// Under COORDINATED drift, `definitions()` and `task_support()` both
+    /// moved to "optional", it goes green while the server still answers
+    /// `-32601`. `meta_tools::tests::task_support_is_coherent_with_dispatch`
+    /// is the test that pins ground truth against `handle_tools_call`; do not
+    /// delete it as "a redundant assertion" (audit D-F5, 2026-08-20).
     #[tokio::test]
     async fn test_tools_list_includes_execution_field() {
         let server = create_test_server();

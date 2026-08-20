@@ -570,8 +570,14 @@ mod tests {
     /// `RandomState`, `list_tools()` never ordered, and `search` truncated with
     /// `matches.truncate(limit)` and no ranking. Six fresh processes returned
     /// six different result sets for `{query:"restart",limit:5}`, and the best
-    /// hit `ssh_service_restart` survived only 2 runs out of 9. Truncation is
-    /// the common case: "list" matches 117 tools, "file" 75, "status" 55.
+    /// hit `ssh_service_restart` survived only 2 runs out of 9.
+    ///
+    /// Truncation is the common case. Over `create_all_enabled_registry()` —
+    /// the 476-tool registry this test runs against — "list" matches 218
+    /// tools, "status" 125, "file" 100 and "restart" 19, all far past the
+    /// default `limit: 20`. (The figures previously quoted here — 117/75/55
+    /// and 12 — were measured against a 279-tool deployment config, not
+    /// against the registry under test; audit D-F10a, 2026-08-20.)
     #[test]
     fn search_is_deterministic_and_ranks_name_matches_first() {
         let registry = create_all_enabled_registry();
@@ -585,7 +591,16 @@ mod tests {
             "ToolRegistry::list_tools must be name-sorted"
         );
 
-        // 2. Determinism: repeated calls in one process return the same list.
+        // 2. Repeated calls in one process return the same list. WEAKER than
+        //    it looks, and deliberately kept with an honest label: `HashMap`
+        //    iteration order is already stable within a process, so this loop
+        //    passed both with the sort in place and with it reverted.
+        //    Process-independent determinism — the property G-14 was about —
+        //    is carried entirely by assertion 1, which pins a canonical
+        //    name-sorted order. What the loop still catches is an
+        //    implementation that goes unstable call-to-call: randomized
+        //    tie-breaking, or a rank that reads a clock or a counter (audit
+        //    D-F6, 2026-08-20).
         let first = search_names(&registry, "restart", 5);
         for _ in 0..5 {
             assert_eq!(search_names(&registry, "restart", 5), first);
