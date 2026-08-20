@@ -1482,9 +1482,10 @@ impl McpServer {
             self.registry.list_tools()
         };
         let mut meta_defs = super::meta_tools::definitions();
-        if listing == ToolListingMode::Progressive {
-            meta_defs.push(super::meta_tools::call_tool_definition());
-        }
+        // Advertised in BOTH modes because it is dispatchable in both: the
+        // rewrite at the top of `handle_tools_call` is not gated on the listing
+        // mode (audit G-21, 2026-08-19).
+        meta_defs.push(super::meta_tools::call_tool_definition());
         meta_defs.extend(all_tools);
         all_tools = meta_defs;
 
@@ -3033,9 +3034,11 @@ mod tests {
         assert!(names.contains(&super::super::meta_tools::LIST_TOOL_GROUPS));
         assert!(names.contains(&super::super::meta_tools::SEARCH_TOOLS));
         assert!(names.contains(&super::super::meta_tools::DESCRIBE_TOOL));
-        // Full mode (the default) must NOT surface the progressive-only
-        // `mcp_call_tool` dispatcher — that's exclusive to progressive mode.
-        assert!(!names.contains(&super::super::meta_tools::CALL_TOOL));
+        // G-21 (audit 2026-08-19): the `mcp_call_tool` rewrite at the top of
+        // `handle_tools_call` is UNCONDITIONAL, so the dispatcher is callable in
+        // full mode too. Listing it only in progressive mode left a
+        // callable-but-undocumented method. Advertise where it is dispatchable.
+        assert!(names.contains(&super::super::meta_tools::CALL_TOOL));
     }
 
     #[tokio::test]
@@ -3108,7 +3111,13 @@ mod tests {
             .iter()
             .find_map(|t| {
                 let name = t["name"].as_str()?.to_string();
-                (!super::super::meta_tools::is_meta_tool(&name)).then_some(name)
+                // G-21 (audit 2026-08-19): `mcp_call_tool` is now listed in full
+                // mode too, and `is_meta_tool` deliberately does not recognize it
+                // (it's a dispatcher, not one of the three meta-tools) — exclude
+                // it explicitly so this still finds an actual registry tool.
+                (!super::super::meta_tools::is_meta_tool(&name)
+                    && name != super::super::meta_tools::CALL_TOOL)
+                    .then_some(name)
             })
             .expect("registry has a real tool");
 
@@ -4272,6 +4281,14 @@ mod tests {
         let tools = result["tools"].as_array().unwrap();
 
         for tool in tools {
+            // G-21 (audit 2026-08-19): `mcp_call_tool` is now advertised in full
+            // mode too (it was already dispatchable there), but it does not yet
+            // declare an `execution` field — that lands with G-14/G-19's
+            // taskSupport coherence fix in a following commit. Carve it out here
+            // rather than assert a value this commit does not produce.
+            if tool["name"] == super::super::meta_tools::CALL_TOOL {
+                continue;
+            }
             assert_eq!(
                 tool["execution"]["taskSupport"], "optional",
                 "Tool {} missing execution.taskSupport",
