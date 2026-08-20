@@ -448,7 +448,7 @@ help:
 	@echo "Packaging:"
 	@echo "  dxt              - Build DXT package for Claude Desktop"
 	@echo "  mcpb             - Build MCPB package for MCP Registry"
-	@echo "  sync-server-json - Sync server.json / server-card / dxt manifest versions to Cargo.toml"
+	@echo "  sync-server-json - Sync all 6 version-carrying manifests to Cargo.toml"
 	@echo "  registry-publish - [MANUAL] Publish server.json to the official MCP registry"
 	@echo ""
 	@echo "Pipelines:"
