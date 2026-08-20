@@ -152,6 +152,23 @@ impl JsonRpcError {
             data: None,
         }
     }
+
+    /// MCP 2025-11-25: the task-augmented form of this call does not exist.
+    ///
+    /// A tool whose `execution.taskSupport` is `"forbidden"` has no
+    /// task-augmented method to invoke, so the answer is `-32601` — the same
+    /// code as an unknown method.
+    #[must_use]
+    pub fn task_not_supported(tool: &str) -> Self {
+        Self {
+            code: -32601,
+            message: format!(
+                "Tool does not support task augmentation \
+                 (execution.taskSupport = \"forbidden\"): {tool}"
+            ),
+            data: None,
+        }
+    }
 }
 
 // ============================================================================

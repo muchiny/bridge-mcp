@@ -35,6 +35,21 @@ pub fn is_meta_tool(name: &str) -> bool {
     matches!(name, LIST_TOOL_GROUPS | SEARCH_TOOLS | DESCRIBE_TOOL)
 }
 
+/// The `execution.taskSupport` value advertised for `tool_name`.
+///
+/// The three meta-tools are dispatched before the task branch in
+/// `handle_tools_call`, so they cannot honor a task and say so. Everything else
+/// — including the `mcp_call_tool` dispatcher, whose rewritten inner name does
+/// reach the task branch — supports tasks optionally.
+#[must_use]
+pub fn task_support(tool_name: &str) -> &'static str {
+    if is_meta_tool(tool_name) {
+        "forbidden"
+    } else {
+        "optional"
+    }
+}
+
 /// Build the three virtual `Tool` entries for `tools/list`.
 ///
 /// These are surfaced alongside the registry so clients can discover them
@@ -58,7 +73,7 @@ pub fn definitions() -> Vec<Tool> {
             }),
             annotations: Some(ToolAnnotations::read_only("List tool groups")),
             execution: Some(ToolExecution {
-                task_support: "optional".to_string(),
+                task_support: "forbidden".to_string(),
             }),
             output_schema: None,
             icons: None,
@@ -96,7 +111,7 @@ pub fn definitions() -> Vec<Tool> {
             }),
             annotations: Some(ToolAnnotations::read_only("Search tools")),
             execution: Some(ToolExecution {
-                task_support: "optional".to_string(),
+                task_support: "forbidden".to_string(),
             }),
             output_schema: None,
             icons: None,
@@ -122,7 +137,7 @@ pub fn definitions() -> Vec<Tool> {
             }),
             annotations: Some(ToolAnnotations::read_only("Describe a tool")),
             execution: Some(ToolExecution {
-                task_support: "optional".to_string(),
+                task_support: "forbidden".to_string(),
             }),
             output_schema: None,
             icons: None,
@@ -132,7 +147,9 @@ pub fn definitions() -> Vec<Tool> {
 }
 
 /// Definition of the generic `mcp_call_tool` dispatcher.
-/// Only surfaced in `tools/list` when listing mode is `progressive`.
+/// Surfaced in `tools/list` in both listing modes — the rewrite at the top of
+/// `handle_tools_call` is not gated on listing mode, so it dispatches in both
+/// (audit G-21, 2026-08-19).
 #[must_use]
 pub fn call_tool_definition() -> Tool {
     Tool {
@@ -165,7 +182,9 @@ pub fn call_tool_definition() -> Tool {
         // is `true`. The real gate is unaffected — the elicitation check keys
         // on the REWRITTEN inner tool name, not on this one.
         annotations: Some(ToolAnnotations::destructive("Invoke any bridge tool")),
-        execution: None,
+        execution: Some(ToolExecution {
+            task_support: "optional".to_string(),
+        }),
         output_schema: None,
         icons: None,
         meta: None,
@@ -352,6 +371,7 @@ fn describe(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
         "reduction_strategy": output_kind.strategy_hint(),
         "reduce_marker": output_kind.short_marker(),
         "annotations": annotations_value(name),
+        "task_support": task_support(name),
         "input_schema": input_schema,
     });
     success_json(payload)
@@ -879,5 +899,49 @@ mod tests {
             err.contains("`name` (string, non-empty) is required"),
             "got: {err}"
         );
+    }
+
+    /// The three meta-tools advertised `taskSupport: "optional"` but are
+    /// dispatched in `handle_tools_call` BEFORE the task branch, so `params.task`
+    /// was silently dropped. `mcp_call_tool` advertised nothing (spec default:
+    /// "forbidden") yet accepted a task, because the name rewrite happens before
+    /// the task branch. Coherent assignment: meta-tools forbid, the dispatcher
+    /// allows (audit 2026-08-19).
+    #[test]
+    fn task_support_is_coherent_with_dispatch() {
+        assert_eq!(task_support(LIST_TOOL_GROUPS), "forbidden");
+        assert_eq!(task_support(SEARCH_TOOLS), "forbidden");
+        assert_eq!(task_support(DESCRIBE_TOOL), "forbidden");
+        assert_eq!(task_support(CALL_TOOL), "optional");
+        assert_eq!(task_support("ssh_status"), "optional");
+
+        for def in definitions() {
+            assert_eq!(
+                def.execution.expect("execution").task_support,
+                "forbidden",
+                "meta-tool {} must forbid tasks",
+                def.name
+            );
+        }
+        assert_eq!(
+            call_tool_definition()
+                .execution
+                .expect("execution")
+                .task_support,
+            "optional"
+        );
+    }
+
+    #[test]
+    fn describe_reports_task_support() {
+        let registry = create_all_enabled_registry();
+        let result = execute(
+            DESCRIBE_TOOL,
+            Some(&json!({"name": "ssh_status"})),
+            &registry,
+        )
+        .expect("meta");
+        let payload = result.structured_content.expect("structured");
+        assert_eq!(payload["task_support"], json!("optional"));
     }
 }

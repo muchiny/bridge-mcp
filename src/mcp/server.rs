@@ -1605,6 +1605,15 @@ impl McpServer {
         // argument-validated locally, so they skip the elicitation gate and
         // the task/progress plumbing.
         if super::meta_tools::is_meta_tool(&call_params.name) {
+            // `execution.taskSupport` is "forbidden" for the three meta-tools:
+            // they are dispatched here, ahead of the task branch below, so a
+            // `task` object would otherwise be accepted and silently dropped.
+            if call_params.task.is_some() {
+                return JsonRpcResponse::error(
+                    id,
+                    JsonRpcError::task_not_supported(&call_params.name),
+                );
+            }
             let result = super::meta_tools::execute(
                 &call_params.name,
                 call_params.arguments.as_ref(),
@@ -3168,6 +3177,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_task_on_meta_tool_is_rejected() {
+        let server = create_test_server();
+        let params = json!({
+            "name": super::super::meta_tools::LIST_TOOL_GROUPS,
+            "arguments": {},
+            "task": {"ttl": 60000}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+
+        let error = response
+            .error
+            .expect("a task on a taskSupport=forbidden tool must be a JSON-RPC error");
+        assert_eq!(error.code, -32601);
+        assert!(
+            error.message.contains("taskSupport"),
+            "got: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_through_call_tool_is_accepted() {
+        let server = create_test_server();
+        let params = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {"name": "ssh_status", "arguments": {}},
+            "task": {"ttl": 60000}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.expect("CreateTaskResult");
+        assert_eq!(result["task"]["status"], "working");
+    }
+
+    #[tokio::test]
     async fn test_call_tool_missing_name_is_tool_error() {
         let server = create_test_server();
         let params = json!({
@@ -4293,18 +4342,17 @@ mod tests {
         let tools = result["tools"].as_array().unwrap();
 
         for tool in tools {
-            // G-21 (audit 2026-08-19): `mcp_call_tool` is now advertised in full
-            // mode too (it was already dispatchable there), but it does not yet
-            // declare an `execution` field — that lands with G-14/G-19's
-            // taskSupport coherence fix in a following commit. Carve it out here
-            // rather than assert a value this commit does not produce.
-            if tool["name"] == super::super::meta_tools::CALL_TOOL {
-                continue;
-            }
+            let name = tool["name"].as_str().expect("tool name");
+            // G-21/G-14/G-19 (audit 2026-08-19): every tool in `tools/list`
+            // (including `mcp_call_tool`, listed in both modes since it is
+            // dispatchable in both) must declare a real `execution.taskSupport`
+            // that agrees with what `handle_tools_call` actually does with a
+            // `task` object for that name: "forbidden" for the three meta-tools
+            // (dispatched ahead of the task branch), "optional" everywhere else.
             assert_eq!(
-                tool["execution"]["taskSupport"], "optional",
-                "Tool {} missing execution.taskSupport",
-                tool["name"]
+                tool["execution"]["taskSupport"],
+                super::super::meta_tools::task_support(name),
+                "Tool {name} execution.taskSupport disagrees with dispatch"
             );
         }
     }
