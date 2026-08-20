@@ -158,15 +158,40 @@ impl JsonRpcError {
     /// A tool whose `execution.taskSupport` is `"forbidden"` has no
     /// task-augmented method to invoke, so the answer is `-32601` — the same
     /// code as an unknown method.
+    ///
+    /// `data` carries `{"tool": …}` so a client can identify the offending
+    /// tool without parsing the English message.
     #[must_use]
     pub fn task_not_supported(tool: &str) -> Self {
+        Self::task_not_supported_via(tool, None)
+    }
+
+    /// As [`Self::task_not_supported`], but also names the dispatcher a
+    /// task-forbidden tool was reached through.
+    ///
+    /// `mcp_call_tool` advertises `taskSupport: "optional"` and rewrites its
+    /// `name` argument into the outer request before the meta-tool dispatch
+    /// runs, so a task-augmented `mcp_call_tool` wrapping one of the three
+    /// discovery meta-tools is refused under a tool name the client never put
+    /// on the wire. Naming both ends makes the refusal attributable, and
+    /// `data.via` lets a client branch on it (audit D-F1, 2026-08-20).
+    #[must_use]
+    pub fn task_not_supported_via(tool: &str, via: Option<&str>) -> Self {
+        let base = format!(
+            "Tool does not support task augmentation \
+             (execution.taskSupport = \"forbidden\"): {tool}"
+        );
+        let (message, data) = match via {
+            Some(via) => (
+                format!("{base}, reached via {via}"),
+                serde_json::json!({ "tool": tool, "via": via }),
+            ),
+            None => (base, serde_json::json!({ "tool": tool })),
+        };
         Self {
             code: -32601,
-            message: format!(
-                "Tool does not support task augmentation \
-                 (execution.taskSupport = \"forbidden\"): {tool}"
-            ),
-            data: None,
+            message,
+            data: Some(data),
         }
     }
 }

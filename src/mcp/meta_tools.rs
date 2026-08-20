@@ -159,7 +159,13 @@ pub fn call_tool_definition() -> Tool {
                       (fetch the schema + Reduction Strategy) → mcp_call_tool. \
                       The target tool's own annotations, destructive-op elicitation \
                       gate, and output-reduction params (jq_filter/columns/limit/\
-                      output_format) all apply exactly as if called directly."
+                      output_format) all apply exactly as if called directly. \
+                      One exception to `taskSupport: \"optional\"`: task \
+                      augmentation is NOT available when the inner tool is one \
+                      of the three discovery meta-tools (mcp_list_tool_groups, \
+                      mcp_search_tools, mcp_describe_tool) — those declare \
+                      \"forbidden\" and such a call returns -32601 whether it is \
+                      made directly or through this dispatcher."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -923,12 +929,26 @@ mod tests {
                 def.name
             );
         }
+        let call_tool = call_tool_definition();
         assert_eq!(
-            call_tool_definition()
-                .execution
-                .expect("execution")
-                .task_support,
+            call_tool.execution.expect("execution").task_support,
             "optional"
+        );
+
+        // D-F1 (audit 2026-08-20): "optional" is true for every inner tool
+        // EXCEPT the three meta-tools — `handle_tools_call` rewrites `name`
+        // before the meta-tool guard, so a task-augmented dispatch of one of
+        // them still returns -32601. The advertisement the client reads must
+        // carry that caveat, not just the error it eventually gets.
+        for name in [LIST_TOOL_GROUPS, SEARCH_TOOLS, DESCRIBE_TOOL] {
+            assert!(
+                call_tool.description.contains(name),
+                "{CALL_TOOL} description must name {name} as a task-forbidden inner tool"
+            );
+        }
+        assert!(
+            call_tool.description.contains("forbidden"),
+            "{CALL_TOOL} description must say task augmentation is unavailable for them"
         );
     }
 

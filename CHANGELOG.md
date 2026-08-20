@@ -170,6 +170,21 @@ section.
 
 ### Fixed
 
+- **A task-augmented `mcp_call_tool` was refused under a tool name the client
+  never sent.** The dispatcher rewrites `params.name` to the inner tool before
+  the meta-tool guard runs, so wrapping `mcp_search_tools` in an
+  `mcp_call_tool` call carrying a `task` object answered `-32601 … :
+  mcp_search_tools` — naming a tool absent from the request at transport
+  level. In `listing: progressive` this is the client's only tool advertising
+  `taskSupport: "optional"`, so it is also its only legal async move. The
+  refusal stands (the three discovery meta-tools are dispatched ahead of the
+  task branch and genuinely cannot honour a task), but it now names both ends
+  — "… : mcp_search_tools, reached via mcp_call_tool" — and every
+  `taskSupport: "forbidden"` refusal now carries `data: {"tool": …}`, plus
+  `"via"` when it came through the dispatcher, so a client can branch without
+  parsing English. Direct calls keep their original message and omit `via`.
+  `mcp_call_tool`'s own `description` states the exception. New lib API:
+  `JsonRpcError::task_not_supported_via`.
 - **`tools/list` panicked on a huge pagination cursor.** A cursor of
   `18446744073709551615` parses cleanly to `usize::MAX`, and the page end was
   computed as `start + page_size` *before* being clamped to the tool count —

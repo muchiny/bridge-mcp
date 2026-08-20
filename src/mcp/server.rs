@@ -1579,6 +1579,12 @@ impl McpServer {
 
         info!(tool = %call_params.name, "Tool call");
 
+        // The name the client actually put on the wire, captured before the
+        // `mcp_call_tool` rewrite below replaces it with the inner tool. Any
+        // error raised after that point must still be attributable to the
+        // request the client sent (audit D-F1, 2026-08-20).
+        let outer_name = call_params.name.clone();
+
         // Generic dispatcher (progressive listing mode): rewrite to the inner
         // tool BEFORE the elicitation gate and annotation lookups, so the
         // target tool's own safety semantics apply. A rewritten name equal to
@@ -1611,10 +1617,15 @@ impl McpServer {
             // `execution.taskSupport` is "forbidden" for the three meta-tools:
             // they are dispatched here, ahead of the task branch below, so a
             // `task` object would otherwise be accepted and silently dropped.
+            //
+            // `mcp_call_tool` advertises "optional" and rewrote `name` above,
+            // so this can fire for a request whose wire-level tool name was the
+            // dispatcher. Name both ends rather than only the rewritten one.
             if call_params.task.is_some() {
+                let via = (outer_name != call_params.name).then_some(outer_name.as_str());
                 return JsonRpcResponse::error(
                     id,
-                    JsonRpcError::task_not_supported(&call_params.name),
+                    JsonRpcError::task_not_supported_via(&call_params.name, via),
                 );
             }
             let result = super::meta_tools::execute(
@@ -3212,6 +3223,71 @@ mod tests {
             "got: {}",
             error.message
         );
+        // Called directly, so nothing to attribute: the message stays as it
+        // was and `data` carries no `via` (audit D-F1, 2026-08-20).
+        assert!(
+            !error.message.contains("reached via"),
+            "a direct call has no dispatcher to name: {}",
+            error.message
+        );
+        let data = error.data.expect("structured error data");
+        assert_eq!(
+            data["tool"],
+            json!(super::super::meta_tools::LIST_TOOL_GROUPS)
+        );
+        assert!(data.get("via").is_none(), "got: {data}");
+    }
+
+    /// D-F1 (audit 2026-08-20): `mcp_call_tool` advertises
+    /// `execution.taskSupport: "optional"` and, in `listing: progressive`, is
+    /// the client's only tool that does — the other three advertise
+    /// `"forbidden"`. But the dispatcher rewrites `params.name` to the inner
+    /// tool BEFORE the meta-tool guard runs, so a task-augmented
+    /// `mcp_call_tool` wrapping a discovery meta-tool was refused under a name
+    /// (`mcp_search_tools`) the client never put on the wire. The refusal is
+    /// correct — the meta-tools are dispatched ahead of the task branch — but
+    /// it must name both ends and carry machine-readable `data` so a client can
+    /// branch without parsing English.
+    #[tokio::test]
+    async fn test_task_via_call_tool_names_both_tools() {
+        let server = create_test_server();
+
+        for inner in [
+            super::super::meta_tools::LIST_TOOL_GROUPS,
+            super::super::meta_tools::SEARCH_TOOLS,
+            super::super::meta_tools::DESCRIBE_TOOL,
+        ] {
+            let params = json!({
+                "name": super::super::meta_tools::CALL_TOOL,
+                "arguments": {
+                    "name": inner,
+                    "arguments": {"query": "restart", "name": "ssh_status"}
+                },
+                "task": {"ttl": 60000}
+            });
+            let response = server
+                .handle_tools_call(Some(json!(1)), Some(params), None, None)
+                .await;
+
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{inner} via mcp_call_tool must be a JSON-RPC error"));
+            assert_eq!(error.code, -32601);
+            assert!(
+                error.message.contains(inner),
+                "error must name the inner tool, got: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains(super::super::meta_tools::CALL_TOOL),
+                "error must name the dispatcher the client actually called, got: {}",
+                error.message
+            );
+
+            let data = error.data.expect("structured error data");
+            assert_eq!(data["tool"], json!(inner));
+            assert_eq!(data["via"], json!(super::super::meta_tools::CALL_TOOL));
+        }
     }
 
     #[tokio::test]
