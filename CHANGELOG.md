@@ -68,11 +68,19 @@ section.
   `mcp_search_tools` results differed in every process), and
   `mcp_search_tools` ranks matches — exact name, name prefix, name substring,
   then description — instead of truncating an arbitrary subset. With the
-  default `limit: 20`, queries like "list" (117 matches) or "restart" used to
-  drop the best hit outright. `mcp_describe_tool` and `mcp_search_tools` now
-  also return each tool's `annotations` (`readOnlyHint`/`destructiveHint`/…),
-  which were unreachable in `listing: progressive` mode, and
-  `mcp_describe_tool` reports `task_support`.
+  default `limit: 20`, queries like "list" (117 matches under a 279-tool
+  config, 218 with every group enabled) or "restart" used to drop the best hit
+  outright. `mcp_describe_tool` and `mcp_search_tools` now also return each
+  tool's `annotations`, which were unreachable in `listing: progressive` mode,
+  and `mcp_describe_tool` reports `task_support`. `mcp_describe_tool` returns
+  the full annotation object; `mcp_search_tools` returns only
+  `readOnlyHint`/`destructiveHint` — it emits up to 200 entries in the one
+  mode whose whole point is keeping schema out of context, and the other three
+  fields carry nothing a client can act on (`title` restates the `name` in the
+  same entry, `openWorldHint` is `true` registry-wide, `idempotentHint`
+  follows from `readOnlyHint`). Measured over every group enabled at the
+  default `limit: 20`: "list" 9314 → 7271 bytes, "restart" 8855 → 6903,
+  "file" 9224 → 7213, "status" 9201 → 7154.
 - **BREAKING (MCP clients): `execution.taskSupport` now matches dispatch, with
   one documented exception.** `mcp_list_tool_groups`, `mcp_search_tools` and
   `mcp_describe_tool` declare `"forbidden"` (they are dispatched ahead of the

@@ -331,7 +331,7 @@ fn search(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
                 "name": t.name,
                 "group": group,
                 "description": short,
-                "annotations": annotations_value(&t.name),
+                "annotations": search_annotations_value(&t.name),
             })
         })
         .collect();
@@ -383,16 +383,49 @@ fn describe(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
     success_json(payload)
 }
 
-/// A tool's MCP annotations as JSON for the discovery payloads, or `Null` when
-/// the tool declares none. Progressive mode hides `tools/list`, so this is the
-/// only place a client can read `readOnlyHint`/`destructiveHint` before it
-/// invokes anything (audit G-19, 2026-08-19).
+/// A tool's MCP annotations as JSON for `describe`, or `Null` when the tool
+/// declares none. Progressive mode hides `tools/list`, so the discovery
+/// payloads are the only place a client can read
+/// `readOnlyHint`/`destructiveHint` before it invokes anything (audit G-19,
+/// 2026-08-19). `describe` returns one deliberately-fetched tool, so it carries
+/// the whole object; see [`search_annotations_value`] for the trimmed form the
+/// bulk path uses.
 fn annotations_value(tool_name: &str) -> Value {
     let ann = tool_annotations(tool_name);
     if ann.is_empty() {
         Value::Null
     } else {
         serde_json::to_value(&ann).unwrap_or(Value::Null)
+    }
+}
+
+/// The two decision-relevant hints only, or `Null` when the tool declares
+/// neither.
+///
+/// `search` emits up to 200 entries and is THE discovery call under
+/// `tool_groups.listing: progressive`, whose entire purpose is keeping the
+/// registry's ~140 K tokens of schema out of the client's context. The full
+/// five-field object added a seven-line block per hit — ~74% on a default-limit
+/// payload — carrying nothing actionable: `title` restates the `name` already
+/// in the entry, `openWorldHint` is `true` across the whole registry, and
+/// `idempotentHint` follows from `readOnlyHint` for every annotation kind we
+/// emit. This keeps exactly the check the ANNOTATIONS paragraph of the server
+/// instructions tells the model to make (audit D-F2, 2026-08-20).
+fn search_annotations_value(tool_name: &str) -> Value {
+    let ann = tool_annotations(tool_name);
+    let mut compact = serde_json::Map::new();
+    // Mirrors `ToolAnnotations`' `skip_serializing_if`: an undeclared hint is
+    // absent, not `null`.
+    if let Some(read_only) = ann.read_only_hint {
+        compact.insert("readOnlyHint".to_string(), Value::Bool(read_only));
+    }
+    if let Some(destructive) = ann.destructive_hint {
+        compact.insert("destructiveHint".to_string(), Value::Bool(destructive));
+    }
+    if compact.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(compact)
     }
 }
 
@@ -639,8 +672,28 @@ mod tests {
         let payload = result.structured_content.expect("structured");
         assert_eq!(payload["annotations"]["readOnlyHint"], json!(false));
         assert_eq!(payload["annotations"]["idempotentHint"], json!(true));
+
+        // D-F2 (audit 2026-08-20): `describe` keeps the WHOLE object — it is
+        // one tool, fetched deliberately, and the extra fields cost nothing at
+        // that scale. `search` is the side that gets trimmed; the two halves of
+        // that split are pinned here and in `search_exposes_annotations`.
+        let ann = payload["annotations"]
+            .as_object()
+            .expect("annotations object");
+        assert_eq!(ann.len(), 5, "describe must emit all five fields: {ann:?}");
+        assert!(ann.contains_key("title"), "got: {ann:?}");
+        assert!(ann.contains_key("openWorldHint"), "got: {ann:?}");
     }
 
+    /// D-F2 (audit 2026-08-20): `search` returns up to 200 entries and, under
+    /// `tool_groups.listing: progressive`, is THE discovery call — the whole
+    /// point of that mode is keeping ~140 K tokens of schema out of context.
+    /// Serializing all five annotation fields per hit inflated the
+    /// default-limit payload by ~74% (e.g. "list": 5371 → 9314 bytes) to say
+    /// nothing a client can act on: `title` restates the `name` already in the
+    /// entry, and `openWorldHint` is `true` for every tool in the registry.
+    /// Only the pair the ANNOTATIONS instructions text actually promises
+    /// survives here.
     #[test]
     fn search_exposes_annotations() {
         let registry = create_all_enabled_registry();
@@ -655,6 +708,17 @@ mod tests {
         assert_eq!(entry["name"], json!("ssh_service_restart"));
         assert_eq!(entry["annotations"]["readOnlyHint"], json!(false));
         assert_eq!(entry["annotations"]["destructiveHint"], json!(false));
+
+        let ann = entry["annotations"]
+            .as_object()
+            .expect("annotations object");
+        assert_eq!(
+            ann.len(),
+            2,
+            "search must emit only the decision-relevant pair: {ann:?}"
+        );
+        assert!(ann.contains_key("readOnlyHint"), "got: {ann:?}");
+        assert!(ann.contains_key("destructiveHint"), "got: {ann:?}");
     }
 
     /// `mcp_call_tool` dispatches to an arbitrary tool, so its own annotations
