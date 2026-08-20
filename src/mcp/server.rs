@@ -2412,10 +2412,13 @@ mod tests {
 
     // ================= in-memory session harness (G-1 / G-9) =================
     //
-    // `serve_session` is the only place the concurrency semaphore is taken,
-    // so a test that calls the handlers directly cannot see the freeze at
-    // all. These two adapters let a test drive the real reader loop with a
-    // scripted message sequence and read back everything it writes.
+    // `serve_session`'s reader loop is one of two places the concurrency
+    // semaphore is taken (the other is the task worker spawned from
+    // `handle_tools_call_async`, G-9) — and the only one that also gates
+    // reading the client's *next* message, so a test that calls the
+    // handlers directly cannot see the reader-loop freeze at all. These
+    // two adapters let a test drive the real reader loop with a scripted
+    // message sequence and read back everything it writes.
 
     /// Feeds `serve_session` a scripted sequence of client messages.
     struct ChannelReader {
@@ -4248,9 +4251,25 @@ mod tests {
             "arguments": {},
             "task": {"ttl": 60000}
         });
-        let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
-            .await;
+        // If the permit were acquired BEFORE the `tokio::spawn` (i.e. still
+        // in the dispatch path, the exact regression this test guards
+        // against), this call would block forever on `acquire_owned()`
+        // while we hold every permit above — `handle_tools_call` awaits
+        // `handle_tools_call_async` directly (see call site around
+        // `handle_tools_call`), it is never spawned itself. Wrap it in a
+        // timeout so that misplacement fails as a readable assertion
+        // instead of hanging the test (and CI) forever.
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.handle_tools_call(Some(json!(1)), Some(params), None, None),
+        )
+        .await
+        .expect(
+            "handle_tools_call never returned — the concurrency permit is \
+             likely being acquired before tokio::spawn (in the dispatch \
+             path) instead of inside the spawned worker, so the enclosing \
+             request itself blocked on the permits this test is holding",
+        );
         let task_id = response.result.unwrap()["task"]["taskId"]
             .as_str()
             .unwrap()
@@ -4279,6 +4298,15 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+
+        // The worker's own permit must be released once it reaches a
+        // terminal state — otherwise "the worker holds it for the whole
+        // TTL" would pass this test silently.
+        assert_eq!(
+            server.concurrent_limit.available_permits(),
+            5,
+            "worker did not release its concurrency permit on completion"
+        );
     }
 
     #[tokio::test]
