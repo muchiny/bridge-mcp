@@ -1203,7 +1203,13 @@ impl McpServer {
             "tasks/result" => self.handle_tasks_result(id, request.params).await,
             "tasks/list" => self.handle_tasks_list(id, request.params).await,
             "tasks/cancel" => self.handle_tasks_cancel(id, request.params).await,
-            "completions/complete" => self.handle_completions_complete(id, request.params),
+            // The 2025-06-18 schema names this method `completion/complete`
+            // (SINGULAR) and that is the ONLY spelling the installed client
+            // sends. The plural was carried over from an earlier draft; keep
+            // both so neither client generation gets -32601.
+            "completion/complete" | "completions/complete" => {
+                self.handle_completions_complete(id, request.params)
+            }
             "logging/setLevel" => self.handle_logging_set_level(id, request.params, session),
             "resources/templates/list" => self.handle_resource_templates_list(id),
             "resources/subscribe" => {
@@ -4969,6 +4975,53 @@ mod tests {
         // Missing params -> invalid_params, not method_not_found
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, -32602);
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_completion_complete_singular_dispatch() {
+        // The MCP 2025-06-18 schema names this method `completion/complete`
+        // (SINGULAR). The installed Claude Code client sends only that
+        // spelling, and it was answered with -32601 Method not found,
+        // making `DefaultCompletionProvider` dead code over the wire.
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completion/complete".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert!(response.error.is_some());
+        let error = response.error.unwrap();
+        assert_eq!(
+            error.code, -32602,
+            "missing params must be invalid_params, not method_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_completion_complete_singular_returns_values() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completion/complete".to_string(),
+            params: Some(json!({
+                "ref": { "type": "ref/prompt", "name": "diagnose_host" },
+                "argument": { "name": "host", "value": "" }
+            })),
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert!(response.error.is_none(), "error: {:?}", response.error);
+        let result = response.result.unwrap();
+        assert!(
+            result["completion"]["values"].is_array(),
+            "completion/complete must return a completion.values array, got: {result}"
+        );
     }
 
     #[tokio::test]
