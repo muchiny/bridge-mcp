@@ -1656,7 +1656,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -1706,7 +1712,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -1732,7 +1744,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits,
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -1758,7 +1776,13 @@ mod tests {
             hosts: HashMap::new(),
             security,
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -1855,7 +1879,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits,
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -1907,7 +1937,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions,
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -1960,7 +1996,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2037,7 +2079,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2107,7 +2155,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2158,7 +2212,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2182,7 +2242,13 @@ mod tests {
             hosts: HashMap::new(),
             security,
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2227,7 +2293,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2246,7 +2318,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2265,7 +2343,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2284,7 +2368,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2305,7 +2395,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2365,7 +2461,13 @@ mod tests {
             hosts,
             security,
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2392,7 +2494,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2458,7 +2566,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2524,7 +2638,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2590,7 +2710,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2632,7 +2758,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2698,7 +2830,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -2764,7 +2902,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3085,7 +3229,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3134,7 +3284,13 @@ mod tests {
             hosts,
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3155,7 +3311,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3178,7 +3340,13 @@ mod tests {
                 max_output_chars: 100_000,
                 ..Default::default()
             },
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3199,7 +3367,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3218,7 +3392,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3237,7 +3417,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3256,7 +3442,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3275,7 +3467,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3294,7 +3492,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3313,7 +3517,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3336,7 +3546,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3355,7 +3571,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3374,7 +3596,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),

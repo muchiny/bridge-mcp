@@ -2599,7 +2599,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: crate::mcp::registry::all_enabled_tool_groups_config_for_test(),
             ssh_config: SshConfigDiscovery::default(),
@@ -3067,7 +3073,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: crate::mcp::registry::all_enabled_tool_groups_config_for_test(),
             ssh_config: SshConfigDiscovery::default(),
@@ -4364,7 +4376,13 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),

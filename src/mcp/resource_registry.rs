@@ -154,7 +154,12 @@ mod tests {
             hosts: HashMap::new(),
             security: SecurityConfig::default(),
             limits: LimitsConfig::default(),
-            audit: AuditConfig::default(),
+            // Test fixture: AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log).
+            audit: AuditConfig {
+                enabled: false,
+                ..AuditConfig::default()
+            },
             sessions: SessionConfig::default(),
             tool_groups: ToolGroupsConfig::default(),
             ssh_config: SshConfigDiscovery::default(),
