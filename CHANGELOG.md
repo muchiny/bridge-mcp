@@ -7,6 +7,157 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-20
+
+> **Not tagged, not published.** This entry documents work in progress.
+> `2026-08-20` is the date the entry was written, not a release date. Task 57
+> tags the actual 3.0.0 release; if that lands on a later day, it reconciles
+> this date to match.
+
+**bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
+`2026-07-28` and nothing else. There is no dual-era mode, no negotiation
+window, and no deprecation period.
+
+### MIGRATION — read this before upgrading
+
+**Any client older than the Modern era stops working the moment you install
+3.0.0, and it cannot recover on its own.**
+
+A legacy client opens a connection by sending `initialize`. bridge-mcp 3.0.0
+answers that method with exactly one thing:
+
+```json
+{"jsonrpc":"2.0","id":1,"error":{"code":-32022,
+ "message":"Unsupported protocol version",
+ "data":{"supported":["2026-07-28"],"requested":"2025-11-25"}}}
+```
+
+`-32022` tells the client which revision would work. It does **not** let the
+client fall forward: a client that only implements `initialize` has no code
+path that can issue `server/discover`, so the connection is dead. This arm
+exists because the spec requires a self-describing refusal, not because it
+provides compatibility. Upgrade the client, or stay on 2.2.0.
+
+Concretely: if `bridge-mcp serve` used to work under your MCP host and now
+logs nothing but `-32022`, your host is pre-Modern. Pin `bridge-mcp = "2"`
+until it ships Modern support.
+
+#### Methods removed
+
+| Removed | Replacement |
+|---|---|
+| `initialize` | `server/discover` — see below |
+| `notifications/initialized` | none; there is no handshake to complete |
+| `ping` | none; liveness is the transport's problem (process liveness on stdio, HTTP keepalive) |
+| `logging/setLevel` | per-request `_meta`; the level is now declared on each request instead of latched onto the connection |
+| `resources/subscribe` | `subscriptions/listen` with `params.notifications.resourceSubscriptions` |
+| `resources/unsubscribe` | ending the `subscriptions/listen` request |
+| `notifications/roots/list_changed` | none |
+| `completions/complete` (plural) | `completion/complete` (singular) is now the only accepted spelling |
+
+#### Wire shapes that changed
+
+- **Connection opening.** `server/discover` replaces the `initialize` /
+  `notifications/initialized` pair. Its result is a new shape:
+  `resultType`, `supportedVersions`, `capabilities`, `instructions`,
+  `ttlMs`, `cacheScope` — and **`serverInfo` has moved** out of the top
+  level into `result._meta["io.modelcontextprotocol/serverInfo"]`. Any
+  client reading `result.serverInfo.name` reads `null` now.
+
+- **Per-request `_meta` envelope.** Protocol revision, client identity and
+  client capabilities are no longer negotiated once; every client→server
+  request carries them:
+
+  ```json
+  "_meta": {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": {"name": "…", "version": "…"},
+    "io.modelcontextprotocol/clientCapabilities": {}
+  }
+  ```
+
+  This is what feeds the destructive-operation elicitation gate. A
+  `tools/call` on a `destructive_hint: true` tool that omits
+  `clientCapabilities.elicitation` while
+  `security.require_elicitation_on_destructive: true` is set is refused —
+  the gate is fail-closed, exactly as it was when the flags came from
+  `initialize`.
+
+- **Notifications are opt-in.** The server emits no notification until a
+  `subscriptions/listen` request asks for it, and every notification it
+  does emit carries `params._meta["io.modelcontextprotocol/subscriptionId"]`.
+  The server's acknowledgement echoes back the *subset it actually
+  supports* — treat the ack, not your request, as the source of truth.
+
+- **`capabilities.extensions`.** Tasks are no longer core protocol; they are
+  the `io.modelcontextprotocol/tasks` extension, declared as a key of
+  `capabilities.extensions`.
+
+- **HTTP transport.** `MCP-Protocol-Version` is now a routing hint only —
+  the authoritative revision is the one in `_meta`, which is the only copy
+  that exists over stdio. Two new request headers mirror the body for
+  gateways and WAFs: `Mcp-Method` (the JSON-RPC method) and `Mcp-Name`
+  (tool name for `tools/call`, resource URI for `resources/read`). A
+  mismatch between `Mcp-Method` and the body is treated as a malformed
+  request; the body always wins.
+
+- **HTTP: sessions and stream resumption are gone.** No `Mcp-Session-Id`
+  header, no session lifecycle, no `DELETE /mcp`. `GET /mcp` no longer
+  serves an SSE stream — `subscriptions/listen`, issued as an ordinary
+  POST, is the only server-to-client notification path. `GET` and `DELETE`
+  on `/mcp` return **405**. `Last-Event-ID` is ignored and there is no
+  redelivery buffer: a broken stream means the client re-issues with a
+  **new** request id, so plan for duplicate work rather than assuming
+  id-keyed idempotency. List endpoints no longer vary per connection.
+  Cross-call state must travel as explicit handles in tool arguments —
+  which is what `ssh_session_create` → `session_id` → `ssh_session_exec`
+  and `output_id` → `ssh_output_fetch` already were.
+
+#### 2.2.0 fixes that 3.0.0 supersedes
+
+If you are reading 2.2.0's notes alongside these, four of its changes no
+longer describe the code. This is intentional; do not re-apply them.
+
+- 2.2.0 changed `capabilities.resources.subscribe` to `false` because
+  `notifications/resources/updated` was never emitted. Modern has no such
+  capability flag at all — resource subscriptions are requested through
+  `subscriptions/listen`, and 3.0.0 actually emits the notification.
+- 2.2.0 taught the server to accept **both** `completion/complete` and
+  `completions/complete`. 3.0.0 accepts only the singular spelling the
+  spec defines.
+- 2.2.0 made the HTTP layer reject a malformed `MCP-Protocol-Version`
+  header with 400. In 3.0.0 the header is advisory; a wrong revision is
+  refused with `-32022` from the `_meta` value instead, on both transports.
+- 2.2.0 hardened `initialize` param parsing (raising a swallowed `debug!`
+  to `warn!` and recovering `protocolVersion` from the raw value). All of
+  that code is deleted: `initialize` is now a single `-32022` arm.
+
+Everything else 2.2.0 fixed still stands — the concurrency-permit deadlock
+on `tasks/result`, the permit escape on task-augmented calls, the notification
+that got a `Response`, the stdio EOF hang, the unstable `mcp_search_tools`
+ordering, the pagination-cursor, cancellation, unknown-tool and root-scoping
+corrections, and the five command-injection sites.
+
+### Changed
+
+- **BREAKING**: protocol revision is `2026-07-28` and
+  `SUPPORTED_PROTOCOL_VERSIONS` is a one-element list. `server.json`
+  (`mcpVersion`), `.well-known/mcp/server-card.json` (`mcp_version`) and
+  the `GET /.well-known/mcp.json` endpoint all read the same
+  `PROTOCOL_VERSION` constant, guarded by `tests/discovery_metadata.rs`.
+- `.claude-plugin/marketplace.json` and `plugin/.claude-plugin/plugin.json`
+  are now synced by `make sync-server-json` and drift-guarded in CI. Both
+  had sat at `1.20.0` through two releases and were only brought to `2.2.0`
+  by hand; nothing kept them there.
+
+### Removed
+
+- The `Mcp-Session-Id` session lifecycle, the standalone `GET /mcp` SSE
+  handler, `DELETE /mcp`, and the `Last-Event-ID` resumption buffer.
+- The `initialize` / `notifications/initialized` handshake, `ping`,
+  `logging/setLevel`, `notifications/roots/list_changed`,
+  `resources/subscribe`, `resources/unsubscribe`.
+
 ## [2.2.0] - 2026-08-19
 
 Major version because this release breaks compatibility in **21 places, ten
@@ -1994,7 +2145,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v2.2.0...v3.0.0
 [2.2.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v2.2.0
 [1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0
