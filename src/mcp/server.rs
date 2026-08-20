@@ -1261,6 +1261,18 @@ impl McpServer {
         let mut negotiated_version = PROTOCOL_VERSION.to_string();
 
         if let Some(p) = params {
+            // Read `protocolVersion` off the RAW value before the typed
+            // deserialize can swallow it. `InitializeParams` requires
+            // `clientInfo`, so a client that omits only `clientInfo.version`
+            // lost BOTH its requested protocol version and its advertised
+            // `capabilities.elicitation` to the `Err` arm below. The version
+            // is the one field we can always recover; do that first.
+            if let Some(requested) = p.get("protocolVersion").and_then(Value::as_str)
+                && SUPPORTED_PROTOCOL_VERSIONS.contains(&requested)
+            {
+                negotiated_version = requested.to_string();
+            }
+
             match serde_json::from_value::<InitializeParams>(p) {
                 Ok(init_params) => {
                     info!(
@@ -1332,7 +1344,16 @@ impl McpServer {
                     *self.client_info.write().await = Some(init_params.client_info);
                 }
                 Err(e) => {
-                    debug!(error = %e, "Could not parse initialize params (continuing anyway)");
+                    // Not fatal — the spec lets us fall forward — but this
+                    // silently costs the client its advertised capabilities
+                    // (elicitation, sampling, roots) and its clientInfo, so
+                    // it must be visible at the default log level.
+                    warn!(
+                        error = %e,
+                        negotiated_version = %negotiated_version,
+                        "Could not parse initialize params; client capabilities and clientInfo \
+                         are being ignored for this session"
+                    );
                 }
             }
         }
@@ -3558,6 +3579,51 @@ mod tests {
 
         // Should still succeed (params are optional/best-effort)
         assert!(response.error.is_none());
+        // With no recoverable protocolVersion, we advertise our own latest.
+        let result = response.result.unwrap();
+        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn test_initialize_recovers_protocol_version_from_malformed_params() {
+        let server = create_test_server();
+        // `clientInfo` is missing, so `InitializeParams` deserialization
+        // fails outright — the whole `params` object used to be discarded in
+        // a `debug!`, silently downgrading the session to our latest version.
+        let params = json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "elicitation": {} }
+        });
+
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(
+            result["protocolVersion"], "2025-06-18",
+            "a supported protocolVersion must survive a failed typed parse"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_unsupported_protocol_version_falls_forward() {
+        let server = create_test_server();
+        let params = json!({
+            "protocolVersion": "1999-01-01",
+            "capabilities": {},
+            "clientInfo": { "name": "test-client", "version": "0.0.1" }
+        });
+
+        let response = server
+            .handle_initialize(Some(json!(1)), Some(params), None)
+            .await;
+
+        // Spec: fall forward to our latest, do NOT return -32602.
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
     }
 
     // ============== Additional Tools Tests ==============
