@@ -136,8 +136,10 @@ pub fn build_instructions(config: &Config, tool_count: usize) -> String {
          PREFER SPECIALIZED TOOLS over ssh_exec \u{2014} they validate inputs, \
          structure output, and enforce safety.\n\
          \n\
-         ANNOTATIONS: Tools declare readOnlyHint or destructiveHint. \
-         Prefer read-only tools for investigation before mutating ones.\n\
+         ANNOTATIONS: Tools declare readOnlyHint or destructiveHint \u{2014} in \
+         progressive mode mcp_describe_tool and mcp_search_tools return them, so \
+         you can check before invoking. Prefer read-only tools for investigation \
+         before mutating ones.\n\
          \n\
          OUTPUT: Truncated output returns an output_id. Call \
          ssh_output_fetch output_id=<id> offset=<N> to paginate the rest.\n\
@@ -359,6 +361,7 @@ mod tests {
         assert!(out.contains("WORKFLOW: Call ssh_status"));
         assert!(out.contains("PREFER SPECIALIZED TOOLS"));
         assert!(out.contains("ANNOTATIONS:"));
+        assert!(out.contains("mcp_describe_tool and mcp_search_tools return them"));
         assert!(out.contains("OUTPUT: Truncated output"));
         assert!(out.contains("ssh_output_fetch"));
         assert!(out.contains("SESSIONS:"));

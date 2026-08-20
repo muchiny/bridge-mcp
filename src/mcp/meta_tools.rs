@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::protocol::{Tool, ToolExecution};
-use super::registry::{ToolRegistry, inject_reduction_schema, tool_group};
+use super::registry::{ToolRegistry, inject_reduction_schema, tool_annotations, tool_group};
 use crate::domain::output_truncator::truncate_chars;
 use crate::ports::{ToolAnnotations, ToolCallResult, ToolContent};
 
@@ -160,7 +160,11 @@ pub fn call_tool_definition() -> Tool {
             },
             "required": ["name"]
         }),
-        annotations: None,
+        // Conservative by construction: the dispatcher's target is unknown at
+        // listing time, and MCP's own default for an absent `destructiveHint`
+        // is `true`. The real gate is unaffected — the elicitation check keys
+        // on the REWRITTEN inner tool name, not on this one.
+        annotations: Some(ToolAnnotations::destructive("Invoke any bridge tool")),
         execution: None,
         output_schema: None,
         icons: None,
@@ -302,6 +306,7 @@ fn search(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
                 "name": t.name,
                 "group": group,
                 "description": short,
+                "annotations": annotations_value(&t.name),
             })
         })
         .collect();
@@ -346,9 +351,23 @@ fn describe(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
         "output_kind": format!("{output_kind:?}"),
         "reduction_strategy": output_kind.strategy_hint(),
         "reduce_marker": output_kind.short_marker(),
+        "annotations": annotations_value(name),
         "input_schema": input_schema,
     });
     success_json(payload)
+}
+
+/// A tool's MCP annotations as JSON for the discovery payloads, or `Null` when
+/// the tool declares none. Progressive mode hides `tools/list`, so this is the
+/// only place a client can read `readOnlyHint`/`destructiveHint` before it
+/// invokes anything (audit G-19, 2026-08-19).
+fn annotations_value(tool_name: &str) -> Value {
+    let ann = tool_annotations(tool_name);
+    if ann.is_empty() {
+        Value::Null
+    } else {
+        serde_json::to_value(&ann).unwrap_or(Value::Null)
+    }
 }
 
 fn success_json(value: Value) -> ToolCallResult {
@@ -564,6 +583,68 @@ mod tests {
         assert_eq!(payload["name"], some_tool.name);
         assert!(payload["input_schema"].is_object());
         assert!(payload["reduction_strategy"].is_string());
+    }
+
+    /// G-19 (audit 2026-08-19): in `listing: progressive` the client never sees
+    /// `tools/list` entries, so `readOnlyHint` / `destructiveHint` were
+    /// unreachable — `describe` and `search` both omitted them, contradicting
+    /// the ANNOTATIONS paragraph in the server instructions. The CLI never had
+    /// this hole (`src/cli/runner.rs` emits "annotations").
+    #[test]
+    fn describe_exposes_annotations() {
+        let registry = create_all_enabled_registry();
+
+        let result = execute(
+            DESCRIBE_TOOL,
+            Some(&json!({"name": "ssh_status"})),
+            &registry,
+        )
+        .expect("meta");
+        let payload = result.structured_content.expect("structured");
+        assert_eq!(payload["annotations"]["readOnlyHint"], json!(true));
+        assert_eq!(payload["annotations"]["destructiveHint"], json!(false));
+
+        let result = execute(
+            DESCRIBE_TOOL,
+            Some(&json!({"name": "ssh_service_restart"})),
+            &registry,
+        )
+        .expect("meta");
+        let payload = result.structured_content.expect("structured");
+        assert_eq!(payload["annotations"]["readOnlyHint"], json!(false));
+        assert_eq!(payload["annotations"]["idempotentHint"], json!(true));
+    }
+
+    #[test]
+    fn search_exposes_annotations() {
+        let registry = create_all_enabled_registry();
+        let result = execute(
+            SEARCH_TOOLS,
+            Some(&json!({"query": "ssh_service_restart", "limit": 1})),
+            &registry,
+        )
+        .expect("meta");
+        let payload = result.structured_content.expect("structured");
+        let entry = &payload["results"][0];
+        assert_eq!(entry["name"], json!("ssh_service_restart"));
+        assert_eq!(entry["annotations"]["readOnlyHint"], json!(false));
+        assert_eq!(entry["annotations"]["destructiveHint"], json!(false));
+    }
+
+    /// `mcp_call_tool` dispatches to an arbitrary tool, so its own annotations
+    /// must be conservative rather than `null`. The MCP default for an absent
+    /// `destructiveHint` is already `true`; declaring it explicitly adds a
+    /// title and stops clients from having to guess.
+    #[test]
+    fn call_tool_definition_declares_conservative_annotations() {
+        let ann = call_tool_definition()
+            .annotations
+            .expect("mcp_call_tool must declare annotations");
+        assert_eq!(ann.read_only_hint, Some(false));
+        assert_eq!(ann.destructive_hint, Some(true));
+        assert_eq!(ann.idempotent_hint, Some(false));
+        assert_eq!(ann.open_world_hint, Some(true));
+        assert!(ann.title.is_some());
     }
 
     // ============== Targeted mutation-killing tests for `search` ==============
