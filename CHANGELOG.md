@@ -9,18 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-08-19
 
-Major version because this release breaks compatibility in **23 places, nine
+Major version because this release breaks compatibility in **21 places, ten
 of them in the public library API**. The bar used, so the number is checkable
 rather than asserted: a change counts as breaking if it can make a
 previously-working client, operator config or downstream crate stop working —
-or silently behave differently — with no change on their side. Every one is
-enumerated in *Migrating from 1.20.0* below. Numbered **2.2.0** rather than 2.0.0: the
-changelog already carries 2.0.0, 2.0.1 and 2.1.0 from an earlier 2.x line that
-was never tagged, and reusing those numbers would make two different releases
-share one version string. 1.20.0 is the last tagged release; 2.0.0 through
-2.1.0 are skipped, not repeated. Every one is listed under **BREAKING** below
-with what to do about it. See "Migrating from 1.20.0" at the end of this
-section.
+or silently behave differently — with no change on their side.
+
+Numbered **2.2.0** rather than 2.0.0: the changelog already carries 2.0.0,
+2.0.1 and 2.1.0 from an earlier 2.x line that was never tagged, and reusing
+those numbers would make two different releases share one version string.
+1.20.0 is the last tagged release; 2.0.0 through 2.1.0 are skipped, not
+repeated. See "Migrating from 1.20.0" at the end of this section.
 
 ### Added
 
@@ -264,7 +263,11 @@ section.
   validates `MCP-Protocol-Version` up front and returns `400 Bad Request`
   for anything outside `SUPPORTED_PROTOCOL_VERSIONS` plus the assumed
   legacy default `2025-03-26`; an absent header is still accepted (assumed
-  `2025-03-26`) for backwards compatibility. Out of scope: detecting *drift*
+  `2025-03-26`) for backwards compatibility. **BREAKING (HTTP clients)**,
+  **Wire-visible**: a client that sent an unrecognised version string
+  previously got a normal `200` and now gets `400`. By this release's own bar
+  it is breaking, and it is the same class as the `200` -> `202` change two
+  entries down, which was marked. Out of scope: detecting *drift*
   between this header and the version actually negotiated by `initialize`
   for the session — that needs new per-session state and is a separate
   change.
@@ -455,14 +458,23 @@ section.
 
 ### Migrating from 1.20.0
 
-Twenty-three breaking changes, nine of them in the public library API. In
-rough order of how likely you are to hit them.
+Twenty-one breaking changes, ten of them in the public library API. In rough
+order of how likely you are to hit them.
 
-An earlier draft of this section said "seven, four of them in the public
-library API" while its own numbered list and table already enumerated more than
-that. The count is now derived from the union of every **BREAKING**-marked
-bullet above and every row of the library table below, deduplicated — so it can
-be re-derived rather than trusted.
+How that number is derived, so you can check it rather than trust it: take
+every **BREAKING**-marked bullet above (14 distinct bullets), add every row of
+the library table below (10 rows), and subtract the 3 that appear in both
+(`build_log_aggregate_command`, `ServerInfo`, `TaskStore::list_tasks`).
+14 + 10 − 3 = 21.
+
+Two earlier drafts of this line were wrong, and both failures are worth naming
+because they are the reason the arithmetic is now spelled out. The first said
+"seven, four of them in the public library API" while the numbered list and
+table below already enumerated more than that — a count that never reconciled
+against its own page. The second said "23", which is not reachable by the
+method it claimed: it came from `grep -c BREAKING` returning 14 *lines* (the
+`retain_days` bullet carries the word twice) plus 9 table rows, with no
+deduplication. Counting lines is not counting changes.
 
 **1. `rbac.enabled: true` no longer loads.** If your config has it, the server
 now refuses to start. There is no drop-in replacement, because there never was
@@ -504,40 +516,63 @@ writer task also wired retention, and because the rotation counter is seeded
 from the existing file's length, an operator already over `max_size_mb` gets the
 first sweep on the **first event after upgrading**, not gradually.
 **Before upgrading: confirm `audit.path` lives in a directory dedicated to the
-audit log.** The sweep only removes files matching this log's own rotated-archive
-shape (`<name>.YYYYMMDD_HHMMSS`), never the live log and never unrelated files —
-but it is a real deletion of real archives. Set `retain_days: 0` to opt out.
+audit log.** The default is already dedicated
+(`~/.local/share/bridge-mcp/audit.log`); this matters if you set `audit.path`
+yourself, and especially if you pointed it somewhere shared like `~` or
+`/var/log`. The sweep only removes files matching this log's own
+rotated-archive shape — `<your audit file name>.` followed by a 14-digit
+timestamp and an optional `.<n>` collision suffix — and never the live log
+itself. It cannot distinguish a real archive from a stray file that happens to
+carry that exact shape, so a dedicated directory is the guarantee, not the
+predicate. Set `retain_days: 0` to opt out entirely.
 
-**7. `tools/call` with a name that is not in the enabled registry now fails.**
+**7. A task on one of the three discovery meta-tools returns `-32601`.**
+`execution.taskSupport` now matches dispatch: `mcp_list_tool_groups`,
+`mcp_search_tools` and `mcp_describe_tool` declare `"forbidden"` because they
+are answered locally, ahead of the task branch. This holds whether the tool is
+called directly or wrapped in `mcp_call_tool` — the dispatcher still advertises
+`"optional"`, and its description now names the carve-out. The refusal names
+both the inner tool and the dispatcher, and carries `data.tool` / `data.via`,
+so a client can branch without parsing prose. If you issued task-augmented
+discovery calls, issue them synchronously instead.
+
+**8. `tools/call` with a name that is not in the enabled registry now fails.**
 It previously fell through to a generic path. Check your tool names against
 `tools/list` for the groups you actually enabled.
 
-**8. `resources/subscribe` and `resources/unsubscribe` both return `-32601`.**
+**9. `resources/subscribe` and `resources/unsubscribe` both return `-32601`.**
 The handshake advertises `resources.subscribe: false` because nothing emits
 `notifications/resources/updated`. Subscribe used to hand out a `subscriptionId`
 anyway and unsubscribe used to return `{}` success; both now refuse. No
 notification was ever sent, so nothing that worked stops working.
 
-**9. `resources/templates/list` publishes `{+path}`, not `{path}`.** RFC 6570
+**10. `resources/templates/list` publishes `{+path}`, not `{path}`.** RFC 6570
 reserved expansion, so a nested path round-trips instead of being
 percent-encoded into an unroutable URI. A client that hardcoded the old template
 string must update it.
 
-**10. Two error codes moved.** `resources/read` on an unconfigured host returns
+**11. Two error codes moved.** `resources/read` on an unconfigured host returns
 `-32602` instead of `-32603` (it is a caller mistake); a per-host rate limit
 stays on `-32603` after briefly being remapped. A client branching on these
 codes must re-check both.
 
-**11. HTTP: a POST carrying only notifications or responses returns `202
+**12. HTTP: an unrecognised `MCP-Protocol-Version` header returns `400`.**
+The value used to be ignored entirely — `POST /mcp` read the header name only,
+to add it to the CORS allowlist — so `1900-01-01` or `not a version!!` got a
+normal `200`. Accepted values are `2025-11-25`, `2025-06-18`, `2024-11-05` and
+the assumed legacy `2025-03-26`. An absent header is still accepted and assumed
+to be `2025-03-26`, so a client that never sent one is unaffected.
+
+**13. HTTP: a POST carrying only notifications or responses returns `202
 Accepted` with no body**, per the Streamable HTTP transport spec's MUST. It
 previously returned `200`. A client asserting `status == 200` must accept `202`.
 
-**12. stdio: a cancelled request gets no response at all.** The `-32800 Request
+**14. stdio: a cancelled request gets no response at all.** The `-32800 Request
 cancelled` write-back is suppressed, per the spec's SHOULD NOT. A stdio client
 that read `-32800` as its cancellation confirmation now gets nothing for that
 request id. The HTTP transport is unaffected.
 
-**13. A Response whose id cannot be determined now serializes `"id": null`**
+**15. A Response whose id cannot be determined now serializes `"id": null`**
 instead of omitting the key, which is what JSON-RPC 2.0 requires. A client that
 rejects a null id will need to accept one.
 
@@ -554,6 +589,7 @@ rejects a null id will need to accept one.
 | `AuditLogger::needs_rotation` / `::rotate` | `pub` | test-only; removed from the public API |
 | `ServerInfo` | no `meta` field | gained public `meta: Option<Value>` |
 | `TaskStore::list_tasks` | returns a tuple | returns `Result<_, InvalidCursor>`; `InvalidCursor` is a new public type |
+| `TaskStore::wait_for_result` | returns `Option<Value>` | returns `TaskWaitOutcome`; `TaskWaitOutcome` is a new public type |
 
 An empty `log_files` passed to `build_log_aggregate_command` is now an error
 rather than producing a command that did nothing.
