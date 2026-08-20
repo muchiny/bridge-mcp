@@ -73,16 +73,25 @@ section.
   also return each tool's `annotations` (`readOnlyHint`/`destructiveHint`/…),
   which were unreachable in `listing: progressive` mode, and
   `mcp_describe_tool` reports `task_support`.
-- **BREAKING (MCP clients): `execution.taskSupport` now matches dispatch.**
-  `mcp_list_tool_groups`, `mcp_search_tools` and `mcp_describe_tool` declare
-  `"forbidden"` (they are dispatched ahead of the task branch, so a `task`
-  object was accepted and silently dropped) and a task-augmented call to one
-  of them now returns `-32601`. `mcp_call_tool` declares `"optional"`, which
-  is what it already did in practice, and is advertised in `tools/list` in
-  **both** listing modes — it was dispatchable in both but listed only in
-  progressive mode. It also carries conservative annotations of its own
-  (`destructiveHint: true`, matching the MCP default for an absent hint)
-  instead of none.
+- **BREAKING (MCP clients): `execution.taskSupport` now matches dispatch, with
+  one documented exception.** `mcp_list_tool_groups`, `mcp_search_tools` and
+  `mcp_describe_tool` declare `"forbidden"` (they are dispatched ahead of the
+  task branch, so a `task` object was accepted and silently dropped) and a
+  task-augmented call to one of them now returns `-32601`. `mcp_call_tool`
+  declares `"optional"`, which is what it already did in practice, and is
+  advertised in `tools/list` in **both** listing modes — it was dispatchable
+  in both but listed only in progressive mode. It also carries conservative
+  annotations of its own (`destructiveHint: true`, matching the MCP default
+  for an absent hint) instead of none. **The exception**: `mcp_call_tool`'s
+  `"optional"` holds for every inner tool *except* those same three
+  meta-tools. The dispatcher rewrites `params.name` before the meta-tool
+  guard, so a task-augmented `mcp_call_tool` wrapping one of them still
+  returns `-32601`. Reordering dispatch to make the advertisement literally
+  true moves logic the destructive-elicitation gate depends on and is deferred
+  past 2.2.0; instead the dispatcher's own `description` states the exception
+  and the error names both tools and carries structured `data` — see "A
+  task-augmented `mcp_call_tool` was refused under a tool name the client
+  never sent" under **Fixed**.
 - **`tasks/result` no longer reports "Task not found" for a cancelled task.**
   Cancelled tasks store no result, but they remain visible through `tasks/get`
   and `tasks/list`; the error now names the terminal state and points at
