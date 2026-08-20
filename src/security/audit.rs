@@ -163,18 +163,29 @@ impl AuditWriterTask {
             return;
         }
 
-        if let Err(e) = rename_with_timestamp(&self.path, Utc::now()) {
-            error!(
-                error = %e,
-                path = %self.path.display(),
-                "Failed to rotate audit log; disabling further rotation for \
-                 this run (events keep landing in the current, oversized file \
-                 until the process restarts)"
-            );
-            self.max_bytes = 0;
-            return;
-        }
-        cleanup_old_audit_files(&self.path, self.retain_days, Utc::now());
+        let rotated = match rename_with_timestamp(&self.path, Utc::now()) {
+            Ok(rotated) => rotated,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    path = %self.path.display(),
+                    "Failed to rotate audit log; disabling further rotation for \
+                     this run (events keep landing in the current, oversized file \
+                     until the process restarts)"
+                );
+                self.max_bytes = 0;
+                return;
+            }
+        };
+        // The second `Utc::now()` is a separate sample from the one that
+        // named the archive; passing `rotated` keeps the sweep off it no
+        // matter how far apart the two readings land (F8).
+        cleanup_old_audit_files(
+            &self.path,
+            self.retain_days,
+            Utc::now(),
+            Some(rotated.as_path()),
+        );
 
         self.reopen_after_rotation();
     }
@@ -240,7 +251,10 @@ fn open_audit_file(path: &Path) -> std::io::Result<File> {
 /// destination on Unix — the first archive would just vanish. If the
 /// timestamped name is already taken, an incrementing numeric suffix is
 /// appended until a free name is found, so a collision loses nothing.
-fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<()> {
+///
+/// Returns the archive's path so the caller can hand it to
+/// `cleanup_old_audit_files` and have the sweep skip it — see F8 there.
+fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<PathBuf> {
     let timestamp = now.format("%Y%m%d_%H%M%S");
     let base_name = path
         .file_name()
@@ -254,7 +268,8 @@ fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<()>
         suffix += 1;
     }
 
-    std::fs::rename(path, rotated_path)
+    std::fs::rename(path, &rotated_path)?;
+    Ok(rotated_path)
 }
 
 /// Whether `name` is one of `live_file_name`'s rotated archives, i.e. exactly
@@ -315,7 +330,22 @@ fn is_own_rotated_archive(name: &str, live_file_name: &str) -> bool {
 /// indistinguishable from one that deleted every archive in the directory —
 /// on the very release that turns this destructive code path on for the
 /// first time.
-fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
+///
+/// F8 (re-review): `just_rotated` names the archive the caller has just
+/// created, and it is skipped unconditionally, whatever its mtime says.
+/// Rotation samples `Utc::now()` for the archive name and the sweep compares
+/// each candidate's FILESYSTEM mtime against `now - retain_days`, so a forward
+/// wall-clock jump larger than `retain_days` — a VM resumed from a snapshot, a
+/// dead RTC, a first NTP sync on a box that booted at the epoch — puts the
+/// archive created microseconds earlier on the wrong side of the cutoff and
+/// deletes the very events rotation just preserved. Callers with nothing to
+/// protect pass `None`.
+fn cleanup_old_audit_files(
+    path: &Path,
+    retain_days: u32,
+    now: DateTime<Utc>,
+    just_rotated: Option<&Path>,
+) {
     if retain_days == 0 {
         return;
     }
@@ -344,6 +374,10 @@ fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
     for entry in entries.flatten() {
         let entry_name = entry.file_name();
         if !is_own_rotated_archive(&entry_name.to_string_lossy(), file_name) {
+            continue;
+        }
+        // Never sweep the archive this rotation just wrote (F8).
+        if just_rotated.is_some_and(|just_rotated| just_rotated == entry.path()) {
             continue;
         }
         if let Ok(metadata) = entry.metadata()
@@ -570,10 +604,16 @@ impl AuditLogger {
             return Ok(());
         }
 
-        rename_with_timestamp(path, Utc::now())?;
+        let rotated = rename_with_timestamp(path, Utc::now())?;
 
-        // Clean up old files if retention is configured
-        self.cleanup_old_files();
+        // Clean up old files if retention is configured, never touching the
+        // archive this call just created (F8).
+        cleanup_old_audit_files(
+            &self.config.path,
+            self.config.retain_days,
+            (self.now_fn)(),
+            Some(rotated.as_path()),
+        );
 
         Ok(())
     }
@@ -586,7 +626,12 @@ impl AuditLogger {
     /// alongside its only callers, `rotate` and the retention tests.
     #[cfg(test)]
     fn cleanup_old_files(&self) {
-        cleanup_old_audit_files(&self.config.path, self.config.retain_days, (self.now_fn)());
+        cleanup_old_audit_files(
+            &self.config.path,
+            self.config.retain_days,
+            (self.now_fn)(),
+            None,
+        );
     }
 }
 
@@ -1805,6 +1850,52 @@ mod tests {
             !own_collision_archive.exists(),
             "our own expired same-second-collision archive must still be swept"
         );
+    }
+
+    /// F8 (re-review of the 2026-08-19 audit corrections): rotation samples
+    /// `Utc::now()` to name the archive, then the sweep compares each
+    /// candidate's FILESYSTEM mtime against `now - retain_days` from a
+    /// SECOND `Utc::now()`. A forward wall-clock jump larger than
+    /// `retain_days` — a VM resumed from a snapshot, a dead RTC, a first NTP
+    /// sync on a box that booted at the epoch — puts the archive created
+    /// microseconds earlier on the wrong side of the cutoff, so rotation
+    /// preserves the events and the sweep immediately deletes them.
+    ///
+    /// The jump is simulated by handing `cleanup_old_audit_files` a `now`
+    /// far in the future rather than by touching this machine's clock. That
+    /// is the same arithmetic the real jump produces: the cutoff moves past
+    /// a freshly written mtime either way.
+    #[test]
+    fn test_cleanup_skips_the_archive_rotation_just_created() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+        std::fs::write(&audit_path, "live log with events worth keeping").unwrap();
+
+        let rotated = rename_with_timestamp(&audit_path, Utc::now()).unwrap();
+        assert!(rotated.exists(), "precondition: the archive was created");
+
+        // The clock jumps forward by far more than retain_days between the
+        // rename and the sweep.
+        let jumped = Utc::now() + chrono::Duration::days(400);
+        cleanup_old_audit_files(&audit_path, 30, jumped, Some(rotated.as_path()));
+
+        assert!(
+            rotated.exists(),
+            "the archive rotation created microseconds earlier must survive \
+             the sweep unconditionally, whatever its mtime says relative to a \
+             jumped clock"
+        );
+
+        // Guard against over-correcting into "skip everything": a DIFFERENT
+        // archive, not the one just rotated, is still swept by the same call.
+        let older_archive = temp_dir.path().join("audit.log.20200101_000000");
+        std::fs::write(&older_archive, "genuinely expired").unwrap();
+        cleanup_old_audit_files(&audit_path, 30, jumped, Some(rotated.as_path()));
+        assert!(
+            !older_archive.exists(),
+            "an archive that is NOT the one just rotated must still be swept"
+        );
+        assert!(rotated.exists(), "and the protected one must still survive");
     }
 
     /// F7 (re-review of the 2026-08-19 audit corrections): removal was
