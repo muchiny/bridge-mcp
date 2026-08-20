@@ -6513,4 +6513,110 @@ mod tests {
             "unexpected error text: {text}"
         );
     }
+
+    /// Legacy era: `initialize` declared elicitation, subsequent requests
+    /// carry no `_meta`. The fallback must keep working until the handshake
+    /// is removed in a later 3.0.0 task.
+    #[tokio::test]
+    async fn test_destructive_gate_falls_back_to_initialize_when_no_meta() {
+        let mut config = test_config();
+        config.security.require_elicitation_on_destructive = true;
+        let (server, _audit_task) = McpServer::new(config);
+
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        // Legacy handshake declares elicitation.
+        let init = server
+            .handle_initialize(
+                Some(json!(0)),
+                Some(json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": { "elicitation": {} },
+                    "clientInfo": { "name": "LegacyClient", "version": "0.9.0" }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
+        assert!(init.error.is_none());
+        assert!(session_ctx.caps.supports_elicitation());
+
+        let pending = Arc::clone(&session_ctx.pending);
+        let fake_client = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if let WriterMessage::Request(req) = msg
+                    && req.method == "elicitation/create"
+                {
+                    let id = req.id.as_str().unwrap_or_default().to_string();
+                    pending.resolve(&id, ClientResponse::Success(json!({ "action": "decline" })));
+                    return true;
+                }
+            }
+            false
+        });
+
+        // No `_meta` anywhere on this request.
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ssh_cron_remove",
+                "arguments": { "host": "prod", "name": "backup" }
+            })),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session_ctx))
+            .await;
+
+        assert!(
+            fake_client.await.unwrap(),
+            "legacy fallback broken: no elicitation/create was sent"
+        );
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("User declined execution of destructive tool"),
+            "unexpected error text: {text}"
+        );
+    }
+
+    /// Precedence: an explicit empty `clientCapabilities` in the request
+    /// envelope is an authoritative denial and beats a stale handshake flag.
+    #[tokio::test]
+    async fn test_request_meta_empty_capabilities_overrides_initialize() {
+        let mut config = test_config();
+        config.security.require_elicitation_on_destructive = true;
+        let (server, _audit_task) = McpServer::new(config);
+
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_elicitation(true);
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ssh_cron_remove",
+                "arguments": { "host": "prod", "name": "backup" },
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            })),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session_ctx))
+            .await;
+
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("does not support elicitation"),
+            "per-request denial did not override the handshake flag: {text}"
+        );
+    }
 }
