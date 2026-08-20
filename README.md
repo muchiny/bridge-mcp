@@ -585,8 +585,8 @@ Representative tools per group — larger groups (e.g. `kubernetes` has 83,
 | URI pattern | Description |
 |-------------|-------------|
 | `metrics://{host}` | System metrics (CPU, memory, disk, network, load) as JSON |
-| `file://{host}/{path}` | Remote file content |
-| `log://{host}/{path}` | Last lines of a log file |
+| `file://{host}/{+path}` | Remote file content |
+| `log://{host}/{+path}` | Last lines of a log file |
 | `health://{host}` | Health check summary for a host (connectivity, load, key services) |
 | `history://{host}` | Recent command history captured by the bridge for that host |
 | `services://{host}` | Snapshot of active systemd services on the host |
