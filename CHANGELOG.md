@@ -9,8 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-08-19
 
-Major version because this release breaks compatibility in seven places, four
-of them in the public library API. Numbered **2.2.0** rather than 2.0.0: the
+Major version because this release breaks compatibility in **23 places, nine
+of them in the public library API**. The bar used, so the number is checkable
+rather than asserted: a change counts as breaking if it can make a
+previously-working client, operator config or downstream crate stop working —
+or silently behave differently — with no change on their side. Every one is
+enumerated in *Migrating from 1.20.0* below. Numbered **2.2.0** rather than 2.0.0: the
 changelog already carries 2.0.0, 2.0.1 and 2.1.0 from an earlier 2.x line that
 was never tagged, and reusing those numbers would make two different releases
 share one version string. 1.20.0 is the last tagged release; 2.0.0 through
@@ -451,8 +455,14 @@ section.
 
 ### Migrating from 1.20.0
 
-Seven breaking changes, four of them in the public library API. In rough order
-of how likely you are to hit them.
+Twenty-three breaking changes, nine of them in the public library API. In
+rough order of how likely you are to hit them.
+
+An earlier draft of this section said "seven, four of them in the public
+library API" while its own numbered list and table already enumerated more than
+that. The count is now derived from the union of every **BREAKING**-marked
+bullet above and every row of the library table below, deduplicated — so it can
+be re-derived rather than trusted.
 
 **1. `rbac.enabled: true` no longer loads.** If your config has it, the server
 now refuses to start. There is no drop-in replacement, because there never was
@@ -467,7 +477,7 @@ previously returned success with `checksum: null`. Drop `verify_checksum`, or
 transfer with `mode=overwrite` to get a source-side SHA256. Be aware of what
 that SHA256 is and is not: it hashes the local file on upload, or the received
 bytes on download. **No mode has ever compared it against the remote host.**
-Remote-side verification is not implemented in 2.0.0.
+Remote-side verification is not implemented in 2.2.0.
 
 **3. Builds without the `jq` feature reject reduction params.** `jq_filter`,
 `yq_filter` and `output_format` used to be accepted and silently ignored; they
@@ -487,9 +497,53 @@ to be stored and re-exported verbatim.
 any value was passed through to `vec![0u8; n]`; `0` truncated the remote file
 and reported success, and `u64::MAX` aborted the process.
 
+**6. Audit retention starts DELETING files, for the first time in any release.**
+`audit.retain_days` (default **30**) has always been documented and has never
+executed once — the cleanup had no production caller. Wiring rotation into the
+writer task also wired retention, and because the rotation counter is seeded
+from the existing file's length, an operator already over `max_size_mb` gets the
+first sweep on the **first event after upgrading**, not gradually.
+**Before upgrading: confirm `audit.path` lives in a directory dedicated to the
+audit log.** The sweep only removes files matching this log's own rotated-archive
+shape (`<name>.YYYYMMDD_HHMMSS`), never the live log and never unrelated files —
+but it is a real deletion of real archives. Set `retain_days: 0` to opt out.
+
+**7. `tools/call` with a name that is not in the enabled registry now fails.**
+It previously fell through to a generic path. Check your tool names against
+`tools/list` for the groups you actually enabled.
+
+**8. `resources/subscribe` and `resources/unsubscribe` both return `-32601`.**
+The handshake advertises `resources.subscribe: false` because nothing emits
+`notifications/resources/updated`. Subscribe used to hand out a `subscriptionId`
+anyway and unsubscribe used to return `{}` success; both now refuse. No
+notification was ever sent, so nothing that worked stops working.
+
+**9. `resources/templates/list` publishes `{+path}`, not `{path}`.** RFC 6570
+reserved expansion, so a nested path round-trips instead of being
+percent-encoded into an unroutable URI. A client that hardcoded the old template
+string must update it.
+
+**10. Two error codes moved.** `resources/read` on an unconfigured host returns
+`-32602` instead of `-32603` (it is a caller mistake); a per-host rate limit
+stays on `-32603` after briefly being remapped. A client branching on these
+codes must re-check both.
+
+**11. HTTP: a POST carrying only notifications or responses returns `202
+Accepted` with no body**, per the Streamable HTTP transport spec's MUST. It
+previously returned `200`. A client asserting `status == 200` must accept `202`.
+
+**12. stdio: a cancelled request gets no response at all.** The `-32800 Request
+cancelled` write-back is suppressed, per the spec's SHOULD NOT. A stdio client
+that read `-32800` as its cancellation confirmation now gets nothing for that
+request id. The HTTP transport is unaffected.
+
+**13. A Response whose id cannot be determined now serializes `"id": null`**
+instead of omitting the key, which is what JSON-RPC 2.0 requires. A client that
+rejects a null id will need to accept one.
+
 **Library API** (only if you depend on `bridge-mcp` as a crate):
 
-| Item | 1.20.0 | 2.0.0 |
+| Item | 1.20.0 | 2.2.0 |
 |---|---|---|
 | `DataReductionArgs::extract` | returns the args | returns `Result<_>` |
 | `truncate_output_with_cache` | 3 arguments | 4 — adds `reduction_tip` |
@@ -498,6 +552,8 @@ and reported success, and `u64::MAX` aborted the process.
 | `BridgeError` | matchable exhaustively | `#[non_exhaustive]` — a `match` over it needs a `_ =>` arm |
 | `BridgeError::RateLimitExceeded` | — | new variant, `{ host: String }` |
 | `AuditLogger::needs_rotation` / `::rotate` | `pub` | test-only; removed from the public API |
+| `ServerInfo` | no `meta` field | gained public `meta: Option<Value>` |
+| `TaskStore::list_tasks` | returns a tuple | returns `Result<_, InvalidCursor>`; `InvalidCursor` is a new public type |
 
 An empty `log_files` passed to `build_log_aggregate_command` is now an error
 rather than producing a command that did nothing.
