@@ -273,11 +273,17 @@ section.
   still got told to wait for a notification that could never come. It now
   refuses every call with `-32601 Method not found`, matching what a
   client should expect from a capability the server does not advertise, and
-  writes nothing into the per-session map. `resources/unsubscribe` is
-  unaffected and still functions (clearing a now purely hypothetical
-  subscription id is harmless). **Wire-visible**: a client that called
-  `resources/subscribe` despite the `false` capability previously got a
-  `subscriptionId` back; it now gets `-32601`.
+  writes nothing into the per-session map. `resources/unsubscribe` now
+  refuses identically: leaving it returning `{}` success meant a client
+  probing which half of the subscription pair existed got two contradictory
+  answers about one disclaimed capability, and succeeding at cancelling a
+  subscription that can never be created is the same defect one method over.
+  Reference MCP servers register neither handler when `subscribe` is
+  undeclared. **BREAKING (MCP clients)**, **Wire-visible**: a client that
+  called `resources/subscribe` despite the `false` capability previously got
+  a `subscriptionId` back, and `resources/unsubscribe` previously returned
+  `{}` success; both now return `-32601`. Restore both bodies in the same
+  commit that adds the notification emitter, never before.
 - **The published resource template was `ssh://{host}/{path}`, a scheme no
   handler answers (G-7).** `create_default_resource_registry` never
   registered an `ssh` handler, so every expansion of the one template
