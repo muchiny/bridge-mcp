@@ -2027,7 +2027,17 @@ impl McpServer {
             }
             Err(e) => {
                 error!(error = %e, "Resource read failed");
-                JsonRpcResponse::error(id, JsonRpcError::internal_error(e.to_string()))
+                // G-7 (audit 2026-08-19): an unroutable scheme or a malformed
+                // URI is the caller's mistake — the registry reports both as
+                // `McpInvalidRequest`. Everything else (SSH failure, rate
+                // limit, remote error) really is a server-side problem.
+                let error = match &e {
+                    crate::error::BridgeError::McpInvalidRequest(msg) => {
+                        JsonRpcError::invalid_params(msg.clone())
+                    }
+                    _ => JsonRpcError::internal_error(e.to_string()),
+                };
+                JsonRpcResponse::error(id, error)
             }
         }
     }
@@ -4952,6 +4962,9 @@ mod tests {
         assert!(!contents.is_empty());
     }
 
+    /// G-7 (audit 2026-08-19): asking for a scheme the server does not serve
+    /// is a caller mistake (-32602 Invalid params), not a server malfunction
+    /// (-32603 Internal error). Real execution failures keep -32603.
     #[tokio::test]
     async fn test_resources_read_unsupported_scheme() {
         let server = create_test_server();
@@ -4964,6 +4977,25 @@ mod tests {
         assert!(response.error.is_some());
         let error = response.error.unwrap();
         assert!(error.message.contains("ftp"));
+        assert_eq!(
+            error.code, -32602,
+            "an unroutable scheme is Invalid params, not Internal error"
+        );
+    }
+
+    /// The malformed-URI path shares the same `McpInvalidRequest` variant and
+    /// must also report -32602.
+    #[tokio::test]
+    async fn test_resources_read_malformed_uri_is_invalid_params() {
+        let server = create_test_server();
+        let params = json!({ "uri": "health://wrong-target" });
+
+        let response = server
+            .handle_resources_read(Some(json!(1)), Some(params))
+            .await;
+
+        let error = response.error.expect("health://wrong-target must fail");
+        assert_eq!(error.code, -32602, "message was: {}", error.message);
     }
 
     #[tokio::test]

@@ -243,6 +243,11 @@ section.
   `capabilities.resources.subscribe` in the `initialize` response flips from
   `true` to `false`; no client could have relied on a notification that was
   never sent, so nothing that worked stops working.
+- **`resources/read` on an unroutable URI returned `-32603` Internal error
+  instead of `-32602` Invalid params (G-7).** An unsupported scheme or a
+  malformed URI is the caller's mistake, not a server malfunction; only the
+  `BridgeError::McpInvalidRequest` variant is remapped, so a genuine
+  execution failure (SSH down, a remote error) still reports `-32603`.
 
 ### Migrating from 1.20.0
 
