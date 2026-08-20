@@ -214,18 +214,32 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Recent Changes
 
-- **v2.2.0 (2026-08-19)** — major bump for seven breaking changes, four in the
-  public lib API. `rbac.enabled: true` is rejected at load (it was never
-  enforced and granted full access); `verify_checksum` refuses `resume`/`append`
-  instead of returning a checksum-free success; no-`jq` builds error on
-  reduction params; `ssh_history` redacts the command itself, so entropy
-  detection now masks opaque 16+ char arguments; `chunk_size` is clamped to
-  4 KB..=64 MB. Lib: `DataReductionArgs::extract` and
-  `build_log_aggregate_command` return `Result`, `truncate_output_with_cache`
-  and `Metrics::record_pipeline_stats` gained a parameter. Also fixes a
-  permanent hang in `TaskStore::wait_for_result` on TTL eviction, five
-  command-injection sites, and a mutation sweep whose flags cargo-mutants
-  silently ignored. Full migration notes in CHANGELOG.md.
+- **v2.2.0 (2026-08-19)** — major bump for **23 breaking changes, nine in the
+  public lib API**. (An earlier draft of this line, and of the CHANGELOG
+  preamble, said "seven, four in the lib API"; that count never reconciled
+  against its own numbered list and was already wrong before the conformance
+  audit began.) Config/wire: `rbac.enabled: true` is rejected at load (it was
+  never enforced and granted full access); `verify_checksum` refuses
+  `resume`/`append` instead of returning a checksum-free success; no-`jq` builds
+  error on reduction params; `ssh_history` redacts the command itself, so
+  entropy detection now masks opaque 16+ char arguments; `chunk_size` is clamped
+  to 4 KB..=64 MB; `tools/call` rejects an unlisted name; `resources/subscribe`
+  AND `unsubscribe` both return `-32601`; templates publish `{+path}`; a
+  notification-only HTTP POST returns `202`, and a cancelled stdio request gets
+  no response at all. **`audit.retain_days` starts DELETING archives for the
+  first time in any release** — it was documented in every release and executed
+  in none, and it fires on the first event after upgrade; `retain_days: 0` opts
+  out. Lib: `DataReductionArgs::extract` and `build_log_aggregate_command`
+  return `Result`, `truncate_output_with_cache` and
+  `Metrics::record_pipeline_stats` gained a parameter, `BridgeError` is
+  `#[non_exhaustive]` with a new `RateLimitExceeded` variant,
+  `AuditLogger::needs_rotation`/`::rotate` left the public API, `ServerInfo`
+  gained `meta`, and `TaskStore::list_tasks` returns `Result` with a new public
+  `InvalidCursor`. Also fixes a permanent hang in `TaskStore::wait_for_result`
+  on TTL eviction, five command-injection sites, an audit retention sweep that
+  deleted files outside its own lineage, an unbounded rename-retry loop, and a
+  mutation sweep whose flags cargo-mutants silently ignored. Full migration
+  notes in CHANGELOG.md.
 
 - ci-hardening-2026-08: **`rust-toolchain.toml` outranks `rustup default`** — every
   workflow now sets `RUSTUP_TOOLCHAIN` explicitly, because until now every CI job
