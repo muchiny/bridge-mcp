@@ -248,6 +248,15 @@ section.
   malformed URI is the caller's mistake, not a server malfunction; only the
   `BridgeError::McpInvalidRequest` variant is remapped, so a genuine
   execution failure (SSH down, a remote error) still reports `-32603`.
+- **`serverInfo.icons[0].src` was a hard 404 (G-27).** It pointed at the
+  `muchini` org while `serverInfo.websiteUrl` and every repository URL
+  (`Cargo.toml`, `server.json`, `README.md`, `LICENSE`) use `muchiny` — an
+  earlier sweep (see the 1.19.0 entry below) corrected every other instance
+  of this typo but missed this constant. `scripts/check-github-org.sh`, run
+  in CI, now fails the build if the two spellings ever diverge again.
+  `src/mcp/registry.rs`'s group-icon `ICON_BASE_URL` gets the same
+  org-spelling fix and nothing more — it still 404s because `dxt/icons/`
+  does not exist, which its own doc comment already documents as tolerated.
 
 ### Migrating from 1.20.0
 

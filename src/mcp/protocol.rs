@@ -938,8 +938,13 @@ pub const BUILD_REV: &str = env!("BRIDGE_MCP_BUILD_REV");
 pub const BUILD_META_KEY: &str = "io.github.muchiny/build";
 /// URL of the server icon advertised in `ServerInfo` (SEP-973). Points at the
 /// committed `dxt/icon.svg`, served raw from GitHub `main`.
+///
+/// The org is `muchiny`, matching `Cargo.toml`, `server.json` and
+/// `serverInfo.websiteUrl`. `muchini` is the maintainer's unix username and
+/// resolves to nothing on GitHub; `scripts/check-github-org.sh` fails CI if
+/// the two spellings ever diverge again (G-27, audit 2026-08-19).
 pub const SERVER_ICON_URL: &str =
-    "https://raw.githubusercontent.com/muchini/bridge-mcp/main/dxt/icon.svg";
+    "https://raw.githubusercontent.com/muchiny/bridge-mcp/main/dxt/icon.svg";
 
 #[cfg(test)]
 mod tests {
@@ -1369,6 +1374,22 @@ mod tests {
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")),
             "server icon should be an SVG: {SERVER_ICON_URL}"
+        );
+    }
+
+    /// G-27 (audit 2026-08-19): `serverInfo.icons[0].src` pointed at the
+    /// `muchini` org — a hard 404 — while `serverInfo.websiteUrl`
+    /// (src/mcp/server.rs) used `muchiny`, which resolves. CHANGELOG.md:206
+    /// records an earlier sweep of this exact typo that missed the constant.
+    #[test]
+    fn test_server_icon_url_uses_the_canonical_github_org() {
+        assert!(
+            SERVER_ICON_URL.starts_with("https://raw.githubusercontent.com/muchiny/bridge-mcp/"),
+            "icon URL must live under the muchiny org, got: {SERVER_ICON_URL}"
+        );
+        assert!(
+            !SERVER_ICON_URL.contains("muchini"),
+            "muchini is a unix username, not the GitHub org: {SERVER_ICON_URL}"
         );
     }
 

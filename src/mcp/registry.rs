@@ -397,7 +397,10 @@ pub fn tool_meta(tool_name: &str) -> Option<Value> {
 /// Per-group SVGs live under `dxt/icons/<group>.svg` and are served raw from
 /// GitHub `main`. Clients fetch lazily and tolerate a 404, so an unmapped or
 /// not-yet-authored group simply renders without an icon.
-const ICON_BASE_URL: &str = "https://raw.githubusercontent.com/muchini/bridge-mcp/main/dxt/icons";
+// NOTE: still a 404 — `dxt/icons/` does not exist in the tree, which the doc
+// comment above deliberately tolerates. Only the org spelling is corrected
+// here, so `scripts/check-github-org.sh` can enforce a single spelling.
+const ICON_BASE_URL: &str = "https://raw.githubusercontent.com/muchiny/bridge-mcp/main/dxt/icons";
 
 /// Return the icon for a tool group, or `None` for groups without a curated
 /// icon. The curated subset can grow without touching any test (the tests only

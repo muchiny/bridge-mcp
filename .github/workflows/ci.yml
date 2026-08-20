@@ -72,6 +72,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  github-org:
+    name: GitHub org spelling
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: ./scripts/check-github-org.sh
+
   # The fuzz harness is a separate workspace that nothing in this workflow
   # compiled, so it drifted out of sync with the API it exercises and only
   # fuzz.yml — nightly, ASan, ~40 minutes — would have noticed. It did not:
