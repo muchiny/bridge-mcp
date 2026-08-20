@@ -521,9 +521,36 @@ pub struct ResourceTemplate {
 
 // TaskStatus and TaskInfo re-exported from ports::protocol above.
 
+/// Modern (2026-07-28) discriminator telling a client whether a result is
+/// final or a partial it must poll again.
+///
+/// PROVENANCE: only `"complete"` is attested by the 2026-07-28 wire reference
+/// (it appears in the `server/discover` result). `"working"` is chosen here to
+/// reuse the spelling `TaskStatus::Working` already puts on the wire, so a
+/// client sees one vocabulary for "not finished yet". Re-check against
+/// `schema/2026-07-28/schema.ts` before adding a third variant.
+///
+/// `Serialize` only, on purpose: this server emits `resultType` and never
+/// parses one. Adding `Deserialize` would need a catch-all variant, and
+/// serde's `#[serde(other)]` is not available on a plain externally-tagged
+/// enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResultType {
+    /// Final. No further polling required.
+    Complete,
+    /// Not final. Poll again after `TaskInfo::poll_interval` milliseconds.
+    Working,
+}
+
 /// Response for a task-augmented `tools/call` request.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateTaskResult {
+    /// `Working` whenever the server hands back a handle instead of an
+    /// answer. Omitted entirely when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<ResultType>,
     pub task: TaskInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "_meta")]
@@ -1685,6 +1712,7 @@ mod tests {
     #[test]
     fn test_create_task_result_serialization() {
         let result = CreateTaskResult {
+            result_type: None,
             task: TaskInfo {
                 task_id: "task-1".to_string(),
                 status: TaskStatus::Working,
@@ -1705,6 +1733,7 @@ mod tests {
     #[test]
     fn test_create_task_result_with_meta() {
         let result = CreateTaskResult {
+            result_type: None,
             task: TaskInfo {
                 task_id: "task-2".to_string(),
                 status: TaskStatus::Working,
@@ -1723,6 +1752,48 @@ mod tests {
             json["_meta"]["io.modelcontextprotocol/model-immediate-response"],
             "Task started"
         );
+    }
+
+    #[test]
+    fn result_type_serializes_to_the_modern_wire_strings() {
+        assert_eq!(
+            serde_json::to_value(ResultType::Complete).unwrap(),
+            "complete"
+        );
+        assert_eq!(
+            serde_json::to_value(ResultType::Working).unwrap(),
+            "working"
+        );
+    }
+
+    #[test]
+    fn create_task_result_emits_result_type_only_when_present() {
+        let task = TaskInfo {
+            task_id: "task-3".to_string(),
+            status: TaskStatus::Working,
+            status_message: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_updated_at: "2025-01-01T00:00:00Z".to_string(),
+            ttl: 30000,
+            poll_interval: 2000,
+        };
+
+        let without = CreateTaskResult {
+            result_type: None,
+            task: task.clone(),
+            meta: None,
+        };
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(json.get("resultType").is_none());
+
+        let with = CreateTaskResult {
+            result_type: Some(ResultType::Working),
+            task,
+            meta: None,
+        };
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["resultType"], "working");
+        assert_eq!(json["task"]["taskId"], "task-3");
     }
 
     #[test]

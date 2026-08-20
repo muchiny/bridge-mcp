@@ -38,11 +38,11 @@ use super::protocol::{
     Icon, InitializeParams, InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, LogLevel, LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION,
     PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
-    ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
-    SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
-    TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability, TaskResultParams,
-    TaskToolsCapability, TasksCapability, ToolCallParams, ToolCallResult, ToolContent,
-    ToolsCapability, ToolsListResult, WriterMessage,
+    ResourcesListResult, ResourcesReadParams, ResourcesReadResult, ResultType, SERVER_ICON_URL,
+    SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo,
+    TaskCancelParams, TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability,
+    TaskResultParams, TaskToolsCapability, TasksCapability, ToolCallParams, ToolCallResult,
+    ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -1983,8 +1983,10 @@ impl McpServer {
             }
         });
 
-        // Return CreateTaskResult immediately
+        // Return CreateTaskResult immediately. `resultType: "working"` marks
+        // it as a handle, not an answer — the client must poll `tasks/result`.
         let create_result = CreateTaskResult {
+            result_type: Some(ResultType::Working),
             task: task_info,
             meta: None,
         };
