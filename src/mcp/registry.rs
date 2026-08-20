@@ -321,6 +321,20 @@ pub fn inject_reduction_schema(schema: &mut Value, kind: crate::domain::output_k
 /// `inventory::submit!` that this function consults. Tool names not
 /// found in the inventory fall back to `"core"` to preserve the
 /// legacy catch-all behavior for unknown names.
+///
+/// **Known conflation, deferred past 2.2.0 (audit D-F9, 2026-08-20).** The
+/// four `mcp/meta_tools.rs` names — `mcp_list_tool_groups`,
+/// `mcp_search_tools`, `mcp_describe_tool` and `mcp_call_tool` — are virtual:
+/// they never enter the registry inventory, so they take this fallback and
+/// `tools/list?group=core` returns them next to the real core tools
+/// (`ssh_exec`, `ssh_status`, `ssh_health`, …). That one filter query is the
+/// only affected surface — `mcp_list_tool_groups`, `mcp_search_tools` and the
+/// CLI all enumerate `ToolRegistry::list_tools()`, which excludes the
+/// meta-tools entirely. Not fixed here because both available fixes are worse
+/// than the defect: a `"meta"` arm in this function invents a group that
+/// `mcp_list_tool_groups` would never advertise, and making that listing
+/// advertise it moves its counts off the documented 476 tools / 77 groups
+/// (`.migration-baseline.json`).
 #[must_use]
 pub fn tool_group(tool_name: &str) -> &'static str {
     inventory_group_map()
