@@ -86,6 +86,19 @@ pub enum BridgeError {
     #[error("Unknown host: {host}")]
     UnknownHost { host: String },
 
+    /// A per-host rate limit was exhausted.
+    ///
+    /// Deliberately a distinct variant from [`BridgeError::McpInvalidRequest`]
+    /// (fix round 1 of the 2026-08-19 audit corrections, task 33 follow-up):
+    /// an unroutable scheme or malformed URI is the caller's fault
+    /// (`-32602 Invalid params`), but "you are being throttled" is not — the
+    /// request itself was well-formed and the caller should retry, which is
+    /// what `-32603 Internal error` signals. Mapping this to `-32602` would
+    /// tell a throttled client its parameters are malformed and stop it from
+    /// retrying.
+    #[error("Rate limit exceeded for host '{host}'")]
+    RateLimitExceeded { host: String },
+
     // File transfer errors
     #[error("File transfer error: {reason}")]
     FileTransfer { reason: String },

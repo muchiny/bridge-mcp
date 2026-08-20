@@ -257,10 +257,22 @@ section.
   phantom `ssh://<host>/{path}`; no client could have successfully expanded
   the old template, so nothing that worked stops working.
 - **`resources/read` on an unroutable URI returned `-32603` Internal error
-  instead of `-32602` Invalid params (G-7).** An unsupported scheme or a
-  malformed URI is the caller's mistake, not a server malfunction; only the
-  `BridgeError::McpInvalidRequest` variant is remapped, so a genuine
-  execution failure (SSH down, a remote error) still reports `-32603`.
+  instead of `-32602` Invalid params (G-7; corrected in fix round 1 — see
+  below).** An unsupported scheme, a malformed URI, or a host name that
+  isn't configured (`BridgeError::UnknownHost`) are all the caller's
+  mistake, not a server malfunction. **Wire-visible**: error codes exist to
+  be machine-parsed, and the original round of this fix only remapped
+  `McpInvalidRequest`, which left two real cases inverted: `UnknownHost` (a
+  genuine caller mistake) still returned `-32603`, while a per-host rate
+  limit — the request was well-formed, the caller should retry, exactly
+  what `-32603` signals — was itself built as `McpInvalidRequest` in all
+  four resource handlers (`file://`, `log://`, `metrics://`, `services://`)
+  and so newly returned `-32602`, telling a throttled client its parameters
+  were malformed and risking it giving up instead of retrying. Fix round 1
+  adds `UnknownHost` to the `-32602` arm and gives rate limiting its own
+  `BridgeError::RateLimitExceeded` variant that stays on `-32603`. A client
+  that backed off on the old `-32603` for a rate limit and now sees
+  `-32602` instead needs to treat that as transient again, not permanent.
 - **`serverInfo.icons[0].src` was a hard 404 (G-27).** It pointed at the
   `muchini` org while `serverInfo.websiteUrl` and every repository URL
   (`Cargo.toml`, `server.json`, `README.md`, `LICENSE`) use `muchiny` — an

@@ -111,10 +111,9 @@ impl ResourceHandler for FileResourceHandler {
 
         // Check rate limit
         if ctx.rate_limiter.check(&parsed.host).is_err() {
-            return Err(BridgeError::McpInvalidRequest(format!(
-                "Rate limit exceeded for host '{}'",
-                parsed.host
-            )));
+            return Err(BridgeError::RateLimitExceeded {
+                host: parsed.host.clone(),
+            });
         }
 
         let limits = ctx.config.limits.clone();

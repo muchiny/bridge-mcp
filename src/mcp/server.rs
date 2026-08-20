@@ -2027,13 +2027,21 @@ impl McpServer {
             }
             Err(e) => {
                 error!(error = %e, "Resource read failed");
-                // G-7 (audit 2026-08-19): an unroutable scheme or a malformed
-                // URI is the caller's mistake — the registry reports both as
-                // `McpInvalidRequest`. Everything else (SSH failure, rate
-                // limit, remote error) really is a server-side problem.
+                // G-7 (audit 2026-08-19; corrected in fix round 1): an
+                // unroutable scheme, a malformed URI (`McpInvalidRequest`),
+                // or a host name that isn't configured (`UnknownHost`) are
+                // all the caller's mistake. A rate limit is deliberately
+                // NOT in this arm — the request was well-formed and the
+                // caller should retry, which is what `-32603 Internal
+                // error` signals (`BridgeError::RateLimitExceeded` falls to
+                // the `_` arm below). A real execution failure (SSH down, a
+                // remote error) also stays `-32603`.
                 let error = match &e {
                     crate::error::BridgeError::McpInvalidRequest(msg) => {
                         JsonRpcError::invalid_params(msg.clone())
+                    }
+                    crate::error::BridgeError::UnknownHost { .. } => {
+                        JsonRpcError::invalid_params(e.to_string())
                     }
                     _ => JsonRpcError::internal_error(e.to_string()),
                 };
@@ -5014,6 +5022,98 @@ mod tests {
 
         let error = response.error.expect("health://wrong-target must fail");
         assert_eq!(error.code, -32602, "message was: {}", error.message);
+    }
+
+    /// Fix round 1 (audit 2026-08-19, task 33 follow-up): `UnknownHost` is a
+    /// caller mistake exactly like a malformed URI, but was falling through
+    /// to the catch-all `-32603` arm because it isn't `McpInvalidRequest`.
+    #[tokio::test]
+    async fn test_resources_read_unknown_host_is_invalid_params() {
+        let server = create_test_server();
+        let params = json!({ "uri": "file://nosuchhost/etc/passwd" });
+
+        let response = server
+            .handle_resources_read(Some(json!(1)), Some(params))
+            .await;
+
+        let error = response.error.expect("unknown host must fail");
+        assert_eq!(error.code, -32602, "message was: {}", error.message);
+        assert!(error.message.contains("nosuchhost"), "{}", error.message);
+    }
+
+    /// Fix round 1 (audit 2026-08-19, task 33 follow-up): a rate limit is
+    /// NOT the caller's fault — the request was well-formed and should be
+    /// retried — so it must stay `-32603`, not fall into the `-32602` arm
+    /// the way it did when the resource handlers built it as
+    /// `McpInvalidRequest`. Exhausts a 1-token-per-second bucket with two
+    /// back-to-back calls; the second must be rejected by the limiter.
+    #[tokio::test]
+    async fn test_resources_read_rate_limit_is_internal_error() {
+        let mut config = test_config();
+        config.limits = LimitsConfig {
+            rate_limit_per_second: 1,
+            ..LimitsConfig::default()
+        };
+        // Permissive so the "cat" command clears command validation and the
+        // handler actually reaches the rate-limit check on both calls,
+        // rather than failing earlier every time on "not in whitelist".
+        config.security = SecurityConfig {
+            mode: crate::config::SecurityMode::Permissive,
+            ..SecurityConfig::default()
+        };
+        config.hosts.insert(
+            "prod".to_string(),
+            crate::config::HostConfig {
+                hostname: "test.example.com".to_string(),
+                port: 22,
+                user: "tester".to_string(),
+                auth: crate::config::AuthConfig::Agent,
+                description: None,
+                host_key_verification: crate::config::HostKeyVerification::default(),
+                proxy_jump: None,
+                socks_proxy: None,
+                sudo_password: None,
+                tags: Vec::new(),
+                os_type: crate::config::OsType::default(),
+                shell: None,
+                retry: None,
+                protocol: crate::config::Protocol::default(),
+                #[cfg(feature = "winrm")]
+                winrm_use_tls: None,
+                #[cfg(feature = "winrm")]
+                winrm_accept_invalid_certs: None,
+                #[cfg(feature = "winrm")]
+                winrm_operation_timeout_secs: None,
+                #[cfg(feature = "winrm")]
+                winrm_max_envelope_size: None,
+            },
+        );
+        let (server, _audit_task) = McpServer::new(config);
+
+        let params = json!({ "uri": "file://prod/etc/hosts" });
+
+        // First call consumes the single token; whatever it returns (success
+        // or an execution failure) is irrelevant to this test.
+        let _ = server
+            .handle_resources_read(Some(json!(1)), Some(params.clone()))
+            .await;
+
+        // Second call must hit the exhausted bucket.
+        let response = server
+            .handle_resources_read(Some(json!(2)), Some(params))
+            .await;
+
+        let error = response.error.expect("exhausted rate limit must fail");
+        assert_eq!(
+            error.code, -32603,
+            "a rate limit is not a caller mistake, message was: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("Rate limit"),
+            "expected a rate-limit message, got: {}",
+            error.message
+        );
     }
 
     #[tokio::test]

@@ -61,9 +61,9 @@ impl ResourceHandler for ServicesResourceHandler {
                         || echo 'No service manager found'";
 
         if ctx.rate_limiter.check(host).is_err() {
-            return Err(BridgeError::McpInvalidRequest(format!(
-                "Rate limit exceeded for host '{host}'"
-            )));
+            return Err(BridgeError::RateLimitExceeded {
+                host: host.to_string(),
+            });
         }
 
         let limits = ctx.config.limits.clone();
