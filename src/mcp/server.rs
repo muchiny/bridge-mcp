@@ -6475,8 +6475,14 @@ mod tests {
             .handle_request_with_cancel(request, None, Some(&session_ctx))
             .await;
 
+        let elicited = tokio::time::timeout(std::time::Duration::from_secs(5), fake_client)
+            .await
+            .expect(
+                "timed out waiting for elicitation/create — the gate ignored the per-request _meta envelope",
+            )
+            .unwrap();
         assert!(
-            fake_client.await.unwrap(),
+            elicited,
             "server never sent elicitation/create — the gate ignored the per-request _meta envelope"
         );
 
@@ -6584,8 +6590,12 @@ mod tests {
             .handle_request_with_cancel(request, None, Some(&session_ctx))
             .await;
 
+        let elicited = tokio::time::timeout(std::time::Duration::from_secs(5), fake_client)
+            .await
+            .expect("timed out waiting for elicitation/create — legacy fallback broken")
+            .unwrap();
         assert!(
-            fake_client.await.unwrap(),
+            elicited,
             "legacy fallback broken: no elicitation/create was sent"
         );
         let result = response.result.unwrap();
