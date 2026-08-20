@@ -46,7 +46,7 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 - **Auto-discovery** — reads `~/.ssh/config` automatically, merges with YAML config
 - **Smart output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV mode (60-80% token savings), pagination via `ssh_output_fetch`, per-client size limits (see [Token-efficient output](#token-efficient-output))
 - **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 476 schemas up front
-- **MCP Tasks support** — every tool advertises `taskSupport: "optional"`, enabling async cancellation and progress notifications for long-running operations
+- **MCP Tasks support** — every registry tool advertises `taskSupport: "optional"`, enabling async cancellation and progress notifications for long-running operations. The three discovery meta-tools declare `"forbidden"`: they are answered locally, ahead of the task branch, so a task on one returns `-32601` whether it is called directly or wrapped in `mcp_call_tool`
 - **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
 - **Daemon mode** — Unix-socket transport for multi-client local usage; built-in `WinRmPool` (120 s TTL) and `K8sExecPool` (300 s TTL) amortize TLS handshakes across calls
 - **8700+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
