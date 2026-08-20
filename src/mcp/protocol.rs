@@ -1934,7 +1934,7 @@ mod tests {
     fn test_build_rev_is_a_git_sha_or_unknown() {
         // Either a 12-char hex sha (optionally "-dirty"), or "unknown" when
         // the crate was built outside a git checkout (crates.io tarball,
-        // vendored source). Anything else means build.rs mis-parsed git.
+        // vendored source). Anything else means build.rs misread git.
         let core = BUILD_REV.strip_suffix("-dirty").unwrap_or(BUILD_REV);
         assert!(
             core == "unknown" || (core.len() == 12 && core.chars().all(|c| c.is_ascii_hexdigit())),

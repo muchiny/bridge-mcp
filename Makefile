@@ -146,7 +146,11 @@ dev:
 
 # Check for typos in code
 typos:
-	@command -v typos >/dev/null 2>&1 && typos || echo "typos not installed, skipping"
+	@if command -v typos >/dev/null 2>&1; then \
+		typos; \
+	else \
+		echo "typos not installed, skipping"; \
+	fi
 
 # Check for unused dependencies
 machete:
