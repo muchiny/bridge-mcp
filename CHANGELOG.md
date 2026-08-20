@@ -342,13 +342,19 @@ section.
   file in `audit.path`'s parent directory** older than `retain_days`, with
   no filename check — with `audit.path: ~/audit.log`, that would have swept
   the operator's entire home directory. It is now scoped to only this log's
-  own rotated archives, matching the exact `<file name>.<suffix>` shape
-  `rename_with_timestamp` produces; nothing else in that directory is ever
-  touched. **Before upgrading**: confirm `audit.path` lives in a directory
-  dedicated to the audit log, not a shared directory like `$HOME` — the
-  filename filter protects unrelated files, but a stray file that happens
-  to be named `<your audit file name>.anything` is not distinguishable from
-  a real rotated archive. **Opt out**: set `retain_days: 0`, which disables
+  own rotated archives, matching the exact `<file name>.<YYYYmmdd_HHMMSS>`
+  shape `rename_with_timestamp` produces, plus the optional `.<n>`
+  same-second collision counter; nothing else in that directory is ever
+  touched. The first version of that filter matched a bare `<file name>.`
+  prefix — "anything after a dot" — which still swept a second instance's
+  LIVE log at `audit.path: .../audit.log.staging`, and an external
+  logrotate's `audit.log.1` / `audit.log.gz`. Matching the archive shape
+  exactly is what makes the sweep safe. **Before upgrading**: confirm
+  `audit.path` lives in a directory dedicated to the audit log, not a shared
+  directory like `$HOME` — the filename filter protects unrelated files, but
+  a stray file named `<your audit file name>.<14-digit timestamp>` is not
+  distinguishable from a real rotated archive. **Opt out**: set
+  `retain_days: 0`, which disables
   the retention sweep entirely; rotation by `max_size_mb` still runs.
   Decision to wire rather than delete the keys outright: `AuditConfig` is
   `deny_unknown_fields`, so removing `max_size_mb`/`retain_days` would break

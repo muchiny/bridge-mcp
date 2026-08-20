@@ -249,6 +249,47 @@ fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<()>
     std::fs::rename(path, rotated_path)
 }
 
+/// Whether `name` is one of `live_file_name`'s rotated archives, i.e. exactly
+/// the shape `rename_with_timestamp` writes: `<live file name>.<YYYYmmdd_HHMMSS>`
+/// with an optional `.<n>` same-second collision counter.
+///
+/// F2 (re-review of the 2026-08-19 audit corrections): the first fix scoped
+/// the retention sweep with `starts_with("<live file name>.")` — "anything
+/// after a dot". That is not the shape rotation writes, and it captures files
+/// that belong to somebody else: a second instance configured `audit.path:
+/// .../audit.log.staging` has a LIVE log starting with `audit.log.`, so the
+/// busy instance would delete it on its first rotation, silently. An external
+/// logrotate's `audit.log.1` and `audit.log.gz` are caught the same way.
+/// Matching the suffix shape exactly is what makes the sweep safe.
+fn is_own_rotated_archive(name: &str, live_file_name: &str) -> bool {
+    let Some(suffix) = name
+        .strip_prefix(live_file_name)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+
+    // `<YYYYmmdd_HHMMSS>`, optionally followed by `.<n>`.
+    let (timestamp, counter) = match suffix.split_once('.') {
+        Some((timestamp, counter)) => (timestamp, Some(counter)),
+        None => (suffix, None),
+    };
+
+    // Byte-wise so a multibyte filename can never panic on a slice boundary.
+    let timestamp = timestamp.as_bytes();
+    let timestamp_ok = timestamp.len() == 15
+        && timestamp[8] == b'_'
+        && timestamp[..8].iter().all(u8::is_ascii_digit)
+        && timestamp[9..].iter().all(u8::is_ascii_digit);
+
+    let counter_ok = match counter {
+        None => true,
+        Some(counter) => !counter.is_empty() && counter.as_bytes().iter().all(u8::is_ascii_digit),
+    };
+
+    timestamp_ok && counter_ok
+}
+
 /// Remove this log's own rotated archives whose mtime predates the retention
 /// cutoff. `retain_days == 0` disables cleanup.
 ///
@@ -257,7 +298,8 @@ fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<()>
 /// with no filename check — `audit.path: ~/audit.log` swept the operator's
 /// entire home directory. Only files matching `<live file name>.<suffix>`
 /// (the shape `rename_with_timestamp` produces) are eligible; nothing else
-/// in that directory belongs to this writer.
+/// in that directory belongs to this writer. See `is_own_rotated_archive` for
+/// why the match has to be the exact archive shape and not a bare prefix.
 fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
     if retain_days == 0 {
         return;
@@ -269,17 +311,12 @@ fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return;
     };
-    let own_archive_prefix = format!("{file_name}.");
-
     let cutoff = now - chrono::Duration::days(i64::from(retain_days));
 
     if let Ok(entries) = std::fs::read_dir(parent) {
         for entry in entries.flatten() {
-            if !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(&own_archive_prefix)
-            {
+            let entry_name = entry.file_name();
+            if !is_own_rotated_archive(&entry_name.to_string_lossy(), file_name) {
                 continue;
             }
             if let Ok(metadata) = entry.metadata()
@@ -1387,14 +1424,23 @@ mod tests {
 
     #[test]
     fn test_cleanup_old_files_respects_zero_retain_days() {
+        use std::time::{Duration, SystemTime};
+
         let temp_dir = tempfile::tempdir().unwrap();
         let audit_path = temp_dir.path().join("audit.log");
 
         std::fs::write(&audit_path, "current log").unwrap();
 
-        // Create a file that would be old
-        let old_file = temp_dir.path().join("audit.log.old");
+        // A real rotated archive of THIS log, backdated well past any
+        // plausible cutoff. F2 (re-review): this fixture used to be named
+        // `audit.log.old` with a current mtime, so it survived on BOTH
+        // counts and proved nothing about `retain_days: 0`. It now survives
+        // only because the sweep is disabled.
+        let old_file = temp_dir.path().join("audit.log.20200101_000000");
         std::fs::write(&old_file, "old content").unwrap();
+        let old_time = SystemTime::now() - Duration::from_hours(2400); // 100 days
+        filetime::set_file_mtime(&old_file, filetime::FileTime::from_system_time(old_time))
+            .unwrap();
 
         let config = AuditConfig {
             enabled: true,
@@ -1421,8 +1467,11 @@ mod tests {
         let audit_path = temp_dir.path().join("audit.log");
         std::fs::write(&audit_path, "current").unwrap();
 
-        // Create file exactly at the cutoff (should be deleted if using <, kept if using <=)
-        let exactly_at_cutoff = temp_dir.path().join("audit.log.cutoff");
+        // Create file exactly at the cutoff (should be deleted if using <, kept if using <=).
+        // Both fixtures carry the real `<name>.<YYYYmmdd_HHMMSS>` archive
+        // shape (F2); the embedded timestamp is never parsed, the mtime set
+        // below is what retention decides on.
+        let exactly_at_cutoff = temp_dir.path().join("audit.log.20250101_000000");
         std::fs::write(&exactly_at_cutoff, "at cutoff").unwrap();
 
         // Set mtime to exactly 30 days ago
@@ -1436,7 +1485,7 @@ mod tests {
         .unwrap();
 
         // Create file just before cutoff (31 days ago, should definitely be deleted)
-        let before_cutoff = temp_dir.path().join("audit.log.old31");
+        let before_cutoff = temp_dir.path().join("audit.log.20241201_000000");
         std::fs::write(&before_cutoff, "31 days old").unwrap();
         let old_time = SystemTime::now() - Duration::from_hours(744);
         filetime::set_file_mtime(
@@ -1529,7 +1578,96 @@ mod tests {
         assert!(
             lookalike.exists(),
             "a name that merely starts with the live log's name, but isn't \
-             <name>.<suffix>, must survive"
+             <name>.<timestamp>, must survive"
+        );
+    }
+
+    /// F2 (re-review of the 2026-08-19 audit corrections): the first fix
+    /// scoped the sweep with `starts_with("<live file name>.")` -- i.e.
+    /// "anything after a dot". That is not the shape `rename_with_timestamp`
+    /// writes, and it captures files that belong to somebody else. A SECOND
+    /// bridge-mcp instance configured `audit.path: .../audit.log.staging`
+    /// has a LIVE log whose name starts with `audit.log.`, so the busy
+    /// instance deletes it on its first rotation -- silently, since removal
+    /// is `let _ = std::fs::remove_file(...)`. An external logrotate's
+    /// `audit.log.1` and `audit.log.gz` are swept by the same predicate.
+    /// Only the exact `<name>.<YYYYmmdd_HHMMSS>` shape, with the optional
+    /// `.<n>` same-second collision counter, is this writer's to delete.
+    #[test]
+    fn test_cleanup_never_deletes_a_sibling_instances_live_log() {
+        use std::time::{Duration, SystemTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+        std::fs::write(&audit_path, "current log").unwrap();
+
+        // A second instance's LIVE audit log, and one of ITS rotated
+        // archives. Both start with `audit.log.`; neither is ours.
+        let sibling_live = temp_dir.path().join("audit.log.staging");
+        std::fs::write(&sibling_live, "the other instance's live log").unwrap();
+        let sibling_archive = temp_dir.path().join("audit.log.staging.20260101_000000");
+        std::fs::write(&sibling_archive, "the other instance's archive").unwrap();
+
+        // An external logrotate's output for the same file.
+        let logrotate_numbered = temp_dir.path().join("audit.log.1");
+        std::fs::write(&logrotate_numbered, "logrotate copy").unwrap();
+        let logrotate_gz = temp_dir.path().join("audit.log.gz");
+        std::fs::write(&logrotate_gz, "logrotate compressed").unwrap();
+
+        // Ours, and it must still be swept -- the fix must not overcorrect
+        // into deleting nothing.
+        let own_archive = temp_dir.path().join("audit.log.20200101_000000");
+        std::fs::write(&own_archive, "our archive").unwrap();
+        let own_collision_archive = temp_dir.path().join("audit.log.20200101_000000.1");
+        std::fs::write(&own_collision_archive, "our same-second archive").unwrap();
+
+        let old_time = SystemTime::now() - Duration::from_hours(2400); // 100 days
+        for f in [
+            &sibling_live,
+            &sibling_archive,
+            &logrotate_numbered,
+            &logrotate_gz,
+            &own_archive,
+            &own_collision_archive,
+        ] {
+            filetime::set_file_mtime(f, filetime::FileTime::from_system_time(old_time)).unwrap();
+        }
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path,
+            max_size_mb: 10,
+            retain_days: 30,
+        };
+
+        let (logger, _) = AuditLogger::new(&config).unwrap();
+        logger.cleanup_old_files();
+
+        assert!(
+            sibling_live.exists(),
+            "another instance's LIVE audit log must never be deleted by this \
+             instance's retention sweep"
+        );
+        assert!(
+            sibling_archive.exists(),
+            "another instance's rotated archive must never be deleted by this \
+             instance's retention sweep"
+        );
+        assert!(
+            logrotate_numbered.exists(),
+            "an external logrotate's audit.log.1 is not ours to delete"
+        );
+        assert!(
+            logrotate_gz.exists(),
+            "an external logrotate's audit.log.gz is not ours to delete"
+        );
+        assert!(
+            !own_archive.exists(),
+            "our own expired archive must still be swept"
+        );
+        assert!(
+            !own_collision_archive.exists(),
+            "our own expired same-second-collision archive must still be swept"
         );
     }
 
@@ -1702,10 +1840,13 @@ mod tests {
         // `old_audit.log` / `recent_audit.log` -- filenames that are NOT
         // `<live file name>.<suffix>`, which only ever passed because
         // `cleanup_old_audit_files` had no filename filter at all (the
-        // CRITICAL bug fixed alongside this test). Renamed to real rotated
-        // archives of `audit.log` so this test exercises the retention
-        // boundary through code that would now reject the old names.
-        let old_file = temp_dir.path().join("audit.log.old31");
+        // CRITICAL bug fixed alongside this test). F2 (re-review): the
+        // replacements `audit.log.old31` / `audit.log.recent` were not the
+        // archive shape either -- they only passed the prefix-only
+        // predicate that F2 replaced. These are real
+        // `<name>.<YYYYmmdd_HHMMSS>` archives now. The embedded timestamp is
+        // never parsed: retention is decided on the file's mtime, set below.
+        let old_file = temp_dir.path().join("audit.log.20250701_000000");
         fs::write(&old_file, "old data").unwrap();
         let old_time = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - std::time::Duration::from_hours(744),
@@ -1713,7 +1854,7 @@ mod tests {
         filetime::set_file_mtime(&old_file, old_time).unwrap();
 
         // Create a recent rotated archive (today)
-        let recent_file = temp_dir.path().join("audit.log.recent");
+        let recent_file = temp_dir.path().join("audit.log.20260801_120000");
         fs::write(&recent_file, "recent data").unwrap();
 
         let config = AuditConfig {
