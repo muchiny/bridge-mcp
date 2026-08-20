@@ -6401,4 +6401,116 @@ mod tests {
         assert!(ctx.client_supports_elicitation);
         assert!(ctx.client_supports_sampling);
     }
+
+    /// THE compatibility-seam test for 3.0.0.
+    ///
+    /// No `initialize` ever happens — a Modern (2026-07-28) client's very
+    /// first message is `tools/call`, and the only place it declares
+    /// elicitation support is the per-request `_meta` envelope. The
+    /// fail-closed destructive gate (`server.rs:451`) must honour that
+    /// declaration, otherwise every `destructive_hint: true` tool starts
+    /// refusing the moment the handshake is deleted.
+    #[tokio::test]
+    async fn test_destructive_gate_honours_elicitation_from_request_meta_only() {
+        let mut config = test_config();
+        config.security.require_elicitation_on_destructive = true;
+        let (server, _audit_task) = McpServer::new(config);
+
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        // Proof of the premise: no handshake ran, so the session flags are
+        // all false and only the envelope can grant the capability.
+        assert!(!session_ctx.caps.supports_elicitation());
+
+        // Fake Modern client: wait for the server's `elicitation/create`,
+        // then decline it. Reaching this point at all proves the capability
+        // check passed on the strength of `_meta` alone.
+        let pending = Arc::clone(&session_ctx.pending);
+        let fake_client = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if let WriterMessage::Request(req) = msg
+                    && req.method == "elicitation/create"
+                {
+                    let id = req.id.as_str().unwrap_or_default().to_string();
+                    pending.resolve(&id, ClientResponse::Success(json!({ "action": "decline" })));
+                    return true;
+                }
+            }
+            false
+        });
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ssh_cron_remove",
+                "arguments": { "host": "prod", "name": "backup" },
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "ExampleClient",
+                        "version": "1.0.0"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} }
+                }
+            })),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session_ctx))
+            .await;
+
+        assert!(
+            fake_client.await.unwrap(),
+            "server never sent elicitation/create — the gate ignored the per-request _meta envelope"
+        );
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            !text.contains("does not support elicitation"),
+            "gate rejected on capability instead of eliciting: {text}"
+        );
+        assert!(
+            text.contains("User declined execution of destructive tool"),
+            "unexpected error text: {text}"
+        );
+    }
+
+    /// The fail-closed half: a request with NO envelope and no handshake
+    /// must still be refused. Without this, the test above could pass by
+    /// the gate having been disabled rather than by the seam working.
+    #[tokio::test]
+    async fn test_destructive_gate_still_refuses_without_meta_or_handshake() {
+        let mut config = test_config();
+        config.security.require_elicitation_on_destructive = true;
+        let (server, _audit_task) = McpServer::new(config);
+
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ssh_cron_remove",
+                "arguments": { "host": "prod", "name": "backup" }
+            })),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session_ctx))
+            .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("does not support elicitation"),
+            "unexpected error text: {text}"
+        );
+    }
 }
