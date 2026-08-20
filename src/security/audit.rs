@@ -1003,6 +1003,82 @@ mod tests {
         );
     }
 
+    /// G-26's BREAKING marker rests entirely on `AuditWriterTask`'s
+    /// `written_bytes` being SEEDED from the live file's existing length in
+    /// `AuditLogger::new`: an operator already carrying a log over
+    /// `max_size_mb` gets rotation — and therefore the retention sweep — on
+    /// the very FIRST event after upgrading, not gradually. That is the
+    /// whole reason the CHANGELOG calls the change a step function rather
+    /// than a slow ramp.
+    ///
+    /// F12 (re-review of the 2026-08-19 audit corrections): replacing that
+    /// seeding with `let written_bytes = 0;` left every single test in this
+    /// module green. The most consequential behaviour in the change had no
+    /// coverage at all. This is that test:
+    /// `test_writer_task_rotates_past_max_size` reaches the threshold by
+    /// writing 1.5 MiB of events, so it passes with or without the seeding;
+    /// here ONE small event is the entire write volume, and only the seed
+    /// can carry the counter over the threshold.
+    #[tokio::test]
+    async fn test_writer_task_seeds_written_bytes_from_existing_log() {
+        // A log left behind by a pre-upgrade run, already past max_size_mb.
+        const PRE_EXISTING: usize = 2 * 1024 * 1024;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+        std::fs::write(&audit_path, vec![b'x'; PRE_EXISTING]).unwrap();
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 1,
+            retain_days: 7,
+        };
+
+        let (logger, task) = AuditLogger::new(&config).unwrap();
+        let handle = tokio::spawn(task.expect("enabled audit must yield a writer task").run());
+
+        // Exactly one small event: a few hundred bytes, nowhere near 1 MiB.
+        logger.log(AuditEvent::new(
+            "seed-host",
+            "echo hi",
+            CommandResult::Success {
+                exit_code: 0,
+                duration_ms: 1,
+            },
+        ));
+
+        drop(logger); // closes the channel so run() returns
+        handle.await.unwrap();
+
+        let archives: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| is_own_rotated_archive(&e.file_name().to_string_lossy(), "audit.log"))
+            .collect();
+
+        assert_eq!(
+            archives.len(),
+            1,
+            "a single small event on an already-oversized log must rotate it \
+             immediately: written_bytes has to be seeded from the file's \
+             existing length, not from zero"
+        );
+
+        let archived_len = std::fs::metadata(archives[0].path()).unwrap().len();
+        assert!(
+            archived_len > PRE_EXISTING as u64,
+            "the archive must carry the pre-existing bytes plus the event \
+             that tripped rotation, got {archived_len}"
+        );
+
+        let live_len = std::fs::metadata(&audit_path).unwrap().len();
+        assert_eq!(
+            live_len, 0,
+            "the reopened live log must start empty after rotation"
+        );
+    }
+
     /// IMPORTANT (fix round 1 of the 2026-08-19 audit corrections): before
     /// this fix, a reopen failure after a successful rename left `self.file`
     /// pointing at the RENAMED (now-archived) inode with `written_bytes`
