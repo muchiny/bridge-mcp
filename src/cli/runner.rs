@@ -251,8 +251,12 @@ pub async fn run_list_tools(
     use crate::mcp::registry::{create_filtered_registry, tool_group};
 
     let registry = create_filtered_registry(&config.tool_groups);
+    // Already name-sorted: `ToolRegistry::list_tools` sorts before returning
+    // (audit G-14), and `search_is_deterministic_and_ranks_name_matches_first`
+    // pins that. The extra `sort_by` this line used to carry was a no-op that
+    // read as load-bearing (audit D-F8, 2026-08-20). `retain` below still
+    // needs the binding to be `mut`.
     let mut tools = registry.list_tools();
-    tools.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Filter by group if specified
     if let Some(group_filter) = group {
