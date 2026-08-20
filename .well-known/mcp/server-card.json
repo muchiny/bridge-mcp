@@ -1,14 +1,13 @@
 {
   "name": "bridge-mcp",
   "version": "2.2.0",
-  "description": "Secure SSH bridge for AI-powered remote server management. 476 tools across 77 groups covering Linux, Windows, Docker, Kubernetes, and more.",
+  "description": "Secure SSH bridge for AI-powered remote server management. 476 tools across 77 groups covering Linux, Windows, Docker, Kubernetes, and more. MCP 2026-07-28 (Modern) only.",
   "capabilities": {
     "tools": true,
     "resources": true,
     "prompts": true,
     "sampling": true,
     "elicitation": true,
-    "tasks": true,
     "structured_output": true,
     "completions": true,
     "logging": true,
@@ -18,6 +17,18 @@
     "stdio",
     "streamable-http"
   ],
+  "modern_only": true,
+  "protocol_notes": {
+    "opens_with": "server/discover",
+    "per_request_meta": [
+      "io.modelcontextprotocol/protocolVersion",
+      "io.modelcontextprotocol/clientInfo",
+      "io.modelcontextprotocol/clientCapabilities"
+    ],
+    "notifications": "opt-in via subscriptions/listen; every notification carries _meta[\"io.modelcontextprotocol/subscriptionId\"]",
+    "legacy_initialize": "answered with -32022 { supported: [\"2026-07-28\"] }; pre-Modern clients cannot fall forward",
+    "http": "POST /mcp only; GET and DELETE return 405. No Mcp-Session-Id, no Last-Event-ID, no stream resumption."
+  },
   "authentication": [
     "oauth2",
     "jwt"
@@ -29,6 +40,10 @@
   "license": "MIT",
   "mcp_version": "2025-11-25",
   "extensions": {
+    "io.modelcontextprotocol/tasks": {
+      "supported": true,
+      "description": "Async task execution. Declared under capabilities.extensions in the server/discover result rather than as a core capability. Task-augmented tool calls return a task handle that the client polls; the handle is also what the server may return unsolicited for a long-running call."
+    },
     "progressive_discovery": {
       "supported": true,
       "description": "Three meta-tools let clients discover the registry on demand instead of loading all 476 schemas up front. Call mcp_list_tool_groups first (~77 entries), then mcp_search_tools to narrow by keyword, then mcp_describe_tool for the one full schema you need. All three are read-only and argument-validated locally.",
