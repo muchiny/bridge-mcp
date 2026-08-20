@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -84,6 +85,15 @@ pub struct AuditWriterTask {
     rx: mpsc::UnboundedReceiver<AuditEvent>,
     file: File,
     sanitizer: Option<Arc<crate::security::Sanitizer>>,
+    /// Live audit log path, needed to rename and reopen on rotation.
+    path: PathBuf,
+    /// `max_size_mb` in bytes. `0` disables rotation.
+    max_bytes: u64,
+    retain_days: u32,
+    /// Bytes in the live file. Seeded from the file's current length so a
+    /// restart on an already-large log rotates on the next event instead of
+    /// growing without bound.
+    written_bytes: u64,
 }
 
 impl AuditWriterTask {
@@ -99,17 +109,109 @@ impl AuditWriterTask {
             }
             if let Ok(json) = serde_json::to_string(&event) {
                 let line = format!("{json}\n");
+                let line_len = line.len() as u64;
                 // Clone file handle for spawn_blocking
                 if let Ok(mut file) = self.file.try_clone() {
-                    let _ = tokio::task::spawn_blocking(move || {
+                    let written = tokio::task::spawn_blocking(move || {
                         if let Err(e) = file.write_all(line.as_bytes()) {
                             warn!(error = %e, "Failed to write audit event to file");
+                            return false;
                         }
                         if let Err(e) = file.flush() {
                             warn!(error = %e, "Failed to flush audit log file");
+                            return false;
                         }
+                        true
                     })
-                    .await;
+                    .await
+                    .unwrap_or(false);
+
+                    if written {
+                        self.written_bytes = self.written_bytes.saturating_add(line_len);
+                        self.rotate_if_needed();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rotate the live audit log once it has grown past `max_size_mb`.
+    ///
+    /// G-26 (audit 2026-08-19): this is the ONLY production caller of
+    /// rotation. It has to live here because this task owns the open `File`
+    /// handle — renaming the path from anywhere else would leave every later
+    /// event appended to the renamed inode.
+    ///
+    /// A rotation failure is logged and swallowed: dropping audit events
+    /// because a rename failed would be strictly worse than an oversized log.
+    fn rotate_if_needed(&mut self) {
+        if self.max_bytes == 0 || self.written_bytes < self.max_bytes {
+            return;
+        }
+
+        if let Err(e) = rename_with_timestamp(&self.path, Utc::now()) {
+            warn!(error = %e, "Failed to rotate audit log; continuing on the current file");
+            return;
+        }
+        cleanup_old_audit_files(&self.path, self.retain_days, Utc::now());
+
+        match open_audit_file(&self.path) {
+            Ok(file) => {
+                self.file = file;
+                self.written_bytes = 0;
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to reopen audit log after rotation");
+            }
+        }
+    }
+}
+
+/// Open (creating if needed) the audit log in append mode, 0600 on unix.
+fn open_audit_file(path: &Path) -> std::io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+/// Rename `path` to `<file_name>.<YYYYmmdd_HHMMSS>` in the same directory.
+fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<()> {
+    let timestamp = now.format("%Y%m%d_%H%M%S");
+    let rotated_name = format!(
+        "{}.{timestamp}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("audit.log")
+    );
+    std::fs::rename(path, path.with_file_name(rotated_name))
+}
+
+/// Remove files in the audit directory whose mtime predates the retention
+/// cutoff. `retain_days == 0` disables cleanup.
+fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
+    if retain_days == 0 {
+        return;
+    }
+
+    let Some(parent) = path.parent() else {
+        return;
+    };
+
+    let cutoff = now - chrono::Duration::days(i64::from(retain_days));
+
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata()
+                && let Ok(modified) = metadata.modified()
+            {
+                let modified: DateTime<Utc> = modified.into();
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(entry.path());
                 }
             }
         }
@@ -134,16 +236,10 @@ impl AuditLogger {
             std::fs::create_dir_all(parent)?;
         }
 
-        let file = {
-            let mut opts = OpenOptions::new();
-            opts.create(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            opts.open(&config.path)?
-        };
+        let file = open_audit_file(&config.path)?;
+        // Seed the rotation counter from the existing file so a restart on an
+        // already-oversized log rotates on the next event (G-26).
+        let written_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
 
         // Create channel for async logging
         let (tx, rx) = mpsc::unbounded_channel();
@@ -159,6 +255,10 @@ impl AuditLogger {
             rx,
             file,
             sanitizer: None,
+            path: config.path.clone(),
+            max_bytes: config.max_size_mb.saturating_mul(1024 * 1024),
+            retain_days: config.retain_days,
+            written_bytes,
         };
 
         Ok((logger, Some(task)))
@@ -299,18 +399,7 @@ impl AuditLogger {
             return Ok(());
         }
 
-        // Generate rotated filename with timestamp
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-        let rotated_name = format!(
-            "{}.{timestamp}",
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("audit.log")
-        );
-        let rotated_path = path.with_file_name(rotated_name);
-
-        // Rename current file
-        std::fs::rename(path, &rotated_path)?;
+        rename_with_timestamp(path, Utc::now())?;
 
         // Clean up old files if retention is configured
         self.cleanup_old_files();
@@ -319,30 +408,12 @@ impl AuditLogger {
     }
 
     /// Remove audit files older than retention period
+    ///
+    /// Uses the injectable clock (`now_fn`) so the retention boundary stays
+    /// deterministically testable; the writer task calls the same helper with
+    /// the real clock.
     fn cleanup_old_files(&self) {
-        let retain_days = self.config.retain_days;
-        if retain_days == 0 {
-            return;
-        }
-
-        let Some(parent) = self.config.path.parent() else {
-            return;
-        };
-
-        let cutoff = (self.now_fn)() - chrono::Duration::days(i64::from(retain_days));
-
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata()
-                    && let Ok(modified) = metadata.modified()
-                {
-                    let modified: DateTime<Utc> = modified.into();
-                    if modified < cutoff {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
-        }
+        cleanup_old_audit_files(&self.config.path, self.config.retain_days, (self.now_fn)());
     }
 }
 
@@ -724,6 +795,10 @@ mod tests {
             rx,
             file,
             sanitizer: None,
+            path: audit_path.clone(),
+            max_bytes: 0, // rotation disabled: this test only checks the write path
+            retain_days: 7,
+            written_bytes: 0,
         };
 
         // Send an event
@@ -753,6 +828,108 @@ mod tests {
         assert!(contents.contains("writer-test-host"));
         assert!(contents.contains("echo writer-test"));
         assert!(contents.contains("42"));
+    }
+
+    /// G-26 (audit 2026-08-19): `rotate()` and `needs_rotation()` have existed
+    /// since the first release with NO production caller in any branch or tag,
+    /// while README.md documents `max_size_mb` / `retain_days` as working
+    /// settings. The writer task owns the file handle, so it is the only place
+    /// that can rename and reopen; this test drives the real task.
+    #[tokio::test]
+    async fn test_writer_task_rotates_past_max_size() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 1,
+            retain_days: 7,
+        };
+
+        let (logger, task) = AuditLogger::new(&config).unwrap();
+        let handle = tokio::spawn(task.expect("enabled audit must yield a writer task").run());
+
+        // 24 events x ~64 KiB of command text = ~1.5 MiB: one rotation at the
+        // 16th event, then ~0.5 MiB in the fresh file. Exactly one rotation.
+        let big_command = "x".repeat(64 * 1024);
+        for _ in 0..24 {
+            logger.log(AuditEvent::new(
+                "rotate-host",
+                &big_command,
+                CommandResult::Success {
+                    exit_code: 0,
+                    duration_ms: 1,
+                },
+            ));
+        }
+
+        drop(logger); // closes the channel so run() returns
+        handle.await.unwrap();
+
+        let rotated: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("audit.log."))
+            .collect();
+
+        assert_eq!(
+            rotated.len(),
+            1,
+            "writer task must rotate exactly once past max_size_mb"
+        );
+        assert!(
+            audit_path.exists(),
+            "writer task must reopen the live audit log after rotating"
+        );
+
+        let live_len = std::fs::metadata(&audit_path).unwrap().len();
+        assert!(
+            live_len > 0 && live_len < 1024 * 1024,
+            "post-rotation log must start fresh and keep receiving events, got {live_len} bytes"
+        );
+    }
+
+    /// `max_size_mb: 0` must DISABLE rotation in the writer task rather than
+    /// rotate on every single event (which would shred the log directory).
+    #[tokio::test]
+    async fn test_writer_task_treats_zero_max_size_as_disabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 0,
+            retain_days: 7,
+        };
+
+        let (logger, task) = AuditLogger::new(&config).unwrap();
+        let handle = tokio::spawn(task.unwrap().run());
+
+        for _ in 0..3 {
+            logger.log(AuditEvent::new(
+                "zero-host",
+                "echo hi",
+                CommandResult::Success {
+                    exit_code: 0,
+                    duration_ms: 1,
+                },
+            ));
+        }
+
+        drop(logger);
+        handle.await.unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "max_size_mb=0 must not rotate: expected only audit.log"
+        );
     }
 
     #[test]
