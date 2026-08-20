@@ -6,9 +6,8 @@
 <img src="dxt/icon.svg" alt="Bridge MCP" width="96" height="96">
 
 [![CI](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/muchiny/bridge-mcp/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/bridge-mcp?style=flat-square&logo=rust)](https://crates.io/crates/bridge-mcp)
-[![docs.rs](https://img.shields.io/docsrs/bridge-mcp?style=flat-square)](https://docs.rs/bridge-mcp)
-[![Downloads](https://img.shields.io/crates/d/bridge-mcp?style=flat-square)](https://crates.io/crates/bridge-mcp)
+[![Release](https://img.shields.io/github/v/release/muchiny/bridge-mcp?style=flat-square&logo=rust)](https://github.com/muchiny/bridge-mcp/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/muchiny/bridge-mcp/total?style=flat-square)](https://github.com/muchiny/bridge-mcp/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
 
