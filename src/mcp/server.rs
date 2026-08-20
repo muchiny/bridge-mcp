@@ -26,6 +26,7 @@ use super::logger::McpLogger;
 use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{IncomingMessage, JsonRpcMessage, RootsListResult};
+use super::request_meta::RequestMeta;
 use super::session_context::{NotificationFanout, SessionContext};
 use super::transport::{Session, Transport, stdio::StdioTransport};
 
@@ -450,7 +451,7 @@ impl McpServer {
                 "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is enabled, but no session context is available — the operation cannot be confirmed."
             ));
         };
-        if !session.caps.supports_elicitation() {
+        if !session.supports_elicitation() {
             return Err(format!(
                 "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is enabled, but the client does not support elicitation. Either upgrade the client or set `security.require_elicitation_on_destructive: false`."
             ));
@@ -558,8 +559,8 @@ impl McpServer {
         // longer holds global `client_supports_*` flags. Snapshot the
         // current session's flags into `ToolContext`; default to `false`
         // when no session handle is available (legacy non-MCP code paths).
-        ctx.client_supports_elicitation = session.is_some_and(|s| s.caps.supports_elicitation());
-        ctx.client_supports_sampling = session.is_some_and(|s| s.caps.supports_sampling());
+        ctx.client_supports_elicitation = session.is_some_and(SessionContext::supports_elicitation);
+        ctx.client_supports_sampling = session.is_some_and(SessionContext::supports_sampling);
         ctx.mcp_logger = self.mcp_logger.read().await.as_ref().map(Arc::clone);
         ctx
     }
@@ -1082,7 +1083,13 @@ impl McpServer {
 
         // Handle client notifications (no response needed per JSON-RPC 2.0)
         if message.method.as_deref() == Some("notifications/roots/list_changed") {
-            Self::handle_roots_changed(session);
+            // This branch bypasses `handle_request_with_cancel`, so attach
+            // the notification's own `_meta` envelope here — otherwise a
+            // Modern client that declares `roots` per-request would be
+            // ignored by the `supports_roots()` gate in `spawn_fetch_roots`.
+            let scoped =
+                session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
+            Self::handle_roots_changed(&scoped);
             return None;
         }
         if message.method.as_deref() == Some("notifications/cancelled") {
@@ -1133,7 +1140,7 @@ impl McpServer {
     /// `session.roots` synchronously, and a client that never answers
     /// simply leaves the slot empty.
     fn spawn_fetch_roots(session: &SessionContext) {
-        if !session.caps.supports_roots() {
+        if !session.supports_roots() {
             return;
         }
         let session = session.clone();
@@ -1154,7 +1161,7 @@ impl McpServer {
     /// Always call via [`Self::spawn_fetch_roots`] from the reader loop —
     /// awaiting this inline deadlocks the session (audit 2026-08-02).
     async fn fetch_roots(session: &SessionContext) {
-        if !session.caps.supports_roots() {
+        if !session.supports_roots() {
             return;
         }
 
@@ -1229,6 +1236,16 @@ impl McpServer {
         session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
         let id = request.id.clone();
+
+        // Per-request `_meta` envelope (MCP 2026-07-28). Parsed ONCE here,
+        // at the single dispatch chokepoint, and attached to a per-request
+        // clone of the session bundle. Every downstream consumer already
+        // receives `Option<&SessionContext>`, so no handler signature
+        // changes. Parsing must happen before `handle_tools_call`, which
+        // consumes `params` by value into `ToolCallParams`.
+        let scoped_session =
+            session.map(|s| s.with_request_meta(RequestMeta::from_params(request.params.as_ref())));
+        let session = scoped_session.as_ref();
 
         match request.method.as_str() {
             "initialize" => self.handle_initialize(id, request.params, session).await,
@@ -6324,5 +6341,64 @@ mod tests {
         );
         assert_eq!(build["rev"], BUILD_REV);
         assert_eq!(build["version"], SERVER_VERSION);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_attaches_request_meta_to_the_session_clone() {
+        // `handle_request_with_cancel` must parse `params._meta` and hand the
+        // handlers a session clone that carries it — without mutating the
+        // session-level bundle.
+        let server = create_test_server();
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "ExampleClient",
+                        "version": "1.0.0"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} }
+                }
+            })),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session_ctx))
+            .await;
+        assert!(response.error.is_none());
+
+        // The session-level bundle is untouched by the request-level parse.
+        assert!(session_ctx.request_meta.is_none());
+        assert!(!session_ctx.supports_elicitation());
+    }
+
+    #[tokio::test]
+    async fn test_tool_context_capability_flags_come_from_request_meta() {
+        let server = create_test_server();
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let base = SessionContext::new(tx);
+        // No `initialize` ever ran.
+        assert!(!base.caps.supports_elicitation());
+        assert!(!base.caps.supports_sampling());
+
+        let params = json!({
+            "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {},
+                    "sampling": {}
+                }
+            }
+        });
+        let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
+
+        let ctx = server.create_tool_context(None, None, Some(&scoped)).await;
+        assert!(ctx.client_supports_elicitation);
+        assert!(ctx.client_supports_sampling);
     }
 }
