@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::AuditConfig;
 
@@ -155,13 +155,45 @@ impl AuditWriterTask {
         }
         cleanup_old_audit_files(&self.path, self.retain_days, Utc::now());
 
+        self.reopen_after_rotation();
+    }
+
+    /// Reopen the live audit log after `rotate_if_needed` has already
+    /// renamed it aside.
+    ///
+    /// IMPORTANT (fix round 1 of the 2026-08-19 audit corrections): a
+    /// failure here used to be a `warn!` with `self.file` and
+    /// `written_bytes` left untouched. Since the rename already succeeded,
+    /// `self.file` was left pointing at the RENAMED (now-archived) inode —
+    /// every subsequent event would keep landing in a file nobody tails,
+    /// and because `written_bytes` was never reset, `rotate_if_needed`
+    /// would immediately try to rotate again on the very next event,
+    /// calling `rename_with_timestamp` on a source that no longer exists at
+    /// `self.path` — failing the exact same way, forever, once per event.
+    /// A rename(2) syscall failing on every single event is strictly worse
+    /// than the oversized-log problem rotation exists to solve.
+    ///
+    /// On failure this now logs once, at `error!` (a human should notice
+    /// this), and permanently disables further rotation attempts for this
+    /// task by zeroing `max_bytes` — `rotate_if_needed`'s guard clause then
+    /// short-circuits on every future call. Events keep landing in the
+    /// renamed file until the process restarts; that is a known, bounded
+    /// degradation instead of an unbounded per-event retry loop.
+    fn reopen_after_rotation(&mut self) {
         match open_audit_file(&self.path) {
             Ok(file) => {
                 self.file = file;
                 self.written_bytes = 0;
             }
             Err(e) => {
-                warn!(error = %e, "Failed to reopen audit log after rotation");
+                error!(
+                    error = %e,
+                    path = %self.path.display(),
+                    "Failed to reopen audit log after rotation; disabling further \
+                     rotation for this run (events will keep landing in the \
+                     rotated file until the process restarts)"
+                );
+                self.max_bytes = 0;
             }
         }
     }
@@ -905,6 +937,58 @@ mod tests {
         assert!(
             live_len > 0 && live_len < 1024 * 1024,
             "post-rotation log must start fresh and keep receiving events, got {live_len} bytes"
+        );
+    }
+
+    /// IMPORTANT (fix round 1 of the 2026-08-19 audit corrections): before
+    /// this fix, a reopen failure after a successful rename left `self.file`
+    /// pointing at the RENAMED (now-archived) inode with `written_bytes`
+    /// untouched -- so every later event kept landing in a file nobody
+    /// tails, AND every later event re-attempted the rename, which fails
+    /// every time (the source no longer exists at `self.path`), forever.
+    /// The fix must instead permanently disable further rotation attempts
+    /// once a reopen fails, logging once rather than looping.
+    ///
+    /// `reopen_after_rotation` is unit-tested directly (rather than through
+    /// the full rename+reopen chain) because a filesystem state where rename
+    /// legitimately succeeds but the immediately following create at the
+    /// vacated name legitimately fails is not reproducible portably without
+    /// racing the OS -- disk-full and inode-exhaustion are the only real
+    /// causes, and this test cannot safely manufacture either on a shared
+    /// dev VM. A missing parent directory reproduces the reopen failure
+    /// deterministically and portably.
+    #[test]
+    fn test_reopen_after_rotation_failure_disables_further_rotation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Parent directory does not exist: open_audit_file must fail with
+        // ENOENT, deterministically and without touching any OS resource
+        // limit or filling the disk.
+        let unreachable_path = temp_dir.path().join("missing-dir").join("audit.log");
+
+        // Placeholder handle for the `file` field; its own path is
+        // irrelevant to what's under test (open_audit_file's success/failure
+        // on `path`).
+        let placeholder_path = temp_dir.path().join("placeholder.log");
+        let file = open_audit_file(&placeholder_path).unwrap();
+
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut task = AuditWriterTask {
+            rx,
+            file,
+            sanitizer: None,
+            path: unreachable_path,
+            max_bytes: 1,
+            retain_days: 7,
+            written_bytes: 999,
+        };
+
+        task.reopen_after_rotation();
+
+        assert_eq!(
+            task.max_bytes, 0,
+            "a reopen failure must permanently disable further rotation \
+             attempts instead of retry-looping a rename that can only fail \
+             the same way forever"
         );
     }
 
