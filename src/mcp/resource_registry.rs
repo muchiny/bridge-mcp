@@ -87,8 +87,17 @@ impl ResourceRegistry {
     ///
     /// Used by `resources/templates/list` tests to prove that every published
     /// `uriTemplate` can actually be routed by `read`.
+    ///
+    /// `#[cfg(test)]` (fix round 1, audit 2026-08-19, MINOR): its only
+    /// caller is a same-crate test, unlike `templated_handlers`, which
+    /// `handle_resource_templates_list` actually calls in production. New
+    /// public API with no production caller is exactly the pattern this
+    /// batch exists to delete; `pub(crate)` alone still left it flagged as
+    /// dead code in a non-test build, so it is test-only rather than
+    /// merely crate-scoped.
+    #[cfg(test)]
     #[must_use]
-    pub fn schemes(&self) -> Vec<&'static str> {
+    pub(crate) fn schemes(&self) -> Vec<&'static str> {
         self.handlers.iter().map(|h| h.scheme()).collect()
     }
 

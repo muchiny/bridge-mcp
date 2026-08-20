@@ -212,15 +212,28 @@ fn open_audit_file(path: &Path) -> std::io::Result<File> {
 }
 
 /// Rename `path` to `<file_name>.<YYYYmmdd_HHMMSS>` in the same directory.
+///
+/// MINOR (fix round 1, audit 2026-08-19): `%Y%m%d_%H%M%S` is one-second
+/// resolution. Two rotations inside the same wall-clock second used to
+/// collide on this name, and `fs::rename` silently clobbers an existing
+/// destination on Unix — the first archive would just vanish. If the
+/// timestamped name is already taken, an incrementing numeric suffix is
+/// appended until a free name is found, so a collision loses nothing.
 fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<()> {
     let timestamp = now.format("%Y%m%d_%H%M%S");
-    let rotated_name = format!(
-        "{}.{timestamp}",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("audit.log")
-    );
-    std::fs::rename(path, path.with_file_name(rotated_name))
+    let base_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audit.log");
+
+    let mut rotated_path = path.with_file_name(format!("{base_name}.{timestamp}"));
+    let mut suffix: u32 = 1;
+    while rotated_path.exists() {
+        rotated_path = path.with_file_name(format!("{base_name}.{timestamp}.{suffix}"));
+        suffix += 1;
+    }
+
+    std::fs::rename(path, rotated_path)
 }
 
 /// Remove this log's own rotated archives whose mtime predates the retention
@@ -1146,6 +1159,59 @@ mod tests {
         assert!(
             rotated_name.starts_with("rotate-test.log."),
             "Rotated file should have timestamp suffix"
+        );
+    }
+
+    /// MINOR (fix round 1 of the 2026-08-19 audit corrections): the rotated
+    /// name is `<file name>.<YYYYmmdd_HHMMSS>` -- one-second resolution.
+    /// Two rotations within the same wall-clock second previously collided
+    /// on that name and `fs::rename` silently clobbered the first archive.
+    /// Drives `rename_with_timestamp` directly with a FIXED `now` twice in
+    /// a row (rather than racing the real clock) to deterministically
+    /// reproduce the same-second collision.
+    #[test]
+    fn test_rename_with_timestamp_does_not_clobber_a_same_second_collision() {
+        fn fixed_now() -> DateTime<Utc> {
+            chrono::DateTime::parse_from_rfc3339("2026-01-31T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+
+        std::fs::write(&audit_path, "first rotation's content").unwrap();
+        rename_with_timestamp(&audit_path, fixed_now()).unwrap();
+
+        // A second rotation in the SAME second: a fresh live file appears
+        // again at the original path (as the writer task's reopen does),
+        // and rotates again with an identical timestamp.
+        std::fs::write(&audit_path, "second rotation's content").unwrap();
+        rename_with_timestamp(&audit_path, fixed_now()).unwrap();
+
+        let archived: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("audit.log."))
+            .collect();
+
+        assert_eq!(
+            archived.len(),
+            2,
+            "two same-second rotations must produce two distinct archives, not one clobbered file"
+        );
+
+        let contents: std::collections::HashSet<String> = archived
+            .iter()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect();
+        assert!(
+            contents.contains("first rotation's content"),
+            "the first archive must survive the second rotation"
+        );
+        assert!(
+            contents.contains("second rotation's content"),
+            "the second archive must also be present"
         );
     }
 
