@@ -2037,11 +2037,19 @@ impl McpServer {
                 // unroutable scheme, a malformed URI (`McpInvalidRequest`),
                 // or a host name that isn't configured (`UnknownHost`) are
                 // all the caller's mistake. A rate limit is deliberately
-                // NOT in this arm — the request was well-formed and the
-                // caller should retry, which is what `-32603 Internal
-                // error` signals (`BridgeError::RateLimitExceeded` falls to
-                // the `_` arm below). A real execution failure (SSH down, a
-                // remote error) also stays `-32603`.
+                // NOT in this arm — the request was well-formed, so it keeps
+                // the `-32603` it returned before task 33 touched this path
+                // (`BridgeError::RateLimitExceeded` falls to the `_` arm
+                // below). A real execution failure (SSH down, a remote
+                // error) also stays `-32603`.
+                //
+                // F10 (batch H re-review): `-32603` is NOT a spec signal to
+                // retry. JSON-RPC 2.0 calls it "Internal JSON-RPC error" and
+                // says nothing about retryability; MCP defines no rate-limit
+                // code. It is used here because it restores prior behaviour
+                // and `-32602` was actively harmful. A dedicated
+                // `-32000..=-32099` code with `error.data.retryAfter` is
+                // filed for 3.0.0.
                 let error = match &e {
                     crate::error::BridgeError::McpInvalidRequest(msg) => {
                         JsonRpcError::invalid_params(msg.clone())

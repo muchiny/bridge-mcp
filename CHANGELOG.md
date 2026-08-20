@@ -305,15 +305,22 @@ section.
   be machine-parsed, and the original round of this fix only remapped
   `McpInvalidRequest`, which left two real cases inverted: `UnknownHost` (a
   genuine caller mistake) still returned `-32603`, while a per-host rate
-  limit — the request was well-formed, the caller should retry, exactly
-  what `-32603` signals — was itself built as `McpInvalidRequest` in all
-  four resource handlers (`file://`, `log://`, `metrics://`, `services://`)
-  and so newly returned `-32602`, telling a throttled client its parameters
-  were malformed and risking it giving up instead of retrying. Fix round 1
-  adds `UnknownHost` to the `-32602` arm and gives rate limiting its own
-  `BridgeError::RateLimitExceeded` variant that stays on `-32603`. A client
-  that backed off on the old `-32603` for a rate limit and now sees
-  `-32602` instead needs to treat that as transient again, not permanent.
+  limit — where the request was well-formed — was itself built as
+  `McpInvalidRequest` in all four resource handlers (`file://`, `log://`,
+  `metrics://`, `services://`) and so newly returned `-32602`, telling a
+  throttled client its parameters were malformed and risking it giving up
+  instead of retrying. Fix round 1 adds `UnknownHost` to the `-32602` arm
+  and gives rate limiting its own `BridgeError::RateLimitExceeded` variant
+  that stays on `-32603`. A client that backed off on the old `-32603` for a
+  rate limit and now sees `-32602` instead needs to treat that as transient
+  again, not permanent.
+  Note on `-32603`: it is kept here because it restores prior behaviour and
+  because `-32602` is actively harmful, **not** because it carries retry
+  semantics. JSON-RPC 2.0 defines `-32603` as "Internal JSON-RPC error" and
+  says nothing about retryability; MCP defines no rate-limit code. A
+  dedicated code from the implementation-defined `-32000..=-32099` range,
+  carrying `error.data.retryAfter`, is the correct destination and is filed
+  for 3.0.0 rather than changing the code twice inside one release.
 - **`serverInfo.icons[0].src` was a hard 404 (G-27).** It pointed at the
   `muchini` org while `serverInfo.websiteUrl` and every repository URL
   (`Cargo.toml`, `server.json`, `README.md`, `LICENSE`) use `muchiny` — an

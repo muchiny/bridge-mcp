@@ -103,10 +103,21 @@ pub enum BridgeError {
     /// (fix round 1 of the 2026-08-19 audit corrections, task 33 follow-up):
     /// an unroutable scheme or malformed URI is the caller's fault
     /// (`-32602 Invalid params`), but "you are being throttled" is not — the
-    /// request itself was well-formed and the caller should retry, which is
-    /// what `-32603 Internal error` signals. Mapping this to `-32602` would
-    /// tell a throttled client its parameters are malformed and stop it from
-    /// retrying.
+    /// request itself was well-formed. This variant keeps `-32603 Internal
+    /// error`, which is what a rate limit returned before task 33 touched
+    /// this path; mapping it to `-32602` would tell a throttled client its
+    /// parameters are malformed and stop it from retrying.
+    ///
+    /// CORRECTION (F10 of the 2026-08-19 batch H re-review): earlier wording
+    /// here claimed `-32603` "signals the caller should retry". It does not.
+    /// JSON-RPC 2.0 defines `-32603` as "Internal JSON-RPC error" and says
+    /// nothing about retryability, and MCP defines no rate-limit code at all.
+    /// `-32603` is chosen here because it restores prior behaviour and
+    /// because `-32602` is actively harmful, not because any spec grants it
+    /// retry semantics. The correct destination is a dedicated code from
+    /// JSON-RPC's implementation-defined `-32000..=-32099` range carrying
+    /// `error.data.retryAfter`; that is filed for 3.0.0, since changing the
+    /// code again inside 2.2.0 would be a second wire break for one fix.
     #[error("Rate limit exceeded for host '{host}'")]
     RateLimitExceeded { host: String },
 
