@@ -27,7 +27,7 @@
   "homepage": "https://github.com/muchiny/bridge-mcp",
   "repository": "https://github.com/muchiny/bridge-mcp",
   "license": "MIT",
-  "mcp_version": "2025-11-25",
+  "mcp_version": "2026-07-28",
   "extensions": {
     "progressive_discovery": {
       "supported": true,

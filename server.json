@@ -13,7 +13,7 @@
     "stdio",
     "streamable-http"
   ],
-  "mcpVersion": "2025-11-25",
+  "mcpVersion": "2026-07-28",
   "capabilities": {
     "tools": true,
     "resources": true,

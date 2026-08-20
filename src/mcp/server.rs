@@ -2830,7 +2830,7 @@ mod tests {
     async fn test_handle_initialize_negotiates_matching_version() {
         let server = create_test_server();
         let params = json!({
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": "2026-07-28",
             "capabilities": {},
             "clientInfo": {
                 "name": "test-client",
@@ -2845,7 +2845,7 @@ mod tests {
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         // Server echoes back the client's version when supported
-        assert_eq!(result["protocolVersion"], "2025-11-25");
+        assert_eq!(result["protocolVersion"], "2026-07-28");
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
         assert_eq!(result["serverInfo"]["version"], SERVER_VERSION);
         assert!(result["capabilities"]["tools"].is_object());
@@ -2889,28 +2889,6 @@ mod tests {
             "listChanged IS honored (config reload broadcasts \
              resources_list_changed) and must stay advertised"
         );
-    }
-
-    #[tokio::test]
-    async fn test_handle_initialize_negotiates_older_version() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        // Server echoes back an older supported version
-        assert_eq!(result["protocolVersion"], "2025-06-18");
     }
 
     #[tokio::test]
@@ -3987,8 +3965,15 @@ mod tests {
         // `clientInfo` is missing, so `InitializeParams` deserialization
         // fails outright — the whole `params` object used to be discarded in
         // a `debug!`, silently downgrading the session to our latest version.
+        //
+        // NON-DISCRIMINATING since task 11 (3.0.0, Modern-only): with a
+        // single supported version, "recovered from the raw Value" and
+        // "fell back to PROTOCOL_VERSION" now yield the same string, so this
+        // assertion can no longer tell the two paths apart. It is kept only
+        // as an interim green while `handle_initialize` still exists; task
+        // 15 deletes both `initialize` negotiation and this test.
         let params = json!({
-            "protocolVersion": "2025-06-18",
+            "protocolVersion": "2026-07-28",
             "capabilities": { "elicitation": {} }
         });
 
@@ -3999,7 +3984,7 @@ mod tests {
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         assert_eq!(
-            result["protocolVersion"], "2025-06-18",
+            result["protocolVersion"], "2026-07-28",
             "a supported protocolVersion must survive a failed typed parse"
         );
     }
@@ -4032,11 +4017,18 @@ mod tests {
         // and `clientInfo` entirely — including `capabilities.elicitation`,
         // which the destructive-tool gate depends on
         // (`require_elicitation_on_destructive` defaults to true).
+        //
+        // The `protocolVersion` assertion below is NON-DISCRIMINATING since
+        // task 11 (3.0.0, Modern-only): with a single supported version,
+        // "recovered from the raw Value" and "fell back to PROTOCOL_VERSION"
+        // now yield the same string. The `supports_elicitation()` assertion
+        // is unaffected and still proves what it always did. Both die in
+        // task 15 along with the rest of `initialize` negotiation.
         let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         let params = json!({
-            "protocolVersion": "2025-06-18",
+            "protocolVersion": "2026-07-28",
             "capabilities": { "elicitation": {} },
             "clientInfo": { "name": "test-client" }
         });
@@ -4047,7 +4039,7 @@ mod tests {
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        assert_eq!(result["protocolVersion"], "2025-06-18");
+        assert_eq!(result["protocolVersion"], "2026-07-28");
         assert!(
             session_ctx.caps.supports_elicitation(),
             "omitting only clientInfo.version must not drop capabilities.elicitation"

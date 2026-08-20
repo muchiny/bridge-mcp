@@ -978,8 +978,14 @@ pub struct RootsListResult {
 // MCP Protocol Version
 // ============================================================================
 
-pub const PROTOCOL_VERSION: &str = "2025-11-25";
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
+/// The single MCP revision this server speaks ("Modern", 2026-07-28).
+pub const PROTOCOL_VERSION: &str = "2026-07-28";
+/// Every revision this server accepts, most-preferred first.
+///
+/// Modern-only by design (3.0.0). This slice is also the `data.supported`
+/// payload of the `-32022 UnsupportedProtocolVersionError` returned to Legacy
+/// clients that still send `initialize`.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2026-07-28"];
 pub const SERVER_NAME: &str = "bridge-mcp";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Git revision this binary was compiled from: 12 hex chars, optionally
@@ -1294,13 +1300,24 @@ mod tests {
         assert!(SERVER_VERSION.contains('.'));
     }
 
+    /// bridge-mcp 3.0.0 speaks MCP 2026-07-28 ("Modern") and nothing else.
+    ///
+    /// The 2025-11-25 / 2025-06-18 / 2024-11-05 ("Legacy") revisions were
+    /// dropped deliberately: there is no dual-era maintenance period. The one
+    /// remnant of Legacy is the `initialize` arm that answers `-32022` with
+    /// this very list (see `JsonRpcError::unsupported_protocol_version`),
+    /// because a Legacy client cannot fall forward on its own.
     #[test]
-    fn test_supported_protocol_versions_includes_latest() {
+    fn test_supported_protocol_versions_is_modern_only() {
+        assert_eq!(PROTOCOL_VERSION, "2026-07-28");
+        assert_eq!(
+            SUPPORTED_PROTOCOL_VERSIONS.len(),
+            1,
+            "3.0.0 is Modern-only; adding a Legacy revision here re-opens \
+             dual-era maintenance"
+        );
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS[0], "2026-07-28");
         assert_eq!(SUPPORTED_PROTOCOL_VERSIONS[0], PROTOCOL_VERSION);
-        assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&"2025-11-25"));
-        assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&"2025-06-18"));
-        assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&"2024-11-05"));
-        // All versions should be valid YYYY-MM-DD format
         for v in SUPPORTED_PROTOCOL_VERSIONS {
             assert_eq!(v.len(), 10, "Version {v} is not YYYY-MM-DD format");
         }
