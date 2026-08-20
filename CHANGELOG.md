@@ -198,12 +198,20 @@ section.
   `JsonRpcRequest` from any message carrying a `method`, without checking
   whether `id` was present, then always wrote the result back as an HTTP
   response body — violating JSON-RPC 2.0 §4.1/§5 the same way the stdio
-  transport did before that was fixed. The HTTP *batch* path in this same
-  file already gated correctly (`request.id.is_none()`); the single-message
-  path now gates the same way, still dispatching through `handle_request`
-  so side effects run, but returning `200` with no body instead of a
-  response when `id` is absent — consistent with what the batch path
-  already returns for an all-notifications batch (`200` with `[]`).
+  transport did before that was fixed. The single-message path now gates on
+  `id` presence exactly like the pre-existing *batch* path already did
+  (`request.id.is_none()`), still dispatching through `handle_request` so
+  the method is at least attempted, but suppressing the response write-back
+  when `id` is absent.
+  **Wire-visible, both paths:** a suppressed response is now `202 Accepted`
+  with no body, per the Streamable HTTP transport spec's MUST for a POST
+  body consisting solely of notifications/responses. This also corrects the
+  pre-existing all-notifications *batch* case, which used to return `200`
+  with an empty `[]` — that was left in place as "matches the batch path"
+  in an earlier draft of this fix, then reversed on review, because a known
+  MUST violation staying in place because it agreed with another MUST
+  violation is exactly the failure shape this corrections pass exists to
+  remove. Both arms move to `202` together so they cannot re-diverge.
 
 ### Migrating from 1.20.0
 

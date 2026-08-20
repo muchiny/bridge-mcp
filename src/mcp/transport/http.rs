@@ -520,9 +520,12 @@ async fn handle_post(
             // Gate on that, not on the method name — the batch arm below
             // does the same (`request.id.is_none()`), and the stdio
             // transport's `McpServer::route_incoming_message` gates
-            // identically. Still dispatch through `handle_request` so any
-            // side effects (e.g. `notifications/initialized`) run; only the
-            // response write-back is suppressed.
+            // identically. Still dispatch through `handle_request` for
+            // symmetry with the batch arm, even though
+            // `handle_request_with_cancel` has no arm for any
+            // `notifications/*` method today — it falls through to
+            // `method_not_found`, which is discarded below just like any
+            // real result would be.
             let is_notification = msg.id.is_none();
             let request = crate::mcp::protocol::JsonRpcRequest {
                 jsonrpc: msg.jsonrpc,
@@ -533,10 +536,12 @@ async fn handle_post(
             let resp = state.server.handle_request(request).await;
             if is_notification {
                 // §5: "the receiver must not send a response to a
-                // notification". No JSON-RPC body at all — 200 to match
-                // what the batch arm already returns for an
-                // all-notifications batch (`Json(Vec::new())`, i.e. 200).
-                return StatusCode::OK.into_response();
+                // notification". The Streamable HTTP transport spec is
+                // explicit: a POST body consisting solely of notifications
+                // (or responses) MUST get HTTP 202 Accepted with no body.
+                // The batch arm below applies the same rule to an
+                // all-notifications batch.
+                return StatusCode::ACCEPTED.into_response();
             }
             let mut response = Json(resp).into_response();
             response.headers_mut().insert(
@@ -564,6 +569,13 @@ async fn handle_post(
                 if !is_notification {
                     responses.push(resp);
                 }
+            }
+            if responses.is_empty() {
+                // Every message in the batch was a notification (or a bare
+                // response/method-less message) — nothing to answer. Same
+                // rule as the single-message arm above: HTTP 202 Accepted,
+                // no body, not `200` with an empty `[]`.
+                return StatusCode::ACCEPTED.into_response();
             }
             let mut response = Json(responses).into_response();
             response.headers_mut().insert(
@@ -1084,6 +1096,12 @@ mod tests {
     // single-message path built and returned a full JsonRpcResponse
     // regardless. Mirrors the stdio fix (`McpServer::route_incoming_message`,
     // gated on `message.id.is_none()`, not on the method name).
+    //
+    // Status code: the Streamable HTTP transport spec MUST-requires 202
+    // Accepted with no body when the POST body is solely notifications (or
+    // responses) — both this arm and the all-notifications batch arm below
+    // return 202, not 200, so the two paths agree instead of each picking
+    // its own answer to the same situation.
 
     #[tokio::test]
     async fn test_post_single_notification_gets_no_response_body() {
@@ -1107,7 +1125,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -1147,6 +1165,80 @@ mod tests {
             .unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["id"], serde_json::json!(7));
+    }
+
+    #[tokio::test]
+    async fn test_post_batch_all_notifications_gets_202_no_body() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // A batch where every message is id-less must get the same
+        // treatment as a single notification: 202, no body — not the old
+        // `200` with an empty `[]`.
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","method":"ping"}]"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            body.is_empty(),
+            "an all-notifications batch must get no JSON-RPC response body, got: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_batch_mixed_still_returns_200_with_responses() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // A batch with at least one real request is unaffected by the
+        // notification-suppression change: normal 200 with a JSON array
+        // carrying only the answered request's response.
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","id":1,"method":"ping"}]"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        let arr = json
+            .as_array()
+            .expect("batch response must be a JSON array");
+        assert_eq!(
+            arr.len(),
+            1,
+            "the notification must not appear in the batch response"
+        );
+        assert_eq!(arr[0]["id"], serde_json::json!(1));
     }
 
     // ========================================================================
