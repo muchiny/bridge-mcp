@@ -431,9 +431,19 @@ and reported success, and `u64::MAX` aborted the process.
 | `truncate_output_with_cache` | 3 arguments | 4 — adds `reduction_tip` |
 | `Metrics::record_pipeline_stats` | 4 arguments | 5 — adds `params_used` |
 | `build_log_aggregate_command` | returns `String` | returns `Result<String>` |
+| `BridgeError` | matchable exhaustively | `#[non_exhaustive]` — a `match` over it needs a `_ =>` arm |
+| `BridgeError::RateLimitExceeded` | — | new variant, `{ host: String }` |
 
 An empty `log_files` passed to `build_log_aggregate_command` is now an error
 rather than producing a command that did nothing.
+
+`BridgeError` gained a variant (`RateLimitExceeded`, for a per-host rate limit
+that used to surface as `McpInvalidRequest`) and, in the same release,
+`#[non_exhaustive]`. Adding the variant on its own would have broken every
+downstream exhaustive `match` silently — nothing in this repo's own test suite
+notices. `#[non_exhaustive]` makes that a compile error once, in a release that
+is already breaking, and makes every future variant additive. Add a `_ =>` arm
+to any `match` over `BridgeError`.
 
 **What has NOT changed, despite appearances.** Refusing the dishonest
 `verify_checksum` modes is not the same as implementing honest verification,

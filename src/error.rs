@@ -1,6 +1,17 @@
 use thiserror::Error;
 
+/// Every error this crate produces.
+///
+/// F5 (re-review of the 2026-08-19 audit corrections): this enum is
+/// `#[non_exhaustive]`. Without it, adding a variant — as 2.2.0 did with
+/// [`BridgeError::RateLimitExceeded`] — breaks every downstream crate that
+/// matches on it exhaustively, and does so silently as far as this repo's
+/// own test suite is concerned. The attribute makes that a compile error
+/// for downstream code exactly once, here in 2.2.0, which is already a
+/// breaking release; every later variant is then additive. Downstream
+/// matches need a `_ =>` arm.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum BridgeError {
     // Configuration errors
     #[error("Configuration error: {0}")]
