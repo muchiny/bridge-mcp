@@ -333,7 +333,12 @@ section.
   code had never executed once in any release, so turning it on is not
   correcting a claim, it is performing a destructive operation for the
   first time. Three things make this BREAKING rather than a quiet fix:
-  (1) deletion is silent (`let _ = std::fs::remove_file(...)`, no log line);
+  (1) it deletes files an operator has never had deleted before — the sweep
+  emits `audit retention swept archives` at `info!` with the number removed
+  and the cutoff, and a `warn!` per file it could not remove, but a log line
+  is not a prompt and nothing asks first (it was entirely silent —
+  `let _ = std::fs::remove_file(...)` — until the fix round that added the
+  logging);
   (2) `AuditWriterTask::written_bytes` is seeded from the live file's
   existing length at startup, so an operator already carrying a log over
   `max_size_mb` gets rotation — and therefore the retention sweep — on the

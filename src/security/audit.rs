@@ -308,6 +308,13 @@ fn is_own_rotated_archive(name: &str, live_file_name: &str) -> bool {
 /// (the shape `rename_with_timestamp` produces) are eligible; nothing else
 /// in that directory belongs to this writer. See `is_own_rotated_archive` for
 /// why the match has to be the exact archive shape and not a bare prefix.
+///
+/// F7 (re-review): the sweep is no longer silent. Removal used to be
+/// `let _ = std::fs::remove_file(...)` with no log line and no counter, so a
+/// sweep that deleted nothing (EACCES, EBUSY, an already-vanished file) was
+/// indistinguishable from one that deleted every archive in the directory —
+/// on the very release that turns this destructive code path on for the
+/// first time.
 fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
     if retain_days == 0 {
         return;
@@ -321,22 +328,42 @@ fn cleanup_old_audit_files(path: &Path, retain_days: u32, now: DateTime<Utc>) {
     };
     let cutoff = now - chrono::Duration::days(i64::from(retain_days));
 
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let entry_name = entry.file_name();
-            if !is_own_rotated_archive(&entry_name.to_string_lossy(), file_name) {
-                continue;
-            }
-            if let Ok(metadata) = entry.metadata()
-                && let Ok(modified) = metadata.modified()
-            {
-                let modified: DateTime<Utc> = modified.into();
-                if modified < cutoff {
-                    let _ = std::fs::remove_file(entry.path());
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!(
+                error = %e,
+                directory = %parent.display(),
+                "Failed to scan the audit directory for expired archives"
+            );
+            return;
+        }
+    };
+
+    let mut removed: usize = 0;
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        if !is_own_rotated_archive(&entry_name.to_string_lossy(), file_name) {
+            continue;
+        }
+        if let Ok(metadata) = entry.metadata()
+            && let Ok(modified) = metadata.modified()
+        {
+            let modified: DateTime<Utc> = modified.into();
+            if modified < cutoff {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(e) => warn!(
+                        error = %e,
+                        archive = %entry.path().display(),
+                        "Failed to remove an expired audit archive"
+                    ),
                 }
             }
         }
     }
+
+    info!(removed, cutoff = %cutoff, "audit retention swept archives");
 }
 
 impl AuditLogger {
@@ -1777,6 +1804,59 @@ mod tests {
         assert!(
             !own_collision_archive.exists(),
             "our own expired same-second-collision archive must still be swept"
+        );
+    }
+
+    /// F7 (re-review of the 2026-08-19 audit corrections): removal was
+    /// `let _ = std::fs::remove_file(...)` with no log line anywhere, and no
+    /// counter. The CHANGELOG names silent deletion as reason (1) for G-26's
+    /// BREAKING marker and then leaves it silent. On the first release where
+    /// this code path deletes anything at all, a sweep that removed nothing
+    /// (EACCES, EBUSY, an already-vanished file) has to be distinguishable
+    /// from one that removed every archive in the directory.
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_cleanup_logs_what_it_swept() {
+        use std::time::{Duration, SystemTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+        std::fs::write(&audit_path, "current log").unwrap();
+
+        let expired_a = temp_dir.path().join("audit.log.20200101_000000");
+        let expired_b = temp_dir.path().join("audit.log.20200102_000000");
+        for f in [&expired_a, &expired_b] {
+            std::fs::write(f, "old archive").unwrap();
+            filetime::set_file_mtime(
+                f,
+                filetime::FileTime::from_system_time(
+                    SystemTime::now() - Duration::from_hours(2400), // 100 days
+                ),
+            )
+            .unwrap();
+        }
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path,
+            max_size_mb: 10,
+            retain_days: 30,
+        };
+
+        let (logger, _) = AuditLogger::new(&config).unwrap();
+        logger.cleanup_old_files();
+
+        assert!(
+            !expired_a.exists() && !expired_b.exists(),
+            "both expired archives must actually be swept"
+        );
+        assert!(
+            logs_contain("audit retention swept archives"),
+            "the retention sweep must leave a log line saying it ran"
+        );
+        assert!(
+            logs_contain("removed=2"),
+            "the retention sweep must report HOW MANY archives it deleted"
         );
     }
 
