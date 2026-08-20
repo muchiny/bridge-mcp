@@ -257,6 +257,16 @@ section.
   `src/mcp/registry.rs`'s group-icon `ICON_BASE_URL` gets the same
   org-spelling fix and nothing more — it still 404s because `dxt/icons/`
   does not exist, which its own doc comment already documents as tolerated.
+- **`bridge-mcp status` claimed CLI audit events are persisted when they are
+  not (G-13).** `create_context` binds the `AuditWriterTask` to `_audit_task`
+  and drops it, so `AuditLogger::log`'s `let _ = sender.send(event)` discards
+  every CLI-mode event — they still reach `log_to_tracing`, so they are
+  non-durable rather than absent. `status` printed a bare `Enabled: true`
+  next to the configured `Path:`, reading as a promise that the file is
+  being written. The status text now says CLI events reach tracing only and
+  that the path is written by the MCP server, not by CLI commands. Durable
+  CLI audit (threading the writer task out of `create_context` and joining
+  it before exit) is out of scope for this release.
 
 ### Migrating from 1.20.0
 

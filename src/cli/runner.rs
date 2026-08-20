@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::config::{Config, ShellType};
+use crate::config::{AuditConfig, Config, ShellType};
 use crate::domain::ExecuteCommandUseCase;
 use crate::domain::output_truncator::truncate_chars;
 use crate::domain::use_cases::shell;
@@ -665,6 +665,33 @@ pub async fn run_exec(
     Ok(())
 }
 
+/// Render the `Audit:` block of `bridge-mcp status`.
+///
+/// G-13 (audit 2026-08-19): CLI mode never spawns the audit writer task —
+/// `create_context` above binds it to `_audit_task` and drops it, so
+/// `AuditLogger::log`'s `let _ = sender.send(event)` discards every CLI event
+/// and nothing is ever appended to `audit.path`. The events are not lost
+/// outright: `log_to_tracing` still emits them, so they appear under
+/// `RUST_LOG`. Printing a bare `Enabled: true` next to a `Path:` line read as
+/// a promise of a durable file that no CLI command writes.
+///
+/// Durable CLI audit is out of scope for 2.2.0 (it means threading the writer
+/// task out of `create_context` and joining it before exit at every call
+/// site). This function only makes the claim honest.
+fn audit_status_lines(audit: &AuditConfig) -> Vec<String> {
+    if !audit.enabled {
+        return vec!["  Enabled: false".to_string()];
+    }
+
+    vec![
+        "  Enabled: true (config) - CLI commands log to tracing only".to_string(),
+        format!(
+            "  Path: {} (written by the MCP server only, not by CLI commands)",
+            audit.path.display()
+        ),
+    ]
+}
+
 /// Show configured hosts and security settings
 ///
 /// # Errors
@@ -733,9 +760,8 @@ pub async fn run_status(config: Arc<Config>) -> Result<()> {
 
     // Audit
     println!("\nAudit:");
-    println!("  Enabled: {}", config.audit.enabled);
-    if config.audit.enabled {
-        println!("  Path: {}", config.audit.path.display());
+    for line in audit_status_lines(&config.audit) {
+        println!("{line}");
     }
 
     Ok(())
@@ -2020,6 +2046,53 @@ mod tests {
 
         let internal = ctx.config.hosts.get("internal").unwrap();
         assert_eq!(internal.proxy_jump, Some("bastion".to_string()));
+    }
+
+    // ============== audit_status_lines Tests ==============
+
+    /// G-13 (audit 2026-08-19): `bridge-mcp status` printed
+    /// `Enabled: true` + `Path: <file>` while `create_context` drops the
+    /// `AuditWriterTask`, so no CLI invocation ever appends a byte to that
+    /// path. The output must not promise a file that is never written.
+    #[test]
+    fn test_audit_status_lines_do_not_promise_a_file_in_cli_mode() {
+        let audit = AuditConfig {
+            enabled: true,
+            path: std::path::PathBuf::from("/var/log/bridge-mcp/audit.log"),
+            max_size_mb: 100,
+            retain_days: 30,
+        };
+
+        let lines = audit_status_lines(&audit);
+
+        assert_eq!(lines.len(), 2, "got {lines:?}");
+        assert!(
+            lines[0].contains("tracing only"),
+            "the enabled line must say CLI events only reach tracing, got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("/var/log/bridge-mcp/audit.log"),
+            "the path must still be shown, got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("MCP server"),
+            "the path line must say who actually writes it, got {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn test_audit_status_lines_disabled_prints_one_line() {
+        let audit = AuditConfig {
+            enabled: false,
+            ..AuditConfig::default()
+        };
+
+        let lines = audit_status_lines(&audit);
+
+        assert_eq!(lines, vec!["  Enabled: false".to_string()]);
     }
 
     // ============== run_status Tests (async) ==============
