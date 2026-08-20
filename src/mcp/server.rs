@@ -1709,14 +1709,25 @@ impl McpServer {
                     reporter.report(3, Some(&format!("Failed: {e}")));
                 }
 
-                // Cancellation gets a proper JSON-RPC error with MCP's
+                // Cancellation gets a proper JSON-RPC error with the
                 // `-32800` "Request Cancelled" code so clients can tell it
-                // apart from a plain tool failure. All other errors stay in
-                // the tool-result envelope for backward compatibility.
+                // apart from a plain tool failure.
                 if matches!(e, crate::error::BridgeError::Cancelled) {
                     return JsonRpcResponse::error(id, JsonRpcError::cancelled(None));
                 }
 
+                // An unregistered tool name is a bad `name` PARAMETER, not a
+                // tool that ran and failed. The `isError` envelope is
+                // reserved for the latter, so an unknown name gets -32602.
+                if let crate::error::BridgeError::McpUnknownTool { ref tool } = e {
+                    return JsonRpcResponse::error(
+                        id,
+                        JsonRpcError::invalid_params(format!("Unknown tool: {tool}")),
+                    );
+                }
+
+                // Everything else — a tool that executed and failed — stays
+                // in the tool-result envelope.
                 let error_result = ToolCallResult::error(e.to_string());
                 JsonRpcResponse::success_or_serialize_error(id, &error_result)
             }
@@ -1734,10 +1745,14 @@ impl McpServer {
         progress_token: Option<Value>,
         session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
-        // Get the handler first to validate the tool exists
+        // Get the handler first to validate the tool exists. Must agree with
+        // the synchronous path: an unregistered name is -32602, not an
+        // isError tool result.
         let Some(handler) = self.registry.get(&tool_name) else {
-            let error_result = ToolCallResult::error(format!("Unknown tool: {tool_name}"));
-            return JsonRpcResponse::success_or_serialize_error(id, &error_result);
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params(format!("Unknown tool: {tool_name}")),
+            );
         };
         let handler = Arc::clone(handler);
 
@@ -2827,10 +2842,19 @@ mod tests {
             .handle_tools_call(Some(json!(1)), Some(params), None, None)
             .await;
 
-        // Unknown tool returns success with error content (MCP spec)
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["isError"].as_bool().unwrap_or(false));
+        // A name that is not in the registry is an invalid `name` PARAMETER,
+        // so it is a JSON-RPC error, not a tool result. The previous comment
+        // here claimed "(MCP spec)" for the isError envelope — that is false;
+        // the spec reserves isError for a tool that RAN and failed.
+        let error = response
+            .error
+            .expect("an unknown tool must be a JSON-RPC error");
+        assert_eq!(error.code, -32602);
+        assert!(
+            error.message.contains("nonexistent_tool"),
+            "error must name the unknown tool, got: {}",
+            error.message
+        );
     }
 
     #[tokio::test]
@@ -3029,9 +3053,11 @@ mod tests {
             .await;
 
         // Normal unknown-tool error path — proves the rewrite fell through
-        // to the registry rather than being swallowed by a meta branch.
-        let result = response.result.unwrap();
-        assert!(result["isError"].as_bool().unwrap_or(false));
+        // to the registry rather than being swallowed by a meta branch. Since
+        // G-22 (-32602 for unknown tool, both call sites) this is a JSON-RPC
+        // error, not an isError tool result.
+        let error = response.error.expect("unknown inner tool must be -32602");
+        assert_eq!(error.code, -32602);
     }
 
     #[tokio::test]
@@ -3050,12 +3076,17 @@ mod tests {
             .handle_tools_call(Some(json!(1)), Some(params), None, None)
             .await;
 
-        let result = response.result.unwrap();
-        assert!(result["isError"].as_bool().unwrap_or(false));
-        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        // Since G-22, an unknown tool (including this self-reference falling
+        // through to the registry) is a JSON-RPC error, not an isError
+        // tool result.
+        let error = response
+            .error
+            .expect("self-reference must not recurse, must fail as unknown tool");
+        assert_eq!(error.code, -32602);
         assert!(
-            text.to_lowercase().contains("unknown tool"),
-            "self-reference must not recurse, must fail as unknown tool: {text}"
+            error.message.to_lowercase().contains("unknown tool"),
+            "got: {}",
+            error.message
         );
     }
 
@@ -3683,10 +3714,10 @@ mod tests {
             .handle_tools_call(Some(json!(1)), Some(params), None, None)
             .await;
 
-        // Empty name should result in tool not found
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["isError"].as_bool().unwrap_or(false));
+        // Empty name should result in tool not found. Since G-22, that is a
+        // JSON-RPC -32602 error, not an isError tool result.
+        let error = response.error.expect("empty name must be -32602");
+        assert_eq!(error.code, -32602);
     }
 
     // ============== Additional Prompts Tests ==============
@@ -4132,10 +4163,13 @@ mod tests {
             .handle_tools_call(Some(json!(1)), Some(params), None, None)
             .await;
 
-        // Unknown tool should return error content, not CreateTaskResult
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["isError"].as_bool().unwrap_or(false));
+        // Task-augmented path must agree with the synchronous one: -32602,
+        // not a CreateTaskResult and not an isError envelope.
+        let error = response
+            .error
+            .expect("an unknown tool must be a JSON-RPC error on the task path too");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("nonexistent_tool"));
     }
 
     #[tokio::test]

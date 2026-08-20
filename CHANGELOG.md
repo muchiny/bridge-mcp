@@ -44,6 +44,14 @@ section.
 
 ### Changed
 
+- **BREAKING (MCP clients)**: `tools/call` with a `name` that is not in the
+  registry now returns a JSON-RPC error `-32602 Invalid params` instead of a
+  successful result carrying `isError: true`. Both the synchronous and the
+  task-augmented paths agree. `isError` is reserved for a tool that ran and
+  failed; an unregistered name never ran. **Side effect**: tool groups
+  disabled via `tool_groups.groups` are absent from the registry, so calling
+  a tool in a disabled group also changes from `isError` to `-32602`. Clients
+  that only inspected `result.isError` must now also inspect `error.code`.
 - **BREAKING (lib API)**: `ServerInfo` gained a public
   `meta: Option<serde_json::Value>` field, serialized as `_meta`. Any
   struct-literal construction of `ServerInfo` outside this crate must add
