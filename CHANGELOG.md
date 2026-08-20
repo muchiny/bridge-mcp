@@ -433,6 +433,7 @@ and reported success, and `u64::MAX` aborted the process.
 | `build_log_aggregate_command` | returns `String` | returns `Result<String>` |
 | `BridgeError` | matchable exhaustively | `#[non_exhaustive]` — a `match` over it needs a `_ =>` arm |
 | `BridgeError::RateLimitExceeded` | — | new variant, `{ host: String }` |
+| `AuditLogger::needs_rotation` / `::rotate` | `pub` | test-only; removed from the public API |
 
 An empty `log_files` passed to `build_log_aggregate_command` is now an error
 rather than producing a command that did nothing.
@@ -444,6 +445,16 @@ downstream exhaustive `match` silently — nothing in this repo's own test suite
 notices. `#[non_exhaustive]` makes that a compile error once, in a release that
 is already breaking, and makes every future variant additive. Add a `_ =>` arm
 to any `match` over `BridgeError`.
+
+`AuditLogger::needs_rotation` and `AuditLogger::rotate` are gone from the
+public API (test-only, like `ResourceRegistry::schemes`). They never had a
+production caller in any branch or tag, and their semantics now contradict the
+writer task that actually does rotate: `needs_rotation` reports true for
+`max_size_mb: 0`, the value that means "rotation disabled", and `rotate`
+renames without reopening, so calling it while an `AuditWriterTask` holds the
+handle leaves every later event appended to the renamed inode. Rotation is
+`AuditWriterTask`'s job because it is the only owner of the open file handle;
+there is no supported way to drive it from outside.
 
 **What has NOT changed, despite appearances.** Refusing the dishonest
 `verify_checksum` modes is not the same as implementing honest verification,

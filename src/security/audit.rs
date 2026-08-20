@@ -72,11 +72,19 @@ impl AuditEvent {
 ///
 /// Uses an async channel to avoid blocking on file writes.
 pub struct AuditLogger {
+    /// Only `needs_rotation`, `rotate` and `cleanup_old_files` ever read
+    /// this, and all three are test-only (F6) — the writer task carries its
+    /// own copy of the settings it needs. Gated so a release build does not
+    /// clone an `AuditConfig` nothing reads.
+    #[cfg(test)]
     config: AuditConfig,
     sender: Option<mpsc::UnboundedSender<AuditEvent>>,
     sanitizer: Option<Arc<crate::security::Sanitizer>>,
     /// Clock used for the retention cutoff; injectable so the boundary
-    /// (mtime == cutoff) is deterministically testable.
+    /// (mtime == cutoff) is deterministically testable. Read only by
+    /// `cleanup_old_files`, which is test-only (F6); the writer task calls
+    /// `cleanup_old_audit_files` with the real clock directly.
+    #[cfg(test)]
     now_fn: fn() -> DateTime<Utc>,
 }
 
@@ -358,9 +366,11 @@ impl AuditLogger {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let logger = Self {
+            #[cfg(test)]
             config: config.clone(),
             sender: Some(tx),
             sanitizer: None,
+            #[cfg(test)]
             now_fn: Utc::now,
         };
 
@@ -410,9 +420,11 @@ impl AuditLogger {
     #[must_use]
     pub fn disabled() -> Self {
         Self {
+            #[cfg(test)]
             config: AuditConfig::default(),
             sender: None,
             sanitizer: None,
+            #[cfg(test)]
             now_fn: Utc::now,
         }
     }
@@ -483,8 +495,21 @@ impl AuditLogger {
     }
 
     /// Check if the audit log needs rotation (exceeds max size)
+    ///
+    /// `#[cfg(test)]` (F6, re-review of the 2026-08-19 audit corrections),
+    /// matching what `ResourceRegistry::schemes` got for the same reason.
+    /// It has no production caller in any branch or tag — `AuditWriterTask`
+    /// owns the open file handle and is the only place that can safely
+    /// rotate — and its semantics now actively contradict the writer task's:
+    /// `len/(1024*1024) >= max_size_mb` is TRUE for `max_size_mb: 0`, the
+    /// exact value that means "rotation disabled" in `rotate_if_needed`. A
+    /// consumer polling `needs_rotation()` and calling `rotate()` would also
+    /// drive straight into the failure mode `rotate_if_needed` guards
+    /// against, since `rotate()` renames without reopening. `pub(crate)`
+    /// alone would still be flagged as dead code in a non-test build.
+    #[cfg(test)]
     #[must_use]
-    pub fn needs_rotation(&self) -> bool {
+    pub(crate) fn needs_rotation(&self) -> bool {
         if !self.config.enabled {
             return false;
         }
@@ -499,10 +524,16 @@ impl AuditLogger {
 
     /// Rotate the audit log file
     ///
+    /// `#[cfg(test)]` for the same reason as `needs_rotation` — see there.
+    /// This renames and never reopens, so anything outside a test that
+    /// called it while an `AuditWriterTask` held the handle would leave
+    /// every later event appended to the renamed inode.
+    ///
     /// # Errors
     ///
     /// Returns an error if the log file cannot be renamed during rotation.
-    pub fn rotate(&self) -> std::io::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn rotate(&self) -> std::io::Result<()> {
         if !self.config.enabled {
             return Ok(());
         }
@@ -523,8 +554,10 @@ impl AuditLogger {
     /// Remove audit files older than retention period
     ///
     /// Uses the injectable clock (`now_fn`) so the retention boundary stays
-    /// deterministically testable; the writer task calls the same helper with
-    /// the real clock.
+    /// deterministically testable; the writer task calls the same free
+    /// function (`cleanup_old_audit_files`) with the real clock. Test-only
+    /// alongside its only callers, `rotate` and the retention tests.
+    #[cfg(test)]
     fn cleanup_old_files(&self) {
         cleanup_old_audit_files(&self.config.path, self.config.retain_days, (self.now_fn)());
     }
