@@ -67,6 +67,11 @@ impl JsonRpcResponse {
     }
 }
 
+/// Error code used for a request cancelled by the client.
+///
+/// Borrowed from LSP's `RequestCancelled`; see [`JsonRpcError::cancelled`].
+pub const CANCELLED_ERROR_CODE: i32 = -32800;
+
 /// JSON-RPC 2.0 Error
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonRpcError {
@@ -122,16 +127,27 @@ impl JsonRpcError {
         }
     }
 
-    /// MCP 2025-11-25 request cancellation error.
+    /// Request-cancellation error.
     ///
     /// Emitted when a `notifications/cancelled` fires while a request is
-    /// still in flight. Code `-32800` lives in the implementation-defined
-    /// server error range (-32000 to -32099 for standard JSON-RPC, but MCP
-    /// uses -32800 by convention for cancellations).
+    /// still in flight.
+    ///
+    /// Two corrections to what this comment used to claim: `-32800` is NOT
+    /// inside the JSON-RPC implementation-defined server-error range, which
+    /// is -32000 to -32099; and it is not an MCP convention either — MCP
+    /// defines no cancellation error code. The value is borrowed from the
+    /// Language Server Protocol, whose `RequestCancelled` is -32800, because
+    /// clients that speak both protocols already recognise it. The code
+    /// choice stands; only the justification was wrong.
+    ///
+    /// Over stdio this envelope is built but never written — see
+    /// `McpServer::should_send_response`. It is still produced so the HTTP
+    /// transport, which has no cancellation notification path, gets a
+    /// terminal answer instead of a dangling request.
     #[must_use]
     pub fn cancelled(reason: Option<String>) -> Self {
         Self {
-            code: -32800,
+            code: CANCELLED_ERROR_CODE,
             message: reason.unwrap_or_else(|| "Request cancelled by client".to_string()),
             data: None,
         }

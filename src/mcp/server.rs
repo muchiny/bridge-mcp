@@ -32,11 +32,11 @@ use super::transport::{Session, Transport, stdio::StdioTransport};
 use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
-    BUILD_META_KEY, BUILD_REV, ClientInfo, CompletionRef, CompletionResult, CompletionsCapability,
-    CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult, Icon, InitializeParams,
-    InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
-    LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION, PromptsCapability,
-    PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
+    BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, ClientInfo, CompletionRef, CompletionResult,
+    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult,
+    Icon, InitializeParams, InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, LogLevel, LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION,
+    PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
     SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
     TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability, TaskResultParams,
@@ -887,7 +887,14 @@ impl McpServer {
                                     Some(&session_ctx_for_task),
                                 )
                                 .await;
-                            let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
+                            if McpServer::should_send_response(&response) {
+                                let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
+                            } else {
+                                debug!(
+                                    id = ?rid_cleanup,
+                                    "Suppressing response for a cancelled request"
+                                );
+                            }
                             if let Some(rid) = rid_cleanup {
                                 session_ctx_for_task.active_requests.unregister(&rid);
                             }
@@ -975,6 +982,21 @@ impl McpServer {
         drop(tx);
         let _ = writer_handle.await;
         drop(fanout_guard);
+    }
+
+    /// Whether a finished request's response should be written back.
+    ///
+    /// MCP: after a `notifications/cancelled`, the receiver SHOULD NOT send
+    /// a result or an error for the cancelled request id. Returning the
+    /// -32800 envelope violated that. The envelope is still built inside
+    /// `handle_tools_call` — the HTTP transport has no cancellation
+    /// notification path and needs a terminal answer — so the suppression
+    /// lives here, at the stdio write site.
+    fn should_send_response(response: &JsonRpcResponse) -> bool {
+        response
+            .error
+            .as_ref()
+            .is_none_or(|e| e.code != CANCELLED_ERROR_CODE)
     }
 
     /// Parse an incoming line as a single JSON-RPC message or a batch.
@@ -3896,6 +3918,32 @@ mod tests {
             McpServer::route_incoming_message(message, &session_ctx).expect("request must route");
         assert_eq!(routed.method, "ping");
         assert_eq!(routed.id, Some(json!(7)));
+    }
+
+    // ============== Cancelled-request suppression (G-17) ==============
+
+    #[test]
+    fn test_cancelled_response_is_not_written_back() {
+        // MCP: after receiving `notifications/cancelled`, the receiver
+        // SHOULD NOT send a result or an error for that request id — the
+        // client has already released it. We still BUILD the -32800
+        // envelope (HTTP has no cancellation notification path and needs a
+        // terminal answer); the stdio session just doesn't write it.
+        let cancelled = JsonRpcResponse::error(Some(json!(1)), JsonRpcError::cancelled(None));
+        assert!(!McpServer::should_send_response(&cancelled));
+    }
+
+    #[test]
+    fn test_non_cancelled_responses_are_written_back() {
+        let failed = JsonRpcResponse::error(Some(json!(2)), JsonRpcError::internal_error("boom"));
+        assert!(McpServer::should_send_response(&failed));
+
+        let bad_params =
+            JsonRpcResponse::error(Some(json!(3)), JsonRpcError::invalid_params("nope"));
+        assert!(McpServer::should_send_response(&bad_params));
+
+        let ok = JsonRpcResponse::success(Some(json!(4)), json!({}));
+        assert!(McpServer::should_send_response(&ok));
     }
 
     #[tokio::test]
