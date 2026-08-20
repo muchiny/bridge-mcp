@@ -84,7 +84,15 @@ impl ResourceHandler for FileResourceHandler {
     }
 
     fn path_template(&self) -> Option<&'static str> {
-        Some("{path}")
+        // MINOR (fix round 1, audit 2026-08-19): `{path}` is RFC 6570
+        // *simple* expansion (section 3.2.2), which percent-encodes
+        // reserved characters -- a conformant expander given
+        // path="etc/hosts" would produce "etc%2Fhosts", which
+        // `parse_file_uri`'s `split_once('/')` cannot route to a nested
+        // path. `{+path}` is *reserved* expansion (section 3.2.3): slashes
+        // pass through unencoded, matching what this template actually
+        // needs.
+        Some("{+path}")
     }
 
     async fn list(&self, _ctx: &ToolContext) -> Result<Vec<ResourceDefinition>> {

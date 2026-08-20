@@ -263,9 +263,15 @@ section.
   template per (templated handler x configured host); a new test asserts
   every published `uriTemplate` resolves to a registered scheme.
   **Wire-visible**: `resources/templates/list` now returns
-  `file://<host>/{path}` and `log://<host>/{path}` entries instead of the
+  `file://<host>/{+path}` and `log://<host>/{+path}` entries instead of the
   phantom `ssh://<host>/{path}`; no client could have successfully expanded
-  the old template, so nothing that worked stops working.
+  the old template, so nothing that worked stops working. Fix round 1
+  corrected the expansion variable from `{path}` (RFC 6570 simple
+  expansion, which percent-encodes `/`, breaking a nested path) to
+  `{+path}` (reserved expansion, `/` passes through unencoded) before this
+  had shipped in a release, and strengthened the covering test to actually
+  route an expanded URI through `resources/read` rather than only checking
+  the published template's shape.
 - **`resources/read` on an unroutable URI returned `-32603` Internal error
   instead of `-32602` Invalid params (G-7; corrected in fix round 1 — see
   below).** An unsupported scheme, a malformed URI, or a host name that

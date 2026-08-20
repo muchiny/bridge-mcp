@@ -5175,8 +5175,22 @@ mod tests {
     /// `ssh://{host}/{path}`, and no handler answers the `ssh` scheme — every
     /// expansion of the advertised template failed. Templates must be derived
     /// from the handlers that actually exist.
-    #[test]
-    fn test_published_resource_templates_all_have_a_handler() {
+    ///
+    /// MINOR (fix round 1, audit 2026-08-19): the original version of this
+    /// test only checked scheme membership and an expansion-variable
+    /// substring — it never proved a published template actually
+    /// *resolves*. It now also expands the `file://` template for a
+    /// concrete path and routes it through the real `resources/read`
+    /// handler, proving the URI is recognized and dispatched rather than
+    /// rejected as unroutable — the exact failure the phantom `ssh://`
+    /// template produced 100% of the time before G-7. Also switched the
+    /// expected expansion variable from `{path}` to `{+path}`: `{path}` is
+    /// RFC 6570 *simple* expansion, which percent-encodes `/`, so a
+    /// conformant expander would turn a nested path into something
+    /// `parse_file_uri`/`parse_log_uri` cannot route; `{+path}` (*reserved*
+    /// expansion) passes `/` through unencoded.
+    #[tokio::test]
+    async fn test_published_resource_templates_all_have_a_handler() {
         let server = create_test_server_with_host("prod");
         let response = server.handle_resource_templates_list(Some(json!(1)));
 
@@ -5202,8 +5216,9 @@ mod tests {
                 "the phantom ssh:// template must not come back"
             );
             assert!(
-                uri_template.contains("{path}"),
-                "a template must contain an expansion variable: {uri_template}"
+                uri_template.contains("{+path}"),
+                "a template must use RFC 6570 reserved expansion so a \
+                 nested path round-trips: {uri_template}"
             );
         }
 
@@ -5212,12 +5227,36 @@ mod tests {
             .map(|t| t["uriTemplate"].as_str().unwrap())
             .collect();
         assert!(
-            published.contains(&"file://prod/{path}"),
+            published.contains(&"file://prod/{+path}"),
             "the file handler is template-based and must be published, got {published:?}"
         );
         assert!(
-            published.contains(&"log://prod/{path}"),
+            published.contains(&"log://prod/{+path}"),
             "the log handler is template-based and must be published, got {published:?}"
+        );
+
+        // Prove the published `file://` template actually resolves: expand
+        // it for a concrete path and route it through the real
+        // `resources/read` handler. There is no real SSH backend in this
+        // test, so the call still fails -- but it must fail for a
+        // DIFFERENT reason than the phantom `ssh://` template did
+        // (`-32602`, "unroutable scheme"). Any other failure proves the URI
+        // was recognized and dispatched to the file handler, which is what
+        // "the template resolves" means.
+        let read_response = server
+            .handle_resources_read(
+                Some(json!(2)),
+                Some(json!({ "uri": "file://prod/etc/hosts" })),
+            )
+            .await;
+        let error = read_response
+            .error
+            .expect("no real SSH backend in this test, so the read itself must fail");
+        assert_ne!(
+            error.code, -32602,
+            "a -32602 here would mean the URI was rejected as unroutable, \
+             exactly like the old phantom ssh:// template -- got: {}",
+            error.message
         );
     }
 
@@ -5240,7 +5279,6 @@ mod tests {
     /// the opposite behavior, not a relaxed version of the old assertion.
     #[tokio::test]
     async fn test_resource_subscribe_always_returns_method_not_found() {
-        let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         let params = json!({ "uri": "health://server" });
@@ -5265,7 +5303,6 @@ mod tests {
     /// that the refusal is unconditional, not parameter-dependent.
     #[tokio::test]
     async fn test_resource_subscribe_missing_uri_still_refused_as_method_not_found() {
-        let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         let params = json!({});
@@ -5309,7 +5346,6 @@ mod tests {
     async fn test_resource_subscribe_without_session_rejected() {
         // Still refused without a session -- now unconditionally, via the
         // same -32601 capability gate rather than a session-specific check.
-        let server = create_test_server();
         let params = json!({ "uri": "health://server" });
         let response = McpServer::handle_resource_subscribe(Some(json!(1)), Some(params), None);
         let error = response.error.expect("subscribe must be refused");

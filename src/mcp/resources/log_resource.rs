@@ -88,7 +88,11 @@ impl ResourceHandler for LogResourceHandler {
     }
 
     fn path_template(&self) -> Option<&'static str> {
-        Some("{path}")
+        // MINOR (fix round 1, audit 2026-08-19): see the matching comment
+        // in `file_resource.rs` -- `{+path}` (RFC 6570 reserved expansion)
+        // passes slashes through unencoded, unlike `{path}` (simple
+        // expansion), which is required for a nested path to round-trip.
+        Some("{+path}")
     }
 
     async fn list(&self, _ctx: &ToolContext) -> Result<Vec<ResourceDefinition>> {
