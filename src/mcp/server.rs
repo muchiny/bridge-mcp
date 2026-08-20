@@ -866,6 +866,10 @@ impl McpServer {
                     let cancel_token = request_id
                         .as_ref()
                         .map(|id| session_ctx.active_requests.register(id.clone()));
+                    // Kept alongside the token moved into the handler below
+                    // so the send site can confirm the token ACTUALLY fired
+                    // — see `should_write_back`.
+                    let cancel_token_for_suppression = cancel_token.clone();
                     let rid_cleanup = request_id;
                     let session_ctx_for_task = session_ctx.clone();
 
@@ -887,7 +891,10 @@ impl McpServer {
                                     Some(&session_ctx_for_task),
                                 )
                                 .await;
-                            if McpServer::should_send_response(&response) {
+                            let token_was_cancelled = cancel_token_for_suppression
+                                .as_ref()
+                                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
+                            if McpServer::should_write_back(&response, token_was_cancelled) {
                                 let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
                             } else {
                                 debug!(
@@ -997,6 +1004,19 @@ impl McpServer {
             .error
             .as_ref()
             .is_none_or(|e| e.code != CANCELLED_ERROR_CODE)
+    }
+
+    /// Whether a finished request's response should be written back, given
+    /// whether its own per-request `CancellationToken` actually fired.
+    ///
+    /// `should_send_response` alone keys on the error CODE. That is correct
+    /// today only because `CANCELLED_ERROR_CODE` has exactly one producer:
+    /// the token registered for this request id, fired by
+    /// `notifications/cancelled` (see `handle_cancellation_notification`).
+    /// Requiring `token_was_cancelled` too means a future -32800 producer
+    /// unrelated to a real cancellation cannot silently vanish here.
+    fn should_write_back(response: &JsonRpcResponse, token_was_cancelled: bool) -> bool {
+        Self::should_send_response(response) || !token_was_cancelled
     }
 
     /// Parse an incoming line as a single JSON-RPC message or a batch.
@@ -3992,6 +4012,30 @@ mod tests {
 
         let ok = JsonRpcResponse::success(Some(json!(4)), json!({}));
         assert!(McpServer::should_send_response(&ok));
+    }
+
+    #[test]
+    fn test_should_write_back_requires_cancel_token_confirmation() {
+        // Fix-round hardening: `should_send_response` alone keys on the
+        // error CODE, which is correct today only because the sole
+        // producer of `CANCELLED_ERROR_CODE` is a per-request token fired
+        // by `notifications/cancelled`. `should_write_back` adds the
+        // second half of that assumption as an explicit, checked
+        // precondition — a future -32800 producer unrelated to a real
+        // cancellation must not be silently suppressed.
+        let cancelled = JsonRpcResponse::error(Some(json!(1)), JsonRpcError::cancelled(None));
+        assert!(
+            McpServer::should_write_back(&cancelled, false),
+            "must write back: the token was never actually cancelled"
+        );
+        assert!(
+            !McpServer::should_write_back(&cancelled, true),
+            "must suppress: this is a genuine cancellation"
+        );
+
+        let ok = JsonRpcResponse::success(Some(json!(2)), json!({}));
+        assert!(McpServer::should_write_back(&ok, true));
+        assert!(McpServer::should_write_back(&ok, false));
     }
 
     #[tokio::test]
