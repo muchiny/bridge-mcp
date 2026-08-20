@@ -1720,6 +1720,20 @@ impl McpServer {
 
         // Clone dependencies for the background worker.
         let task_store = Arc::clone(&self.task_store);
+        // G-9 (audit 2026-08-19): the enclosing `tools/call` releases its own
+        // permit the instant this function returns `CreateTaskResult`, and
+        // the worker below used to acquire nothing — so task-augmented calls
+        // escaped `limits.max_concurrent_commands` entirely (measured: 12/12
+        // accepted with `task`, 0/12 without). The effective ceiling became
+        // `max_tasks` (50), i.e. up to 50 concurrent SSH connections against
+        // an sshd whose MaxStartups is 10:30:100. The worker takes its own
+        // permit instead.
+        //
+        // This is only safe because `ping` and every `tasks/*` method are
+        // exempt from that same semaphore (see `is_concurrency_exempt`):
+        // workers legitimately holding all five permits is now the normal
+        // busy state, and the control plane must stay answerable through it.
+        let concurrent_limit = Arc::clone(&self.concurrent_limit);
         // Per-session tx ONLY (FIND-034 audit 2026-05-09): the task
         // notification must reach the SAME client that created the task,
         // never any other live session. If no session is attached
@@ -1744,6 +1758,20 @@ impl McpServer {
 
         // Spawn the background worker
         tokio::spawn(async move {
+            // Wait for a concurrency slot before doing any remote work. A
+            // `tasks/cancel` arriving while we are queued here must still
+            // win — otherwise cancelling a queued task would do nothing
+            // until it finally started.
+            let _permit = tokio::select! {
+                permit = concurrent_limit.acquire_owned() => if let Ok(permit) = permit {
+                    permit
+                } else {
+                    error!("Semaphore closed unexpectedly, dropping task worker");
+                    return;
+                },
+                () = cancel_token.cancelled() => return,
+            };
+
             let result = tokio::select! {
                 res = handler.execute(arguments, &ctx) => res,
                 () = cancel_token.cancelled() => {
@@ -4195,6 +4223,62 @@ mod tests {
             result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
             task_id
         );
+    }
+
+    /// G-9 (audit 2026-08-19): a task-augmented `tools/call` must be
+    /// governed by `limits.max_concurrent_commands` like any other command.
+    /// The enclosing request drops its permit as soon as it returns the
+    /// `CreateTaskResult`, so the worker has to take its own — otherwise the
+    /// real ceiling is `max_tasks` (50), and 50 concurrent SSH connections
+    /// walk straight into sshd's `MaxStartups` 10:30:100.
+    #[tokio::test]
+    async fn task_augmented_call_waits_for_a_concurrency_permit() {
+        let server = create_test_server();
+        let available = server.concurrent_limit.available_permits();
+        assert_eq!(available, 5, "fixture must keep the default limit");
+
+        // Hold every permit: no command may run.
+        let permits = Arc::clone(&server.concurrent_limit)
+            .acquire_many_owned(u32::try_from(available).unwrap())
+            .await
+            .unwrap();
+
+        let params = json!({
+            "name": "ssh_status",
+            "arguments": {},
+            "task": {"ttl": 60000}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+        let task_id = response.result.unwrap()["task"]["taskId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The worker must be parked on the semaphore, not running.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let info = server.task_store.get_task(&task_id).await.unwrap();
+        assert_eq!(
+            info.status,
+            crate::ports::protocol::TaskStatus::Working,
+            "task worker ran while every concurrency permit was held"
+        );
+
+        // Release the permits: the worker must then run to a terminal state.
+        drop(permits);
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let info = server.task_store.get_task(&task_id).await.unwrap();
+            if info.status != crate::ports::protocol::TaskStatus::Working {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "task never ran after the permits were released"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]
