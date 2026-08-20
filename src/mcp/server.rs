@@ -520,8 +520,22 @@ impl McpServer {
             guard.clone()
         };
 
+        // Resolve the `client_overrides` profile from THIS request's
+        // `io.modelcontextprotocol/clientInfo` (MCP 2026-07-28). Modern
+        // clients never send `initialize`, so the handshake-time resolution
+        // in `handle_initialize` never runs for them and the profile would
+        // otherwise be silently ignored.
+        if let Some(name) = session.and_then(SessionContext::request_client_name) {
+            config_snapshot.limits.max_output_chars = config_snapshot
+                .limits
+                .effective_max_output_chars(Some(name));
+        }
+
         // Apply per-session runtime override to the snapshot so handlers
         // see THIS session's effective value (FIND-033 audit 2026-05-09).
+        // Applied AFTER the per-request profile above: `runtime_max_output`
+        // is written by an explicit operator action (`ssh_config_set`) or by
+        // a legacy `initialize`, and either must beat a name-matched profile.
         if let Some(s) = session
             && let Some(runtime_val) = *s.runtime_max_output.read().await
         {
@@ -6618,5 +6632,91 @@ mod tests {
             text.contains("does not support elicitation"),
             "per-request denial did not override the handshake flag: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_client_overrides_resolve_from_request_meta_client_info() {
+        use crate::config::{ClientOverride, MatchMode};
+
+        let mut config = test_config();
+        config.limits.max_output_chars = 40_000;
+        config.limits.client_overrides = vec![ClientOverride {
+            name_contains: "modernclient".to_string(),
+            match_mode: MatchMode::Exact,
+            max_output_chars: Some(1234),
+        }];
+        let (server, _audit_task) = McpServer::new(config);
+
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let base = SessionContext::new(tx);
+        // No handshake: `runtime_max_output` was never written.
+        assert!(base.runtime_max_output.read().await.is_none());
+
+        let params = json!({
+            "_meta": {
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "ModernClient",
+                    "version": "1.0.0"
+                }
+            }
+        });
+        let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
+
+        let ctx = server.create_tool_context(None, None, Some(&scoped)).await;
+        assert_eq!(ctx.config.limits.max_output_chars, 1234);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_override_beats_request_meta_client_profile() {
+        use crate::config::{ClientOverride, MatchMode};
+
+        let mut config = test_config();
+        config.limits.max_output_chars = 40_000;
+        config.limits.client_overrides = vec![ClientOverride {
+            name_contains: "modernclient".to_string(),
+            match_mode: MatchMode::Exact,
+            max_output_chars: Some(1234),
+        }];
+        let (server, _audit_task) = McpServer::new(config);
+
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let base = SessionContext::new(tx);
+        // Explicit operator action (`ssh_config_set`) wins over the profile.
+        *base.runtime_max_output.write().await = Some(9999);
+
+        let params = json!({
+            "_meta": {
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "ModernClient",
+                    "version": "1.0.0"
+                }
+            }
+        });
+        let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
+
+        let ctx = server.create_tool_context(None, None, Some(&scoped)).await;
+        assert_eq!(ctx.config.limits.max_output_chars, 9999);
+    }
+
+    #[tokio::test]
+    async fn test_no_client_info_leaves_max_output_at_the_yaml_default() {
+        use crate::config::{ClientOverride, MatchMode};
+
+        let mut config = test_config();
+        config.limits.max_output_chars = 40_000;
+        config.limits.client_overrides = vec![ClientOverride {
+            name_contains: "modernclient".to_string(),
+            match_mode: MatchMode::Exact,
+            max_output_chars: Some(1234),
+        }];
+        let (server, _audit_task) = McpServer::new(config);
+
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let ctx = server
+            .create_tool_context(None, None, Some(&session_ctx))
+            .await;
+        assert_eq!(ctx.config.limits.max_output_chars, 40_000);
     }
 }
