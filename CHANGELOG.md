@@ -194,6 +194,13 @@ section.
   parsing English. Direct calls keep their original message and omit `via`.
   `mcp_call_tool`'s own `description` states the exception. New lib API:
   `JsonRpcError::task_not_supported_via`.
+- **`tasks/result` emitted Rust `Debug` casing on the wire.** The
+  terminal-state error was built with `{:?}` on a `TaskStatus` carrying
+  `#[serde(rename_all = "lowercase")]`, so this endpoint reported `Cancelled`
+  while `tasks/get` reported `cancelled` for the same task. It now uses the
+  serde form, and the error carries `data: {"taskId": …, "status": …}` so the
+  terminal state is reachable without string-matching the English message.
+  New lib API: `JsonRpcError::with_data`.
 - **`tools/list` panicked on a huge pagination cursor.** A cursor of
   `18446744073709551615` parses cleanly to `usize::MAX`, and the page end was
   computed as `start + page_size` *before* being clamped to the tool count —

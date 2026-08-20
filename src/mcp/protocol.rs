@@ -82,6 +82,18 @@ pub struct JsonRpcError {
 }
 
 impl JsonRpcError {
+    /// Attach machine-readable `data` to an error built by one of the
+    /// constructors below, none of which populate it.
+    ///
+    /// JSON-RPC 2.0 §5.1 leaves `data` to the server; a client that has to
+    /// regex the English `message` to learn *why* a call failed is coupled to
+    /// wording that changes between releases.
+    #[must_use]
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+
     #[must_use]
     pub fn parse_error(msg: impl Into<String>) -> Self {
         Self {

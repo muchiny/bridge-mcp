@@ -2333,15 +2333,41 @@ impl McpServer {
                 // `entry.result`. Reporting "Task not found" contradicted both
                 // other endpoints (audit G-23, 2026-08-19). Storing a terminal
                 // result for cancelled tasks is deliberately out of scope here.
-                let message = match self.task_store.get_task(&result_params.task_id).await {
-                    Some(info) => format!(
-                        "Task {} reached terminal state {:?} without storing a result \
-                         (cancelled tasks record none); use tasks/get for its status",
-                        result_params.task_id, info.status
-                    ),
-                    None => format!("Task not found: {}", result_params.task_id),
+                //
+                // The "(cancelled tasks record none)" parenthetical below is
+                // only true while `complete_task` and `fail_task` both always
+                // assign `entry.result` — `Cancelled` is the sole status that
+                // can reach this arm. Give either of them an early return and
+                // the wording becomes a lie; the `status` field in `data` will
+                // still be right.
+                let (message, data) = match self.task_store.get_task(&result_params.task_id).await {
+                    Some(info) => {
+                        // Wire spelling, not `{:?}`: `TaskStatus` carries
+                        // `#[serde(rename_all = "lowercase")]`, so Debug said
+                        // `Cancelled` here while `tasks/get` said `cancelled`
+                        // for the same task (audit D-F3, 2026-08-20).
+                        let status = serde_json::to_value(info.status).unwrap_or(Value::Null);
+                        let status_text = status.as_str().unwrap_or("unknown");
+                        (
+                            format!(
+                                "Task {} reached terminal state {status_text} without storing a \
+                                 result (cancelled tasks record none); use tasks/get for its \
+                                 status",
+                                result_params.task_id
+                            ),
+                            Some(json!({
+                                "taskId": result_params.task_id,
+                                "status": status,
+                            })),
+                        )
+                    }
+                    None => (format!("Task not found: {}", result_params.task_id), None),
                 };
-                JsonRpcResponse::error(id, JsonRpcError::invalid_params(message))
+                let mut error = JsonRpcError::invalid_params(message);
+                if let Some(data) = data {
+                    error = error.with_data(data);
+                }
+                JsonRpcResponse::error(id, error)
             }
         }
     }
@@ -4801,6 +4827,13 @@ mod tests {
     /// found" — while `tasks/get` and `tasks/list` both still returned the same
     /// task. Wording fix only; storing a terminal result for cancelled tasks is
     /// out of scope for 2.2.0.
+    ///
+    /// D-F3 (audit 2026-08-20): the message was built with `{:?}` on a
+    /// `TaskStatus` carrying `#[serde(rename_all = "lowercase")]`, so this
+    /// endpoint said `Cancelled` while `tasks/get` said `cancelled` for the
+    /// same task — and the terminal state was reachable only by string-matching
+    /// English. Both spellings were asserted in this one test, fourteen lines
+    /// apart.
     #[tokio::test]
     async fn test_tasks_result_on_cancelled_task() {
         let server = create_test_server();
@@ -4818,11 +4851,27 @@ mod tests {
             "misleading message: {}",
             error.message
         );
+        // The wire spelling, not Rust's. Anchored on the substitution site:
+        // the trailing "(cancelled tasks record none)" parenthetical contains
+        // the lowercase word regardless, so a bare `contains("cancelled")`
+        // would pass even with `{:?}`.
         assert!(
-            error.message.contains("Cancelled"),
-            "message must name the terminal state: {}",
+            error.message.contains("terminal state cancelled"),
+            "message must name the terminal state in its wire spelling: {}",
             error.message
         );
+        assert!(
+            !error.message.contains("Cancelled"),
+            "Rust Debug casing must not reach the wire: {}",
+            error.message
+        );
+
+        // Machine-readable: no client should have to parse the prose above.
+        let data = error
+            .data
+            .expect("a terminal-state tasks/result error must carry data");
+        assert_eq!(data["taskId"], json!(task_id));
+        assert_eq!(data["status"], json!("cancelled"));
 
         // The two endpoints must agree: tasks/get still reports the task.
         let get = server
