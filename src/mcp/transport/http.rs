@@ -516,6 +516,14 @@ async fn handle_post(
             if msg.method.is_none() {
                 return StatusCode::NO_CONTENT.into_response();
             }
+            // JSON-RPC 2.0 §4.1: a Notification is a Request with no `id`.
+            // Gate on that, not on the method name — the batch arm below
+            // does the same (`request.id.is_none()`), and the stdio
+            // transport's `McpServer::route_incoming_message` gates
+            // identically. Still dispatch through `handle_request` so any
+            // side effects (e.g. `notifications/initialized`) run; only the
+            // response write-back is suppressed.
+            let is_notification = msg.id.is_none();
             let request = crate::mcp::protocol::JsonRpcRequest {
                 jsonrpc: msg.jsonrpc,
                 id: msg.id,
@@ -523,6 +531,13 @@ async fn handle_post(
                 params: msg.params,
             };
             let resp = state.server.handle_request(request).await;
+            if is_notification {
+                // §5: "the receiver must not send a response to a
+                // notification". No JSON-RPC body at all — 200 to match
+                // what the batch arm already returns for an
+                // all-notifications batch (`Json(Vec::new())`, i.e. 200).
+                return StatusCode::OK.into_response();
+            }
             let mut response = Json(resp).into_response();
             response.headers_mut().insert(
                 "mcp-session-id",
@@ -1059,6 +1074,79 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ============== Single-message notification suppression (G-18) ==============
+    //
+    // JSON-RPC 2.0 §4.1/§5: a Notification is a Request with no `id`, and
+    // "the receiver must not send a response to a notification". The batch
+    // path in this file already gates on `request.id.is_none()`; the
+    // single-message path built and returned a full JsonRpcResponse
+    // regardless. Mirrors the stdio fix (`McpServer::route_incoming_message`,
+    // gated on `message.id.is_none()`, not on the method name).
+
+    #[tokio::test]
+    async fn test_post_single_notification_gets_no_response_body() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // "ping" is an ordinary request method with no "notifications/"
+        // prefix — omitting `id` is what makes this a notification, not the
+        // method name. Proves the gate is id-based, not prefix-based.
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","method":"ping"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            body.is_empty(),
+            "a notification must get no JSON-RPC response body, got: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_request_named_like_notification_still_answered() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // Method name suggests a notification, but `id` is present — this
+        // IS a request per JSON-RPC 2.0 and MUST still be answered. Proves
+        // the gate does not special-case by method name in either direction.
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], serde_json::json!(7));
     }
 
     // ========================================================================

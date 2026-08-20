@@ -193,6 +193,17 @@ section.
   between this header and the version actually negotiated by `initialize`
   for the session — that needs new per-session state and is a separate
   change.
+- **The HTTP single-message POST path answered JSON-RPC notifications
+  (G-18), same defect class as G-3.** `handle_post` built and dispatched a
+  `JsonRpcRequest` from any message carrying a `method`, without checking
+  whether `id` was present, then always wrote the result back as an HTTP
+  response body — violating JSON-RPC 2.0 §4.1/§5 the same way the stdio
+  transport did before that was fixed. The HTTP *batch* path in this same
+  file already gated correctly (`request.id.is_none()`); the single-message
+  path now gates the same way, still dispatching through `handle_request`
+  so side effects run, but returning `200` with no body instead of a
+  response when `id` is absent — consistent with what the batch path
+  already returns for an all-notifications batch (`200` with `[]`).
 
 ### Migrating from 1.20.0
 
