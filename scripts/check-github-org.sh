@@ -26,15 +26,47 @@
 #    scheme once it might split the file list across multiple invocations,
 #    which would reintroduce the same ambiguity. A single `grep -- "${files[@]}"`
 #    call keeps grep's real exit code intact.)
+#
+# F3 (re-review, audit 2026-08-19): the guard reported OK after scanning
+# nothing. Three separate ways in:
+# 1. `git ls-files` is CWD-relative, so running from a subdirectory listed
+#    only that subtree -- a bad URL at the repo root went unseen and the
+#    script printed OK, exit 0. It now `cd`s to the repository toplevel and
+#    hard-fails if it is not inside a repository at all.
+# 2. `set -euo pipefail` does NOT propagate a failure out of a process
+#    substitution: `mapfile -d '' -t files < <(git ls-files -z)` in a non-git
+#    directory printed `fatal: not a git repository`, left `files` empty and
+#    carried on. `git ls-files`' exit status is now observed explicitly.
+#    (Its NUL-separated output goes through a temp file rather than a command
+#    substitution, which strips NUL bytes.)
+# 3. Zero tracked files was an OK. "I scanned nothing" is never a pass for a
+#    guard whose whole job is to scan; it is now an ERROR.
+# Until this fix, CI was protected only by `actions/checkout@v7` happening to
+# run first and leave the job's CWD at the repo root.
 set -euo pipefail
 
 pattern='(github\.com|githubusercontent\.com|ghcr\.io)/muchini'
 
-mapfile -d '' -t files < <(git ls-files -z)
+if ! repo_root=$(git rev-parse --show-toplevel 2>&1); then
+    echo "ERROR: not inside a git repository; refusing to report a clean scan." >&2
+    echo "$repo_root" >&2
+    exit 1
+fi
+cd "$repo_root"
+
+tracked_list=$(mktemp)
+trap 'rm -f "$tracked_list"' EXIT
+
+if ! git ls-files -z >"$tracked_list"; then
+    echo "ERROR: 'git ls-files' failed; cannot scan the repo for the dead 'muchini' org." >&2
+    exit 1
+fi
+
+mapfile -d '' -t files <"$tracked_list"
 
 if [ "${#files[@]}" -eq 0 ]; then
-    echo "OK: every GitHub URL uses the 'muchiny' org (no tracked files)."
-    exit 0
+    echo "ERROR: 'git ls-files' listed no tracked files; refusing to report a clean scan." >&2
+    exit 1
 fi
 
 set +e
