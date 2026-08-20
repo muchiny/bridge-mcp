@@ -38,7 +38,8 @@ use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator};
 use super::session_store::{InMemorySessionStore, SessionData, SessionStore};
 
 use crate::mcp::protocol::{
-    IncomingMessage, JsonRpcError, JsonRpcMessage, JsonRpcResponse, WriterMessage,
+    IncomingMessage, JsonRpcError, JsonRpcMessage, JsonRpcResponse, SUPPORTED_PROTOCOL_VERSIONS,
+    WriterMessage,
 };
 use crate::mcp::server::McpServer;
 
@@ -404,12 +405,53 @@ fn new_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Protocol version assumed when the client sends no `MCP-Protocol-Version`
+/// header. The Streamable HTTP spec pins this fallback to `2025-03-26`.
+const ASSUMED_PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// Validate the `MCP-Protocol-Version` request header.
+///
+/// Absent header -> accepted, the client is assumed to speak
+/// [`ASSUMED_PROTOCOL_VERSION`]. Present header -> must name a version this
+/// build implements, otherwise the request is rejected with HTTP 400.
+///
+/// SCOPE: this checks the header in isolation. Detecting *drift* — a header
+/// that contradicts the version negotiated by this session's `initialize` —
+/// is deliberately not done here: `negotiated_version` is a local of
+/// `McpServer::handle_initialize` and is never persisted per session, so
+/// there is nothing to compare against without new session state.
+fn validate_protocol_version(headers: &HeaderMap) -> Result<(), String> {
+    let Some(raw) = headers.get("mcp-protocol-version") else {
+        return Ok(());
+    };
+    let Ok(value) = raw.to_str() else {
+        return Err("MCP-Protocol-Version header is not valid ASCII".to_string());
+    };
+    if value == ASSUMED_PROTOCOL_VERSION || SUPPORTED_PROTOCOL_VERSIONS.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unsupported MCP-Protocol-Version: {value} (supported: {}, {ASSUMED_PROTOCOL_VERSION})",
+            SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+        ))
+    }
+}
+
 /// POST /mcp — Handle JSON-RPC requests.
+#[allow(clippy::too_many_lines)]
 async fn handle_post(
     State(state): State<Arc<HttpTransportState>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    // Reject a protocol version this build cannot speak before doing any
+    // work. Previously the header was only listed in the CORS allowlist and
+    // never read, so garbage versions got a 200.
+    if let Err(msg) = validate_protocol_version(&headers) {
+        warn!(error = %msg, "Rejecting request with unsupported MCP-Protocol-Version");
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+
     // Parse the request
     let incoming = if body.is_array() {
         match serde_json::from_value::<Vec<JsonRpcMessage>>(body) {
@@ -920,6 +962,103 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ============== MCP-Protocol-Version header (G-5) ==============
+
+    #[tokio::test]
+    async fn test_post_rejects_unsupported_protocol_version_header() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "1999-01-01")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_post_accepts_supported_protocol_version_header() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2025-11-25")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_post_accepts_absent_protocol_version_header() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // Spec: when the header is absent the server SHOULD assume
+        // 2025-03-26 for backwards compatibility. Absent must NOT be a 400.
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_post_accepts_assumed_legacy_protocol_version_header() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // A client that explicitly sends the assumed default must be treated
+        // exactly like one that sends nothing.
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2025-03-26")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     // ========================================================================

@@ -181,6 +181,18 @@ section.
   at all for that request id, per spec. The HTTP transport is unaffected —
   it has no `notifications/cancelled` path and still returns the `-32800`
   envelope as its terminal answer.
+- **An unsupported `MCP-Protocol-Version` header was silently accepted
+  (G-5).** `POST /mcp` only ever read the header name to add it to the CORS
+  allowlist; the value itself was never checked, so `1900-01-01` or garbage
+  like `not a version!!` got a normal `200`. The Streamable HTTP spec MUST-
+  rejects a version the server does not implement. `handle_post` now
+  validates `MCP-Protocol-Version` up front and returns `400 Bad Request`
+  for anything outside `SUPPORTED_PROTOCOL_VERSIONS` plus the assumed
+  legacy default `2025-03-26`; an absent header is still accepted (assumed
+  `2025-03-26`) for backwards compatibility. Out of scope: detecting *drift*
+  between this header and the version actually negotiated by `initialize`
+  for the session — that needs new per-session state and is a separate
+  change.
 
 ### Migrating from 1.20.0
 
