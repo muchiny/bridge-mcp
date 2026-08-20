@@ -2292,10 +2292,22 @@ impl McpServer {
                 }
                 JsonRpcResponse::success(id, response)
             }
-            TaskWaitOutcome::NotFound => JsonRpcResponse::error(
-                id,
-                JsonRpcError::invalid_params(format!("Task not found: {}", result_params.task_id)),
-            ),
+            TaskWaitOutcome::NotFound => {
+                // A cancelled task is still in the store and still visible via
+                // `tasks/get` and `tasks/list`; `cancel_task` simply never sets
+                // `entry.result`. Reporting "Task not found" contradicted both
+                // other endpoints (audit G-23, 2026-08-19). Storing a terminal
+                // result for cancelled tasks is deliberately out of scope here.
+                let message = match self.task_store.get_task(&result_params.task_id).await {
+                    Some(info) => format!(
+                        "Task {} reached terminal state {:?} without storing a result \
+                         (cancelled tasks record none); use tasks/get for its status",
+                        result_params.task_id, info.status
+                    ),
+                    None => format!("Task not found: {}", result_params.task_id),
+                };
+                JsonRpcResponse::error(id, JsonRpcError::invalid_params(message))
+            }
         }
     }
 
@@ -4645,6 +4657,11 @@ mod tests {
         assert_eq!(result["taskId"], task_id);
     }
 
+    /// G-23 (audit 2026-08-19): `cancel_task` stores no result, so
+    /// `wait_for_result` returns `None` and the handler answered "Task not
+    /// found" — while `tasks/get` and `tasks/list` both still returned the same
+    /// task. Wording fix only; storing a terminal result for cancelled tasks is
+    /// out of scope for 2.2.0.
     #[tokio::test]
     async fn test_tasks_result_on_cancelled_task() {
         let server = create_test_server();
@@ -4656,8 +4673,38 @@ mod tests {
             .handle_tasks_result(Some(json!(1)), Some(params))
             .await;
 
-        // Cancelled tasks have no stored result — handler returns error
-        assert!(response.error.is_some());
+        let error = response.error.expect("cancelled tasks store no result");
+        assert!(
+            !error.message.contains("Task not found"),
+            "misleading message: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("Cancelled"),
+            "message must name the terminal state: {}",
+            error.message
+        );
+
+        // The two endpoints must agree: tasks/get still reports the task.
+        let get = server
+            .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
+            .await;
+        assert_eq!(get.result.expect("task info")["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_tasks_result_unknown_id_still_says_not_found() {
+        let server = create_test_server();
+        let response = server
+            .handle_tasks_result(Some(json!(1)), Some(json!({"taskId": "no-such-task"})))
+            .await;
+
+        let error = response.error.expect("unknown task is an error");
+        assert!(
+            error.message.contains("Task not found"),
+            "got: {}",
+            error.message
+        );
     }
 
     /// G-1 (audit 2026-08-19): a `tasks/result` poll whose budget elapses

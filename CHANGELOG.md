@@ -62,6 +62,31 @@ section.
   params in `tools/list`. Lib API: `DataReductionArgs::extract` now returns
   `Result`; `truncate_output_with_cache` takes a 4th `reduction_tip` argument;
   `Metrics::record_pipeline_stats` takes a 5th `params_used` argument.
+- **Discovery surface is now deterministic and self-describing.**
+  `ToolRegistry::list_tools` returns tools sorted by name (it iterated a
+  `HashMap` with `RandomState`, so `tools/list` pagination cursors and
+  `mcp_search_tools` results differed in every process), and
+  `mcp_search_tools` ranks matches — exact name, name prefix, name substring,
+  then description — instead of truncating an arbitrary subset. With the
+  default `limit: 20`, queries like "list" (117 matches) or "restart" used to
+  drop the best hit outright. `mcp_describe_tool` and `mcp_search_tools` now
+  also return each tool's `annotations` (`readOnlyHint`/`destructiveHint`/…),
+  which were unreachable in `listing: progressive` mode, and
+  `mcp_describe_tool` reports `task_support`.
+- **BREAKING (MCP clients): `execution.taskSupport` now matches dispatch.**
+  `mcp_list_tool_groups`, `mcp_search_tools` and `mcp_describe_tool` declare
+  `"forbidden"` (they are dispatched ahead of the task branch, so a `task`
+  object was accepted and silently dropped) and a task-augmented call to one
+  of them now returns `-32601`. `mcp_call_tool` declares `"optional"`, which
+  is what it already did in practice, and is advertised in `tools/list` in
+  **both** listing modes — it was dispatchable in both but listed only in
+  progressive mode. It also carries conservative annotations of its own
+  (`destructiveHint: true`, matching the MCP default for an absent hint)
+  instead of none.
+- **`tasks/result` no longer reports "Task not found" for a cancelled task.**
+  Cancelled tasks store no result, but they remain visible through `tasks/get`
+  and `tasks/list`; the error now names the terminal state and points at
+  `tasks/get`.
 - **BREAKING: `rbac.enabled: true` is now rejected at config load** — a
   config file that loaded successfully before this change can now fail to
   load. Nothing in the request path ever called `RbacEnforcer::is_allowed`
