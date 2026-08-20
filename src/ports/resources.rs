@@ -22,6 +22,19 @@ pub trait ResourceHandler: Send + Sync {
     /// Get a description of this resource type
     fn description(&self) -> &'static str;
 
+    /// RFC 6570 path expression this handler serves under
+    /// `<scheme>://<host>/`, or `None` when every resource of this type is
+    /// enumerable by [`ResourceHandler::list`] and therefore needs no
+    /// template.
+    ///
+    /// Handlers returning `Some` are published by
+    /// `resources/templates/list`, expanded once per configured host.
+    /// Defaulted to `None` so a handler that lists its resources concretely
+    /// (metrics, services, history, health) needs no change.
+    fn path_template(&self) -> Option<&'static str> {
+        None
+    }
+
     /// List available resources of this type
     ///
     /// Returns concrete resources that can be listed upfront.

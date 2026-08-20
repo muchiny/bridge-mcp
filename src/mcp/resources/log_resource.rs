@@ -87,6 +87,10 @@ impl ResourceHandler for LogResourceHandler {
         "Tail remote log files (log://{host}/{path}?lines=N)"
     }
 
+    fn path_template(&self) -> Option<&'static str> {
+        Some("{path}")
+    }
+
     async fn list(&self, _ctx: &ToolContext) -> Result<Vec<ResourceDefinition>> {
         // Log resources are template-based; no concrete listing.
         Ok(Vec::new())

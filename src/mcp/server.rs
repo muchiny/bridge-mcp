@@ -2046,22 +2046,40 @@ impl McpServer {
     // Resource template & subscription handlers
     // =========================================================================
 
+    /// List the per-host resource templates.
+    ///
+    /// G-7 (audit 2026-08-19): this used to publish a single hardcoded
+    /// `ssh://{host}/{path}`, a scheme no handler answers — every expansion
+    /// failed — while `file://` and `log://`, the two genuinely
+    /// template-based handlers, were published nowhere. Templates are now
+    /// derived from the registry: one per (templated handler x configured
+    /// host). Hosts are sorted so the list is stable across processes
+    /// (`config.hosts` is a `HashMap`).
     fn handle_resource_templates_list(&self, id: Option<Value>) -> JsonRpcResponse {
         use super::protocol::ResourceTemplate;
 
         let Ok(config) = self.config.try_read() else {
             return JsonRpcResponse::success(id, json!({ "resourceTemplates": [] }));
         };
-        let templates: Vec<ResourceTemplate> = config
-            .hosts
-            .keys()
-            .map(|host| ResourceTemplate {
-                uri_template: format!("ssh://{host}/{{path}}"),
-                name: format!("{host} file access"),
-                description: Some(format!("Access files on {host} via SSH")),
-                mime_type: None,
-            })
-            .collect();
+
+        let mut hosts: Vec<&String> = config.hosts.keys().collect();
+        hosts.sort();
+
+        let mut templates: Vec<ResourceTemplate> = Vec::new();
+        for handler in self.resource_registry.templated_handlers() {
+            let Some(path_expr) = handler.path_template() else {
+                continue;
+            };
+            let scheme = handler.scheme();
+            for host in &hosts {
+                templates.push(ResourceTemplate {
+                    uri_template: format!("{scheme}://{host}/{path_expr}"),
+                    name: format!("{scheme} on {host}"),
+                    description: Some(handler.description().to_string()),
+                    mime_type: None,
+                });
+            }
+        }
 
         JsonRpcResponse::success_or_serialize_error(id, &json!({ "resourceTemplates": templates }))
     }
@@ -5036,6 +5054,91 @@ mod tests {
         let serialized = serde_json::to_value(&response).unwrap();
         assert!(serialized.as_object().unwrap().contains_key("id"));
         assert!(serialized["id"].is_null());
+    }
+
+    /// Build a server whose config has exactly one host, so the
+    /// per-host resource templates are non-empty.
+    fn create_test_server_with_host(alias: &str) -> McpServer {
+        let mut config = test_config();
+        config.hosts.insert(
+            alias.to_string(),
+            crate::config::HostConfig {
+                hostname: "test.example.com".to_string(),
+                port: 22,
+                user: "tester".to_string(),
+                auth: crate::config::AuthConfig::Agent,
+                description: None,
+                host_key_verification: crate::config::HostKeyVerification::default(),
+                proxy_jump: None,
+                socks_proxy: None,
+                sudo_password: None,
+                tags: Vec::new(),
+                os_type: crate::config::OsType::default(),
+                shell: None,
+                retry: None,
+                protocol: crate::config::Protocol::default(),
+                #[cfg(feature = "winrm")]
+                winrm_use_tls: None,
+                #[cfg(feature = "winrm")]
+                winrm_accept_invalid_certs: None,
+                #[cfg(feature = "winrm")]
+                winrm_operation_timeout_secs: None,
+                #[cfg(feature = "winrm")]
+                winrm_max_envelope_size: None,
+            },
+        );
+        let (server, _audit_task) = McpServer::new(config);
+        server
+    }
+
+    /// G-7 (audit 2026-08-19): the only published template was
+    /// `ssh://{host}/{path}`, and no handler answers the `ssh` scheme — every
+    /// expansion of the advertised template failed. Templates must be derived
+    /// from the handlers that actually exist.
+    #[test]
+    fn test_published_resource_templates_all_have_a_handler() {
+        let server = create_test_server_with_host("prod");
+        let response = server.handle_resource_templates_list(Some(json!(1)));
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        let templates = result["resourceTemplates"].as_array().unwrap();
+        assert!(
+            !templates.is_empty(),
+            "one configured host must yield at least one template"
+        );
+
+        let schemes = server.resource_registry.schemes();
+        for template in templates {
+            let uri_template = template["uriTemplate"].as_str().unwrap();
+            let scheme = uri_template.split("://").next().unwrap();
+            assert!(
+                schemes.contains(&scheme),
+                "published template {uri_template} uses scheme '{scheme}' \
+                 which no registered handler answers (registered: {schemes:?})"
+            );
+            assert_ne!(
+                scheme, "ssh",
+                "the phantom ssh:// template must not come back"
+            );
+            assert!(
+                uri_template.contains("{path}"),
+                "a template must contain an expansion variable: {uri_template}"
+            );
+        }
+
+        let published: Vec<&str> = templates
+            .iter()
+            .map(|t| t["uriTemplate"].as_str().unwrap())
+            .collect();
+        assert!(
+            published.contains(&"file://prod/{path}"),
+            "the file handler is template-based and must be published, got {published:?}"
+        );
+        assert!(
+            published.contains(&"log://prod/{path}"),
+            "the log handler is template-based and must be published, got {published:?}"
+        );
     }
 
     // ============== Resource Subscribe/Unsubscribe Tests ==============

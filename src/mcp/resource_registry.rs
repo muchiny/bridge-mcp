@@ -77,6 +77,21 @@ impl ResourceRegistry {
         handler.read(uri, ctx).await
     }
 
+    /// Handlers that publish a per-host URI template instead of a concrete
+    /// listing (their `list()` returns an empty Vec by design).
+    pub fn templated_handlers(&self) -> impl Iterator<Item = &Arc<dyn ResourceHandler>> {
+        self.handlers.iter().filter(|h| h.path_template().is_some())
+    }
+
+    /// Every URI scheme that has a registered handler.
+    ///
+    /// Used by `resources/templates/list` tests to prove that every published
+    /// `uriTemplate` can actually be routed by `read`.
+    #[must_use]
+    pub fn schemes(&self) -> Vec<&'static str> {
+        self.handlers.iter().map(|h| h.scheme()).collect()
+    }
+
     /// Get the number of registered handlers
     #[must_use]
     pub fn len(&self) -> usize {

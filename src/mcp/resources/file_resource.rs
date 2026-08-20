@@ -83,6 +83,10 @@ impl ResourceHandler for FileResourceHandler {
         "Read remote files via SSH (file://{host}/{path})"
     }
 
+    fn path_template(&self) -> Option<&'static str> {
+        Some("{path}")
+    }
+
     async fn list(&self, _ctx: &ToolContext) -> Result<Vec<ResourceDefinition>> {
         // File resources are template-based; no concrete listing.
         Ok(Vec::new())

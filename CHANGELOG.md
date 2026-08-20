@@ -243,6 +243,19 @@ section.
   `capabilities.resources.subscribe` in the `initialize` response flips from
   `true` to `false`; no client could have relied on a notification that was
   never sent, so nothing that worked stops working.
+- **The published resource template was `ssh://{host}/{path}`, a scheme no
+  handler answers (G-7).** `create_default_resource_registry` never
+  registered an `ssh` handler, so every expansion of the one template
+  `resources/templates/list` advertised failed in `ResourceRegistry::read`.
+  Meanwhile the two genuinely template-based handlers, `file://` and
+  `log://`, were published nowhere. Templates are now derived from each
+  registered handler's own `scheme()` and a new `path_template()`, one
+  template per (templated handler x configured host); a new test asserts
+  every published `uriTemplate` resolves to a registered scheme.
+  **Wire-visible**: `resources/templates/list` now returns
+  `file://<host>/{path}` and `log://<host>/{path}` entries instead of the
+  phantom `ssh://<host>/{path}`; no client could have successfully expanded
+  the old template, so nothing that worked stops working.
 - **`resources/read` on an unroutable URI returned `-32603` Internal error
   instead of `-32602` Invalid params (G-7).** An unsupported scheme or a
   malformed URI is the caller's mistake, not a server malfunction; only the
