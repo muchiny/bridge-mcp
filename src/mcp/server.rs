@@ -6357,11 +6357,23 @@ mod tests {
         assert_eq!(build["version"], SERVER_VERSION);
     }
 
+    /// Confirms the NON-mutation half of the dispatch-chokepoint contract:
+    /// when `handle_request_with_cancel` scopes a request's `_meta` envelope
+    /// onto a session clone (Task 3), the ORIGINAL `SessionContext` the
+    /// caller holds is left untouched — `request_meta` stays `None` and its
+    /// capability reads keep falling back to `caps` alone.
+    ///
+    /// This does NOT prove the scoped clone actually carries the envelope
+    /// to downstream handlers — a regression that dropped
+    /// `session.map(|s| s.with_request_meta(...))` entirely would still
+    /// pass this test, since `session` is `&SessionContext` and the
+    /// original can never be mutated through it either way. That positive
+    /// half is covered by `test_tool_context_capability_flags_come_from_request_meta`
+    /// (unit-level) and end-to-end by the seam tests in tasks 4-6, which
+    /// drive a real `_meta`-bearing request through full dispatch and
+    /// assert on behaviour that only the scoped clone can produce.
     #[tokio::test]
-    async fn test_dispatch_attaches_request_meta_to_the_session_clone() {
-        // `handle_request_with_cancel` must parse `params._meta` and hand the
-        // handlers a session clone that carries it — without mutating the
-        // session-level bundle.
+    async fn test_dispatch_with_meta_leaves_original_session_unmutated() {
         let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
