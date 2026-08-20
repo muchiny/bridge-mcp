@@ -255,6 +255,7 @@ jobs:
         run: |
           make sync-server-json
           git diff --exit-code server.json .well-known/mcp/server-card.json dxt/manifest.json \
+            .claude-plugin/marketplace.json plugin/.claude-plugin/plugin.json dxt/README.md \
             || { echo "::error::Discovery manifest version drift — run 'make sync-server-json' and commit"; exit 1; }
 
       - name: Build DXT packages
