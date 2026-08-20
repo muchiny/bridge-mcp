@@ -3077,9 +3077,18 @@ mod tests {
         // Normal unknown-tool error path — proves the rewrite fell through
         // to the registry rather than being swallowed by a meta branch. Since
         // G-22 (-32602 for unknown tool, both call sites) this is a JSON-RPC
-        // error, not an isError tool result.
+        // error, not an isError tool result. Naming the INNER tool in the
+        // message (not just the -32602 code) pins that the rewrite actually
+        // happened — a regression that dropped it entirely would still
+        // reach the registry with `mcp_call_tool` as the name and still
+        // fail with -32602, but wouldn't mention `ssh_does_not_exist`.
         let error = response.error.expect("unknown inner tool must be -32602");
         assert_eq!(error.code, -32602);
+        assert!(
+            error.message.contains("ssh_does_not_exist"),
+            "must name the inner tool the rewrite dispatched to, got: {}",
+            error.message
+        );
     }
 
     #[tokio::test]
@@ -3768,9 +3777,17 @@ mod tests {
             .await;
 
         // Empty name should result in tool not found. Since G-22, that is a
-        // JSON-RPC -32602 error, not an isError tool result.
+        // JSON-RPC -32602 error, not an isError tool result. -32602 alone
+        // doesn't separate "reached the registry as an unknown tool" from
+        // an earlier param-shape rejection (also -32602) — the message
+        // must say "Unknown tool" to prove it took the registry path.
         let error = response.error.expect("empty name must be -32602");
         assert_eq!(error.code, -32602);
+        assert!(
+            error.message.contains("Unknown tool"),
+            "must reach the registry as an unknown tool, not an earlier param rejection, got: {}",
+            error.message
+        );
     }
 
     // ============== Additional Prompts Tests ==============
