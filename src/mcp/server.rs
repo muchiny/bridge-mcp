@@ -430,22 +430,6 @@ impl McpServer {
         Arc::new(PendingRequests::new())
     }
 
-    /// Allocate a fresh per-session capabilities handle.
-    ///
-    /// Test helper used by `tests/multisession_isolation.rs` to verify
-    /// that two sessions on the same `McpServer` instance get independent
-    /// `Arc<SessionCapabilities>` instances (Vuln 9 audit 2026-05-09).
-    /// Integration tests live in their own crate so this helper cannot
-    /// be `#[cfg(test)]`; it is gated `#[doc(hidden)]` instead so it
-    /// stays out of the public docs.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn allocate_session_capabilities_for_test(
-        &self,
-    ) -> Arc<crate::mcp::session_capabilities::SessionCapabilities> {
-        Arc::new(crate::mcp::session_capabilities::SessionCapabilities::new())
-    }
-
     /// Allocate a fresh per-session `ActiveRequests` handle.
     ///
     /// Test helper used by `tests/cross_session_cancel.rs` to verify
@@ -3032,6 +3016,42 @@ mod tests {
         params
     }
 
+    /// A session scoped to a request declaring exactly `caps`.
+    ///
+    /// Task 68 deleted `SessionCapabilities`, so a test that used to grant a
+    /// capability with `session_ctx.caps.set_supports_elicitation(true)` now
+    /// declares it the way a Modern client does: in the request's own `_meta`.
+    ///
+    /// Not a mechanical substitution. The old flag was per SESSION and
+    /// outlived the request; the declaration is per REQUEST and does not.
+    /// That is why this builds the context from params instead of mutating
+    /// one after the fact — a test that mutated would be describing a
+    /// lifetime the server no longer has.
+    /// Params declaring `roots`, for tests that go through
+    /// `route_incoming_message`.
+    ///
+    /// Those tests CANNOT use [`session_declaring`]: the router scopes the
+    /// session to the message it is routing, replacing `request_meta`
+    /// wholesale, so a declaration parked on the session is discarded before
+    /// `supports_roots()` is asked. Declaring on the message is not a
+    /// workaround for that — it is the only place a Modern client ever
+    /// declares anything.
+    fn params_declaring_roots() -> Value {
+        json!({
+            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "roots": {} } }
+        })
+    }
+
+    fn session_declaring(caps: &Value) -> (SessionContext, mpsc::Receiver<WriterMessage>) {
+        let (tx, rx) = mpsc::channel::<WriterMessage>(64);
+        let params = json!({
+            "_meta": { "io.modelcontextprotocol/clientCapabilities": caps }
+        });
+        let session =
+            SessionContext::new(tx).with_request_meta(RequestMeta::from_params(Some(&params)));
+        (session, rx)
+    }
+
     fn session_declaring_tasks() -> (SessionContext, mpsc::Receiver<WriterMessage>) {
         let (tx, rx) = mpsc::channel::<WriterMessage>(64);
         let params = json!({
@@ -3460,9 +3480,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session = SessionContext::new(tx);
 
-        assert!(!session.caps.supports_elicitation());
-        assert!(!session.caps.supports_roots());
-        assert!(!session.caps.supports_sampling());
+        assert!(!session.supports_elicitation());
+        assert!(!session.supports_roots());
+        assert!(!session.supports_sampling());
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -3486,15 +3506,15 @@ mod tests {
 
         assert_eq!(response.error.expect("must error").code, -32022);
         assert!(
-            !session.caps.supports_elicitation(),
+            !session.supports_elicitation(),
             "a rejected handshake granted elicitation"
         );
         assert!(
-            !session.caps.supports_roots(),
+            !session.supports_roots(),
             "a rejected handshake granted roots"
         );
         assert!(
-            !session.caps.supports_sampling(),
+            !session.supports_sampling(),
             "a rejected handshake granted sampling"
         );
     }
@@ -3805,7 +3825,7 @@ rbac:
         let (server, _task) = McpServer::new(config);
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-        // session_ctx.caps.supports_elicitation() defaults to false.
+        // session_ctx.supports_elicitation() defaults to false.
 
         // ssh_cron_remove is annotated destructive
         let params = json!({
@@ -4091,7 +4111,7 @@ rbac:
         let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-        // session_ctx.caps.supports_elicitation() defaults to false —
+        // session_ctx.supports_elicitation() defaults to false —
         // the gate should refuse.
         let params = json!({
             "name": "ssh_cron_remove",
@@ -4153,9 +4173,7 @@ rbac:
         // lands mid-char whatever the serializer's key order.
         for pad in 0..4_usize {
             let server = create_test_server();
-            let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
-            let session_ctx = SessionContext::new(tx);
-            session_ctx.caps.set_supports_elicitation(true);
+            let (session_ctx, _rx) = session_declaring(&json!({ "elicitation": {} }));
 
             let params = json!({
                 "name": "ssh_cron_remove",
@@ -4181,9 +4199,7 @@ rbac:
         // next to it is capped at 4000), producing a prompt too large for
         // the client to render or the operator to approve.
         let server = create_test_server();
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
-        let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_elicitation(true);
+        let (session_ctx, mut rx) = session_declaring(&json!({ "elicitation": {} }));
 
         let params = json!({
             "name": "ssh_cron_remove",
@@ -4226,7 +4242,7 @@ rbac:
         let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-        // session_ctx.caps.supports_elicitation() defaults to false —
+        // session_ctx.supports_elicitation() defaults to false —
         // the gate should refuse, even through the dispatcher.
         let params = json!({
             "name": super::super::meta_tools::CALL_TOOL,
@@ -4291,9 +4307,8 @@ rbac:
     /// from the first-request fetch is the only trigger left.
     #[tokio::test]
     async fn test_roots_list_changed_notification_is_inert() {
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
         let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_roots(true);
         // Pretend the one-shot fetch already happened.
         session_ctx
             .roots_fetched
@@ -4303,7 +4318,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: None,
             method: Some("notifications/roots/list_changed".to_string()),
-            params: None,
+            params: Some(params_declaring_roots()),
             result: None,
             error: None,
         };
@@ -4323,15 +4338,14 @@ rbac:
     /// FIRST client request of the session, exactly once.
     #[tokio::test]
     async fn test_first_request_triggers_roots_fetch_once() {
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
         let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_roots(true);
 
         let make = || super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: Some("tools/list".to_string()),
-            params: None,
+            params: Some(params_declaring_roots()),
             result: None,
             error: None,
         };
@@ -4368,14 +4382,13 @@ rbac:
     /// method now falls through to the generic no-`id` arm.
     #[tokio::test]
     async fn test_initialized_notification_is_no_longer_special_cased() {
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
         let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_roots(true);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: None,
             method: Some("notifications/initialized".to_string()),
-            params: None,
+            params: Some(params_declaring_roots()),
             result: None,
             error: None,
         };
@@ -4400,14 +4413,13 @@ rbac:
         // The fetch is spawned (audit 2026-08-02), so routing returns at
         // once and the `roots/list` request lands on tx from the detached
         // task.
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
         let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_roots(true);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: Some("tools/list".to_string()),
-            params: None,
+            params: Some(params_declaring_roots()),
             result: None,
             error: None,
         };
@@ -4448,14 +4460,13 @@ rbac:
     /// roots land on the session slot whenever the client answers.
     #[tokio::test]
     async fn test_first_request_does_not_block_reader_loop() {
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
         let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_roots(true);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: Some("tools/list".to_string()),
-            params: None,
+            params: Some(params_declaring_roots()),
             result: None,
             error: None,
         };
@@ -7920,8 +7931,8 @@ rbac:
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let base = SessionContext::new(tx);
         // No `initialize` ever ran.
-        assert!(!base.caps.supports_elicitation());
-        assert!(!base.caps.supports_sampling());
+        assert!(!base.supports_elicitation());
+        assert!(!base.supports_sampling());
 
         let params = json!({
             "_meta": {
@@ -7956,7 +7967,7 @@ rbac:
         let session_ctx = SessionContext::new(tx);
         // Proof of the premise: no handshake ran, so the session flags are
         // all false and only the envelope can grant the capability.
-        assert!(!session_ctx.caps.supports_elicitation());
+        assert!(!session_ctx.supports_elicitation());
 
         // Fake Modern client: wait for the server's `elicitation/create`,
         // then decline it. Reaching this point at all proves the capability
@@ -8086,9 +8097,7 @@ rbac:
         config.security.require_elicitation_on_destructive = true;
         let (server, _audit_task) = McpServer::new(config);
 
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
-        let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_elicitation(true);
+        let (session_ctx, mut rx) = session_declaring(&json!({ "elicitation": {} }));
 
         let pending = Arc::clone(&session_ctx.pending);
         let fake_client = tokio::spawn(async move {
@@ -8407,9 +8416,7 @@ rbac:
         config.security.require_elicitation_on_destructive = true;
         let (server, _audit_task) = McpServer::new(config);
 
-        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
-        let session_ctx = SessionContext::new(tx);
-        session_ctx.caps.set_supports_elicitation(true);
+        let (session_ctx, _rx) = session_declaring(&json!({ "elicitation": {} }));
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),

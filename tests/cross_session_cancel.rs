@@ -28,7 +28,8 @@ async fn active_requests_are_isolated_across_sessions() {
 
     // Each session must get its OWN ActiveRequests handle. Two calls
     // to the test helper return independent instances — same pattern as
-    // PendingRequests / SessionCapabilities (Vuln 8 / Vuln 9).
+    // PendingRequests (Vuln 8). Vuln 9's SessionCapabilities is gone;
+    // capabilities are per request now.
     let active_a = server.allocate_session_active_requests_for_test();
     let active_b = server.allocate_session_active_requests_for_test();
 

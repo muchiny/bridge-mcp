@@ -31,35 +31,74 @@ async fn pending_requests_are_isolated_across_sessions() {
     );
 }
 
+/// Vuln 9, re-expressed for a server with no handshake.
+///
+/// The original leak was between SESSIONS: `initialize` wrote capability
+/// flags into a per-session `SessionCapabilities`, and sharing one handle
+/// across sessions would have let client A's declaration grant rights to
+/// client B. 3.0.0 deleted the type — capabilities are declared per REQUEST,
+/// in `_meta` — so the old test has no handle left to compare.
+///
+/// The guarantee did not shrink with the type, it GREW, and this asserts the
+/// larger one. The unit of isolation went from the session to the request, so
+/// there are now three ways a declaration could leak instead of one: into
+/// another session, into the declaring session itself, and into a sibling
+/// request of that same session. All three are checked. The middle one is the
+/// case that did not exist before `with_request_meta`, and it is the one a
+/// naive implementation (mutating the bundle in place instead of cloning it)
+/// would get wrong.
 #[tokio::test]
-async fn elicitation_capability_does_not_leak_across_sessions() {
-    let config = bridge_mcp::config::Config::default();
-    let (server, _audit_task) = bridge_mcp::mcp::McpServer::new(config);
-    let server = std::sync::Arc::new(server);
+async fn a_declared_capability_does_not_leak_beyond_its_own_request() {
+    use bridge_mcp::mcp::protocol::WriterMessage;
+    use bridge_mcp::mcp::request_meta::RequestMeta;
+    use bridge_mcp::mcp::session_context::SessionContext;
 
-    let caps_a = server.allocate_session_capabilities_for_test();
-    let caps_b = server.allocate_session_capabilities_for_test();
+    fn session() -> SessionContext {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<WriterMessage>(8);
+        SessionContext::new(tx)
+    }
 
+    let declaring = serde_json::json!({
+        "_meta": {
+            "io.modelcontextprotocol/clientCapabilities": {
+                "elicitation": {}, "sampling": {}, "roots": {}
+            }
+        }
+    });
+
+    let session_a = session();
+    let session_b = session();
+
+    let request_a = session_a.with_request_meta(RequestMeta::from_params(Some(&declaring)));
     assert!(
-        !std::sync::Arc::ptr_eq(&caps_a, &caps_b),
-        "each session must own its own SessionCapabilities"
+        request_a.supports_elicitation(),
+        "the declaring request must get what it declared"
     );
 
-    caps_a.set_supports_elicitation(true);
-    caps_a.set_supports_sampling(true);
-    caps_a.set_supports_roots(true);
+    // 1. Not into another session.
+    assert!(
+        !session_b.supports_elicitation(),
+        "session B must not inherit session A's request-level declaration"
+    );
 
-    assert!(caps_a.supports_elicitation());
+    // 2. Not into its OWN session. `with_request_meta` clones; if it mutated,
+    //    every later request of this session would inherit the grant.
     assert!(
-        !caps_b.supports_elicitation(),
-        "B must NOT inherit A's elicitation flag"
+        !session_a.supports_elicitation(),
+        "the declaration must not persist into the session it came from"
     );
+    assert!(!session_a.supports_sampling());
+    assert!(!session_a.supports_roots());
+
+    // 3. Not into a sibling request of the same session. This is the case
+    //    Vuln 9 could not have had: two requests, one bundle, concurrent.
+    let sibling = session_a.with_request_meta(RequestMeta::from_params(Some(
+        &serde_json::json!({ "_meta": { "io.modelcontextprotocol/clientCapabilities": {} } }),
+    )));
     assert!(
-        !caps_b.supports_sampling(),
-        "B must NOT inherit A's sampling flag"
+        !sibling.supports_elicitation(),
+        "a sibling request declaring `{{}}` must not inherit its neighbour's grant"
     );
-    assert!(
-        !caps_b.supports_roots(),
-        "B must NOT inherit A's roots flag"
-    );
+    // And the original is unchanged by the sibling existing.
+    assert!(request_a.supports_elicitation());
 }

@@ -2,8 +2,8 @@
 //!
 //! Audit 2026-05-09 (FIND-033/034/036/037) moved four fields off the
 //! shared `McpServer` and into per-session storage allocated in
-//! `serve_session()`. Together with the prior fixes from Vuln 8, Vuln 9,
-//! and FIND-038, that adds up to seven Arc/handle parameters threaded
+//! `serve_session()`. Together with the prior fixes from Vuln 8 and
+//! FIND-038, that adds up to several Arc/handle parameters threaded
 //! through `route_incoming_message → handle_request_with_cancel →
 //! handle_tools_call → create_tool_context`. To avoid the parameter
 //! explosion (and per the FIND-038 quality review's standing
@@ -15,6 +15,15 @@
 //! field is `Arc`-wrapped) into spawned per-request tasks. Each session
 //! owns an independent bundle, so cross-session leakage is impossible
 //! by construction.
+//!
+//! Vuln 9 — one session's capability flags granting rights to another —
+//! used to be answered by a per-session `SessionCapabilities` here. 3.0.0
+//! deleted it: capabilities are declared per REQUEST, in `_meta`, and
+//! [`Self::with_request_meta`] gives each request its own envelope without
+//! touching the session. The guarantee is now tighter than Vuln 9 asked
+//! for, because the unit of isolation shrank from the session to the
+//! request — a sibling request of the SAME session cannot inherit one
+//! either.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -24,7 +33,6 @@ use tokio::sync::{RwLock, mpsc};
 use super::pending_requests::PendingRequests;
 use super::protocol::{RootEntry, WriterMessage};
 use super::request_meta::RequestMeta;
-use super::session_capabilities::SessionCapabilities;
 
 /// All per-session state bundled into one cloneable handle.
 ///
@@ -35,16 +43,16 @@ use super::session_capabilities::SessionCapabilities;
 pub struct SessionContext {
     /// Per-session pending-requests map (Vuln 8).
     pub pending: Arc<PendingRequests>,
-    /// Per-session client capability flags (Vuln 9).
-    pub caps: Arc<SessionCapabilities>,
     /// Per-session active-requests map for MCP cancellation (FIND-038).
     pub active_requests: super::server::ActiveRequests,
     /// Per-session writer channel for server-initiated messages
     /// (notifications, requests). FIND-034.
     pub notification_tx: mpsc::Sender<WriterMessage>,
-    /// Per-session runtime override for `max_output_chars`. Written by
-    /// `handle_initialize` based on this client's `client_overrides`
-    /// profile and read by `create_tool_context`. FIND-033.
+    /// Per-session runtime override for `max_output_chars`. Resolved from
+    /// the per-request `clientInfo` envelope against this client's
+    /// `client_overrides` profile, and read by `create_tool_context`.
+    /// FIND-033. (It was written by `handle_initialize` until 3.0.0 reduced
+    /// that arm to a bare -32022.)
     pub runtime_max_output: Arc<RwLock<Option<usize>>>,
     /// Per-session client-declared workspace roots. Written by
     /// `fetch_roots` on the session's first client request. FIND-037.
@@ -72,7 +80,6 @@ impl SessionContext {
     pub fn new(notification_tx: mpsc::Sender<WriterMessage>) -> Self {
         Self {
             pending: Arc::new(PendingRequests::new()),
-            caps: Arc::new(SessionCapabilities::new()),
             active_requests: super::server::ActiveRequests::new(),
             notification_tx,
             runtime_max_output: Arc::new(RwLock::new(None)),
@@ -96,37 +103,60 @@ impl SessionContext {
 
     /// Whether the client supports `elicitation/create` for THIS request.
     ///
-    /// Precedence — this is the compatibility seam that lets Modern and
-    /// Legacy clients coexist while the handshake is being removed:
-    /// 1. the request's own `_meta` envelope, when it declared capabilities
-    ///    (including an authoritative `{}` meaning "none");
-    /// 2. otherwise the flags this session's `initialize` handshake set.
+    /// The ONLY source is the request's own `_meta` envelope. There used to
+    /// be a second: `SessionCapabilities`, written by the `initialize`
+    /// handshake, consulted whenever the envelope declared nothing. Both are
+    /// gone — the handshake in 3.0.0, and the flags with this accessor's
+    /// fallback arm.
+    ///
+    /// `None` — the request declared no capabilities at all — now answers
+    /// `false`, and the fail-closed direction is deliberate. C3 refuses such
+    /// a request at the dispatch chokepoint, so on the ordinary path this
+    /// arm is unreachable; what still reaches it is the EXEMPT methods
+    /// (`server/discover`, `initialize`), which have no envelope by
+    /// construction. Answering `true` there would hand a capability to a
+    /// client that never claimed one, on precisely the two methods that
+    /// cross the era boundary.
+    ///
+    /// An explicit `{}` is a different case and always was: it is an
+    /// authoritative declaration of no capabilities, `Some(false)`, not an
+    /// absence. Both now answer `false`, but through different branches, and
+    /// `session_context::tests` pins each separately so a future change that
+    /// collapses them has to do so on purpose.
     #[must_use]
     pub fn supports_elicitation(&self) -> bool {
         self.request_meta
             .as_ref()
             .and_then(|m| m.declares_elicitation())
-            .unwrap_or_else(|| self.caps.supports_elicitation())
+            .unwrap_or(false)
     }
 
     /// Whether the client supports `sampling/createMessage` for THIS request.
-    /// See [`Self::supports_elicitation`] for the precedence rule.
+    /// See [`Self::supports_elicitation`] for why an absent envelope is
+    /// `false` rather than a fallback.
     #[must_use]
     pub fn supports_sampling(&self) -> bool {
         self.request_meta
             .as_ref()
             .and_then(|m| m.declares_sampling())
-            .unwrap_or_else(|| self.caps.supports_sampling())
+            .unwrap_or(false)
     }
 
     /// Whether the client supports `roots/list` for THIS request.
-    /// See [`Self::supports_elicitation`] for the precedence rule.
+    /// See [`Self::supports_elicitation`] for why an absent envelope is
+    /// `false` rather than a fallback.
+    ///
+    /// This one has a live caller that depends on the `false`:
+    /// `route_incoming_message` asks it before spending the one-shot
+    /// `roots_fetched` latch, and the first request of every Modern session
+    /// is the exempt `server/discover`. A `true` here would spend the latch
+    /// on a probe that cannot fetch.
     #[must_use]
     pub fn supports_roots(&self) -> bool {
         self.request_meta
             .as_ref()
             .and_then(|m| m.declares_roots())
-            .unwrap_or_else(|| self.caps.supports_roots())
+            .unwrap_or(false)
     }
 
     /// The client name declared in THIS request's `_meta` envelope.
@@ -174,7 +204,7 @@ mod tests {
         let ctx = SessionContext::new(dummy_writer_tx());
         assert!(ctx.request_meta.is_none());
         assert!(ctx.request_client_name().is_none());
-        // With neither handshake nor envelope, everything is false.
+        // With no envelope, everything is false.
         assert!(!ctx.supports_elicitation());
         assert!(!ctx.supports_sampling());
         assert!(!ctx.supports_roots());
@@ -182,11 +212,11 @@ mod tests {
 
     #[test]
     fn per_request_meta_grants_capability_without_any_handshake() {
-        // This is the compatibility seam: no `initialize` ever ran, so every
-        // SessionCapabilities AtomicBool is false, yet the request's own
-        // `_meta` envelope declares elicitation.
+        // This is the compatibility seam: nothing outside the request can
+        // grant anything any more, yet the request's own `_meta` envelope
+        // declares elicitation and that is honoured.
         let base = SessionContext::new(dummy_writer_tx());
-        assert!(!base.caps.supports_elicitation());
+        assert!(!base.supports_elicitation());
 
         let params = serde_json::json!({
             "_meta": {
@@ -205,25 +235,37 @@ mod tests {
         assert_eq!(scoped.request_client_name(), Some("ExampleClient"));
     }
 
+    /// INVERTS `absent_envelope_falls_back_to_handshake_flags`, which
+    /// asserted that a request with no `_meta` inherited the handshake's
+    /// flags. There is no handshake and no flags; an absent envelope now
+    /// grants nothing.
+    ///
+    /// Not a formality. C3 refuses capability-less requests at dispatch, but
+    /// it EXEMPTS `server/discover` and `initialize`, and those reach this
+    /// accessor with no envelope. This is the test that says what they get.
     #[test]
-    fn absent_envelope_falls_back_to_handshake_flags() {
-        // Legacy client: `initialize` set the flags, requests carry no `_meta`.
+    fn an_absent_envelope_grants_nothing() {
         let base = SessionContext::new(dummy_writer_tx());
-        base.caps.set_supports_elicitation(true);
 
         let params = serde_json::json!({ "name": "ssh_exec" });
         let scoped = base.with_request_meta(RequestMeta::from_params(Some(&params)));
 
-        assert!(scoped.supports_elicitation());
+        assert!(!scoped.supports_elicitation());
+        assert!(!scoped.supports_sampling());
+        assert!(!scoped.supports_roots());
     }
 
+    /// The OTHER branch to the same answer, kept separate on purpose.
+    ///
+    /// An explicit `{}` is `Some(false)` — an authoritative declaration of no
+    /// capabilities — while an absent envelope is `None` unwrapped to
+    /// `false`. Both say no today. Pinning them separately means a future
+    /// change that collapses the two, or that makes `None` permissive again,
+    /// has to break a test rather than slip through under one shared
+    /// assertion.
     #[test]
-    fn declared_envelope_overrides_handshake_flags() {
-        // Modern client that supports nothing: `{}` is an authoritative
-        // denial for THIS request and must win over a stale handshake flag.
+    fn an_explicit_empty_declaration_grants_nothing() {
         let base = SessionContext::new(dummy_writer_tx());
-        base.caps.set_supports_elicitation(true);
-        base.caps.set_supports_sampling(true);
 
         let params = serde_json::json!({
             "_meta": { "io.modelcontextprotocol/clientCapabilities": {} }
