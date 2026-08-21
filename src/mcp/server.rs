@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -64,7 +64,6 @@ pub struct McpServer {
     tunnel_manager: Arc<TunnelManager>,
     output_cache: Arc<OutputCache>,
     task_store: Arc<TaskStore>,
-    initialized: AtomicBool,
     concurrent_limit: Arc<Semaphore>,
     client_info: RwLock<Option<ClientInfo>>,
     /// Server-wide fanout registry of live session writer channels.
@@ -305,7 +304,6 @@ impl McpServer {
             tunnel_manager,
             output_cache,
             task_store,
-            initialized: AtomicBool::new(false),
             concurrent_limit,
             client_info: RwLock::new(None),
             notification_fanout: NotificationFanout::new(),
@@ -759,17 +757,19 @@ impl McpServer {
     /// froze whole sessions, because the reader loop acquires the permit
     /// BEFORE it spawns the handler — so N parked `tasks/result` long
     /// polls (N = the limit, 5 by default) meant the client's next message
-    /// was never read at all. Measured: N=4 still answered `ping`; N=5
-    /// answered neither `ping` nor `tasks/cancel` — the one request that
-    /// could have released the parked polls — and was still dead after
-    /// 208 s.
+    /// was never read at all. Measured: N=4 still answered a control-plane
+    /// probe; N=5 answered neither the probe nor `tasks/cancel` — the one
+    /// request that could have released the parked polls — and was still
+    /// dead after 208 s. (The audit used `ping` as the probe; Modern
+    /// 2026-07-28 deleted that method, so the exemption is now `tasks/*`
+    /// only. The freeze it prevents is unchanged.)
     ///
-    /// Neither `ping` nor any `tasks/*` method does remote work, so
-    /// exempting them costs no concurrency budget. Task-augmented
-    /// `tools/call` work is governed instead by the permit the task worker
-    /// itself takes in `handle_tools_call_async`.
+    /// No `tasks/*` method does remote work, so exempting them costs no
+    /// concurrency budget. Task-augmented `tools/call` work is governed
+    /// instead by the permit the task worker itself takes in
+    /// `handle_tools_call_async`.
     fn is_concurrency_exempt(method: &str) -> bool {
-        method == "ping" || method.starts_with("tasks/")
+        method.starts_with("tasks/")
     }
 
     /// Drive one full client session: spawn a per-session writer task,
@@ -1086,25 +1086,11 @@ impl McpServer {
         }
 
         // Handle client notifications (no response needed per JSON-RPC 2.0)
-        if message.method.as_deref() == Some("notifications/roots/list_changed") {
-            // This branch bypasses `handle_request_with_cancel`, so attach
-            // the notification's own `_meta` envelope here — otherwise a
-            // Modern client that declares `roots` per-request would be
-            // ignored by the `supports_roots()` gate in `spawn_fetch_roots`.
-            let scoped =
-                session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
-            Self::handle_roots_changed(&scoped);
-            return None;
-        }
         if message.method.as_deref() == Some("notifications/cancelled") {
             Self::handle_cancellation_notification(
                 &session.active_requests,
                 message.params.as_ref(),
             );
-            return None;
-        }
-        if message.method.as_deref() == Some("notifications/initialized") {
-            Self::handle_initialized_notification(session);
             return None;
         }
 
@@ -1119,6 +1105,24 @@ impl McpServer {
                 "Ignoring unhandled JSON-RPC notification (no id, no response sent)"
             );
             return None;
+        }
+
+        // Modern (2026-07-28) removed `notifications/initialized`, which
+        // used to trigger the one-shot `roots/list` fetch. Fire it lazily
+        // on the first client request of the session instead. `swap` makes
+        // this exactly-once even under a burst of concurrent requests, and
+        // the fetch itself is spawned, so the reader loop is never blocked
+        // (audit 2026-08-02).
+        //
+        // The request's own `_meta` envelope is attached first: a Modern
+        // client declares `roots` per-request, and without the scope the
+        // `supports_roots()` gate inside `spawn_fetch_roots` would read the
+        // session-level flags — always `false` with no handshake — and
+        // never fetch anything.
+        if !session.roots_fetched.swap(true, Ordering::Relaxed) {
+            let scoped =
+                session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
+            Self::spawn_fetch_roots(&scoped);
         }
 
         // It's a client request — convert to JsonRpcRequest
@@ -1186,19 +1190,6 @@ impl McpServer {
                 debug!(error = %e, "Failed to fetch roots from client");
             }
         }
-    }
-
-    /// Handle `notifications/roots/list_changed` — re-fetch roots.
-    fn handle_roots_changed(session: &SessionContext) {
-        info!("Client roots changed, re-fetching");
-        Self::spawn_fetch_roots(session);
-    }
-
-    /// Handle `notifications/initialized` — fetch client roots if supported.
-    /// No response is emitted (per JSON-RPC 2.0 notification semantics).
-    fn handle_initialized_notification(session: &SessionContext) {
-        info!("Client sent notifications/initialized; fetching roots");
-        Self::spawn_fetch_roots(session);
     }
 
     /// Handle a single JSON-RPC request and return the response.
@@ -1276,7 +1267,6 @@ impl McpServer {
             "resources/unsubscribe" => {
                 Self::handle_resource_unsubscribe(id, request.params, session)
             }
-            "ping" => JsonRpcResponse::success(id, json!({})),
             _ => {
                 error!(method = %request.method, "Unknown method");
                 JsonRpcResponse::error(id, JsonRpcError::method_not_found(&request.method))
@@ -1413,8 +1403,6 @@ impl McpServer {
                 }
             }
         }
-
-        self.initialized.store(true, Ordering::SeqCst);
 
         let instructions = {
             let config = self.config.read().await;
@@ -2700,11 +2688,17 @@ mod tests {
     /// so N parked polls froze the entire session: the loop blocks on
     /// `acquire_owned()` before it spawns the handler, so the client's next
     /// message is never read. The audit measured the boundary exactly —
-    /// N=4 still answered `ping`, N=5 answered neither `ping` nor
+    /// N=4 still answered the probe, N=5 answered neither the probe nor
     /// `tasks/cancel` (the one call that could have released the polls),
     /// and it was still dead 208 s later. This table walks across it.
+    ///
+    /// The audit's probe was `ping`, which Modern (2026-07-28) deleted.
+    /// `tasks/list` replaces it: same role (a concurrency-exempt request
+    /// that must still be read and answered while the polls are parked),
+    /// and the freeze under test is a property of the reader loop, not of
+    /// the probe's method name.
     #[tokio::test]
-    async fn ping_survives_parked_task_polls_at_and_past_the_concurrency_limit() {
+    async fn control_plane_survives_parked_task_polls_at_and_past_the_concurrency_limit() {
         for parked_polls in [1_usize, 2, 3, 4, 5, 6] {
             let server = Arc::new(create_test_server());
             assert_eq!(
@@ -2736,17 +2730,19 @@ mod tests {
                 next_id += 1;
             }
 
-            // Let the reader loop consume every poll before the ping arrives.
+            // Let the reader loop consume every poll before the probe arrives.
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-            client_tx.send(client_request(9999, "ping", None)).unwrap();
+            client_tx
+                .send(client_request(9999, "tasks/list", None))
+                .unwrap();
 
             let msg = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
                 .await
                 .unwrap_or_else(|_| {
                     panic!(
                         "session froze with {parked_polls} parked tasks/result polls: \
-                     ping was never answered"
+                     the tasks/list probe was never answered"
                     )
                 })
                 .expect("session writer channel closed");
@@ -2756,11 +2752,11 @@ mod tests {
                     assert_eq!(
                         response.id,
                         Some(json!(9999)),
-                        "the first answer must be the ping, not a parked poll"
+                        "the first answer must be the probe, not a parked poll"
                     );
-                    assert!(response.error.is_none(), "ping must succeed");
+                    assert!(response.error.is_none(), "the probe must succeed");
                 }
-                _ => panic!("expected a ping response, got a notification or a batch"),
+                _ => panic!("expected a probe response, got a notification or a batch"),
             }
 
             serve.abort();
@@ -2933,16 +2929,6 @@ mod tests {
         assert!(result["serverInfo"]["description"].is_string());
         assert!(result["serverInfo"]["websiteUrl"].is_string());
         assert!(result["instructions"].is_string());
-    }
-
-    #[tokio::test]
-    async fn test_handle_initialize_sets_initialized_flag() {
-        let server = create_test_server();
-        assert!(!server.initialized.load(Ordering::SeqCst));
-
-        server.handle_initialize(Some(json!(1)), None, None).await;
-
-        assert!(server.initialized.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -3606,8 +3592,10 @@ mod tests {
         assert!(error.message.contains("unknown/method"));
     }
 
+    /// Modern (2026-07-28) removed `ping`. It must now be an ordinary
+    /// unknown method, not a silent success.
     #[tokio::test]
-    async fn test_handle_request_ping() {
+    async fn test_ping_is_method_not_found() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -3618,44 +3606,96 @@ mod tests {
 
         let response = server.handle_request(request).await;
 
-        assert!(response.error.is_none());
+        assert!(response.result.is_none(), "ping must not succeed");
+        let error = response.error.expect("ping must return an error");
+        assert_eq!(error.code, -32601);
+        assert!(error.message.contains("ping"), "got: {}", error.message);
         assert_eq!(response.id, Some(json!(42)));
     }
 
+    /// Modern (2026-07-28) removed root list-change notifications. The
+    /// method is now an unrecognised notification: dropped, no response,
+    /// and — critically — no `roots/list` round-trip, because the latch
+    /// from the first-request fetch is the only trigger left.
     #[tokio::test]
-    async fn test_route_initialized_notification_emits_no_response() {
-        // Per JSON-RPC 2.0 / MCP spec, notifications carry no `id` and MUST NOT
-        // receive a response. `route_incoming_message` must short-circuit
-        // `notifications/initialized` so it never reaches the dispatcher.
+    async fn test_roots_list_changed_notification_is_inert() {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+        // Pretend the one-shot fetch already happened.
+        session_ctx
+            .roots_fetched
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: None,
-            method: Some("notifications/initialized".to_string()),
+            method: Some("notifications/roots/list_changed".to_string()),
             params: None,
             result: None,
             error: None,
         };
 
-        let session_ctx = SessionContext::new(tx);
         let routed = McpServer::route_incoming_message(message, &session_ctx);
+        assert!(routed.is_none(), "a notification is never dispatched");
 
-        assert!(routed.is_none(), "notification must not be dispatched");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(
             rx.try_recv().is_err(),
-            "no JSON-RPC response must be emitted for a notification"
+            "roots/list_changed must not trigger a re-fetch in Modern"
         );
     }
 
+    /// Modern (2026-07-28) removed `notifications/initialized`. The
+    /// one-shot `roots/list` fetch it used to trigger now fires on the
+    /// FIRST client request of the session, exactly once.
     #[tokio::test]
-    async fn test_route_initialized_notification_fetches_roots_when_supported() {
-        // When the client advertised roots support during initialize,
-        // receiving `notifications/initialized` must trigger a server-initiated
-        // `roots/list` request on the writer channel.
-        //
-        // The fetch is spawned (audit 2026-08-02), so routing returns at
-        // once and the `roots/list` request lands on tx from the detached
-        // task.
+    async fn test_first_request_triggers_roots_fetch_once() {
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+
+        let make = || super::super::protocol::JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: Some("tools/list".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        assert!(
+            McpServer::route_incoming_message(make(), &session_ctx).is_some(),
+            "a request must still be dispatched"
+        );
+        assert!(McpServer::route_incoming_message(make(), &session_ctx).is_some());
+        assert!(McpServer::route_incoming_message(make(), &session_ctx).is_some());
+
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a roots/list request within 2s")
+            .expect("channel closed unexpectedly");
+        match sent {
+            WriterMessage::Request(req) => assert_eq!(req.method, "roots/list"),
+            _ => panic!("expected WriterMessage::Request(roots/list)"),
+        }
+
+        // Exactly once: three requests, one fetch.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "roots/list must be fetched once per session, not once per request"
+        );
+    }
+
+    /// `notifications/initialized` is no longer a special case: it is an
+    /// unknown notification, dropped without a response and without side
+    /// effects. This also carries the JSON-RPC 2.0 §4.1 guarantee that the
+    /// deleted `test_route_initialized_notification_emits_no_response`
+    /// used to hold — a notification never draws a response — because the
+    /// method now falls through to the generic no-`id` arm.
+    #[tokio::test]
+    async fn test_initialized_notification_is_no_longer_special_cased() {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         session_ctx.caps.set_supports_roots(true);
@@ -3668,9 +3708,41 @@ mod tests {
             error: None,
         };
 
+        let routed = McpServer::route_incoming_message(message, &session_ctx);
+        assert!(routed.is_none(), "a notification is never dispatched");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(
-            McpServer::route_incoming_message(message, &session_ctx).is_none(),
-            "a notification is never dispatched"
+            rx.try_recv().is_err(),
+            "notifications/initialized must have no side effect in Modern"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_first_request_fetches_roots_when_supported() {
+        // When the client supports roots, the session's FIRST client
+        // request must trigger a server-initiated `roots/list` request on
+        // the writer channel. Modern (2026-07-28) has no
+        // `notifications/initialized` to hang this off.
+        //
+        // The fetch is spawned (audit 2026-08-02), so routing returns at
+        // once and the `roots/list` request lands on tx from the detached
+        // task.
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+        let message = super::super::protocol::JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: Some("tools/list".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        assert!(
+            McpServer::route_incoming_message(message, &session_ctx).is_some(),
+            "a request is dispatched"
         );
 
         let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -3685,9 +3757,12 @@ mod tests {
         }
     }
 
-    /// Regression (audit 2026-08-02): `notifications/initialized` must NOT
-    /// block the session reader loop while the `roots/list` round-trip is
-    /// in flight.
+    /// Regression (audit 2026-08-02): the first-request roots fetch must
+    /// NOT block the session reader loop while the `roots/list` round-trip
+    /// is in flight. (The trigger used to be `notifications/initialized`;
+    /// Modern deleted it, but the deadlock it could cause is a property of
+    /// the fetch, not of the trigger, so the guarantee outlived the
+    /// method.)
     ///
     /// `route_incoming_message` runs *inside* `serve_session`'s reader loop.
     /// When `fetch_roots` was awaited inline, the loop could not read the
@@ -3700,14 +3775,14 @@ mod tests {
     /// The fetch is fire-and-forget: routing returns immediately and the
     /// roots land on the session slot whenever the client answers.
     #[tokio::test]
-    async fn test_route_initialized_notification_does_not_block_reader_loop() {
+    async fn test_first_request_does_not_block_reader_loop() {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         session_ctx.caps.set_supports_roots(true);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
-            id: None,
-            method: Some("notifications/initialized".to_string()),
+            id: Some(json!(1)),
+            method: Some("tools/list".to_string()),
             params: None,
             result: None,
             error: None,
@@ -3726,9 +3801,9 @@ mod tests {
 
         assert!(
             elapsed < std::time::Duration::from_millis(500),
-            "initialized notification blocked the reader loop for {elapsed:?}"
+            "the first-request roots fetch blocked the reader loop for {elapsed:?}"
         );
-        assert!(routed.is_none(), "a notification is never dispatched");
+        assert!(routed.is_some(), "a request is dispatched");
 
         // The fetch still happened — just off the reader loop.
         let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -4189,7 +4264,7 @@ mod tests {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: None,
-            method: "ping".to_string(),
+            method: "tools/list".to_string(),
             params: None,
         };
 
@@ -4264,6 +4339,10 @@ mod tests {
             error: None,
         };
 
+        // `ping` is deliberately a method Modern (2026-07-28) deleted:
+        // routing is method-agnostic, so an unknown method must still be
+        // dispatched — it is the DISPATCHER that answers -32601, not the
+        // router. See `test_ping_is_method_not_found` for the other half.
         let routed =
             McpServer::route_incoming_message(message, &session_ctx).expect("request must route");
         assert_eq!(routed.method, "ping");
@@ -4391,25 +4470,11 @@ mod tests {
 
         let (server, audit_task) = McpServer::new(config);
 
-        // Server should be created
-        assert!(!server.initialized.load(std::sync::atomic::Ordering::SeqCst));
+        // Server should be created with a populated tool registry.
+        assert!(!server.registry.is_empty());
 
         // Audit task might be None if audit is disabled by default
         drop(audit_task);
-    }
-
-    #[tokio::test]
-    async fn test_server_initialized_flag() {
-        let server = create_test_server();
-
-        // Initially not initialized
-        assert!(!server.initialized.load(std::sync::atomic::Ordering::SeqCst));
-
-        // After initialize call
-        server.handle_initialize(Some(json!(1)), None, None).await;
-
-        // Should be initialized
-        assert!(server.initialized.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     // ============== Edge Cases ==============

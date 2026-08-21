@@ -202,9 +202,9 @@ async fn test_daemon_batch_requests_are_dispatched() {
     }
     assert!(ready, "daemon failed to bind socket within 2s");
 
-    // Send a batch of three tools/list + resources/list + ping.
+    // Send a batch of three tools/list + resources/list + prompts/list.
     let mut client = UnixStream::connect(&socket).await.expect("connect");
-    let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"resources/list"},{"jsonrpc":"2.0","id":3,"method":"ping"}]
+    let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"resources/list"},{"jsonrpc":"2.0","id":3,"method":"prompts/list"}]
 "#;
     client.write_all(batch).await.expect("write");
     client.flush().await.expect("flush");

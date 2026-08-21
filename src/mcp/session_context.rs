@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::{RwLock, mpsc};
 
@@ -50,8 +51,13 @@ pub struct SessionContext {
     /// FIND-036.
     pub resource_subs: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Per-session client-declared workspace roots. Written by
-    /// `fetch_roots` after `notifications/initialized`. FIND-037.
+    /// `fetch_roots` on the session's first client request. FIND-037.
     pub roots: Arc<RwLock<Vec<RootEntry>>>,
+    /// One-shot latch: set the first time this session dispatches a
+    /// client request, gating the `roots/list` fetch. Modern
+    /// (2026-07-28) deleted `notifications/initialized`, which used to
+    /// be the trigger.
+    pub roots_fetched: Arc<AtomicBool>,
     /// The `_meta` envelope of the ONE request currently being handled
     /// (MCP 2026-07-28). `None` on the session-level bundle and on every
     /// request from a Legacy client.
@@ -76,6 +82,7 @@ impl SessionContext {
             runtime_max_output: Arc::new(RwLock::new(None)),
             resource_subs: Arc::new(RwLock::new(HashMap::new())),
             roots: Arc::new(RwLock::new(Vec::new())),
+            roots_fetched: Arc::new(AtomicBool::new(false)),
             request_meta: None,
         }
     }
