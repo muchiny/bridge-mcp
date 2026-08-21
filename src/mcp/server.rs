@@ -25,7 +25,8 @@ use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{IncomingMessage, JsonRpcMessage, RootsListResult};
 use super::request_meta::{
-    MISSING_CLIENT_CAPABILITIES_MSG, RequestMeta, lacks_required_client_capabilities,
+    CAPABILITY_EXEMPT_METHODS, MISSING_CLIENT_CAPABILITIES_MSG, RequestMeta,
+    lacks_required_client_capabilities,
 };
 use super::session_context::SessionContext;
 use super::subscriptions::{NotificationTopic, SubscriptionRegistry, SubscriptionsListenParams};
@@ -1499,6 +1500,41 @@ impl McpServer {
             return Some(JsonRpcResponse::error(
                 id,
                 JsonRpcError::invalid_params(MISSING_CLIENT_CAPABILITIES_MSG),
+            ));
+        }
+
+        // The envelope's protocol revision was PARSED AND THEN READ BY
+        // NOBODY. `RequestMeta::protocol_version` had no production consumer
+        // at all — the only `unsupported_protocol_version` call site reads
+        // `params.protocolVersion`, the LEGACY handshake field — so a Modern
+        // client declaring `"1999-01-01"` was served normally on both
+        // transports, and the release notes claiming otherwise were false on
+        // both.
+        //
+        // Refused only when DECLARED and unsupported. An absent
+        // `protocolVersion` is left permissive on purpose: unlike
+        // `clientCapabilities`, nothing in this tree establishes it as
+        // mandatory, and inventing a refusal for an absent field would break
+        // clients on a rule no source states. If that turns out to be
+        // required, this is the line to change and the exemptions below still
+        // apply.
+        //
+        // The same two methods are exempt, for the same reason and one extra.
+        // `server/discover` must answer a DISCOVERY RESULT even to a client
+        // declaring a version this server does not speak, because that result
+        // is where the client reads `supportedVersions` and picks one — the
+        // probe says "if the server returns a discovery result, it is modern
+        // and the client should select a mutually supported version".
+        // Refusing it would deny the client the very list it needs to
+        // recover. `initialize` already answers -32022 from its own arm,
+        // carrying the Legacy-shaped `requested`.
+        if !CAPABILITY_EXEMPT_METHODS.contains(&request.method.as_str())
+            && let Some(declared) = request_meta.protocol_version.as_deref()
+            && !SUPPORTED_PROTOCOL_VERSIONS.contains(&declared)
+        {
+            return Some(JsonRpcResponse::error(
+                id,
+                JsonRpcError::unsupported_protocol_version(declared),
             ));
         }
 
@@ -8395,6 +8431,125 @@ rbac:
             Some(-32602),
             "a notification carries no id, so C3 must not fire on it: {:?}",
             response.error
+        );
+    }
+
+    // ============== The DECLARED protocol revision is enforced ==============
+
+    /// The envelope's `protocolVersion` had no production consumer at all: it
+    /// was parsed into `RequestMeta` and read by nobody, so a client
+    /// declaring any string whatsoever was served normally. The whole gate
+    /// went in green without a single existing test changing, which is the
+    /// measure of how uncovered it was.
+    #[tokio::test]
+    async fn a_declared_unsupported_revision_is_refused_with_32022() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            })),
+        };
+
+        let error = server
+            .handle_request(request)
+            .await
+            .error
+            .expect("a revision this server does not speak must be refused");
+
+        assert_eq!(error.code, -32022, "{error:?}");
+        let data = error.data.expect("-32022 must carry the supported list");
+        assert_eq!(data["supported"], json!(["2026-07-28"]));
+        assert_eq!(
+            data["requested"],
+            json!("2025-11-25"),
+            "the refusal must echo what was asked for, or the client cannot tell \
+             which of its declarations was wrong"
+        );
+    }
+
+    /// THE POSITIVE TWIN. The same request declaring the revision this server
+    /// speaks is served. Without it, "unsupported revisions are refused" is
+    /// equally satisfied by a gate that refuses every declared revision.
+    #[tokio::test]
+    async fn a_declared_supported_revision_is_served() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            })),
+        };
+
+        let response = server.handle_request(request).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(response.result.expect("a tools/list result")["tools"].is_array());
+    }
+
+    /// An ABSENT `protocolVersion` is served, and this test exists to pin that
+    /// as a DECISION rather than an oversight.
+    ///
+    /// Unlike `clientCapabilities`, nothing in this tree establishes the
+    /// revision field as mandatory, so refusing its absence would break
+    /// clients on a rule no source states. If a source turns up saying
+    /// otherwise, this is the test that has to be deliberately deleted —
+    /// which is the point of writing it.
+    #[tokio::test]
+    async fn an_absent_revision_declaration_is_served() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(params_declaring_nothing(json!({}))),
+        };
+
+        let response = server.handle_request(request).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+    }
+
+    /// `server/discover` answers a DISCOVERY RESULT even to a client declaring
+    /// a revision this server does not speak, and the exemption is not
+    /// symmetry with the capability gate — it has its own reason.
+    ///
+    /// The discovery result is where a client reads `supportedVersions` and
+    /// picks one; the probe says "if the server returns a discovery result, it
+    /// is modern and the client should select a mutually supported version".
+    /// Refusing it would deny the client the very list it needs in order to
+    /// recover, and would do so at the one message designed to hand that list
+    /// over.
+    #[tokio::test]
+    async fn server_discover_answers_even_a_client_declaring_a_wrong_revision() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "server/discover".to_string(),
+            params: Some(json!({
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "1999-01-01" }
+            })),
+        };
+
+        let response = server.handle_request(request).await;
+        assert!(
+            response.error.is_none(),
+            "discover must hand over the version list, not refuse: {:?}",
+            response.error
+        );
+        assert_eq!(
+            response.result.expect("a discovery result")["supportedVersions"],
+            json!(["2026-07-28"]),
+            "and the list is the whole point of answering"
         );
     }
 
