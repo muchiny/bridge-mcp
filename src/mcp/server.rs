@@ -38,8 +38,9 @@ use super::protocol::{
     PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
     SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
-    TaskGetParams, TaskRequestsCapability, TaskStatus, TaskToolsCapability, TasksCapability,
-    ToolCallParams, ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
+    TaskGetParams, TaskNotificationParams, TaskRequestsCapability, TaskStatus, TaskToolsCapability,
+    TasksCapability, ToolCallParams, ToolCallResult, ToolContent, ToolsCapability, ToolsListResult,
+    WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -1703,17 +1704,11 @@ impl McpServer {
         if super::task_policy::is_long_running(&call_params.name)
             && Self::request_declares_tasks_extension(session)
         {
+            // The progress token is deliberately NOT forwarded: it is not
+            // part of this call's signature at all. See the context built
+            // below.
             return self
-                .handle_tools_call_async(
-                    call_params.name,
-                    call_params.arguments,
-                    id,
-                    call_params
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.progress_token.clone()),
-                    session,
-                )
+                .handle_tools_call_async(call_params.name, call_params.arguments, id, session)
                 .await;
         }
 
@@ -1868,12 +1863,12 @@ impl McpServer {
 
     /// Handle a server-elected task: create the task, spawn a background
     /// worker, and return the flat task handle immediately.
+    #[allow(clippy::too_many_lines)]
     async fn handle_tools_call_async(
         &self,
         tool_name: String,
         arguments: Option<Value>,
         id: Option<Value>,
-        progress_token: Option<Value>,
         session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
         // Get the handler first to validate the tool exists. Must agree with
@@ -1929,19 +1924,33 @@ impl McpServer {
         // dropped — same effect as before.
         let task_notification_tx = session.map(|s| s.notification_tx.clone());
 
-        // SEP-1686: emit `notifications/tasks/status` for the initial
-        // non-existent → working transition. The worker emits the matching
-        // terminal notification on completion/failure/cancellation.
+        // Emit `notifications/tasks` for the initial non-existent → working
+        // transition. The worker emits the matching terminal notification.
+        // A `working` task has no payload to carry.
         if let Some(tx) = task_notification_tx.as_ref() {
-            let msg = WriterMessage::Notification(JsonRpcNotification::task_status(&task_info));
+            let params = TaskNotificationParams::new(task_info.clone(), None);
+            let msg = WriterMessage::Notification(JsonRpcNotification::task_notification(&params));
             let _ = tx.try_send(msg);
         }
 
         // Propagate the task's cancel_token into the ToolContext so the
         // handler can do clean shutdown (e.g. evicting the SSH connection
         // from the pool) when the task is cancelled via `tasks/cancel`.
+        // `None` for the progress token, and the parameter no longer reaches
+        // this function at all: "`notifications/progress` and
+        // `notifications/message` notifications MUST NOT be sent on the
+        // `subscriptions/listen` stream for a task, and are not supported on
+        // tasks in general in this specification."
+        //
+        // Structure, not vigilance: `ToolContext::progress_reporter` hands a
+        // handler `None` when the token is absent, so a promoted tool CANNOT
+        // report progress even if it asks. Progress for a task lives in
+        // `statusMessage` instead. This matters most for the tool most likely
+        // to join the promotion list after the MRTR item closes —
+        // `ssh_runbook_execute` is one of the four handlers that do call
+        // `progress_reporter`.
         let ctx = self
-            .create_tool_context(Some(cancel_token.clone()), progress_token, session)
+            .create_tool_context(Some(cancel_token.clone()), None, session)
             .await;
 
         // Spawn the background worker
@@ -1968,8 +1977,23 @@ impl McpServer {
                 }
             };
 
-            // Store the result and send notification
-            let info = match result {
+            // Store the result and send notification.
+            //
+            // The `failed`/`completed` boundary is a MUST that is easy to
+            // implement backwards, and 2025-11-25 said the OPPOSITE of what
+            // 2026-07-28 says: "The `failed` status MUST NOT be used to
+            // represent non-JSON-RPC errors, such as a tool result that
+            // completed with `isError: true`. Errors within the context of a
+            // protocol method result MUST use the `completed` status with the
+            // error details in the `result` field."
+            //
+            // The rule that makes each arm decidable: `tasks/get` "returns
+            // exactly what the underlying request would have returned". So
+            // this match mirrors the SYNCHRONOUS path arm for arm — whatever
+            // `handle_tools_call` answers with an isError envelope is
+            // `completed` here, and only what it answers with a JSON-RPC error
+            // is `failed`.
+            let (info, payload) = match result {
                 Ok(tool_result) => {
                     let tool_result = tool_result.without_apps();
                     let result_value =
@@ -1977,8 +2001,43 @@ impl McpServer {
                             "content": [{"type": "text", "text": format!("Serialization error: {e}")}],
                             "isError": true,
                         }));
-                    task_store.complete_task(&task_id, result_value).await
+                    (
+                        task_store
+                            .complete_task(&task_id, result_value.clone())
+                            .await,
+                        Some(result_value),
+                    )
                 }
+                // Cancellation is the one arm the synchronous path answers
+                // with a JSON-RPC error (`-32800`), so it is the one arm that
+                // is `failed` — and `error` then carries that error OBJECT,
+                // not a tool result. `McpUnknownTool`, the other JSON-RPC arm
+                // over there, cannot occur here: the handler was resolved
+                // before the spawn.
+                Err(crate::error::BridgeError::Cancelled) => {
+                    let error_value = serde_json::to_value(JsonRpcError::cancelled(None))
+                        .unwrap_or_else(|_| {
+                            json!({
+                                "code": CANCELLED_ERROR_CODE,
+                                "message": "Request cancelled by client",
+                            })
+                        });
+                    (
+                        task_store
+                            .fail_task(
+                                &task_id,
+                                "Task was cancelled during execution.",
+                                error_value.clone(),
+                            )
+                            .await,
+                        Some(error_value),
+                    )
+                }
+                // A tool that ran and failed. The synchronous path returns
+                // this as a successful result carrying `isError: true`, so the
+                // task is COMPLETED. An operator filtering on
+                // `status == "failed"` will no longer see these; the probe is
+                // `result.isError == true`.
                 Err(e) => {
                     let error_result = ToolCallResult::error(e.to_string());
                     let result_value =
@@ -1986,18 +2045,29 @@ impl McpServer {
                             "content": [{"type": "text", "text": format!("Serialization error: {e}")}],
                             "isError": true,
                         }));
-                    task_store
-                        .fail_task(&task_id, &e.to_string(), result_value)
-                        .await
+                    (
+                        task_store
+                            .complete_task(&task_id, result_value.clone())
+                            .await,
+                        Some(result_value),
+                    )
                 }
             };
 
-            // Send status notification (best-effort) on the per-session
+            // Send the terminal notification (best-effort) on the per-session
             // tx so it reaches the originating client only.
+            //
+            // It carries the PAYLOAD, not just the status: "The notification
+            // includes the full task object, allowing clients to access the
+            // complete task state and final results without polling the
+            // `tasks/get` method." A notification a client must follow with a
+            // poll would be a notification that saved nobody anything.
             if let Some(info) = info
                 && let Some(tx) = task_notification_tx.as_ref()
             {
-                let msg = WriterMessage::Notification(JsonRpcNotification::task_status(&info));
+                let params = TaskNotificationParams::new(info, payload);
+                let msg =
+                    WriterMessage::Notification(JsonRpcNotification::task_notification(&params));
                 let _ = tx.try_send(msg);
             }
         });
@@ -2373,10 +2443,32 @@ impl McpServer {
             }
         };
 
-        match self.task_store.cancel_task(&cancel_params.task_id).await {
-            Ok(info) => JsonRpcResponse::success_or_serialize_error(id, &info),
-            Err(e) => JsonRpcResponse::error(id, JsonRpcError::invalid_params(e)),
+        // "On success, the server MUST acknowledge the request with an empty
+        // result", and `CancelTaskResult = Result` — so the ack carries the
+        // discriminator and nothing else. It deliberately does NOT echo the
+        // task: a client reading a status here would be reading a value the
+        // spec calls eventually consistent, and `tasks/get` is where status
+        // lives.
+        //
+        // Only an unknown id is an error ("Servers SHOULD return a JSON-RPC
+        // error if the `taskId` does not correspond to a known task"). An
+        // already-terminal task is acknowledged like any other: cancellation
+        // is cooperative, and the client "MAY delete all state associated with
+        // the task as soon as it sends a cancellation", so it cannot know the
+        // work had already finished.
+        if self
+            .task_store
+            .cancel_task(&cancel_params.task_id)
+            .await
+            .is_none()
+        {
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params(format!("Task not found: {}", cancel_params.task_id)),
+            );
         }
+
+        JsonRpcResponse::success(id, json!({ "resultType": "complete" }))
     }
 
     // ========================================================================
@@ -4536,10 +4628,8 @@ mod tests {
     /// emits a task notification, so a subscribed client can track the
     /// lifecycle without polling.
     ///
-    /// Still asserts the 2025-11-25 method name `notifications/tasks/status`:
-    /// renaming it to `notifications/tasks` and carrying a full `DetailedTask`
-    /// is a separate change, and pinning today's wire keeps that change
-    /// visible when it happens instead of silent.
+    /// The method is `notifications/tasks` — 2025-11-25 spelled it
+    /// `notifications/tasks/status`.
     #[tokio::test]
     async fn a_promoted_call_emits_the_working_status_notification() {
         let server = create_test_server();
@@ -4569,9 +4659,9 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
         {
             if let WriterMessage::Notification(n) = msg
-                && n.method == "notifications/tasks/status"
+                && n.method == "notifications/tasks"
             {
-                let params = n.params.expect("tasks/status should carry params");
+                let params = n.params.expect("a task notification carries params");
                 if params["taskId"] == task_id.as_str() && params["status"] == "working" {
                     found_working = true;
                     break;
@@ -4581,7 +4671,7 @@ mod tests {
 
         assert!(
             found_working,
-            "expected `notifications/tasks/status` with status=\"working\" and taskId={task_id}"
+            "expected `notifications/tasks` with status=\"working\" and taskId={task_id}"
         );
     }
 
@@ -4667,7 +4757,6 @@ mod tests {
     #[tokio::test]
     async fn test_tasks_cancel() {
         let server = create_test_server();
-        // Create a task
         let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
 
         let params = json!({"taskId": task_id});
@@ -4677,7 +4766,24 @@ mod tests {
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        assert_eq!(result["status"], "cancelled");
+        // EMPTY ack plus the discriminator, and nothing else: `CancelTaskResult
+        // = Result`. The pre-3.0.0 handler echoed the whole `TaskInfo`, which
+        // invited clients to read a status the spec calls eventually
+        // consistent from the one response that cannot carry a fresh one.
+        assert_eq!(result["resultType"], "complete");
+        assert!(result.get("taskId").is_none(), "{result}");
+        assert!(result.get("status").is_none(), "{result}");
+        assert_eq!(
+            result.as_object().map(serde_json::Map::len),
+            Some(1),
+            "the ack carries exactly one key: {result}"
+        );
+
+        // The intent still took effect where it belongs.
+        assert_eq!(
+            server.task_store.get_task(&task_id).await.unwrap().status,
+            crate::ports::protocol::TaskStatus::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -4689,7 +4795,12 @@ mod tests {
             .handle_tasks_cancel(Some(json!(1)), Some(params))
             .await;
 
-        assert!(response.error.is_some());
+        // The only case that is still an error, now that a terminal task is
+        // acknowledged. `assert_eq!` on the code: `is_some()` would keep
+        // passing if every cancel started erroring again.
+        let error = response.error.expect("an unknown taskId is an error");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("no-such-task"), "{}", error.message);
     }
 
     #[tokio::test]
@@ -4781,6 +4892,120 @@ mod tests {
         }
     }
 
+    /// Spec 5.13, the MUST that 2025-11-25 stated backwards: a tool that ran
+    /// and returned an error is a COMPLETION carrying `isError: true`, never
+    /// `status: "failed"`. `failed` is reserved for JSON-RPC faults.
+    ///
+    /// The decision rule is that `tasks/get` "returns exactly what the
+    /// underlying request would have returned" — and the synchronous path
+    /// answers this very input with an isError envelope, not an error. The
+    /// tool here cannot reach its host, so the handler errors: the exact
+    /// input that produced `failed` before this release.
+    #[tokio::test]
+    async fn a_tool_error_completes_the_task_and_never_fails_it() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+        let params = json!({
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+        });
+        let call = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
+            .await;
+        let task_id = call.result.unwrap()["taskId"].as_str().unwrap().to_string();
+
+        let mut body = json!(null);
+        for _ in 0..200 {
+            let response = server
+                .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
+                .await;
+            let snapshot = response.result.expect("tasks/get always answers");
+            if snapshot["status"] != "working" {
+                body = snapshot;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            body["status"], "completed",
+            "a tool error is a completion, not a failure: {body}"
+        );
+        // Value AND placement. The error details belong in `result`, where a
+        // client reads a `CallToolResult`; `error` is reserved for a JSON-RPC
+        // error object, and a task carrying both would satisfy a test written
+        // without the negation.
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        assert!(body["result"]["content"].is_array(), "{body}");
+        assert!(body.get("error").is_none(), "{body}");
+        // The human-readable half. An operator who filtered on
+        // `status == "failed"` sees nothing now; this field is what is left
+        // to read, so it must not claim success.
+        assert_eq!(body["statusMessage"], "Task completed with a tool error.");
+    }
+
+    /// The terminal notification carries the PAYLOAD, not just the status:
+    /// "The notification includes the full task object, allowing clients to
+    /// access the complete task state and final results without polling the
+    /// `tasks/get` method."
+    ///
+    /// Without the payload assertion this test would pass for a notification
+    /// that merely says "done" — which is the version that saves a subscribed
+    /// client nothing, since it would still have to poll for the result.
+    #[tokio::test]
+    async fn the_terminal_task_notification_carries_the_full_result() {
+        let server = create_test_server();
+        let (session, mut rx) = session_declaring_tasks();
+        let params = json!({
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+        });
+
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
+            .await;
+        let task_id = response.result.unwrap()["taskId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut terminal = None;
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+        {
+            if let WriterMessage::Notification(n) = msg {
+                // MUST NOT, spec 5.14: progress is not supported on tasks at
+                // all. This cannot fire today — none of the four promoted
+                // tools calls `progress_reporter` — so it is a TRIPWIRE, not
+                // proof. The guarantee itself is structural: the progress
+                // token is not a parameter of `handle_tools_call_async`, and
+                // `ToolContext::progress_reporter` returns `None` without one.
+                // The tripwire is aimed at `ssh_runbook_execute`, which does
+                // report progress and is the first candidate to join the list
+                // once the MRTR item closes.
+                assert_ne!(
+                    n.method, "notifications/progress",
+                    "progress MUST NOT be sent for a task"
+                );
+                if n.method == "notifications/tasks" {
+                    let params = n.params.expect("params");
+                    if params["taskId"] == task_id.as_str() && params["status"] != "working" {
+                        terminal = Some(params);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let terminal = terminal.expect("no terminal `notifications/tasks` arrived");
+        assert_eq!(terminal["status"], "completed", "{terminal}");
+        assert_eq!(terminal["result"]["isError"], true, "{terminal}");
+        assert!(terminal["result"]["content"].is_array(), "{terminal}");
+        // Flat, and no result discriminator on a notification.
+        assert_eq!(terminal["taskId"], task_id.as_str());
+        assert!(terminal.get("resultType").is_none(), "{terminal}");
+    }
+
     #[tokio::test]
     async fn tasks_get_never_blocks_on_a_working_task() {
         // MCP 2026-07-28: `tasks/get` is a point-in-time snapshot and never
@@ -4813,7 +5038,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tasks_cancel_already_completed_returns_error() {
+    /// Supersedes `test_tasks_cancel_already_completed_returns_error`.
+    ///
+    /// This is the race the spec names: the work finished before the
+    /// cancellation arrived. The client cannot have known — it is told it may
+    /// delete its state the moment it sends the request — so the answer is an
+    /// ack, not an error.
+    ///
+    /// The `tasks/get` assertion is the half that matters: acknowledging must
+    /// not mean overwriting. A completed task that reports `cancelled`
+    /// afterwards would tell an operator the work never ran.
+    async fn tasks_cancel_on_a_completed_task_is_acknowledged_not_refused() {
         let server = create_test_server();
         let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
         server
@@ -4824,28 +5059,43 @@ mod tests {
             )
             .await;
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_cancel(Some(json!(1)), Some(params))
+            .handle_tasks_cancel(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
-        assert!(response.error.is_some());
-        let err = response.error.unwrap();
-        assert_eq!(err.code, -32602);
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.result.unwrap()["resultType"], "complete");
+
+        let snapshot = server
+            .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
+            .await
+            .result
+            .expect("the task is still readable");
+        assert_eq!(
+            snapshot["status"], "completed",
+            "a late cancellation must not rewrite a finished task: {snapshot}"
+        );
+        assert!(snapshot["result"]["content"].is_array(), "{snapshot}");
     }
 
     #[tokio::test]
-    async fn test_tasks_cancel_already_cancelled_returns_error() {
+    /// Supersedes `test_tasks_cancel_already_cancelled_returns_error`. A
+    /// client that deleted its state and re-sent cannot be punished for it.
+    async fn tasks_cancel_is_idempotent() {
         let server = create_test_server();
         let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
         server.task_store.cancel_task(&task_id).await.unwrap();
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_cancel(Some(json!(1)), Some(params))
+            .handle_tasks_cancel(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
-        assert!(response.error.is_some());
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.result.unwrap()["resultType"], "complete");
+        assert_eq!(
+            server.task_store.get_task(&task_id).await.unwrap().status,
+            crate::ports::protocol::TaskStatus::Cancelled
+        );
     }
 
     #[tokio::test]

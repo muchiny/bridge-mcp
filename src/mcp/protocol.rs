@@ -868,6 +868,60 @@ pub struct JsonRpcErrorData {
 // MCP Extensions
 // ============================================================================
 
+/// Params of a `notifications/tasks` notification: a full `DetailedTask`.
+///
+/// "Each notification carries a complete `DetailedTask` for the current
+/// status, identical to what `tasks/get` would have returned at that moment."
+/// The narrative spec renders these params as a bare `Task`; `schema.ts` —
+/// which declares itself the source of truth — says `DetailedTask`, and the
+/// prose agrees. The payload is what makes the notification worth having: a
+/// client that subscribes never has to poll for the result.
+///
+/// This is NOT [`DetailedTask`], and the difference is one field:
+/// `resultType` discriminates a RESULT, and a notification is not a result.
+/// The spec's own literal notification carries no such key, and
+/// [`DetailedTask::result_type`] is deliberately non-optional so that every
+/// `tasks/get` answer must carry one. Reusing it here would have forced that
+/// field to become skippable — weakening a MUST on the response path to serve
+/// the notification path.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskNotificationParams {
+    /// The seven `Task` fields, flattened to the root of `params`.
+    #[serde(flatten)]
+    pub task: TaskInfo,
+    /// Present iff `status == Completed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    /// Present iff `status == Failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
+}
+
+impl TaskNotificationParams {
+    /// Route `payload` to the field the task's status calls for.
+    ///
+    /// The routing lives here, once, because it is a MUST that both emission
+    /// sites and `tasks/get` have to agree on: a completed task carries
+    /// `result`, a failed one carries `error`, and a non-terminal one carries
+    /// neither. Duplicating the match at each call site is how the two drift.
+    #[must_use]
+    pub fn new(task: TaskInfo, payload: Option<Value>) -> Self {
+        let (result, error) = match task.status {
+            TaskStatus::Completed => (payload, None),
+            TaskStatus::Failed => (None, payload),
+            // `working` and `input_required` have no payload yet; `cancelled`
+            // never gets one — `CancelledTask` extends `Task` with no result.
+            TaskStatus::Working | TaskStatus::InputRequired | TaskStatus::Cancelled => (None, None),
+        };
+        Self {
+            task,
+            result,
+            error,
+        }
+    }
+}
+
 /// Well-known extension URIs advertised by this server.
 pub mod extensions {
     /// Tasks extension (standard MCP).
@@ -887,7 +941,7 @@ pub mod extensions {
 pub struct JsonRpcNotification {
     pub jsonrpc: String,
     pub method: String,
-    /// Optional params payload (used by `notifications/tasks/status`).
+    /// Optional params payload (used by `notifications/tasks`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<Value>,
 }
@@ -923,13 +977,18 @@ impl JsonRpcNotification {
         }
     }
 
-    /// Create a `notifications/tasks/status` notification (MCP 2025-11-25+).
+    /// Create a `notifications/tasks` notification (MCP 2026-07-28).
+    ///
+    /// The method name lost its `/status` suffix: 2025-11-25 spelled it
+    /// `notifications/tasks/status`. Both live under the `notifications/tasks/`
+    /// prefix the extension reserves, so a client subscribed to the new name
+    /// would silently receive nothing from a server still sending the old one.
     #[must_use]
-    pub fn task_status(task_info: &TaskInfo) -> Self {
+    pub fn task_notification(params: &TaskNotificationParams) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
-            method: "notifications/tasks/status".to_string(),
-            params: serde_json::to_value(task_info).ok(),
+            method: "notifications/tasks".to_string(),
+            params: serde_json::to_value(params).ok(),
         }
     }
 
@@ -1972,7 +2031,7 @@ mod tests {
     }
 
     #[test]
-    fn test_notification_task_status() {
+    fn task_notification_carries_the_detailed_task_flat() {
         let info = TaskInfo {
             task_id: "task-99".to_string(),
             status: TaskStatus::Completed,
@@ -1982,12 +2041,67 @@ mod tests {
             ttl_ms: Some(60000),
             poll_interval_ms: Some(5000),
         };
-        let n = JsonRpcNotification::task_status(&info);
-        assert_eq!(n.method, "notifications/tasks/status");
-        assert!(n.params.is_some());
-        let params = n.params.unwrap();
+        let payload = json!({"content": [{"type": "text", "text": "hi"}], "isError": false});
+        let n = JsonRpcNotification::task_notification(&TaskNotificationParams::new(
+            info,
+            Some(payload),
+        ));
+
+        // The 2025-11-25 name was `notifications/tasks/status`. Asserting the
+        // exact string, not a prefix: both names live under the reserved
+        // `notifications/tasks` prefix, so a substring check would pass for
+        // either and a client subscribed to one would hear nothing from a
+        // server sending the other.
+        assert_eq!(n.method, "notifications/tasks");
+
+        let params = n.params.expect("params");
+        // FLAT, like every other `Task` carrier in this revision.
         assert_eq!(params["taskId"], "task-99");
         assert_eq!(params["status"], "completed");
+        assert_eq!(params["ttlMs"], 60000);
+        // The payload is the whole point of subscribing: no poll needed.
+        assert_eq!(params["result"]["content"][0]["text"], "hi");
+        assert!(params.get("error").is_none());
+        // A notification is not a result: no discriminator.
+        assert!(
+            params.get("resultType").is_none(),
+            "resultType discriminates a result shape, not a notification: {params}"
+        );
+    }
+
+    /// The routing is a MUST both emission sites and `tasks/get` must agree
+    /// on, so it is pinned on its own rather than only through the happy path.
+    #[test]
+    fn task_notification_params_route_the_payload_by_status() {
+        let task = |status| TaskInfo {
+            task_id: "t".to_string(),
+            status,
+            status_message: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_updated_at: "2025-01-01T00:00:00Z".to_string(),
+            ttl_ms: Some(1000),
+            poll_interval_ms: None,
+        };
+        let payload = json!({"anything": true});
+
+        let failed = serde_json::to_value(TaskNotificationParams::new(
+            task(TaskStatus::Failed),
+            Some(payload.clone()),
+        ))
+        .unwrap();
+        assert_eq!(failed["error"], payload);
+        assert!(failed.get("result").is_none());
+
+        // A cancelled task never carries a payload: `CancelledTask` extends
+        // `Task` with no result field, so a payload offered here is dropped
+        // rather than invented onto the wire.
+        let cancelled = serde_json::to_value(TaskNotificationParams::new(
+            task(TaskStatus::Cancelled),
+            Some(payload),
+        ))
+        .unwrap();
+        assert!(cancelled.get("result").is_none(), "{cancelled}");
+        assert!(cancelled.get("error").is_none(), "{cancelled}");
     }
 
     #[test]

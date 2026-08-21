@@ -131,7 +131,19 @@ impl TaskStore {
         }
 
         entry.info.status = TaskStatus::Completed;
-        entry.info.status_message = Some("Task completed successfully.".to_string());
+        // A tool call that returned `isError: true` is a COMPLETION, not a
+        // failure (MCP 2026-07-28) — but calling it "successful" in the one
+        // human-readable field the task carries would be a lie, and it is
+        // exactly the signal an operator loses now that these no longer reach
+        // `failed`. The spec lists "Summaries for `completed` status" as a
+        // `statusMessage` use; this is that summary.
+        entry.info.status_message = Some(
+            if result.get("isError").and_then(Value::as_bool) == Some(true) {
+                "Task completed with a tool error.".to_string()
+            } else {
+                "Task completed successfully.".to_string()
+            },
+        );
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.result = Some(result);
@@ -157,18 +169,27 @@ impl TaskStore {
         Some(entry.info.clone())
     }
 
-    /// Cancel a task. Returns error string if the task is already terminal.
-    pub async fn cancel_task(&self, task_id: &str) -> Result<TaskInfo, String> {
+    /// Cancel a task. `None` means no such task; everything else is a
+    /// successful cancellation request.
+    ///
+    /// Cancellation is COOPERATIVE and eventually consistent in MCP
+    /// 2026-07-28: "The request signals intent, and the server decides
+    /// whether and when to honor it", and a task "MAY ultimately reach a
+    /// terminal status other than `cancelled` if the work finished before
+    /// cancellation could take effect."
+    ///
+    /// So an already-terminal task is NOT an error here — it is precisely the
+    /// race the spec describes, and the client is told it may delete its state
+    /// as soon as it sends the request. The terminal state is returned
+    /// untouched: overwriting a `completed` task with `cancelled` would
+    /// destroy a result the client is entitled to fetch, and would report work
+    /// that DID happen as work that was called off.
+    pub async fn cancel_task(&self, task_id: &str) -> Option<TaskInfo> {
         let mut tasks = self.tasks.write().await;
-        let entry = tasks
-            .get_mut(task_id)
-            .ok_or_else(|| format!("Task not found: {task_id}"))?;
+        let entry = tasks.get_mut(task_id)?;
 
         if entry.is_terminal() {
-            return Err(format!(
-                "Cannot cancel task in terminal state: {:?}",
-                entry.info.status
-            ));
+            return Some(entry.info.clone());
         }
 
         entry.info.status = TaskStatus::Cancelled;
@@ -177,7 +198,7 @@ impl TaskStore {
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.cancel_token.cancel();
 
-        Ok(entry.info.clone())
+        Some(entry.info.clone())
     }
 
     /// Get the current status of a task.
@@ -316,6 +337,34 @@ mod tests {
         assert_eq!(result["isError"], true);
     }
 
+    /// Both a clean result and a tool error land on `completed` — that IS the
+    /// 2026-07-28 rule — so `statusMessage` is the only field left that tells
+    /// a human which one happened.
+    #[tokio::test]
+    async fn complete_task_distinguishes_a_tool_error_in_its_status_message() {
+        let store = TaskStore::new(10, 60_000, 2_000);
+        let (ok_id, _) = store.create_task(None).await.unwrap();
+        let (err_id, _) = store.create_task(None).await.unwrap();
+
+        store.complete_task(&ok_id, test_result()).await;
+        store.complete_task(&err_id, error_result()).await;
+
+        let ok = store.get_task(&ok_id).await.unwrap();
+        let err = store.get_task(&err_id).await.unwrap();
+
+        assert_eq!(ok.status, TaskStatus::Completed);
+        assert_eq!(err.status, TaskStatus::Completed);
+        assert_ne!(
+            ok.status_message, err.status_message,
+            "the two outcomes are indistinguishable without this field"
+        );
+        assert_eq!(
+            err.status_message.unwrap(),
+            "Task completed with a tool error."
+        );
+        assert_eq!(ok.status_message.unwrap(), "Task completed successfully.");
+    }
+
     #[tokio::test]
     async fn test_cancel_task_lifecycle() {
         let store = TaskStore::new(10, 60_000, 2_000);
@@ -328,22 +377,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel_terminal_task_returns_error() {
+    /// Supersedes `test_cancel_terminal_task_returns_error`, which asserted
+    /// the refusal 2026-07-28 removed.
+    ///
+    /// The load-bearing half is the second assertion, not the first: a
+    /// cancellation that "succeeds" by overwriting `completed` with
+    /// `cancelled` would destroy a stored result the client may still fetch,
+    /// and would report work that finished as work that was called off.
+    async fn cancel_after_complete_is_accepted_and_changes_nothing() {
         let store = TaskStore::new(10, 60_000, 2_000);
         let (id, _) = store.create_task(None).await.unwrap();
         store.complete_task(&id, test_result()).await;
 
-        let result = store.cancel_task(&id).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("terminal"));
+        let info = store
+            .cancel_task(&id)
+            .await
+            .expect("a known task is never `not found`");
+        assert_eq!(info.status, TaskStatus::Completed);
+
+        let after = store.get_task(&id).await.unwrap();
+        assert_eq!(after.status, TaskStatus::Completed);
+        assert!(
+            store.get_result(&id).await.is_some(),
+            "the stored result must survive a late cancellation"
+        );
     }
 
     #[tokio::test]
-    async fn test_cancel_nonexistent_task_returns_error() {
+    /// The one case that stays an error: `None` means no such task, which is
+    /// what the handler turns into `-32602`. Without this, `cancel_task`
+    /// returning `Some` for everything would pass every other cancel test.
+    async fn cancel_nonexistent_task_is_none() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let result = store.cancel_task("nonexistent").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not found"));
+        assert!(store.cancel_task("nonexistent").await.is_none());
     }
 
     #[tokio::test]
@@ -423,14 +489,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel_after_fail_returns_error() {
+    /// Supersedes `test_cancel_after_fail_returns_error`. Same rule as the
+    /// completed case, on the other terminal status.
+    async fn cancel_after_fail_is_accepted_and_changes_nothing() {
         let store = TaskStore::new(10, 60_000, 2_000);
         let (id, _) = store.create_task(None).await.unwrap();
         store.fail_task(&id, "boom", error_result()).await;
 
-        let result = store.cancel_task(&id).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("terminal"));
+        let info = store.cancel_task(&id).await.expect("a known task");
+        assert_eq!(info.status, TaskStatus::Failed);
+        assert_eq!(
+            store.get_task(&id).await.unwrap().status,
+            TaskStatus::Failed
+        );
     }
 
     #[tokio::test]
@@ -452,14 +523,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_double_cancel_returns_error() {
+    /// Supersedes `test_double_cancel_returns_error`. A client "MAY delete
+    /// all state associated with the task as soon as it sends a
+    /// cancellation", so it cannot know a second send is redundant — the
+    /// second send must not be an error.
+    async fn double_cancel_is_idempotent() {
         let store = TaskStore::new(10, 60_000, 2_000);
         let (id, _) = store.create_task(None).await.unwrap();
         store.cancel_task(&id).await.unwrap();
 
-        let result = store.cancel_task(&id).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("terminal"));
+        let info = store.cancel_task(&id).await.expect("a known task");
+        assert_eq!(info.status, TaskStatus::Cancelled);
     }
 
     // ============== get_result Edge Cases ==============
