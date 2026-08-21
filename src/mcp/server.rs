@@ -27,7 +27,7 @@ use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{IncomingMessage, JsonRpcMessage, RootsListResult};
 use super::request_meta::RequestMeta;
-use super::session_context::{NotificationFanout, SessionContext};
+use super::session_context::SessionContext;
 use super::subscriptions::{NotificationTopic, SubscriptionRegistry, SubscriptionsListenParams};
 use super::transport::{Session, Transport, stdio::StdioTransport};
 
@@ -68,19 +68,6 @@ pub struct McpServer {
     initialized: AtomicBool,
     concurrent_limit: Arc<Semaphore>,
     client_info: RwLock<Option<ClientInfo>>,
-    /// Server-wide fanout registry of live session writer channels.
-    ///
-    /// Used by the config watcher (and any other server-wide event
-    /// source) to broadcast `list_changed` notifications to ALL live
-    /// sessions. Per-session direct delivery (progress, elicitation,
-    /// sampling, logging) goes through [`SessionContext::notification_tx`]
-    /// instead — the per-session tx is the only correct routing for
-    /// messages addressed to one specific client.
-    ///
-    /// FIND-034 (audit 2026-05-09) replaced the previous single
-    /// last-writer-wins `notification_tx` slot with this fanout
-    /// registry plus per-session `SessionContext` senders.
-    notification_fanout: NotificationFanout,
     /// Live `subscriptions/listen` subscriptions (MCP 2026-07-28).
     ///
     /// A notification type is delivered only to the subscriptions that
@@ -322,7 +309,6 @@ impl McpServer {
             initialized: AtomicBool::new(false),
             concurrent_limit,
             client_info: RwLock::new(None),
-            notification_fanout: NotificationFanout::new(),
             subscriptions: SubscriptionRegistry::new(),
             log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
             mcp_logger: Arc::new(RwLock::new(None)),
@@ -807,12 +793,6 @@ impl McpServer {
         // is cheap.
         let session_ctx = SessionContext::new(tx.clone());
 
-        // Register this session's tx with the server-wide fanout so the
-        // config watcher (and any other broadcaster) reaches us. The
-        // returned guard removes the registration on drop — including
-        // panics — so dead senders never accumulate (FIND-034).
-        let fanout_guard = self.notification_fanout.register(tx.clone());
-
         // Create / refresh MCP logger (writes `notifications/message`
         // to the client) now that we have a tx for this session.
         // FIND-035: McpLogger is gated by the SESSION's log_level so
@@ -1006,18 +986,9 @@ impl McpServer {
         // reused channel.
         self.subscriptions.remove_for_tx(&tx);
 
-        // The fanout guard removes our tx from the broadcast registry on
-        // drop (end of this function), so the config watcher stops
-        // trying to send into a dead channel without us touching any
-        // shared state here.
-
-        // Signal writer to stop and wait for it. Then explicitly drop
-        // the fanout guard so the session's tx is removed from the
-        // broadcast registry — the lexical drop at end-of-scope would
-        // do this too, but being explicit documents the contract.
+        // Signal writer to stop and wait for it.
         drop(tx);
         let _ = writer_handle.await;
-        drop(fanout_guard);
     }
 
     /// Whether a finished request's response should be written back.
