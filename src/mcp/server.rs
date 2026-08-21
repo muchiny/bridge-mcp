@@ -4618,34 +4618,44 @@ mod tests {
         assert!(result["capabilities"]["tasks"]["requests"]["tools"]["call"].is_object());
     }
 
-    /// NOT a mirror of dispatch, despite appearances: production never calls
-    /// `task_support()` to build the listing — three independent hardcoded
-    /// literals do — so this only proves the listing and the helper agree.
-    /// Under COORDINATED drift, `definitions()` and `task_support()` both
-    /// moved to "optional", it goes green while the server still answers
-    /// `-32601`. `meta_tools::tests::task_support_is_coherent_with_dispatch`
-    /// is the test that pins ground truth against `handle_tools_call`; do not
-    /// delete it as "a redundant assertion" (audit D-F5, 2026-08-20).
+    /// Inverts `test_tools_list_includes_execution_field`, which required
+    /// every tool to CARRY `execution.taskSupport`.
+    ///
+    /// MCP 2026-07-28 removed per-tool task gating entirely: the server is the
+    /// sole decider, per request, and no client may signal a task preference,
+    /// so there is nothing for a per-tool declaration to gate. The pair of
+    /// audit tests that guarded the field — including
+    /// `task_support_is_coherent_with_dispatch`, annotated "do not delete it
+    /// as a redundant assertion" (D-F5) — are not overruled: they policed the
+    /// agreement between an advertisement and a dispatch rule, and BOTH sides
+    /// of that agreement are gone. What replaces them is this tripwire, which
+    /// guards the removal instead of the value.
+    ///
+    /// It sweeps the whole listing rather than sampling: the field was fed by
+    /// three independent hardcoded literals plus the registry, so a partial
+    /// removal is the realistic failure, and it would be invisible to a test
+    /// that checked one tool.
     #[tokio::test]
-    async fn test_tools_list_includes_execution_field() {
+    async fn tools_list_never_advertises_task_support() {
         let server = create_test_server();
         let response = server.handle_tools_list(Some(json!(1)), None).await;
 
         let result = response.result.unwrap();
-        let tools = result["tools"].as_array().unwrap();
+        let tools = result["tools"].as_array().expect("a tools array");
+        assert!(!tools.is_empty(), "an empty listing would pass vacuously");
 
         for tool in tools {
             let name = tool["name"].as_str().expect("tool name");
-            // G-21/G-14/G-19 (audit 2026-08-19): every tool in `tools/list`
-            // (including `mcp_call_tool`, listed in both modes since it is
-            // dispatchable in both) must declare a real `execution.taskSupport`
-            // that agrees with what `handle_tools_call` actually does with a
-            // `task` object for that name: "forbidden" for the three meta-tools
-            // (dispatched ahead of the task branch), "optional" everywhere else.
-            assert_eq!(
-                tool["execution"]["taskSupport"],
-                super::super::meta_tools::task_support(name),
-                "Tool {name} execution.taskSupport disagrees with dispatch"
+            assert!(
+                tool.get("execution").is_none(),
+                "tool {name} still advertises an `execution` object: {tool}"
+            );
+            // Belt and braces on the KEY, not just its container: a future
+            // `taskSupport` hoisted to the tool root, or nested under some
+            // other object, would slip past the check above.
+            assert!(
+                !tool.to_string().contains("taskSupport"),
+                "tool {name} still mentions taskSupport somewhere: {tool}"
             );
         }
     }

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::protocol::{Tool, ToolExecution};
+use super::protocol::Tool;
 use super::registry::{ToolRegistry, inject_reduction_schema, tool_annotations, tool_group};
 use crate::domain::output_truncator::truncate_chars;
 use crate::ports::{ToolAnnotations, ToolCallResult, ToolContent};
@@ -33,26 +33,6 @@ pub const CALL_TOOL: &str = "mcp_call_tool";
 #[must_use]
 pub fn is_meta_tool(name: &str) -> bool {
     matches!(name, LIST_TOOL_GROUPS | SEARCH_TOOLS | DESCRIBE_TOOL)
-}
-
-/// The `execution.taskSupport` value advertised for `tool_name`.
-///
-/// The three meta-tools are dispatched before the task branch in
-/// `handle_tools_call`, so they cannot honor a task and say so. Everything
-/// else supports tasks optionally, including the `mcp_call_tool` dispatcher —
-/// but with one carve-out this function cannot express, because it keys on a
-/// single name: when `mcp_call_tool` WRAPS one of the three meta-tools, the
-/// rewrite assigns the inner name and the meta-tool guard fires first, so the
-/// call still returns `-32601`. The dispatcher's own `description` in
-/// `call_tool_definition` states that exception, and
-/// `task_support_is_coherent_with_dispatch` pins it.
-#[must_use]
-pub fn task_support(tool_name: &str) -> &'static str {
-    if is_meta_tool(tool_name) {
-        "forbidden"
-    } else {
-        "optional"
-    }
 }
 
 /// Build the three virtual `Tool` entries for `tools/list`.
@@ -77,9 +57,6 @@ pub fn definitions() -> Vec<Tool> {
                 "additionalProperties": false
             }),
             annotations: Some(ToolAnnotations::read_only("List tool groups")),
-            execution: Some(ToolExecution {
-                task_support: "forbidden".to_string(),
-            }),
             output_schema: None,
             icons: None,
             meta: None,
@@ -115,9 +92,6 @@ pub fn definitions() -> Vec<Tool> {
                 "additionalProperties": false
             }),
             annotations: Some(ToolAnnotations::read_only("Search tools")),
-            execution: Some(ToolExecution {
-                task_support: "forbidden".to_string(),
-            }),
             output_schema: None,
             icons: None,
             meta: None,
@@ -141,9 +115,6 @@ pub fn definitions() -> Vec<Tool> {
                 "additionalProperties": false
             }),
             annotations: Some(ToolAnnotations::read_only("Describe a tool")),
-            execution: Some(ToolExecution {
-                task_support: "forbidden".to_string(),
-            }),
             output_schema: None,
             icons: None,
             meta: None,
@@ -164,13 +135,7 @@ pub fn call_tool_definition() -> Tool {
                       (fetch the schema + Reduction Strategy) → mcp_call_tool. \
                       The target tool's own annotations, destructive-op elicitation \
                       gate, and output-reduction params (jq_filter/columns/limit/\
-                      output_format) all apply exactly as if called directly. \
-                      One exception to `taskSupport: \"optional\"`: task \
-                      augmentation is NOT available when the inner tool is one \
-                      of the three discovery meta-tools (mcp_list_tool_groups, \
-                      mcp_search_tools, mcp_describe_tool) — those declare \
-                      \"forbidden\" and such a call returns -32601 whether it is \
-                      made directly or through this dispatcher."
+                      output_format) all apply exactly as if called directly."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -193,9 +158,6 @@ pub fn call_tool_definition() -> Tool {
         // is `true`. The real gate is unaffected — the elicitation check keys
         // on the REWRITTEN inner tool name, not on this one.
         annotations: Some(ToolAnnotations::destructive("Invoke any bridge tool")),
-        execution: Some(ToolExecution {
-            task_support: "optional".to_string(),
-        }),
         output_schema: None,
         icons: None,
         meta: None,
@@ -382,7 +344,6 @@ fn describe(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
         "reduction_strategy": output_kind.strategy_hint(),
         "reduce_marker": output_kind.short_marker(),
         "annotations": annotations_value(name),
-        "task_support": task_support(name),
         "input_schema": input_schema,
     });
     success_json(payload)
@@ -989,63 +950,5 @@ mod tests {
             err.contains("`name` (string, non-empty) is required"),
             "got: {err}"
         );
-    }
-
-    /// The three meta-tools advertised `taskSupport: "optional"` but are
-    /// dispatched in `handle_tools_call` BEFORE the task branch, so `params.task`
-    /// was silently dropped. `mcp_call_tool` advertised nothing (spec default:
-    /// "forbidden") yet accepted a task, because the name rewrite happens before
-    /// the task branch. Coherent assignment: meta-tools forbid, the dispatcher
-    /// allows (audit 2026-08-19).
-    #[test]
-    fn task_support_is_coherent_with_dispatch() {
-        assert_eq!(task_support(LIST_TOOL_GROUPS), "forbidden");
-        assert_eq!(task_support(SEARCH_TOOLS), "forbidden");
-        assert_eq!(task_support(DESCRIBE_TOOL), "forbidden");
-        assert_eq!(task_support(CALL_TOOL), "optional");
-        assert_eq!(task_support("ssh_status"), "optional");
-
-        for def in definitions() {
-            assert_eq!(
-                def.execution.expect("execution").task_support,
-                "forbidden",
-                "meta-tool {} must forbid tasks",
-                def.name
-            );
-        }
-        let call_tool = call_tool_definition();
-        assert_eq!(
-            call_tool.execution.expect("execution").task_support,
-            "optional"
-        );
-
-        // D-F1 (audit 2026-08-20): "optional" is true for every inner tool
-        // EXCEPT the three meta-tools — `handle_tools_call` rewrites `name`
-        // before the meta-tool guard, so a task-augmented dispatch of one of
-        // them still returns -32601. The advertisement the client reads must
-        // carry that caveat, not just the error it eventually gets.
-        for name in [LIST_TOOL_GROUPS, SEARCH_TOOLS, DESCRIBE_TOOL] {
-            assert!(
-                call_tool.description.contains(name),
-                "{CALL_TOOL} description must name {name} as a task-forbidden inner tool"
-            );
-        }
-        assert!(
-            call_tool.description.contains("forbidden"),
-            "{CALL_TOOL} description must say task augmentation is unavailable for them"
-        );
-    }
-
-    #[test]
-    fn describe_reports_task_support() {
-        let registry = create_all_enabled_registry();
-        let result = execute(
-            DESCRIBE_TOOL,
-            Some(&json!({"name": "ssh_status"})),
-            &registry,
-        )
-        .expect("meta");
-        let payload = result.structured_content.expect("structured");
-        assert_eq!(payload["task_support"], json!("optional"));
     }
 }

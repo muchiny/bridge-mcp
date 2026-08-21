@@ -378,22 +378,35 @@ fn test_destructive_tools_not_marked_read_only() {
 
 // ============== Task Execution Field ==============
 
+/// Inverts `test_every_tool_has_execution_task_support`.
+///
+/// MCP 2026-07-28 removed per-tool task gating: the server decides, per
+/// request, and no client can signal a task preference — so a per-tool
+/// declaration has nothing left to gate. The field is gone from `Tool`, so
+/// the Rust side is enforced by the type; what still needs a test is the
+/// WIRE, over the whole registry.
+///
+/// This is the only sweep that covers all of the registry's tools, so it is
+/// where a partial removal would surface — the field used to be fed by the
+/// registry AND by three hardcoded literals in `meta_tools`.
 #[test]
-fn test_every_tool_has_execution_task_support() {
+fn no_tool_serializes_an_execution_or_task_support_key() {
     let config = all_enabled_tool_groups_config_for_test();
     let registry = create_filtered_registry(&config);
     let tools = registry.list_tools();
 
+    assert!(!tools.is_empty(), "an empty registry would pass vacuously");
+
     for tool in &tools {
+        let json = serde_json::to_value(tool).expect("a tool serializes");
         assert!(
-            tool.execution.is_some(),
-            "Tool '{}' should have an execution field",
+            json.get("execution").is_none(),
+            "Tool '{}' still serializes an `execution` object: {json}",
             tool.name
         );
-        assert_eq!(
-            tool.execution.as_ref().unwrap().task_support,
-            "optional",
-            "Tool '{}' should have taskSupport: \"optional\"",
+        assert!(
+            !json.to_string().contains("taskSupport"),
+            "Tool '{}' still mentions taskSupport somewhere: {json}",
             tool.name
         );
     }

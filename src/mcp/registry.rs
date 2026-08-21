@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use crate::config::ToolGroupsConfig;
 use crate::error::{BridgeError, Result};
-use crate::mcp::protocol::{Tool, ToolAnnotations, ToolCallResult, ToolExecution};
+use crate::mcp::protocol::{Tool, ToolAnnotations, ToolCallResult};
 #[cfg(test)]
 use crate::ports::ToolSchema;
 use crate::ports::{ToolContext, ToolHandler};
@@ -179,9 +179,6 @@ impl ToolRegistry {
                     } else {
                         Some(annotations)
                     },
-                    execution: Some(ToolExecution {
-                        task_support: "optional".to_string(),
-                    }),
                     output_schema: handler.output_schema(),
                     icons: tool_icons(schema.name),
                     meta: tool_meta(schema.name),

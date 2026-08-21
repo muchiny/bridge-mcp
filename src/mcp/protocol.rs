@@ -359,9 +359,6 @@ pub struct Tool {
     /// Behavioral hints for MCP clients (MCP 2025-03-26+).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<ToolAnnotations>,
-    /// Execution hints for task support (MCP 2025-11-25+).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution: Option<ToolExecution>,
     /// Structured output schema for the tool's return value (MCP 2025-06-18+).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
@@ -371,14 +368,6 @@ pub struct Tool {
     /// Client-specific metadata hints (e.g., `anthropic/maxResultSizeChars`).
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
-}
-
-/// Tool execution hints (MCP 2025-11-25+).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolExecution {
-    /// `"forbidden"` | `"optional"` | `"required"`
-    pub task_support: String,
 }
 
 /// MCP Tools List Response
@@ -1391,7 +1380,6 @@ mod tests {
             description: "Execute command".to_string(),
             input_schema: json!({"type": "object"}),
             annotations: None,
-            execution: None,
             output_schema: None,
             icons: None,
             meta: None,
@@ -1400,7 +1388,10 @@ mod tests {
         assert!(json.contains("inputSchema"));
         // annotations: None should be omitted
         assert!(!json.contains("annotations"));
-        // execution: None should be omitted
+        // `execution` is not omitted, it is GONE: MCP 2026-07-28 removed
+        // per-tool task gating entirely. Kept as a tripwire against its
+        // return, since a re-added `Option` field would serialize the moment
+        // anything populated it.
         assert!(!json.contains("execution"));
         // icons: None should be omitted
         assert!(!json.contains("\"icons\""));
@@ -1535,7 +1526,6 @@ mod tests {
             description: "List containers".to_string(),
             input_schema: json!({"type": "object"}),
             annotations: None,
-            execution: None,
             output_schema: None,
             icons: Some(vec![Icon {
                 src: "https://example.com/docker.svg".to_string(),
@@ -1614,7 +1604,6 @@ mod tests {
             description: "List containers".to_string(),
             input_schema: json!({"type": "object"}),
             annotations: Some(ToolAnnotations::read_only("List Docker Containers")),
-            execution: None,
             output_schema: None,
             icons: None,
             meta: None,
@@ -1633,7 +1622,6 @@ mod tests {
             description: "test".to_string(),
             input_schema: json!({"type": "object"}),
             annotations: None,
-            execution: None,
             output_schema: None,
             icons: None,
             meta: None,
@@ -1983,40 +1971,12 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_execution_serialization() {
-        let exec = ToolExecution {
-            task_support: "optional".to_string(),
-        };
-        let json = serde_json::to_value(&exec).unwrap();
-        assert_eq!(json["taskSupport"], "optional");
-    }
-
-    #[test]
-    fn test_tool_with_execution_serialization() {
-        let tool = Tool {
-            name: "ssh_exec".to_string(),
-            description: "Execute".to_string(),
-            input_schema: json!({"type": "object"}),
-            annotations: None,
-            execution: Some(ToolExecution {
-                task_support: "optional".to_string(),
-            }),
-            output_schema: None,
-            icons: None,
-            meta: None,
-        };
-        let json = serde_json::to_value(&tool).unwrap();
-        assert_eq!(json["execution"]["taskSupport"], "optional");
-    }
-
-    #[test]
     fn test_tool_meta_serializes_correctly() {
         let tool = Tool {
             name: "ssh_exec".to_string(),
             description: "Execute".to_string(),
             input_schema: json!({"type": "object"}),
             annotations: None,
-            execution: None,
             output_schema: None,
             icons: None,
             meta: Some(json!({"anthropic/maxResultSizeChars": 200_000})),
@@ -2032,7 +1992,6 @@ mod tests {
             description: "Status".to_string(),
             input_schema: json!({"type": "object"}),
             annotations: None,
-            execution: None,
             output_schema: None,
             icons: None,
             meta: None,
