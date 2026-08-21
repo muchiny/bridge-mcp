@@ -38,9 +38,8 @@ use super::protocol::{
     PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
     SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
-    TaskGetParams, TaskNotificationParams, TaskRequestsCapability, TaskStatus, TaskToolsCapability,
-    TaskUpdateParams, TasksCapability, ToolCallParams, ToolCallResult, ToolContent,
-    ToolsCapability, ToolsListResult, WriterMessage,
+    TaskGetParams, TaskNotificationParams, TaskStatus, TaskUpdateParams, ToolCallParams,
+    ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -1494,13 +1493,6 @@ impl McpServer {
                     // the emitter, never before.
                     subscribe: false,
                     list_changed: true,
-                }),
-                tasks: Some(TasksCapability {
-                    list: json!({}),
-                    cancel: json!({}),
-                    requests: TaskRequestsCapability {
-                        tools: Some(TaskToolsCapability { call: json!({}) }),
-                    },
                 }),
                 completions: Some(CompletionsCapability {}),
                 logging: Some(LoggingCapability {}),
@@ -4595,8 +4587,17 @@ mod tests {
 
     // ============== Task Tests (MCP 2025-11-25+) ==============
 
+    /// Supersedes `test_initialize_includes_tasks_capability`.
+    ///
+    /// The declaration did not disappear, it CHANGED CHANNEL: out of
+    /// `capabilities.tasks` (2025-11-25 core) and into
+    /// `capabilities.extensions`, keyed by the extension identifier. Both
+    /// halves are asserted, because an absence check alone would be equally
+    /// satisfied by a server that quietly stopped declaring tasks at all —
+    /// which would leave every client polling a method it was never told
+    /// about.
     #[tokio::test]
-    async fn test_initialize_includes_tasks_capability() {
+    async fn initialize_declares_tasks_under_extensions_not_as_a_capability() {
         let server = create_test_server();
         let params = json!({
             "protocolVersion": "2025-11-25",
@@ -4611,11 +4612,15 @@ mod tests {
             .handle_initialize(Some(json!(1)), Some(params), None)
             .await;
 
-        let result = response.result.unwrap();
-        assert!(result["capabilities"]["tasks"].is_object());
-        assert!(result["capabilities"]["tasks"]["list"].is_object());
-        assert!(result["capabilities"]["tasks"]["cancel"].is_object());
-        assert!(result["capabilities"]["tasks"]["requests"]["tools"]["call"].is_object());
+        let caps = &response.result.expect("initialize result")["capabilities"];
+        assert!(
+            caps.get("tasks").is_none(),
+            "`capabilities.tasks` is the 2025-11-25 shape: {caps}"
+        );
+        assert!(
+            caps["extensions"]["io.modelcontextprotocol/tasks"].is_object(),
+            "the tasks extension must still be declared, under `extensions`: {caps}"
+        );
     }
 
     /// Inverts `test_tools_list_includes_execution_field`, which required
@@ -4658,6 +4663,67 @@ mod tests {
                 "tool {name} still mentions taskSupport somewhere: {tool}"
             );
         }
+    }
+
+    /// D8: the destructive-op elicitation gate MUST resolve BEFORE a task
+    /// exists. Creating the task first and asking for confirmation afterwards
+    /// is the flow the spec says cannot be implemented without reading the
+    /// multi-round-trip page first — the named MRTR debt.
+    ///
+    /// **This ordering is not observable at runtime today, and saying so is
+    /// worth more than a test that appears to prove it.**
+    /// `check_destructive_elicitation` fires only for `destructive_hint:
+    /// true`, and `long_running_tools_are_never_destructive` forbids exactly
+    /// those from the promotion list — so no single call can reach both the
+    /// gate and the task branch. A runtime test would have to assert that two
+    /// things happen in order when one of them never happens, and it would sit
+    /// green forever whatever the order.
+    ///
+    /// The two meet the day the MRTR item closes and a destructive tool joins
+    /// `LONG_RUNNING_TOOLS` — which is exactly when a silent reordering would
+    /// ship the forbidden flow. So the order is pinned now, as source text,
+    /// while the code is still correct. A source-text guard is the weakest
+    /// kind of test; it is still stronger than the runtime test that cannot
+    /// be written.
+    #[test]
+    fn the_elicitation_gate_precedes_the_task_branch() {
+        let src = include_str!("server.rs");
+
+        // Scope 1 — the production half. `include_str!` pulls in THIS test,
+        // whose own assertion arguments are the two literals searched for
+        // below; scanning the whole file would make the guard match itself and
+        // pass (or fail) for reasons having nothing to do with the code it
+        // polices. `expect`, never a fallback to the whole file: a missing
+        // boundary is a broken guard and must say which it is.
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // Scope 2 — ONE function. `check_destructive_elicitation` is also
+        // DEFINED earlier in the file, so a file-wide index comparison would
+        // be comparing that definition against the branch and would pass no
+        // matter how `handle_tools_call` itself is ordered.
+        let from_fn = production
+            .find("async fn handle_tools_call(")
+            .expect("handle_tools_call must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    async fn handle_tools_call_async(")
+            .expect("handle_tools_call_async must follow handle_tools_call");
+        let body = &body[..to_next_fn];
+
+        let gate = body
+            .find(".check_destructive_elicitation(")
+            .expect("the destructive-op gate must run inside handle_tools_call");
+        let promotion = body
+            .find("task_policy::is_long_running(")
+            .expect("the promotion decision must be made inside handle_tools_call");
+
+        assert!(
+            gate < promotion,
+            "the destructive-op elicitation gate must resolve BEFORE the task branch: a task \
+             created first and confirmed afterwards is the MRTR flow this release cannot ship"
+        );
     }
 
     /// A tool that is not on the promotion list is answered synchronously —

@@ -262,9 +262,6 @@ pub struct ServerCapabilities {
     pub prompts: Option<PromptsCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourcesCapability>,
-    /// Experimental Tasks capability (MCP 2025-11-25+).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tasks: Option<TasksCapability>,
     /// Completions capability (argument auto-completion).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completions: Option<CompletionsCapability>,
@@ -274,27 +271,6 @@ pub struct ServerCapabilities {
     /// MCP Extensions (2025-11-25+). Map of extension URI to settings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, Value>>,
-}
-
-/// Tasks capability declaration for MCP `initialize` response.
-#[derive(Debug, Clone, Serialize)]
-pub struct TasksCapability {
-    pub list: Value,
-    pub cancel: Value,
-    pub requests: TaskRequestsCapability,
-}
-
-/// Which request types support task augmentation.
-#[derive(Debug, Clone, Serialize)]
-pub struct TaskRequestsCapability {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<TaskToolsCapability>,
-}
-
-/// Task support for `tools/call`.
-#[derive(Debug, Clone, Serialize)]
-pub struct TaskToolsCapability {
-    pub call: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1323,7 +1299,6 @@ mod tests {
                     list_changed: false,
                 }),
                 resources: None,
-                tasks: None,
                 completions: None,
                 logging: None,
                 extensions: None,
@@ -2000,41 +1975,38 @@ mod tests {
         assert!(!json.contains("_meta"));
     }
 
+    /// Supersedes `test_tasks_capability_serialization` and
+    /// `test_server_capabilities_with_tasks`, which pinned the 2025-11-25
+    /// shape: a top-level `capabilities.tasks` object carrying `list`,
+    /// `cancel` and `requests.tools.call`.
+    ///
+    /// Tasks left core in 2026-07-28 and became an extension, so the server
+    /// declares them under `capabilities.extensions` keyed by the extension
+    /// identifier. Two of the three sub-keys could not be declared any more
+    /// even if the object survived: `tasks/list` no longer exists, and
+    /// per-request task support is not a thing a server advertises.
+    ///
+    /// Asserting BOTH halves — gone from one place, present in the other — is
+    /// what makes this a migration test rather than a deletion test. A bare
+    /// absence check would also pass for a server that stopped declaring
+    /// tasks altogether, which is a different bug with the same symptom.
     #[test]
-    fn test_tasks_capability_serialization() {
-        let cap = TasksCapability {
-            list: json!({}),
-            cancel: json!({}),
-            requests: TaskRequestsCapability {
-                tools: Some(TaskToolsCapability { call: json!({}) }),
-            },
-        };
-        let json = serde_json::to_value(&cap).unwrap();
-        assert!(json["list"].is_object());
-        assert!(json["cancel"].is_object());
-        assert!(json["requests"]["tools"]["call"].is_object());
-    }
-
-    #[test]
-    fn test_server_capabilities_with_tasks() {
+    fn tasks_are_declared_as_an_extension_not_a_core_capability() {
         let caps = ServerCapabilities {
             tools: Some(ToolsCapability { list_changed: true }),
             prompts: None,
             resources: None,
-            tasks: Some(TasksCapability {
-                list: json!({}),
-                cancel: json!({}),
-                requests: TaskRequestsCapability {
-                    tools: Some(TaskToolsCapability { call: json!({}) }),
-                },
-            }),
             completions: None,
             logging: None,
-            extensions: None,
+            extensions: Some(HashMap::from([(extensions::TASKS.to_string(), json!({}))])),
         };
         let json = serde_json::to_value(&caps).unwrap();
-        assert!(json["tasks"].is_object());
-        assert!(json["tasks"]["requests"]["tools"]["call"].is_object());
+
+        assert!(
+            json.get("tasks").is_none(),
+            "`capabilities.tasks` is the 2025-11-25 shape: {json}"
+        );
+        assert!(json["extensions"][extensions::TASKS].is_object(), "{json}");
     }
 
     #[test]
