@@ -737,23 +737,21 @@ impl McpServer {
         vec![sm_handle, ts_handle, oc_handle, cp_handle]
     }
 
-    /// Start a config file watcher that broadcasts `list_changed`
+    /// Start a config file watcher that publishes `list_changed`
     /// notifications on reload.
     ///
-    /// FIND-034 (audit 2026-05-09): the previous topology read a single
-    /// global `notification_tx` slot at callback time, so the broadcast
-    /// reached only the most recently registered session. The watcher
-    /// now uses [`NotificationFanout::broadcast`], which fans the
-    /// notifications out to every live session's per-session sender.
+    /// FIND-034 (audit 2026-05-09) replaced a single global sender with a
+    /// fanout, so the reload reached every live session. MCP 2026-07-28
+    /// narrows that again: a server MUST NOT deliver a notification type
+    /// nobody subscribed to. The reload therefore publishes through
+    /// [`SubscriptionRegistry`], which delivers only to the subscriptions
+    /// that named each topic in `subscriptions/listen` — a session that
+    /// never subscribed now receives nothing at all.
     fn spawn_config_watcher(&self, path: &Path) -> Option<ConfigWatcher> {
-        let fanout = self.notification_fanout.clone();
+        let subscriptions = self.subscriptions.clone();
         let on_reload: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            fanout.broadcast(&WriterMessage::Notification(
-                JsonRpcNotification::tools_list_changed(),
-            ));
-            fanout.broadcast(&WriterMessage::Notification(
-                JsonRpcNotification::resources_list_changed(),
-            ));
+            subscriptions.publish_topic(NotificationTopic::ToolsListChanged);
+            subscriptions.publish_topic(NotificationTopic::ResourcesListChanged);
         });
 
         ConfigWatcher::with_notifications(
@@ -5870,6 +5868,76 @@ mod tests {
             .error
             .expect("session-less listen is refused");
         assert_eq!(error.code, -32600, "method must be routed, not unknown");
+    }
+
+    /// MCP 2026-07-28: a server MUST NOT deliver a notification type that
+    /// no live subscription requested. Before this, `spawn_config_watcher`
+    /// fanned `tools/list_changed` + `resources/list_changed` out to every
+    /// live session regardless of what (if anything) it had subscribed to.
+    #[tokio::test]
+    async fn test_list_changed_reaches_only_subscribers() {
+        let server = create_test_server();
+        let (tx_sub, mut rx_sub) = mpsc::channel::<WriterMessage>(8);
+        let (tx_silent, mut rx_silent) = mpsc::channel::<WriterMessage>(8);
+        let session_sub = SessionContext::new(tx_sub);
+        // A live session that never sent subscriptions/listen.
+        let _session_silent = SessionContext::new(tx_silent);
+
+        server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({ "notifications": { "toolsListChanged": true } })),
+                Some(&session_sub),
+            )
+            .await;
+        // Drain the acknowledgement so the next recv is the broadcast.
+        let _ack = rx_sub.try_recv().expect("ack notification");
+
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_topic(NotificationTopic::ToolsListChanged),
+            1
+        );
+
+        match rx_sub.try_recv().expect("subscriber receives its topic") {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/tools/list_changed");
+            }
+            _ => panic!("expected a Notification"),
+        }
+        assert!(
+            rx_silent.try_recv().is_err(),
+            "a session that never sent subscriptions/listen MUST receive nothing"
+        );
+
+        // A topic nobody subscribed to reaches nobody at all.
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_topic(NotificationTopic::ResourcesListChanged),
+            0
+        );
+        assert!(
+            rx_sub.try_recv().is_err(),
+            "a tools-only subscriber MUST NOT receive resources/list_changed"
+        );
+    }
+
+    /// The config watcher is the only server-wide `list_changed` producer.
+    /// It must build without touching a fanout, and must be a no-op when
+    /// nothing is subscribed.
+    #[tokio::test]
+    async fn test_config_reload_publishes_through_the_subscription_registry() {
+        let server = create_test_server();
+        assert!(server.subscriptions.is_empty());
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_topic(NotificationTopic::ToolsListChanged),
+            0,
+            "a reload with zero subscriptions delivers zero notifications"
+        );
     }
 
     // ============== Completions Tests ==============
