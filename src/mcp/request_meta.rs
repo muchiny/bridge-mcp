@@ -113,6 +113,28 @@ impl RequestMeta {
             .map(|c| Self::capability_present(c, "roots"))
     }
 
+    /// Whether THIS request declared support for the named MCP extension.
+    ///
+    /// NOT tri-state, unlike [`Self::declares_elicitation`] and its two
+    /// siblings. Those return `Option<bool>` so a Legacy client that declared
+    /// nothing falls back to the session handshake flags. The tasks extension
+    /// FORBIDS that fallback: "A server MUST NOT return `CreateTaskResult` to
+    /// a client that did not include the extension capability on its request,
+    /// regardless of prior declarations." A request that did not declare it
+    /// has not declared it — `false` is the only correct answer for an absent
+    /// envelope.
+    ///
+    /// Reads `clientCapabilities.extensions[id]` — nested one level deeper
+    /// than the three core capabilities, which sit at the root of the map.
+    #[must_use]
+    pub fn declares_extension(&self, id: &str) -> bool {
+        self.client_capabilities
+            .as_ref()
+            .and_then(|c| c.get("extensions"))
+            .and_then(Value::as_object)
+            .is_some_and(|exts| Self::capability_present(exts, id))
+    }
+
     /// The client name from `io.modelcontextprotocol/clientInfo`, if any.
     #[must_use]
     pub fn client_name(&self) -> Option<&str> {
@@ -257,6 +279,77 @@ mod tests {
         });
         let meta = RequestMeta::from_params(Some(&params));
         assert_eq!(meta.protocol_version.as_deref(), Some("2026-07-28"));
+    }
+
+    // ========================================================================
+    // declares_extension — the tasks extension gate (MCP 2026-07-28 §5.2)
+    // ========================================================================
+
+    /// The tasks extension identifier, spelled here rather than imported so
+    /// this module's tests do not depend on `mcp::protocol`.
+    const TASKS: &str = "io.modelcontextprotocol/tasks";
+
+    fn meta_with_caps(caps: &Value) -> RequestMeta {
+        let params = json!({
+            "_meta": { "io.modelcontextprotocol/clientCapabilities": caps }
+        });
+        RequestMeta::from_params(Some(&params))
+    }
+
+    #[test]
+    fn declares_extension_is_true_when_the_request_lists_it() {
+        let meta = meta_with_caps(&json!({ "extensions": { TASKS: {} } }));
+        assert!(meta.declares_extension(TASKS));
+    }
+
+    #[test]
+    fn declares_extension_is_false_for_an_empty_extensions_map() {
+        let meta = meta_with_caps(&json!({ "extensions": {} }));
+        assert!(!meta.declares_extension(TASKS));
+    }
+
+    #[test]
+    fn declares_extension_is_false_when_no_extensions_key_is_present() {
+        // Capabilities declared, but nothing under `extensions`.
+        let meta = meta_with_caps(&json!({}));
+        assert!(!meta.declares_extension(TASKS));
+    }
+
+    #[test]
+    fn declares_extension_is_false_not_none_when_meta_is_absent() {
+        // THE line that separates extension semantics from elicitation
+        // semantics. `declares_elicitation()` answers `None` here so the
+        // caller may fall back to the session handshake. The tasks extension
+        // forbids that fallback outright: an undeclared request is a
+        // non-declaring request, full stop.
+        let params = json!({ "name": "ssh_exec" });
+        let meta = RequestMeta::from_params(Some(&params));
+        assert_eq!(meta.declares_elicitation(), None);
+        assert!(!meta.declares_extension(TASKS));
+    }
+
+    #[test]
+    fn declares_extension_is_false_for_a_null_value() {
+        // `TasksExtensionCapability = Record<string, never>` — `{}` attests
+        // support. `null` is not an object and attests nothing.
+        let meta = meta_with_caps(&json!({ "extensions": { TASKS: null } }));
+        assert!(!meta.declares_extension(TASKS));
+    }
+
+    #[test]
+    fn declares_extension_is_false_when_extensions_is_not_an_object() {
+        let meta = meta_with_caps(&json!({ "extensions": "not-an-object" }));
+        assert!(!meta.declares_extension(TASKS));
+    }
+
+    #[test]
+    fn declares_extension_requires_an_exact_identifier_match() {
+        // A neighbouring identifier must not satisfy the gate: the lookup is
+        // a map key, never a prefix or substring test.
+        let meta = meta_with_caps(&json!({
+            "extensions": { "io.modelcontextprotocol/tasks-v2": {} }
+        }));
+        assert!(!meta.declares_extension(TASKS));
     }
 
     #[test]

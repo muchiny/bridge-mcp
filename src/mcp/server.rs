@@ -11,9 +11,7 @@ use tracing::{Instrument, debug, error, info, warn};
 
 use crate::config::{Config, ConfigWatcher};
 use crate::domain::output_truncator::truncate_chars;
-use crate::domain::{
-    ExecuteCommandUseCase, OutputCache, TaskStore, TaskWaitOutcome, TunnelManager,
-};
+use crate::domain::{ExecuteCommandUseCase, OutputCache, TaskStore, TunnelManager};
 use crate::error::Result;
 use crate::mcp::instructions;
 use crate::ports::ExecutorRouter;
@@ -34,15 +32,15 @@ use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
     BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, CacheScope, CompletionRef, CompletionResult,
-    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult,
-    DISCOVER_TTL_MS, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon, JsonRpcError,
+    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, DISCOVER_TTL_MS,
+    DetailedTask, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon, JsonRpcError,
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel, LoggingCapability,
     LoggingSetLevelParams, PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult,
     PromptsListResult, ResourcesCapability, ResourcesListResult, ResourcesReadParams,
     ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
-    ServerCapabilities, ServerInfo, TaskCancelParams, TaskGetParams, TaskListParams,
-    TaskListResult, TaskRequestsCapability, TaskResultParams, TaskToolsCapability, TasksCapability,
-    ToolCallParams, ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
+    ServerCapabilities, ServerInfo, TaskCancelParams, TaskGetParams, TaskNotificationParams,
+    TaskStatus, TaskUpdateParams, ToolCallParams, ToolCallResult, ToolContent, ToolsCapability,
+    ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -774,12 +772,18 @@ impl McpServer {
     /// G-1 (audit 2026-08-19): `limits.max_concurrent_commands` exists to
     /// cap concurrent *command execution*. Applying it to every method
     /// froze whole sessions, because the reader loop acquires the permit
-    /// BEFORE it spawns the handler — so N parked `tasks/result` long
-    /// polls (N = the limit, 5 by default) meant the client's next message
-    /// was never read at all. Measured: N=4 still answered `ping`; N=5
-    /// answered neither `ping` nor `tasks/cancel` — the one request that
-    /// could have released the parked polls — and was still dead after
-    /// 208 s.
+    /// BEFORE it spawns the handler — so N parked `tasks/result` long polls
+    /// (N = the limit, 5 by default) meant the client's next message was
+    /// never read at all. Measured: N=4 still answered `ping`; N=5 answered
+    /// neither `ping` nor `tasks/cancel` — the one request that could have
+    /// released the parked polls — and was still dead after 208 s.
+    ///
+    /// `tasks/result` was deleted in 3.0.0, so that exact scenario is no
+    /// longer reachable; the measurement is recorded as the historical
+    /// reason the exemption exists, not as a description of any method
+    /// this server still dispatches. The exemption itself still earns its
+    /// keep: task WORKERS legitimately hold all N permits during normal
+    /// operation, and the control plane must stay answerable through it.
     ///
     /// Neither `ping` nor any `tasks/*` method does remote work, so
     /// exempting them costs no concurrency budget. Task-augmented
@@ -1232,6 +1236,19 @@ impl McpServer {
     /// this code path because no per-session pending-requests map is
     /// supplied. Use [`Self::serve`] / `Self::serve_session` (private) for full
     /// MCP feature support.
+    /// The `tasks/*` methods a client may only use after declaring the
+    /// extension ON THE REQUEST.
+    ///
+    /// Named methods, never the `tasks/` PREFIX. `tasks/list` and
+    /// `tasks/result` were deleted in 3.0.0 and must keep answering `-32601`
+    /// to everyone: a prefix gate would tell a non-declaring client to declare
+    /// a capability that would not make those methods exist. The prefix is
+    /// right for `is_concurrency_exempt`, which is about scheduling; it is
+    /// wrong here, where the answer has to distinguish "you may not" from
+    /// "there is no such thing".
+    const TASK_METHODS_REQUIRING_EXTENSION: [&'static str; 3] =
+        ["tasks/get", "tasks/update", "tasks/cancel"];
+
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
         self.handle_request_with_cancel(request, None, None).await
     }
@@ -1270,6 +1287,25 @@ impl McpServer {
             session.map(|s| s.with_request_meta(RequestMeta::from_params(request.params.as_ref())));
         let session = scoped_session.as_ref();
 
+        // The tasks extension is gated per REQUEST: "Servers MUST return this
+        // error for non-declaring clients issuing `tasks/get`,
+        // `tasks/update`, and `tasks/cancel` requests", and "Servers MUST NOT
+        // infer capabilities from prior requests" — so a declaration made on
+        // an earlier request, or at a handshake, grants nothing here.
+        //
+        // Ahead of the match, so that a `tasks/*` method cannot be added below
+        // without meeting this list.
+        if Self::TASK_METHODS_REQUIRING_EXTENSION.contains(&request.method.as_str())
+            && !Self::request_declares_tasks_extension(session)
+        {
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::missing_required_client_capability(&json!({
+                    "extensions": { super::protocol::extensions::TASKS: {} }
+                })),
+            );
+        }
+
         match request.method.as_str() {
             "server/discover" => self.handle_discover(id).await,
             "initialize" => Self::handle_initialize(id, request.params.as_ref()),
@@ -1282,9 +1318,14 @@ impl McpServer {
             "prompts/get" => self.handle_prompts_get(id, request.params).await,
             "resources/list" => self.handle_resources_list(id).await,
             "resources/read" => self.handle_resources_read(id, request.params).await,
+            // No `tasks/result` and no `tasks/list` arm: MCP 2026-07-28 has
+            // neither method. `tasks/result`'s payload is inlined into the
+            // `tasks/get` below; `tasks/list` was removed deliberately, so
+            // that a server cannot leak one caller's task ids to another
+            // (spec 5.15, cross-caller correlation). Both names now fall
+            // through to -32601 like any other unknown method.
             "tasks/get" => self.handle_tasks_get(id, request.params).await,
-            "tasks/result" => self.handle_tasks_result(id, request.params).await,
-            "tasks/list" => self.handle_tasks_list(id, request.params).await,
+            "tasks/update" => self.handle_tasks_update(id, request.params).await,
             "tasks/cancel" => self.handle_tasks_cancel(id, request.params).await,
             // The 2025-06-18 schema names this method `completion/complete`
             // (SINGULAR) and that is the ONLY spelling the installed client
@@ -1353,13 +1394,6 @@ impl McpServer {
                 resources: Some(ResourcesCapability {
                     subscribe: false,
                     list_changed: true,
-                }),
-                tasks: Some(TasksCapability {
-                    list: json!({}),
-                    cancel: json!({}),
-                    requests: TaskRequestsCapability {
-                        tools: Some(TaskToolsCapability { call: json!({}) }),
-                    },
                 }),
                 completions: Some(CompletionsCapability {}),
                 logging: Some(LoggingCapability {}),
@@ -1611,12 +1645,6 @@ impl McpServer {
 
         info!(tool = %call_params.name, "Tool call");
 
-        // The name the client actually put on the wire, captured before the
-        // `mcp_call_tool` rewrite below replaces it with the inner tool. Any
-        // error raised after that point must still be attributable to the
-        // request the client sent (audit D-F1, 2026-08-20).
-        let outer_name = call_params.name.clone();
-
         // Generic dispatcher (progressive listing mode): rewrite to the inner
         // tool BEFORE the elicitation gate and annotation lookups, so the
         // target tool's own safety semantics apply. A rewritten name equal to
@@ -1646,20 +1674,6 @@ impl McpServer {
         // argument-validated locally, so they skip the elicitation gate and
         // the task/progress plumbing.
         if super::meta_tools::is_meta_tool(&call_params.name) {
-            // `execution.taskSupport` is "forbidden" for the three meta-tools:
-            // they are dispatched here, ahead of the task branch below, so a
-            // `task` object would otherwise be accepted and silently dropped.
-            //
-            // `mcp_call_tool` advertises "optional" and rewrote `name` above,
-            // so this can fire for a request whose wire-level tool name was the
-            // dispatcher. Name both ends rather than only the rewritten one.
-            if call_params.task.is_some() {
-                let via = (outer_name != call_params.name).then_some(outer_name.as_str());
-                return JsonRpcResponse::error(
-                    id,
-                    JsonRpcError::task_not_supported_via(&call_params.name, via),
-                );
-            }
             let result = super::meta_tools::execute(
                 &call_params.name,
                 call_params.arguments.as_ref(),
@@ -1696,23 +1710,28 @@ impl McpServer {
             return JsonRpcResponse::success_or_serialize_error(id, &ToolCallResult::error(msg));
         }
 
-        // Task-augmented request: spawn background worker and return immediately.
+        // Server-elected task. MCP 2026-07-28 deleted `params.task`: "The
+        // server is the sole decider; clients do not signal task preference on
+        // the request itself." The policy lives in `task_policy`.
+        //
+        // BOTH conditions are required, and the second is a MUST NOT, not a
+        // courtesy: "A server MUST NOT return `CreateTaskResult` to a client
+        // that did not include the extension capability on its request,
+        // regardless of prior declarations." A non-declaring client asking for
+        // a long-running tool gets the ordinary synchronous answer — the same
+        // one it got before this release — never a handle it cannot poll.
+        //
         // MCP Tasks have their own cancellation via `tasks/cancel`; we don't
         // propagate the request-level `cancel_token` here because the task
         // lives beyond the enclosing request.
-        if let Some(task_request) = call_params.task {
+        if super::task_policy::is_long_running(&call_params.name)
+            && Self::request_declares_tasks_extension(session)
+        {
+            // The progress token is deliberately NOT forwarded: it is not
+            // part of this call's signature at all. See the context built
+            // below.
             return self
-                .handle_tools_call_async(
-                    call_params.name,
-                    call_params.arguments,
-                    task_request,
-                    id,
-                    call_params
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.progress_token.clone()),
-                    session,
-                )
+                .handle_tools_call_async(call_params.name, call_params.arguments, id, session)
                 .await;
         }
 
@@ -1845,15 +1864,34 @@ impl McpServer {
         }
     }
 
-    /// Handle a task-augmented `tools/call`: create a task, spawn a background
-    /// worker, and return `CreateTaskResult` immediately.
+    /// Whether THIS request declared the tasks extension.
+    ///
+    /// Reads `request_meta` and nothing else. There is deliberately no
+    /// `SessionContext::supports_tasks_extension()` alongside
+    /// `supports_elicitation()` / `supports_sampling()` / `supports_roots()`:
+    /// those three fall back to the connection handshake when the request
+    /// declares nothing, and for the tasks extension that fallback is
+    /// forbidden — "regardless of prior declarations", and "Servers MUST NOT
+    /// infer capabilities from prior requests". An accessor built on the
+    /// neighbouring pattern would be a capability cache wearing the right
+    /// clothes.
+    ///
+    /// A session with no `request_meta` at all (the non-MCP internal call
+    /// path) declares nothing, so it is `false` — never a handle.
+    fn request_declares_tasks_extension(session: Option<&SessionContext>) -> bool {
+        session
+            .and_then(|s| s.request_meta.as_ref())
+            .is_some_and(|meta| meta.declares_extension(super::protocol::extensions::TASKS))
+    }
+
+    /// Handle a server-elected task: create the task, spawn a background
+    /// worker, and return the flat task handle immediately.
+    #[allow(clippy::too_many_lines)]
     async fn handle_tools_call_async(
         &self,
         tool_name: String,
         arguments: Option<Value>,
-        task_request: super::protocol::TaskRequest,
         id: Option<Value>,
-        progress_token: Option<Value>,
         session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
         // Get the handler first to validate the tool exists. Must agree with
@@ -1868,8 +1906,10 @@ impl McpServer {
         let handler = Arc::clone(handler);
 
         // Create the task
-        let Some((task_id, cancel_token)) = self.task_store.create_task(task_request.ttl).await
-        else {
+        // `None`: the server picks the TTL unilaterally (spec 5.9). The
+        // client used to propose one through `params.task.ttl` and the store
+        // capped it; there is no client proposal left to cap.
+        let Some((task_id, cancel_token)) = self.task_store.create_task().await else {
             return JsonRpcResponse::error(
                 id,
                 JsonRpcError::internal_error("Task limit reached, try again later"),
@@ -1907,19 +1947,33 @@ impl McpServer {
         // dropped — same effect as before.
         let task_notification_tx = session.map(|s| s.notification_tx.clone());
 
-        // SEP-1686: emit `notifications/tasks/status` for the initial
-        // non-existent → working transition. The worker emits the matching
-        // terminal notification on completion/failure/cancellation.
+        // Emit `notifications/tasks` for the initial non-existent → working
+        // transition. The worker emits the matching terminal notification.
+        // A `working` task has no payload to carry.
         if let Some(tx) = task_notification_tx.as_ref() {
-            let msg = WriterMessage::Notification(JsonRpcNotification::task_status(&task_info));
+            let params = TaskNotificationParams::new(task_info.clone(), None);
+            let msg = WriterMessage::Notification(JsonRpcNotification::task_notification(&params));
             let _ = tx.try_send(msg);
         }
 
         // Propagate the task's cancel_token into the ToolContext so the
         // handler can do clean shutdown (e.g. evicting the SSH connection
         // from the pool) when the task is cancelled via `tasks/cancel`.
+        // `None` for the progress token, and the parameter no longer reaches
+        // this function at all: "`notifications/progress` and
+        // `notifications/message` notifications MUST NOT be sent on the
+        // `subscriptions/listen` stream for a task, and are not supported on
+        // tasks in general in this specification."
+        //
+        // Structure, not vigilance: `ToolContext::progress_reporter` hands a
+        // handler `None` when the token is absent, so a promoted tool CANNOT
+        // report progress even if it asks. Progress for a task lives in
+        // `statusMessage` instead. This matters most for the tool most likely
+        // to join the promotion list after the MRTR item closes —
+        // `ssh_runbook_execute` is one of the four handlers that do call
+        // `progress_reporter`.
         let ctx = self
-            .create_tool_context(Some(cancel_token.clone()), progress_token, session)
+            .create_tool_context(Some(cancel_token.clone()), None, session)
             .await;
 
         // Spawn the background worker
@@ -1946,8 +2000,23 @@ impl McpServer {
                 }
             };
 
-            // Store the result and send notification
-            let info = match result {
+            // Store the result and send notification.
+            //
+            // The `failed`/`completed` boundary is a MUST that is easy to
+            // implement backwards, and 2025-11-25 said the OPPOSITE of what
+            // 2026-07-28 says: "The `failed` status MUST NOT be used to
+            // represent non-JSON-RPC errors, such as a tool result that
+            // completed with `isError: true`. Errors within the context of a
+            // protocol method result MUST use the `completed` status with the
+            // error details in the `result` field."
+            //
+            // The rule that makes each arm decidable: `tasks/get` "returns
+            // exactly what the underlying request would have returned". So
+            // this match mirrors the SYNCHRONOUS path arm for arm — whatever
+            // `handle_tools_call` answers with an isError envelope is
+            // `completed` here, and only what it answers with a JSON-RPC error
+            // is `failed`.
+            let (info, payload) = match result {
                 Ok(tool_result) => {
                     let tool_result = tool_result.without_apps();
                     let result_value =
@@ -1955,8 +2024,43 @@ impl McpServer {
                             "content": [{"type": "text", "text": format!("Serialization error: {e}")}],
                             "isError": true,
                         }));
-                    task_store.complete_task(&task_id, result_value).await
+                    (
+                        task_store
+                            .complete_task(&task_id, result_value.clone())
+                            .await,
+                        Some(result_value),
+                    )
                 }
+                // Cancellation is the one arm the synchronous path answers
+                // with a JSON-RPC error (`-32800`), so it is the one arm that
+                // is `failed` — and `error` then carries that error OBJECT,
+                // not a tool result. `McpUnknownTool`, the other JSON-RPC arm
+                // over there, cannot occur here: the handler was resolved
+                // before the spawn.
+                Err(crate::error::BridgeError::Cancelled) => {
+                    let error_value = serde_json::to_value(JsonRpcError::cancelled(None))
+                        .unwrap_or_else(|_| {
+                            json!({
+                                "code": CANCELLED_ERROR_CODE,
+                                "message": "Request cancelled by client",
+                            })
+                        });
+                    (
+                        task_store
+                            .fail_task(
+                                &task_id,
+                                "Task was cancelled during execution.",
+                                error_value.clone(),
+                            )
+                            .await,
+                        Some(error_value),
+                    )
+                }
+                // A tool that ran and failed. The synchronous path returns
+                // this as a successful result carrying `isError: true`, so the
+                // task is COMPLETED. An operator filtering on
+                // `status == "failed"` will no longer see these; the probe is
+                // `result.isError == true`.
                 Err(e) => {
                     let error_result = ToolCallResult::error(e.to_string());
                     let result_value =
@@ -1964,27 +2068,41 @@ impl McpServer {
                             "content": [{"type": "text", "text": format!("Serialization error: {e}")}],
                             "isError": true,
                         }));
-                    task_store
-                        .fail_task(&task_id, &e.to_string(), result_value)
-                        .await
+                    (
+                        task_store
+                            .complete_task(&task_id, result_value.clone())
+                            .await,
+                        Some(result_value),
+                    )
                 }
             };
 
-            // Send status notification (best-effort) on the per-session
+            // Send the terminal notification (best-effort) on the per-session
             // tx so it reaches the originating client only.
+            //
+            // It carries the PAYLOAD, not just the status: "The notification
+            // includes the full task object, allowing clients to access the
+            // complete task state and final results without polling the
+            // `tasks/get` method." A notification a client must follow with a
+            // poll would be a notification that saved nobody anything.
             if let Some(info) = info
                 && let Some(tx) = task_notification_tx.as_ref()
             {
-                let msg = WriterMessage::Notification(JsonRpcNotification::task_status(&info));
+                let params = TaskNotificationParams::new(info, payload);
+                let msg =
+                    WriterMessage::Notification(JsonRpcNotification::task_notification(&params));
                 let _ = tx.try_send(msg);
             }
         });
 
-        // Return CreateTaskResult immediately
-        let create_result = CreateTaskResult {
-            task: task_info,
-            meta: None,
-        };
+        // Return the task handle immediately. `resultType: "task"` is the
+        // MUST that lets a client tell this apart from a standard
+        // `ToolCallResult`; it says nothing about progress, which lives in
+        // `status`. The client polls `tasks/get`.
+        //
+        // The handle is FLAT: `taskId`/`status`/`ttlMs` sit at the root of
+        // `result`, not under a nested `task` object.
+        let create_result = DetailedTask::handle(task_info);
         JsonRpcResponse::success_or_serialize_error(id, &create_result)
     }
 
@@ -2272,6 +2390,16 @@ impl McpServer {
     // Task handlers (MCP 2025-11-25+)
     // =========================================================================
 
+    /// Point-in-time snapshot of a task — the ONLY way to read one.
+    ///
+    /// Never blocks. MCP 2026-07-28 deleted `tasks/result` and folded its
+    /// payload in here: the answer carries the status AND, at a terminal
+    /// status, the stored `result` (completed) or `error` (failed), inlined
+    /// flat alongside the task fields.
+    ///
+    /// `resultType` is `"complete"` on every answer, whatever the status —
+    /// it names the result SHAPE, not the progress. A `working` snapshot is
+    /// still a complete `tasks/get` result.
     async fn handle_tasks_get(&self, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
@@ -2287,16 +2415,58 @@ impl McpServer {
             }
         };
 
-        match self.task_store.get_task(&get_params.task_id).await {
-            Some(info) => JsonRpcResponse::success_or_serialize_error(id, &info),
-            None => JsonRpcResponse::error(
+        // Unknown or TTL-evicted id is -32602. This is also where eviction
+        // surfaces: as an error from a non-blocking call, never as a hang.
+        let Some(info) = self.task_store.get_task(&get_params.task_id).await else {
+            return JsonRpcResponse::error(
                 id,
                 JsonRpcError::invalid_params(format!("Task not found: {}", get_params.task_id)),
-            ),
-        }
+            );
+        };
+
+        let status = info.status;
+        let snapshot = DetailedTask::snapshot(info);
+        let snapshot = match status {
+            // `result` MUST be present on a completed task. `get_result`
+            // returning None here would mean the store completed a task
+            // without storing anything, which `complete_task` cannot do.
+            TaskStatus::Completed => match self.task_store.get_result(&get_params.task_id).await {
+                Some(result) => snapshot.with_result(result),
+                None => snapshot,
+            },
+            TaskStatus::Failed => match self.task_store.get_result(&get_params.task_id).await {
+                Some(error) => snapshot.with_error(error),
+                None => snapshot,
+            },
+            // `working` carries no payload; `cancelled` carries none either
+            // — `CancelledTask` extends `Task` with no `result` field, so
+            // inventing one would be an extension of our own.
+            TaskStatus::Working | TaskStatus::InputRequired | TaskStatus::Cancelled => snapshot,
+        };
+
+        JsonRpcResponse::success_or_serialize_error(id, &snapshot)
     }
 
-    async fn handle_tasks_result(
+    /// `tasks/update` — deliver `inputResponses` for a task waiting on input.
+    ///
+    /// A no-op acknowledgement, and conformant as one. bridge-mcp never enters
+    /// `input_required`: no tool suspends mid-execution to elicit, and the
+    /// destructive-confirmation gate resolves on the ORIGINAL `tools/call`
+    /// through core multi-round-trip, before any task exists — which is what
+    /// the spec prescribes ("a server that needs client input _before_
+    /// returning a `CreateTaskResult` uses the multi round-trip request flow
+    /// on the original request").
+    ///
+    /// So this server never issues an `inputRequest`, so no key a client sends
+    /// can be outstanding, and the spec says what to do with those: "A server
+    /// SHOULD ignore any `inputResponses` responses mapped to a key that is
+    /// not currently outstanding for the task — including keys that were never
+    /// issued". Ignoring all of them is that rule at its limit.
+    ///
+    /// It exists rather than answering `-32601` because the extension
+    /// declaration promises the method: advertising a capability whose methods
+    /// the server then refuses is worse than the no-op.
+    async fn handle_tasks_update(
         &self,
         id: Option<Value>,
         params: Option<Value>,
@@ -2305,7 +2475,7 @@ impl McpServer {
             return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
         };
 
-        let result_params: TaskResultParams = match serde_json::from_value(params) {
+        let update_params: TaskUpdateParams = match serde_json::from_value(params) {
             Ok(p) => p,
             Err(e) => {
                 return JsonRpcResponse::error(
@@ -2315,116 +2485,25 @@ impl McpServer {
             }
         };
 
-        // Wait for the task's result, bounded by the store's poll budget.
-        match self
+        // "Servers SHOULD return a JSON-RPC error if the `taskId` does not
+        // correspond to a known task." Checked before the ack, so the no-op
+        // does not silently absorb a typo'd or TTL-evicted id.
+        if self
             .task_store
-            .wait_for_result(&result_params.task_id)
+            .get_task(&update_params.task_id)
             .await
+            .is_none()
         {
-            TaskWaitOutcome::Ready(result) => {
-                // Inject task correlation metadata
-                let mut response = result;
-                if let Some(obj) = response.as_object_mut() {
-                    obj.insert(
-                        "_meta".to_string(),
-                        json!({
-                            "io.modelcontextprotocol/related-task": {
-                                "taskId": result_params.task_id
-                            }
-                        }),
-                    );
-                }
-                JsonRpcResponse::success(id, response)
-            }
-            // G-1: the poll budget elapsed with the task still running.
-            // Hand back the current status so the client stays in a normal
-            // poll loop — erroring here would make a slow task look like a
-            // missing one.
-            TaskWaitOutcome::TimedOut(info) => {
-                let Ok(mut response) = serde_json::to_value(&*info) else {
-                    return JsonRpcResponse::error(
-                        id,
-                        JsonRpcError::internal_error("Failed to serialize task status"),
-                    );
-                };
-                if let Some(obj) = response.as_object_mut() {
-                    obj.insert(
-                        "_meta".to_string(),
-                        json!({
-                            "io.modelcontextprotocol/related-task": {
-                                "taskId": result_params.task_id
-                            }
-                        }),
-                    );
-                }
-                JsonRpcResponse::success(id, response)
-            }
-            TaskWaitOutcome::NotFound => {
-                // A cancelled task is still in the store and still visible via
-                // `tasks/get` and `tasks/list`; `cancel_task` simply never sets
-                // `entry.result`. Reporting "Task not found" contradicted both
-                // other endpoints (audit G-23, 2026-08-19). Storing a terminal
-                // result for cancelled tasks is deliberately out of scope here.
-                //
-                // The "(cancelled tasks record none)" parenthetical below is
-                // only true while `complete_task` and `fail_task` both always
-                // assign `entry.result` — `Cancelled` is the sole status that
-                // can reach this arm. Give either of them an early return and
-                // the wording becomes a lie; the `status` field in `data` will
-                // still be right.
-                let (message, data) = match self.task_store.get_task(&result_params.task_id).await {
-                    Some(info) => {
-                        // Wire spelling, not `{:?}`: `TaskStatus` carries
-                        // `#[serde(rename_all = "lowercase")]`, so Debug said
-                        // `Cancelled` here while `tasks/get` said `cancelled`
-                        // for the same task (audit D-F3, 2026-08-20).
-                        let status = serde_json::to_value(info.status).unwrap_or(Value::Null);
-                        let status_text = status.as_str().unwrap_or("unknown");
-                        (
-                            format!(
-                                "Task {} reached terminal state {status_text} without storing a \
-                                 result (cancelled tasks record none); use tasks/get for its \
-                                 status",
-                                result_params.task_id
-                            ),
-                            Some(json!({
-                                "taskId": result_params.task_id,
-                                "status": status,
-                            })),
-                        )
-                    }
-                    None => (format!("Task not found: {}", result_params.task_id), None),
-                };
-                let mut error = JsonRpcError::invalid_params(message);
-                if let Some(data) = data {
-                    error = error.with_data(data);
-                }
-                JsonRpcResponse::error(id, error)
-            }
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params(format!("Task not found: {}", update_params.task_id)),
+            );
         }
-    }
 
-    async fn handle_tasks_list(&self, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
-        let list_params: TaskListParams = params
-            .and_then(|p| serde_json::from_value(p).ok())
-            .unwrap_or(TaskListParams { cursor: None });
-
-        let (tasks, next_cursor) = match self
-            .task_store
-            .list_tasks(list_params.cursor.as_deref(), 20)
-            .await
-        {
-            Ok(page) => page,
-            Err(e) => {
-                // A cursor naming no live task is a client error, not a
-                // reason to silently replay page 1. TTL eviction can stale a
-                // cursor between two polls of the same loop.
-                return JsonRpcResponse::error(id, JsonRpcError::invalid_params(e.to_string()));
-            }
-        };
-
-        let result = TaskListResult { tasks, next_cursor };
-        JsonRpcResponse::success_or_serialize_error(id, &result)
+        // "On success, the server MUST acknowledge the request with an empty
+        // result", and "The `resultType` field MUST be set to `"complete"` on
+        // `UpdateTaskResult`".
+        JsonRpcResponse::success(id, json!({ "resultType": "complete" }))
     }
 
     async fn handle_tasks_cancel(
@@ -2446,10 +2525,32 @@ impl McpServer {
             }
         };
 
-        match self.task_store.cancel_task(&cancel_params.task_id).await {
-            Ok(info) => JsonRpcResponse::success_or_serialize_error(id, &info),
-            Err(e) => JsonRpcResponse::error(id, JsonRpcError::invalid_params(e)),
+        // "On success, the server MUST acknowledge the request with an empty
+        // result", and `CancelTaskResult = Result` — so the ack carries the
+        // discriminator and nothing else. It deliberately does NOT echo the
+        // task: a client reading a status here would be reading a value the
+        // spec calls eventually consistent, and `tasks/get` is where status
+        // lives.
+        //
+        // Only an unknown id is an error ("Servers SHOULD return a JSON-RPC
+        // error if the `taskId` does not correspond to a known task"). An
+        // already-terminal task is acknowledged like any other: cancellation
+        // is cooperative, and the client "MAY delete all state associated with
+        // the task as soon as it sends a cancellation", so it cannot know the
+        // work had already finished.
+        if self
+            .task_store
+            .cancel_task(&cancel_params.task_id)
+            .await
+            .is_none()
+        {
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params(format!("Task not found: {}", cancel_params.task_id)),
+            );
         }
+
+        JsonRpcResponse::success(id, json!({ "resultType": "complete" }))
     }
 
     // ========================================================================
@@ -2643,20 +2744,46 @@ mod tests {
         }
     }
 
-    fn create_test_server() -> McpServer {
-        let (server, _audit_task) = McpServer::new(test_config());
-        server
+    /// A session whose CURRENT request declares the tasks extension.
+    ///
+    /// Goes through `with_request_meta(RequestMeta::from_params(..))`, which
+    /// is exactly what `handle_request_with_cancel` does at the chokepoint —
+    /// so a test using this exercises the real capability seam instead of a
+    /// flag set by hand. Nothing here touches `session.caps`: the handshake
+    /// must not be able to grant this extension.
+    /// Params carrying the tasks-extension declaration the way a Modern
+    /// client sends it: inside this request's own `_meta`.
+    ///
+    /// Dispatcher-level tests must put it HERE rather than on the session,
+    /// because the chokepoint replaces the session's `request_meta` with
+    /// whatever it parses from the request it is handling. That is the whole
+    /// point of a per-request capability, and it makes these tests exercise
+    /// the real seam end to end.
+    fn params_declaring_tasks(mut params: Value) -> Value {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": { "io.modelcontextprotocol/tasks": {} }
+            }
+        });
+        params
     }
 
-    /// Same fixture as `create_test_server`, with the limits block swapped.
-    /// Used by tests that need a poll budget measured in milliseconds
-    /// rather than the production 60 s (2 000 ms poll interval x 30).
-    fn create_test_server_with_limits(limits: LimitsConfig) -> McpServer {
-        let config = Config {
-            limits,
-            ..test_config()
-        };
-        let (server, _audit_task) = McpServer::new(config);
+    fn session_declaring_tasks() -> (SessionContext, mpsc::Receiver<WriterMessage>) {
+        let (tx, rx) = mpsc::channel::<WriterMessage>(64);
+        let params = json!({
+            "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "extensions": { "io.modelcontextprotocol/tasks": {} }
+                }
+            }
+        });
+        let session =
+            SessionContext::new(tx).with_request_meta(RequestMeta::from_params(Some(&params)));
+        (session, rx)
+    }
+
+    fn create_test_server() -> McpServer {
+        let (server, _audit_task) = McpServer::new(test_config());
         server
     }
 
@@ -2725,76 +2852,114 @@ mod tests {
 
     /// G-1 regression, straight from the audit's own reproduction.
     ///
-    /// `tasks/result` is a long poll. It used to take a permit from
+    /// `tasks/result` used to be a long poll that took a permit from
     /// `limits.max_concurrent_commands` (default 5) INSIDE the reader loop,
     /// so N parked polls froze the entire session: the loop blocks on
     /// `acquire_owned()` before it spawns the handler, so the client's next
     /// message is never read. The audit measured the boundary exactly —
     /// N=4 still answered `ping`, N=5 answered neither `ping` nor
     /// `tasks/cancel` (the one call that could have released the polls),
-    /// and it was still dead 208 s later. This table walks across it.
+    /// and it was still dead 208 s later.
+    ///
+    /// 3.0.0 deletes the long poll — and then the method: MCP 2026-07-28 has
+    /// no `tasks/result` at all, and `tasks/get` is a non-blocking snapshot.
+    /// The original reproduction (many never-completing tasks, each held open
+    /// by a blocking poll) can no longer be built.
+    ///
+    /// The exemption this guards, `is_concurrency_exempt`, survives both
+    /// changes and is still load-bearing — it keys on the method PREFIX, so
+    /// what needs proving is that `ping` and `tasks/*` never reach
+    /// `acquire_owned()` at all. That matters more now, not less: task
+    /// workers legitimately hold every permit during normal operation, so a
+    /// full semaphore is the busy state, not a fault. This re-anchors the
+    /// original shape onto the surviving method — N `tasks/get` polls at and
+    /// past the concurrency limit (5), with every permit held by an entirely
+    /// separate mechanism, plus a `ping`. All must still answer.
+    ///
+    /// This is the ONLY execution coverage of `is_concurrency_exempt`;
+    /// deleting it would leave the exemption pinned by nothing.
     #[tokio::test]
-    async fn ping_survives_parked_task_polls_at_and_past_the_concurrency_limit() {
-        for parked_polls in [1_usize, 2, 3, 4, 5, 6] {
-            let server = Arc::new(create_test_server());
-            assert_eq!(
-                server.concurrent_limit.available_permits(),
-                5,
-                "fixture must keep the default max_concurrent_commands"
-            );
+    async fn control_plane_survives_a_full_concurrency_semaphore() {
+        let server = Arc::new(create_test_server());
+        assert_eq!(
+            server.concurrent_limit.available_permits(),
+            5,
+            "fixture must keep the default max_concurrent_commands"
+        );
 
-            // Tasks nobody will ever complete: every `tasks/result` parks.
-            let mut task_ids = Vec::new();
-            for _ in 0..parked_polls {
-                let (task_id, _cancel) =
-                    server.task_store.create_task(Some(600_000)).await.unwrap();
-                task_ids.push(task_id);
-            }
+        // Hold every permit: no ordinary (non-exempt) command may run.
+        let permits = Arc::clone(&server.concurrent_limit)
+            .acquire_many_owned(5)
+            .await
+            .unwrap();
 
-            let (session, client_tx, mut server_rx) = in_memory_session();
-            let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        // 6 tasks, one past the 5-permit limit — the same "at and past"
+        // shape the original `parked_polls` table walked.
+        let mut task_ids = Vec::new();
+        for _ in 0..6 {
+            let (task_id, _cancel) = server.task_store.create_task().await.unwrap();
+            task_ids.push(task_id);
+        }
 
-            let mut next_id: i64 = 1;
-            for task_id in &task_ids {
-                client_tx
-                    .send(client_request(
-                        next_id,
-                        "tasks/result",
-                        Some(json!({ "taskId": task_id })),
-                    ))
-                    .unwrap();
-                next_id += 1;
-            }
+        let (session, client_tx, mut server_rx) = in_memory_session();
+        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
 
-            // Let the reader loop consume every poll before the ping arrives.
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut expected_ids: std::collections::HashSet<Option<Value>> =
+            std::collections::HashSet::new();
+        for (i, task_id) in task_ids.iter().enumerate() {
+            let id = i64::try_from(i).unwrap();
+            client_tx
+                .send(client_request(
+                    id,
+                    "tasks/get",
+                    // The envelope is not decoration here: `tasks/get` is
+                    // capability-gated per request, so without it these polls
+                    // would be answered with `-32021` and the test would be
+                    // measuring the gate instead of the semaphore.
+                    Some(json!({
+                        "taskId": task_id,
+                        "_meta": {
+                            "io.modelcontextprotocol/clientCapabilities": {
+                                "extensions": { "io.modelcontextprotocol/tasks": {} }
+                            }
+                        }
+                    })),
+                ))
+                .unwrap();
+            expected_ids.insert(Some(json!(id)));
+        }
+        client_tx.send(client_request(9999, "ping", None)).unwrap();
+        expected_ids.insert(Some(json!(9999)));
 
-            client_tx.send(client_request(9999, "ping", None)).unwrap();
-
+        let mut answered = std::collections::HashSet::new();
+        while answered.len() < expected_ids.len() {
             let msg = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
                 .await
                 .unwrap_or_else(|_| {
                     panic!(
-                        "session froze with {parked_polls} parked tasks/result polls: \
-                     ping was never answered"
+                        "session froze with every concurrency permit held: only answered \
+                         {answered:?} of {expected_ids:?} so far"
                     )
                 })
                 .expect("session writer channel closed");
 
             match msg {
                 WriterMessage::Response(response) => {
-                    assert_eq!(
-                        response.id,
-                        Some(json!(9999)),
-                        "the first answer must be the ping, not a parked poll"
-                    );
-                    assert!(response.error.is_none(), "ping must succeed");
+                    assert!(response.error.is_none(), "unexpected error: {response:?}");
+                    answered.insert(response.id.clone());
                 }
-                _ => panic!("expected a ping response, got a notification or a batch"),
+                _ => panic!("expected a response, got a notification or a batch"),
             }
-
-            serve.abort();
         }
+
+        assert_eq!(
+            answered, expected_ids,
+            "every tasks/get poll and the ping must all be answered despite every \
+             concurrency permit being held"
+        );
+
+        drop(permits);
+        serve.abort();
     }
 
     /// `spawn_cleanup_tasks` must actually spawn one loop per expiring
@@ -2998,6 +3163,15 @@ mod tests {
     /// was written against omitted that field from its literal, the same gap
     /// `test_handshake_payload_is_byte_identical` (Task 12) already had to
     /// close. `build_discovery_payload` populates it unconditionally.
+    ///
+    /// There is deliberately NO `capabilities.tasks` here, and its absence is
+    /// load-bearing rather than an omission. Tasks are an EXTENSION in
+    /// 2026-07-28, declared under `capabilities.extensions` keyed by
+    /// `io.modelcontextprotocol/tasks` — which this literal does assert, two
+    /// keys below. The 2025-11-25 core block (`list`/`cancel`/`requests`)
+    /// could not be declared here even if we wanted to: `tasks/list` no longer
+    /// exists, and per-request support is not something a server announces.
+    /// Restoring it would re-advertise two methods the server does not serve.
     #[tokio::test]
     async fn test_server_discover_full_wire_shape() {
         let server = create_test_server();
@@ -3023,11 +3197,6 @@ mod tests {
                     "tools": {"listChanged": true},
                     "prompts": {"listChanged": true},
                     "resources": {"subscribe": false, "listChanged": true},
-                    "tasks": {
-                        "list": {},
-                        "cancel": {},
-                        "requests": {"tools": {"call": {}}}
-                    },
                     "completions": {},
                     "logging": {},
                     "extensions": {
@@ -3441,109 +3610,51 @@ rbac:
         );
     }
 
+    /// Supersedes `test_task_through_call_tool_is_accepted`, which asked for
+    /// the task with `params.task` through the dispatcher.
+    ///
+    /// The dispatcher rewrites `params.name` to the INNER tool before the
+    /// promotion check runs, so promotion keys on the tool that will actually
+    /// execute — the same rule the dispatcher's own comment demands of any
+    /// future RBAC enforcement, for the same reason: a decision keyed on the
+    /// outer name (`mcp_call_tool`) would be steerable by wrapping.
+    ///
+    /// The negative half is what makes it a test of the KEY rather than of
+    /// the dispatcher: the same wrapper around a tool that is not on the list
+    /// must stay synchronous.
     #[tokio::test]
-    async fn test_task_on_meta_tool_is_rejected() {
+    async fn promotion_keys_on_the_inner_tool_of_mcp_call_tool() {
         let server = create_test_server();
-        let params = json!({
-            "name": super::super::meta_tools::LIST_TOOL_GROUPS,
-            "arguments": {},
-            "task": {"ttl": 60000}
-        });
-        let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
-            .await;
+        let (session, _rx) = session_declaring_tasks();
 
-        let error = response
-            .error
-            .expect("a task on a taskSupport=forbidden tool must be a JSON-RPC error");
-        assert_eq!(error.code, -32601);
-        assert!(
-            error.message.contains("taskSupport"),
-            "got: {}",
-            error.message
-        );
-        // Called directly, so nothing to attribute: the message stays as it
-        // was and `data` carries no `via` (audit D-F1, 2026-08-20).
-        assert!(
-            !error.message.contains("reached via"),
-            "a direct call has no dispatcher to name: {}",
-            error.message
-        );
-        let data = error.data.expect("structured error data");
-        assert_eq!(
-            data["tool"],
-            json!(super::super::meta_tools::LIST_TOOL_GROUPS)
-        );
-        assert!(data.get("via").is_none(), "got: {data}");
-    }
-
-    /// D-F1 (audit 2026-08-20): `mcp_call_tool` advertises
-    /// `execution.taskSupport: "optional"` and, in `listing: progressive`, is
-    /// the client's only tool that does — the other three advertise
-    /// `"forbidden"`. But the dispatcher rewrites `params.name` to the inner
-    /// tool BEFORE the meta-tool guard runs, so a task-augmented
-    /// `mcp_call_tool` wrapping a discovery meta-tool was refused under a name
-    /// (`mcp_search_tools`) the client never put on the wire. The refusal is
-    /// correct — the meta-tools are dispatched ahead of the task branch — but
-    /// it must name both ends and carry machine-readable `data` so a client can
-    /// branch without parsing English.
-    #[tokio::test]
-    async fn test_task_via_call_tool_names_both_tools() {
-        let server = create_test_server();
-
-        for inner in [
-            super::super::meta_tools::LIST_TOOL_GROUPS,
-            super::super::meta_tools::SEARCH_TOOLS,
-            super::super::meta_tools::DESCRIBE_TOOL,
-        ] {
-            let params = json!({
-                "name": super::super::meta_tools::CALL_TOOL,
-                "arguments": {
-                    "name": inner,
-                    "arguments": {"query": "restart", "name": "ssh_status"}
-                },
-                "task": {"ttl": 60000}
-            });
-            let response = server
-                .handle_tools_call(Some(json!(1)), Some(params), None, None)
-                .await;
-
-            let error = response
-                .error
-                .unwrap_or_else(|| panic!("{inner} via mcp_call_tool must be a JSON-RPC error"));
-            assert_eq!(error.code, -32601);
-            assert!(
-                error.message.contains(inner),
-                "error must name the inner tool, got: {}",
-                error.message
-            );
-            assert!(
-                error.message.contains(super::super::meta_tools::CALL_TOOL),
-                "error must name the dispatcher the client actually called, got: {}",
-                error.message
-            );
-
-            let data = error.data.expect("structured error data");
-            assert_eq!(data["tool"], json!(inner));
-            assert_eq!(data["via"], json!(super::super::meta_tools::CALL_TOOL));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_task_through_call_tool_is_accepted() {
-        let server = create_test_server();
-        let params = json!({
+        let promoted = json!({
             "name": super::super::meta_tools::CALL_TOOL,
-            "arguments": {"name": "ssh_status", "arguments": {}},
-            "task": {"ttl": 60000}
+            "arguments": {
+                "name": "ssh_ansible_playbook",
+                "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            }
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(promoted), None, Some(&session))
             .await;
-
         assert!(response.error.is_none(), "{:?}", response.error);
-        let result = response.result.expect("CreateTaskResult");
-        assert_eq!(result["task"]["status"], "working");
+        let result = response.result.expect("task handle");
+        assert_eq!(result["resultType"], "task");
+        assert_eq!(result["status"], "working");
+
+        let plain = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {"name": "ssh_status", "arguments": {}}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(2)), Some(plain), None, Some(&session))
+            .await;
+        let result = response.result.expect("synchronous result");
+        assert!(
+            result.get("resultType").is_none(),
+            "an unlisted inner tool must not be promoted: {result}"
+        );
+        assert!(result["content"].is_array());
     }
 
     #[tokio::test]
@@ -4469,90 +4580,216 @@ rbac:
 
     // ============== Task Tests (MCP 2025-11-25+) ==============
 
-    /// NOT a mirror of dispatch, despite appearances: production never calls
-    /// `task_support()` to build the listing — three independent hardcoded
-    /// literals do — so this only proves the listing and the helper agree.
-    /// Under COORDINATED drift, `definitions()` and `task_support()` both
-    /// moved to "optional", it goes green while the server still answers
-    /// `-32601`. `meta_tools::tests::task_support_is_coherent_with_dispatch`
-    /// is the test that pins ground truth against `handle_tools_call`; do not
-    /// delete it as "a redundant assertion" (audit D-F5, 2026-08-20).
+    /// Inverts `test_tools_list_includes_execution_field`, which required
+    /// every tool to CARRY `execution.taskSupport`.
+    ///
+    /// MCP 2026-07-28 removed per-tool task gating entirely: the server is the
+    /// sole decider, per request, and no client may signal a task preference,
+    /// so there is nothing for a per-tool declaration to gate. The pair of
+    /// audit tests that guarded the field — including
+    /// `task_support_is_coherent_with_dispatch`, annotated "do not delete it
+    /// as a redundant assertion" (D-F5) — are not overruled: they policed the
+    /// agreement between an advertisement and a dispatch rule, and BOTH sides
+    /// of that agreement are gone. What replaces them is this tripwire, which
+    /// guards the removal instead of the value.
+    ///
+    /// It sweeps the whole listing rather than sampling: the field was fed by
+    /// three independent hardcoded literals plus the registry, so a partial
+    /// removal is the realistic failure, and it would be invisible to a test
+    /// that checked one tool.
     #[tokio::test]
-    async fn test_tools_list_includes_execution_field() {
+    async fn tools_list_never_advertises_task_support() {
         let server = create_test_server();
         let response = server.handle_tools_list(Some(json!(1)), None).await;
 
         let result = response.result.unwrap();
-        let tools = result["tools"].as_array().unwrap();
+        let tools = result["tools"].as_array().expect("a tools array");
+        assert!(!tools.is_empty(), "an empty listing would pass vacuously");
 
         for tool in tools {
             let name = tool["name"].as_str().expect("tool name");
-            // G-21/G-14/G-19 (audit 2026-08-19): every tool in `tools/list`
-            // (including `mcp_call_tool`, listed in both modes since it is
-            // dispatchable in both) must declare a real `execution.taskSupport`
-            // that agrees with what `handle_tools_call` actually does with a
-            // `task` object for that name: "forbidden" for the three meta-tools
-            // (dispatched ahead of the task branch), "optional" everywhere else.
-            assert_eq!(
-                tool["execution"]["taskSupport"],
-                super::super::meta_tools::task_support(name),
-                "Tool {name} execution.taskSupport disagrees with dispatch"
+            assert!(
+                tool.get("execution").is_none(),
+                "tool {name} still advertises an `execution` object: {tool}"
+            );
+            // Belt and braces on the KEY, not just its container: a future
+            // `taskSupport` hoisted to the tool root, or nested under some
+            // other object, would slip past the check above.
+            assert!(
+                !tool.to_string().contains("taskSupport"),
+                "tool {name} still mentions taskSupport somewhere: {tool}"
             );
         }
     }
 
+    /// D8: the destructive-op elicitation gate MUST resolve BEFORE a task
+    /// exists. Creating the task first and asking for confirmation afterwards
+    /// is the flow the spec says cannot be implemented without reading the
+    /// multi-round-trip page first — the named MRTR debt.
+    ///
+    /// **This ordering is not observable at runtime today, and saying so is
+    /// worth more than a test that appears to prove it.**
+    /// `check_destructive_elicitation` fires only for `destructive_hint:
+    /// true`, and `long_running_tools_are_never_destructive` forbids exactly
+    /// those from the promotion list — so no single call can reach both the
+    /// gate and the task branch. A runtime test would have to assert that two
+    /// things happen in order when one of them never happens, and it would sit
+    /// green forever whatever the order.
+    ///
+    /// The two meet the day the MRTR item closes and a destructive tool joins
+    /// `LONG_RUNNING_TOOLS` — which is exactly when a silent reordering would
+    /// ship the forbidden flow. So the order is pinned now, as source text,
+    /// while the code is still correct. A source-text guard is the weakest
+    /// kind of test; it is still stronger than the runtime test that cannot
+    /// be written.
+    #[test]
+    fn the_elicitation_gate_precedes_the_task_branch() {
+        let src = include_str!("server.rs");
+
+        // Scope 1 — the production half. `include_str!` pulls in THIS test,
+        // whose own assertion arguments are the two literals searched for
+        // below; scanning the whole file would make the guard match itself and
+        // pass (or fail) for reasons having nothing to do with the code it
+        // polices. `expect`, never a fallback to the whole file: a missing
+        // boundary is a broken guard and must say which it is.
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // Scope 2 — ONE function. `check_destructive_elicitation` is also
+        // DEFINED earlier in the file, so a file-wide index comparison would
+        // be comparing that definition against the branch and would pass no
+        // matter how `handle_tools_call` itself is ordered.
+        let from_fn = production
+            .find("async fn handle_tools_call(")
+            .expect("handle_tools_call must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    async fn handle_tools_call_async(")
+            .expect("handle_tools_call_async must follow handle_tools_call");
+        let body = &body[..to_next_fn];
+
+        let gate = body
+            .find(".check_destructive_elicitation(")
+            .expect("the destructive-op gate must run inside handle_tools_call");
+        let promotion = body
+            .find("task_policy::is_long_running(")
+            .expect("the promotion decision must be made inside handle_tools_call");
+
+        assert!(
+            gate < promotion,
+            "the destructive-op elicitation gate must resolve BEFORE the task branch: a task \
+             created first and confirmed afterwards is the MRTR flow this release cannot ship"
+        );
+    }
+
+    /// A tool that is not on the promotion list is answered synchronously —
+    /// even for a client that declared the extension. Declaring it is
+    /// permission, not a request: "The client declaring the extension
+    /// capability does not suggest that it requires a `CreateTaskResult` in
+    /// response to that request."
     #[tokio::test]
-    async fn test_tools_call_without_task_field_is_synchronous() {
+    async fn an_unlisted_tool_is_answered_synchronously() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
             "name": "ssh_status",
             "arguments": {}
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
 
-        // Synchronous: should return content directly (not CreateTaskResult)
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         assert!(result["content"].is_array());
+        assert!(
+            result.get("resultType").is_none(),
+            "a synchronous answer carries no task discriminator: {result}"
+        );
     }
 
+    /// Supersedes `test_tools_call_with_task_field_returns_create_task_result`.
+    /// Same subject — the shape of the handle — on the trigger that replaced
+    /// `params.task`, and on the 2026-07-28 field names.
     #[tokio::test]
-    async fn test_tools_call_with_task_field_returns_create_task_result() {
+    async fn a_promoted_call_returns_a_flat_task_handle() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 30000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        // Should have task field with taskId and status
-        assert!(result["task"]["taskId"].is_string());
-        assert_eq!(result["task"]["status"], "working");
-        assert!(result["task"]["createdAt"].is_string());
-        assert!(result["task"]["pollInterval"].is_number());
+        // FLAT and discriminated: `resultType: "task"` is the MUST that tells
+        // a client this is a handle and not a `CallToolResult`.
+        assert_eq!(result["resultType"], "task");
+        assert!(result["taskId"].is_string());
+        assert_eq!(result["status"], "working");
+        assert!(result["createdAt"].is_string());
+        assert!(result["ttlMs"].is_number());
+        assert!(result["pollIntervalMs"].is_number());
+        assert!(
+            result.get("task").is_none(),
+            "the enclosing `task` object is the 2025-11-25 shape: {result}"
+        );
     }
 
+    /// The MUST NOT, and the reason the promotion is a conjunction rather
+    /// than a lookup: "A server MUST NOT return `CreateTaskResult` to a client
+    /// that did not include the extension capability on its request, regardless
+    /// of prior declarations."
+    ///
+    /// The two assertions are not redundant. `error.is_none()` alone would
+    /// pass for a server that answered with a handle; `content.is_array()`
+    /// alone would pass for one that answered with an isError envelope. What
+    /// has to be true is that this client got the ordinary result it would
+    /// have got before the extension existed.
     #[tokio::test]
-    async fn test_tools_call_with_task_emits_status_working_notification() {
-        // SEP-1686: every status transition (including non-existent → working at
-        // creation) MUST emit `notifications/tasks/status` so clients can track
-        // the task lifecycle without polling.
+    async fn a_long_running_tool_stays_synchronous_for_a_non_declaring_client() {
         let server = create_test_server();
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
-        let session_ctx = SessionContext::new(tx);
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        // A session with NO envelope on this request: the non-declaring case.
+        let session = SessionContext::new(tx);
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 30000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+        });
+
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
+            .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert!(
+            result.get("resultType").is_none(),
+            "a non-declaring client must never receive a task handle: {result}"
+        );
+        assert!(result.get("taskId").is_none(), "{result}");
+        assert!(result["content"].is_array(), "{result}");
+    }
+
+    /// Every status transition (including non-existent → working at creation)
+    /// emits a task notification, so a subscribed client can track the
+    /// lifecycle without polling.
+    ///
+    /// The method is `notifications/tasks` — 2025-11-25 spelled it
+    /// `notifications/tasks/status`.
+    #[tokio::test]
+    async fn a_promoted_call_emits_the_working_status_notification() {
+        let server = create_test_server();
+        let (session_ctx, mut rx) = session_declaring_tasks();
+        let params = json!({
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let response = server
@@ -4561,9 +4798,9 @@ rbac:
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        let task_id = result["task"]["taskId"]
+        let task_id = result["taskId"]
             .as_str()
-            .expect("response should carry task.taskId")
+            .expect("response should carry a flat taskId")
             .to_string();
 
         // The creation notification is emitted synchronously before the response
@@ -4575,9 +4812,9 @@ rbac:
             tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
         {
             if let WriterMessage::Notification(n) = msg
-                && n.method == "notifications/tasks/status"
+                && n.method == "notifications/tasks"
             {
-                let params = n.params.expect("tasks/status should carry params");
+                let params = n.params.expect("a task notification carries params");
                 if params["taskId"] == task_id.as_str() && params["status"] == "working" {
                     found_working = true;
                     break;
@@ -4587,45 +4824,59 @@ rbac:
 
         assert!(
             found_working,
-            "expected `notifications/tasks/status` with status=\"working\" and taskId={task_id}"
+            "expected `notifications/tasks` with status=\"working\" and taskId={task_id}"
         );
     }
 
+    /// Supersedes `test_tools_call_async_unknown_tool`, which reached the task
+    /// path with `params.task` on a name that never existed.
+    ///
+    /// That exact shape is now unreachable — the promotion list holds only
+    /// registered names, and `long_running_tools_are_never_destructive`
+    /// enforces it. The reachable form is the divergence between the two:
+    /// a listed tool whose GROUP the operator disabled. The task path must
+    /// then agree with the synchronous one — `-32602`, not a handle to a task
+    /// that can never run, and not an isError envelope.
     #[tokio::test]
-    async fn test_tools_call_async_unknown_tool() {
-        let server = create_test_server();
+    async fn a_listed_tool_from_a_disabled_group_is_invalid_params_not_a_task() {
+        let mut config = test_config();
+        config
+            .tool_groups
+            .groups
+            .insert("ansible".to_string(), false);
+        let (server, _audit_task) = McpServer::new(config);
+        let (session, _rx) = session_declaring_tasks();
+
         let params = json!({
-            "name": "nonexistent_tool",
-            "arguments": {},
-            "task": {}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
 
-        // Task-augmented path must agree with the synchronous one: -32602,
-        // not a CreateTaskResult and not an isError envelope.
         let error = response
             .error
-            .expect("an unknown tool must be a JSON-RPC error on the task path too");
+            .expect("a tool that is not registered must be a JSON-RPC error");
         assert_eq!(error.code, -32602);
-        assert!(error.message.contains("nonexistent_tool"));
+        assert!(error.message.contains("ssh_ansible_playbook"));
     }
 
     #[tokio::test]
     async fn test_tasks_get_returns_status() {
         let server = create_test_server();
-        // Create a task via tools/call
+        let (session, _rx) = session_declaring_tasks();
+        // Create a task the only way a client can now: call a listed tool
+        // while declaring the extension.
         let call_params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 60000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(call_params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(call_params), None, Some(&session))
             .await;
-        let task_id = call_response.result.unwrap()["task"]["taskId"]
+        let task_id = call_response.result.unwrap()["taskId"]
             .as_str()
             .unwrap()
             .to_string();
@@ -4659,8 +4910,7 @@ rbac:
     #[tokio::test]
     async fn test_tasks_cancel() {
         let server = create_test_server();
-        // Create a task
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
 
         let params = json!({"taskId": task_id});
         let response = server
@@ -4669,7 +4919,24 @@ rbac:
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        assert_eq!(result["status"], "cancelled");
+        // EMPTY ack plus the discriminator, and nothing else: `CancelTaskResult
+        // = Result`. The pre-3.0.0 handler echoed the whole `TaskInfo`, which
+        // invited clients to read a status the spec calls eventually
+        // consistent from the one response that cannot carry a fresh one.
+        assert_eq!(result["resultType"], "complete");
+        assert!(result.get("taskId").is_none(), "{result}");
+        assert!(result.get("status").is_none(), "{result}");
+        assert_eq!(
+            result.as_object().map(serde_json::Map::len),
+            Some(1),
+            "the ack carries exactly one key: {result}"
+        );
+
+        // The intent still took effect where it belongs.
+        assert_eq!(
+            server.task_store.get_task(&task_id).await.unwrap().status,
+            crate::ports::protocol::TaskStatus::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -4681,49 +4948,12 @@ rbac:
             .handle_tasks_cancel(Some(json!(1)), Some(params))
             .await;
 
-        assert!(response.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_tasks_list_empty() {
-        let server = create_test_server();
-
-        let response = server.handle_tasks_list(Some(json!(1)), None).await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["tasks"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_tasks_list_with_tasks() {
-        let server = create_test_server();
-        server.task_store.create_task(Some(60_000)).await.unwrap();
-        server.task_store.create_task(Some(60_000)).await.unwrap();
-
-        let response = server.handle_tasks_list(Some(json!(1)), None).await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(result["tasks"].as_array().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_tasks_list_invalid_cursor_returns_invalid_params() {
-        let server = create_test_server();
-        let params = json!({ "cursor": "no-such-task-id" });
-
-        let response = server.handle_tasks_list(Some(json!(1)), Some(params)).await;
-
-        let error = response
-            .error
-            .expect("an unknown tasks/list cursor must be a JSON-RPC error");
+        // The only case that is still an error, now that a terminal task is
+        // acknowledged. `assert_eq!` on the code: `is_some()` would keep
+        // passing if every cancel started erroring again.
+        let error = response.error.expect("an unknown taskId is an error");
         assert_eq!(error.code, -32602);
-        assert!(
-            error.message.contains("no-such-task-id"),
-            "error must name the offending cursor, got: {}",
-            error.message
-        );
+        assert!(error.message.contains("no-such-task"), "{}", error.message);
     }
 
     #[tokio::test]
@@ -4747,55 +4977,233 @@ rbac:
     }
 
     #[tokio::test]
-    async fn test_tasks_result_waits_for_completion() {
+    async fn tasks_get_polls_until_terminal() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 60000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
-        let task_id = call_response.result.unwrap()["task"]["taskId"]
+        // FLAT: taskId at the root of `result`, no nested `task` object.
+        let task_id = call_response.result.unwrap()["taskId"]
             .as_str()
             .unwrap()
             .to_string();
 
-        // tasks/result blocks until terminal
-        let result_params = json!({"taskId": task_id});
-        let response = server
-            .handle_tasks_result(Some(json!(2)), Some(result_params))
+        // Each call answers immediately; the CLIENT loops, not the server.
+        let mut terminal = json!(null);
+        for _ in 0..200 {
+            let response = server
+                .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
+                .await;
+            assert!(response.error.is_none());
+            let body = response.result.unwrap();
+            // "complete" on EVERY turn, including while still `working`:
+            // the discriminator names the shape, `status` names the
+            // progress. Asserting it inside the loop is what makes the two
+            // axes independently observable.
+            assert_eq!(body["resultType"], "complete");
+            assert_eq!(body["taskId"], task_id.as_str());
+            if body["status"] != "working" {
+                terminal = body;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            terminal["status"].is_string(),
+            "worker never reached a terminal state within 2s"
+        );
+        assert_eq!(terminal["resultType"], "complete");
+        // `related-task` is gone: it was emitted only by `tasks/result`.
+        assert!(terminal.get("_meta").is_none());
+
+        // The payload folded in from the deleted `tasks/result` — and the
+        // correspondence the five `tasks/get` MUSTs demand: a completed task
+        // carries `result`, a failed one carries `error`, and never both.
+        //
+        // The tool here cannot reach a real host, so today it lands on the
+        // `failed` branch. Asserting the CORRESPONDENCE rather than one
+        // outcome is what lets this test survive the `isError` inversion
+        // (which moves this very call to `completed`) without being rewritten
+        // — and still catch a payload that disagrees with its own status.
+        match terminal["status"].as_str().unwrap() {
+            "completed" => {
+                assert!(terminal["result"]["content"].is_array(), "{terminal}");
+                assert!(terminal.get("error").is_none(), "{terminal}");
+            }
+            "failed" => {
+                assert!(!terminal["error"].is_null(), "{terminal}");
+                assert!(terminal.get("result").is_none(), "{terminal}");
+            }
+            other => panic!("unexpected terminal status {other}: {terminal}"),
+        }
+    }
+
+    /// Spec 5.13, the MUST that 2025-11-25 stated backwards: a tool that ran
+    /// and returned an error is a COMPLETION carrying `isError: true`, never
+    /// `status: "failed"`. `failed` is reserved for JSON-RPC faults.
+    ///
+    /// The decision rule is that `tasks/get` "returns exactly what the
+    /// underlying request would have returned" — and the synchronous path
+    /// answers this very input with an isError envelope, not an error. The
+    /// tool here cannot reach its host, so the handler errors: the exact
+    /// input that produced `failed` before this release.
+    #[tokio::test]
+    async fn a_tool_error_completes_the_task_and_never_fails_it() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+        let params = json!({
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+        });
+        let call = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
+        let task_id = call.result.unwrap()["taskId"].as_str().unwrap().to_string();
+
+        let mut body = json!(null);
+        for _ in 0..200 {
+            let response = server
+                .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
+                .await;
+            let snapshot = response.result.expect("tasks/get always answers");
+            if snapshot["status"] != "working" {
+                body = snapshot;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            body["status"], "completed",
+            "a tool error is a completion, not a failure: {body}"
+        );
+        // Value AND placement. The error details belong in `result`, where a
+        // client reads a `CallToolResult`; `error` is reserved for a JSON-RPC
+        // error object, and a task carrying both would satisfy a test written
+        // without the negation.
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        assert!(body["result"]["content"].is_array(), "{body}");
+        assert!(body.get("error").is_none(), "{body}");
+        // The human-readable half. An operator who filtered on
+        // `status == "failed"` sees nothing now; this field is what is left
+        // to read, so it must not claim success.
+        assert_eq!(body["statusMessage"], "Task completed with a tool error.");
+    }
+
+    /// The terminal notification carries the PAYLOAD, not just the status:
+    /// "The notification includes the full task object, allowing clients to
+    /// access the complete task state and final results without polling the
+    /// `tasks/get` method."
+    ///
+    /// Without the payload assertion this test would pass for a notification
+    /// that merely says "done" — which is the version that saves a subscribed
+    /// client nothing, since it would still have to poll for the result.
+    #[tokio::test]
+    async fn the_terminal_task_notification_carries_the_full_result() {
+        let server = create_test_server();
+        let (session, mut rx) = session_declaring_tasks();
+        let params = json!({
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+        });
+
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
+            .await;
+        let task_id = response.result.unwrap()["taskId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut terminal = None;
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+        {
+            if let WriterMessage::Notification(n) = msg {
+                // MUST NOT, spec 5.14: progress is not supported on tasks at
+                // all. This cannot fire today — none of the four promoted
+                // tools calls `progress_reporter` — so it is a TRIPWIRE, not
+                // proof. The guarantee itself is structural: the progress
+                // token is not a parameter of `handle_tools_call_async`, and
+                // `ToolContext::progress_reporter` returns `None` without one.
+                // The tripwire is aimed at `ssh_runbook_execute`, which does
+                // report progress and is the first candidate to join the list
+                // once the MRTR item closes.
+                assert_ne!(
+                    n.method, "notifications/progress",
+                    "progress MUST NOT be sent for a task"
+                );
+                if n.method == "notifications/tasks" {
+                    let params = n.params.expect("params");
+                    if params["taskId"] == task_id.as_str() && params["status"] != "working" {
+                        terminal = Some(params);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let terminal = terminal.expect("no terminal `notifications/tasks` arrived");
+        assert_eq!(terminal["status"], "completed", "{terminal}");
+        assert_eq!(terminal["result"]["isError"], true, "{terminal}");
+        assert!(terminal["result"]["content"].is_array(), "{terminal}");
+        // Flat, and no result discriminator on a notification.
+        assert_eq!(terminal["taskId"], task_id.as_str());
+        assert!(terminal.get("resultType").is_none(), "{terminal}");
+    }
+
+    #[tokio::test]
+    async fn tasks_get_never_blocks_on_a_working_task() {
+        // MCP 2026-07-28: `tasks/get` is a point-in-time snapshot and never
+        // blocks. The pre-3.0.0 `tasks/result` parked here until the task
+        // went terminal, which is the G-1 freeze (issue #131). The timeout
+        // is the executable half of that guarantee — the `include_str!`
+        // guard in `task_store.rs` only pins a NAME.
+        let server = create_test_server();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            server.handle_tasks_get(Some(json!(1)), Some(json!({"taskId": task_id}))),
+        )
+        .await
+        .expect("tasks/get must not block on a working task");
 
         assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        // Should have _meta with related-task
-        assert_eq!(
-            result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id
-        );
-        // Should have content from the tool execution
-        assert!(result["content"].is_array());
+        let body = response.result.unwrap();
+        // The pair that proves the two axes are distinct: the discriminator
+        // says "complete" (this IS the standard result shape) while the task
+        // status says "working". Conflating them was the pre-3.0.0 error
+        // that invented a `ResultType::Working`.
+        assert_eq!(body["resultType"], "complete");
+        assert_eq!(body["status"], "working");
+        assert_eq!(body["taskId"], task_id.as_str());
+        // A non-terminal task carries neither payload field.
+        assert!(body.get("result").is_none());
+        assert!(body.get("error").is_none());
     }
 
     #[tokio::test]
-    async fn test_tasks_result_nonexistent() {
+    /// Supersedes `test_tasks_cancel_already_completed_returns_error`.
+    ///
+    /// This is the race the spec names: the work finished before the
+    /// cancellation arrived. The client cannot have known — it is told it may
+    /// delete its state the moment it sends the request — so the answer is an
+    /// ack, not an error.
+    ///
+    /// The `tasks/get` assertion is the half that matters: acknowledging must
+    /// not mean overwriting. A completed task that reports `cancelled`
+    /// afterwards would tell an operator the work never ran.
+    async fn tasks_cancel_on_a_completed_task_is_acknowledged_not_refused() {
         let server = create_test_server();
-        let params = json!({"taskId": "no-such-task"});
-
-        let response = server
-            .handle_tasks_result(Some(json!(1)), Some(params))
-            .await;
-
-        assert!(response.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_tasks_cancel_already_completed_returns_error() {
-        let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server
             .task_store
             .complete_task(
@@ -4804,34 +5212,49 @@ rbac:
             )
             .await;
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_cancel(Some(json!(1)), Some(params))
+            .handle_tasks_cancel(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
-        assert!(response.error.is_some());
-        let err = response.error.unwrap();
-        assert_eq!(err.code, -32602);
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.result.unwrap()["resultType"], "complete");
+
+        let snapshot = server
+            .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
+            .await
+            .result
+            .expect("the task is still readable");
+        assert_eq!(
+            snapshot["status"], "completed",
+            "a late cancellation must not rewrite a finished task: {snapshot}"
+        );
+        assert!(snapshot["result"]["content"].is_array(), "{snapshot}");
     }
 
     #[tokio::test]
-    async fn test_tasks_cancel_already_cancelled_returns_error() {
+    /// Supersedes `test_tasks_cancel_already_cancelled_returns_error`. A
+    /// client that deleted its state and re-sent cannot be punished for it.
+    async fn tasks_cancel_is_idempotent() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server.task_store.cancel_task(&task_id).await.unwrap();
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_cancel(Some(json!(1)), Some(params))
+            .handle_tasks_cancel(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
-        assert!(response.error.is_some());
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.result.unwrap()["resultType"], "complete");
+        assert_eq!(
+            server.task_store.get_task(&task_id).await.unwrap().status,
+            crate::ports::protocol::TaskStatus::Cancelled
+        );
     }
 
     #[tokio::test]
     async fn test_tasks_get_on_completed_task() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server
             .task_store
             .complete_task(
@@ -4849,119 +5272,54 @@ rbac:
         assert_eq!(result["taskId"], task_id);
     }
 
-    /// G-23 (audit 2026-08-19): `cancel_task` stores no result, so
-    /// `wait_for_result` returns `None` and the handler answered "Task not
-    /// found" — while `tasks/get` and `tasks/list` both still returned the same
-    /// task. Wording fix only; storing a terminal result for cancelled tasks is
-    /// out of scope for 2.2.0.
+    /// Supersedes `test_tasks_result_on_cancelled_task`.
     ///
-    /// D-F3 (audit 2026-08-20): the message was built with `{:?}` on a
-    /// `TaskStatus` carrying `#[serde(rename_all = "lowercase")]`, so this
-    /// endpoint said `Cancelled` while `tasks/get` said `cancelled` for the
-    /// same task — and the terminal state was reachable only by string-matching
-    /// English. Both spellings were asserted in this one test, fourteen lines
-    /// apart.
+    /// The G-23 / D-F3 audit guards it carried protected `tasks/result`'s
+    /// "terminal state without a stored result" error path — its wire-spelled
+    /// status text and its machine-readable `data`. That path is unreachable
+    /// in 3.0.0: it belonged to a method that no longer exists. The guard is
+    /// not reverted, it is rendered moot — `tasks/get` never had to synthesize
+    /// a result for a cancelled task. It returns the snapshot, with
+    /// `status: "cancelled"` and no `result` key, which is exactly
+    /// `CancelledTask` (`extends Task`, no `result` field).
     #[tokio::test]
-    async fn test_tasks_result_on_cancelled_task() {
+    async fn tasks_get_on_cancelled_carries_no_result() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server.task_store.cancel_task(&task_id).await.unwrap();
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_result(Some(json!(1)), Some(params))
+            .handle_tasks_get(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
-        let error = response.error.expect("cancelled tasks store no result");
+        // A cancelled task is reported, not errored on.
+        assert!(response.error.is_none());
+        let body = response.result.expect("cancelled task is still readable");
+        assert_eq!(body["resultType"], "complete");
+        // The wire spelling, lowercase double-l — never Rust's `Cancelled`.
+        assert_eq!(body["status"], "cancelled");
+        assert_eq!(body["taskId"], task_id.as_str());
+        // The half that carries the guarantee: no invented payload.
         assert!(
-            !error.message.contains("Task not found"),
-            "misleading message: {}",
-            error.message
+            body.get("result").is_none(),
+            "CancelledTask has no `result` field"
         );
-        // The wire spelling, not Rust's. Anchored on the substitution site:
-        // the trailing "(cancelled tasks record none)" parenthetical contains
-        // the lowercase word regardless, so a bare `contains("cancelled")`
-        // would pass even with `{:?}`.
-        assert!(
-            error.message.contains("terminal state cancelled"),
-            "message must name the terminal state in its wire spelling: {}",
-            error.message
-        );
-        assert!(
-            !error.message.contains("Cancelled"),
-            "Rust Debug casing must not reach the wire: {}",
-            error.message
-        );
-
-        // Machine-readable: no client should have to parse the prose above.
-        let data = error
-            .data
-            .expect("a terminal-state tasks/result error must carry data");
-        assert_eq!(data["taskId"], json!(task_id));
-        assert_eq!(data["status"], json!("cancelled"));
-
-        // The two endpoints must agree: tasks/get still reports the task.
-        let get = server
-            .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
-            .await;
-        assert_eq!(get.result.expect("task info")["status"], "cancelled");
+        assert!(body.get("error").is_none());
     }
 
     #[tokio::test]
-    async fn test_tasks_result_unknown_id_still_says_not_found() {
+    async fn tasks_get_unknown_id_still_says_not_found() {
         let server = create_test_server();
         let response = server
-            .handle_tasks_result(Some(json!(1)), Some(json!({"taskId": "no-such-task"})))
+            .handle_tasks_get(Some(json!(1)), Some(json!({"taskId": "no-such-task"})))
             .await;
 
         let error = response.error.expect("unknown task is an error");
+        assert_eq!(error.code, -32602);
         assert!(
             error.message.contains("Task not found"),
             "got: {}",
             error.message
-        );
-    }
-
-    /// G-1 (audit 2026-08-19): a `tasks/result` poll whose budget elapses
-    /// must answer with the task's CURRENT status. Returning "Task not
-    /// found" would tell the client its running task had vanished, and
-    /// returning nothing at all is what used to park the request forever.
-    #[tokio::test]
-    async fn test_tasks_result_times_out_with_current_status() {
-        // 10ms poll interval => 300ms wait budget.
-        let limits = LimitsConfig {
-            task_poll_interval_ms: 10,
-            ..LimitsConfig::default()
-        };
-        let server = create_test_server_with_limits(limits);
-
-        // A task nobody will ever complete.
-        let (task_id, _cancel) = server.task_store.create_task(Some(60_000)).await.unwrap();
-
-        let started = Instant::now();
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            server.handle_tasks_result(Some(json!(1)), Some(json!({ "taskId": task_id }))),
-        )
-        .await
-        .expect("tasks/result must not park forever");
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "poll should end after ~300ms, took {:?}",
-            started.elapsed()
-        );
-        assert!(
-            response.error.is_none(),
-            "a timed-out poll is not an error: {:?}",
-            response.error
-        );
-        let result = response.result.unwrap();
-        assert_eq!(result["taskId"], task_id);
-        assert_eq!(result["status"], "working");
-        assert_eq!(
-            result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id
         );
     }
 
@@ -4983,10 +5341,10 @@ rbac:
             .await
             .unwrap();
 
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 60000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
         // If the permit were acquired BEFORE the `tokio::spawn` (i.e. still
         // in the dispatch path, the exact regression this test guards
@@ -4998,7 +5356,7 @@ rbac:
         // instead of hanging the test (and CI) forever.
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            server.handle_tools_call(Some(json!(1)), Some(params), None, None),
+            server.handle_tools_call(Some(json!(1)), Some(params), None, Some(&session)),
         )
         .await
         .expect(
@@ -5007,7 +5365,7 @@ rbac:
              path) instead of inside the spawned worker, so the enclosing \
              request itself blocked on the permits this test is holding",
         );
-        let task_id = response.result.unwrap()["task"]["taskId"]
+        let task_id = response.result.unwrap()["taskId"]
             .as_str()
             .unwrap()
             .to_string();
@@ -5047,9 +5405,9 @@ rbac:
     }
 
     #[tokio::test]
-    async fn test_tasks_result_on_already_completed() {
+    async fn tasks_get_on_completed_inlines_the_result() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server
             .task_store
             .complete_task(
@@ -5058,18 +5416,23 @@ rbac:
             )
             .await;
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_result(Some(json!(1)), Some(params))
+            .handle_tasks_get(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
         assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(
-            result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id
-        );
-        assert!(result["content"].is_array());
+        let body = response.result.unwrap();
+        assert_eq!(body["resultType"], "complete");
+        assert_eq!(body["status"], "completed");
+        // Named key AND shape. `assert!(response.error.is_none())` alone
+        // survives both deleting the line that populates `result` and
+        // renaming the key; these two assertions survive neither.
+        assert!(body["result"]["content"].is_array());
+        assert_eq!(body["result"]["content"][0]["text"], "result data");
+        // The completed task carries no `error` — the two payload fields are
+        // mutually exclusive, and a lazy implementation setting both would
+        // pass a test written without this negation.
+        assert!(body.get("error").is_none());
     }
 
     #[tokio::test]
@@ -5092,18 +5455,15 @@ rbac:
         assert_eq!(response.error.unwrap().code, -32602);
     }
 
+    /// Replaces `test_handle_request_tasks_result_dispatch`, which asserted
+    /// the exact opposite (`assert_ne!(code, -32601)`).
+    ///
+    /// `assert_eq!` on the code, not `error.is_some()`: an `is_some()` test
+    /// stays green if the method still exists and merely fails for some
+    /// other reason — here, "Task not found" for the nonexistent id — which
+    /// is precisely the failure mode this test has to catch.
     #[tokio::test]
-    async fn test_tasks_result_missing_params() {
-        let server = create_test_server();
-
-        let response = server.handle_tasks_result(Some(json!(1)), None).await;
-
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602);
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_tasks_result_dispatch() {
+    async fn tasks_result_is_no_longer_a_method() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -5114,30 +5474,50 @@ rbac:
 
         let response = server.handle_request(request).await;
 
-        // Should be dispatched (not method_not_found)
-        assert!(response.error.is_some());
-        assert_ne!(response.error.unwrap().code, -32601);
+        assert_eq!(
+            response.error.expect("tasks/result must not dispatch").code,
+            -32601,
+            "MCP 2026-07-28 has no tasks/result method"
+        );
     }
 
+    /// The POSITIVE half of the capability gate: with the extension declared
+    /// on the request, `tasks/get` reaches its handler and answers on the
+    /// merits — here `-32602` for an id that does not exist.
+    ///
+    /// Without this, a gate that refused EVERY request would satisfy all
+    /// three refusal tests below and look perfectly conformant.
     #[tokio::test]
     async fn test_handle_request_tasks_get_dispatch() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tasks/get".to_string(),
-            params: Some(json!({"taskId": "nonexistent"})),
+            params: Some(params_declaring_tasks(json!({"taskId": "nonexistent"}))),
         };
 
-        let response = server.handle_request(request).await;
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
 
-        // Should be dispatched (not method_not_found)
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602); // Invalid params (task not found)
+        let error = response.error.expect("unknown task is an error");
+        assert_eq!(
+            error.code, -32602,
+            "a declaring client must be answered on the merits, not gated: {error:?}"
+        );
     }
 
+    /// Replaces `test_handle_request_tasks_list_dispatch`, which asserted the
+    /// exact opposite (a successful empty listing).
+    ///
+    /// `assert_eq!` on the code rather than `error.is_some()`: `tasks/list`
+    /// required no params, so a surviving handler answers SUCCESSFULLY here.
+    /// A test written as `is_some()` would fail for the right reason today
+    /// and pass for the wrong one the moment anyone restored the arm.
     #[tokio::test]
-    async fn test_handle_request_tasks_list_dispatch() {
+    async fn tasks_list_is_no_longer_a_method() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -5148,27 +5528,183 @@ rbac:
 
         let response = server.handle_request(request).await;
 
-        // Should succeed with empty tasks list
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["tasks"].is_array());
+        assert_eq!(
+            response.error.expect("tasks/list must not dispatch").code,
+            -32601,
+            "MCP 2026-07-28 removed tasks/list deliberately"
+        );
     }
 
+    /// Same positive half for `tasks/cancel`.
+    ///
+    /// The old body asserted `assert_ne!(code, -32601)`, which kept passing
+    /// once the gate landed — `-32021` is not `-32601` either, so it was green
+    /// while proving nothing about dispatch. `assert_eq!` on the code it
+    /// should actually receive is what makes it a test again.
     #[tokio::test]
     async fn test_handle_request_tasks_cancel_dispatch() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tasks/cancel".to_string(),
-            params: Some(json!({"taskId": "nonexistent"})),
+            params: Some(params_declaring_tasks(json!({"taskId": "nonexistent"}))),
         };
 
-        let response = server.handle_request(request).await;
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
 
-        // Should be dispatched (not method_not_found)
-        assert!(response.error.is_some());
-        assert_ne!(response.error.unwrap().code, -32601);
+        let error = response.error.expect("unknown task is an error");
+        assert_eq!(error.code, -32602, "{error:?}");
+    }
+
+    /// The NEGATIVE half, on all three gated methods at once.
+    ///
+    /// `data.requiredCapabilities` is asserted LITERALLY, not merely present:
+    /// its whole purpose is to tell a client what to declare in order to
+    /// retry, so an invented shape would be as useless as an absent one while
+    /// passing any presence check.
+    #[tokio::test]
+    async fn the_three_task_methods_reject_a_non_declaring_client_with_32021() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+        // A real task, so the refusal cannot be mistaken for "not found".
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
+
+        for method in ["tasks/get", "tasks/update", "tasks/cancel"] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                // No `_meta`: this request declares nothing, whatever any
+                // earlier request or handshake may have said.
+                params: Some(json!({ "taskId": task_id })),
+            };
+
+            let response = server
+                .handle_request_with_cancel(request, None, Some(&session))
+                .await;
+
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{method} must be refused for a non-declaring client"));
+            assert_eq!(error.code, -32021, "{method}: {error:?}");
+
+            let data = error
+                .data
+                .unwrap_or_else(|| panic!("{method}: -32021 must carry requiredCapabilities"));
+            assert_eq!(
+                data,
+                json!({
+                    "requiredCapabilities": {
+                        "extensions": { "io.modelcontextprotocol/tasks": {} }
+                    }
+                }),
+                "{method}: the payload must name what to declare, exactly"
+            );
+        }
+
+        // And the task is untouched: a refused request must not have run.
+        assert_eq!(
+            server.task_store.get_task(&task_id).await.unwrap().status,
+            crate::ports::protocol::TaskStatus::Working
+        );
+    }
+
+    /// A deleted method stays deleted for everyone. This is why the gate lists
+    /// three method NAMES instead of matching the `tasks/` prefix: a prefix
+    /// gate would answer `-32021` here, telling a client to declare a
+    /// capability that would not bring `tasks/list` back.
+    #[tokio::test]
+    async fn a_deleted_task_method_is_32601_not_32021_for_a_non_declaring_client() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+
+        for method in ["tasks/list", "tasks/result"] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: Some(json!({"taskId": "whatever"})),
+            };
+
+            let response = server
+                .handle_request_with_cancel(request, None, Some(&session))
+                .await;
+
+            assert_eq!(
+                response.error.expect("deleted method").code,
+                -32601,
+                "{method} does not exist; the answer must say so, not blame a capability"
+            );
+        }
+    }
+
+    /// `tasks/update` acks with the discriminator and nothing else, and its
+    /// `inputResponses` are ignored rather than rejected — this server never
+    /// issues an `inputRequest`, so no key a client sends can be outstanding.
+    #[tokio::test]
+    async fn tasks_update_acknowledges_and_ignores_input_responses() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tasks/update".to_string(),
+            params: Some(params_declaring_tasks(json!({
+                "taskId": task_id,
+                "inputResponses": {
+                    "never-issued": { "action": "accept", "content": { "input": "Luca" } }
+                }
+            }))),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.expect("an ack");
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(
+            result.as_object().map(serde_json::Map::len),
+            Some(1),
+            "UpdateTaskResult is an empty acknowledgement: {result}"
+        );
+
+        // A no-op is a no-op: the task must be exactly where it was.
+        let info = server.task_store.get_task(&task_id).await.unwrap();
+        assert_eq!(info.status, crate::ports::protocol::TaskStatus::Working);
+    }
+
+    /// An unknown id is still an error, so the no-op cannot silently absorb a
+    /// typo'd or TTL-evicted task.
+    #[tokio::test]
+    async fn tasks_update_on_an_unknown_task_is_invalid_params() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tasks/update".to_string(),
+            params: Some(params_declaring_tasks(json!({
+                "taskId": "no-such-task",
+                "inputResponses": {}
+            }))),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
+
+        let error = response.error.expect("unknown taskId is an error");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("no-such-task"), "{}", error.message);
     }
 
     // ============== Resources List/Read Tests ==============

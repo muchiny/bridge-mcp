@@ -16,7 +16,7 @@ fuzz_target!(|data: (u8, u8, &str)| {
         let store = TaskStore::new(max, ttl_ms, 500);
 
         // Create a task
-        if let Some((id, _token)) = store.create_task(Some(ttl_ms)).await {
+        if let Some((id, _token)) = store.create_task().await {
             let _ = store.get_task(&id).await;
             let _ = store.get_result(&id).await;
 
@@ -41,9 +41,8 @@ fuzz_target!(|data: (u8, u8, &str)| {
             let _ = store.get_result(&id).await;
         }
 
-        // Fuzz list with arbitrary cursor
-        let _ = store.list_tasks(Some(id_data), 10).await;
-        let _ = store.list_tasks(None, 10).await;
+        // No cursor fuzzing left: `list_tasks` went with `tasks/list`,
+        // and with it the only cursor this store ever parsed.
 
         // Try operations on non-existent task
         let _ = store.cancel_task(id_data).await;

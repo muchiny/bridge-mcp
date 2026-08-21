@@ -20,6 +20,7 @@ mod server;
 pub mod session_capabilities;
 pub mod session_context;
 pub mod standard_tool;
+pub mod task_policy;
 pub mod tool_handlers;
 pub mod transport;
 
