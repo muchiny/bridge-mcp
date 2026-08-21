@@ -49,6 +49,31 @@ use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
 
 /// MCP Server that communicates over stdio
+/// How often the resource-update watch loop looks for changes.
+///
+/// `history://` is change-detected exactly, through the monotonic
+/// revision counter on `CommandHistory`. Every other published resource
+/// scheme is backed by the REMOTE host — `metrics://`, `services://` and
+/// `health://` shell out on each read, `file://` and `log://` read remote
+/// paths — so this process has no change feed for them and must not
+/// pretend to. For those, a tick means "poll again", not "it changed".
+/// That is deliberate: the alternative is either advertising
+/// `subscribe: true` with nothing behind it, or opening an inotify
+/// channel per subscribed path over SSH, which the bridge does not do.
+const RESOURCE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Decide which subscribed URIs get `notifications/resources/updated` on
+/// one tick of the watch loop.
+///
+/// Split out of the loop so the decision is unit-testable without waiting
+/// 30 s of wall clock.
+fn resource_update_tick(uris: &[String], history_changed: bool) -> Vec<String> {
+    uris.iter()
+        .filter(|uri| history_changed || !uri.starts_with("history://"))
+        .cloned()
+        .collect()
+}
+
 /// What `subscriptions/listen` decided, for the dispatch layer to act on.
 ///
 /// MCP 2026-07-28 gives `subscriptions/listen` **no immediate result**.
@@ -665,8 +690,11 @@ impl McpServer {
             tokio::spawn(task.run());
         }
 
-        // Spawn cleanup tasks (global, shared across sessions).
-        let cleanup_handles = self.spawn_cleanup_tasks();
+        // Spawn cleanup tasks (global, shared across sessions), plus the
+        // resource-update watch loop that feeds
+        // `notifications/resources/updated` to live subscriptions.
+        let mut cleanup_handles = self.spawn_cleanup_tasks();
+        cleanup_handles.push(self.spawn_resource_update_watch());
 
         // Start config watcher. The watcher holds a closure that reads
         // the *current* `notification_tx` from the server each time a
@@ -712,6 +740,37 @@ impl McpServer {
         transport.shutdown().await;
 
         Ok(())
+    }
+
+    /// Spawn the resource-update watch loop.
+    ///
+    /// Deliberately NOT part of [`Self::spawn_cleanup_tasks`]: that
+    /// function's contract (and its test) is "one loop per expiring
+    /// resource", and this loop expires nothing. It is appended to the
+    /// same handle vec in `serve()` so shutdown aborts it too.
+    ///
+    /// The loop does no work at all while nobody is subscribed, and emits
+    /// nothing for `history://` while the bridge is idle.
+    fn spawn_resource_update_watch(&self) -> tokio::task::JoinHandle<()> {
+        let subscriptions = self.subscriptions.clone();
+        let history = Arc::clone(&self.history);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(RESOURCE_WATCH_INTERVAL);
+            let mut last_revision = history.revision();
+            loop {
+                interval.tick().await;
+                let uris = subscriptions.subscribed_resource_uris();
+                if uris.is_empty() {
+                    continue;
+                }
+                let revision = history.revision();
+                let history_changed = revision != last_revision;
+                last_revision = revision;
+                for uri in resource_update_tick(&uris, history_changed) {
+                    subscriptions.publish_resource_updated(&uri);
+                }
+            }
+        })
     }
 
     /// Spawn the four per-server cleanup tasks (session manager, task
@@ -6081,6 +6140,94 @@ mod tests {
             .error
             .expect("session-less listen is refused");
         assert_eq!(error.code, -32600, "method must be routed, not unknown");
+    }
+
+    // ============== resources/updated Watch Tests ==============
+
+    #[test]
+    fn test_resource_update_tick_skips_history_when_unchanged() {
+        let uris = vec![
+            "history://recent".to_string(),
+            "health://server".to_string(),
+        ];
+        assert_eq!(
+            resource_update_tick(&uris, false),
+            vec!["health://server".to_string()],
+            "history:// is change-detected and must stay silent when idle"
+        );
+        assert_eq!(
+            resource_update_tick(&uris, true),
+            vec![
+                "history://recent".to_string(),
+                "health://server".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resource_update_tick_with_no_subscriptions_is_empty() {
+        assert!(resource_update_tick(&[], true).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resource_update_emits_only_to_subscribers_of_that_uri() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({
+                    "notifications": { "resourceSubscriptions": ["history://recent"] }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
+        let _ack = rx.try_recv().expect("ack notification");
+
+        let uris = server.subscriptions.subscribed_resource_uris();
+        assert_eq!(uris, vec!["history://recent".to_string()]);
+
+        // Idle bridge: the tick emits nothing at all.
+        assert!(resource_update_tick(&uris, false).is_empty());
+        assert!(rx.try_recv().is_err());
+
+        // A recorded command bumps the revision, so the tick emits.
+        server.history.record_success("host", "uptime", 0, 5);
+        for uri in resource_update_tick(&uris, true) {
+            server.subscriptions.publish_resource_updated(&uri);
+        }
+        match rx
+            .try_recv()
+            .expect("subscriber receives resources/updated")
+        {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/resources/updated");
+                assert_eq!(n.params.expect("params")["uri"], "history://recent");
+            }
+            _ => panic!("expected a Notification"),
+        }
+
+        // A URI nobody subscribed to reaches nobody.
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_resource_updated("health://server"),
+            0
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_resource_update_watch_keeps_ticking() {
+        let server = create_test_server();
+        let handle = server.spawn_resource_update_watch();
+        tokio::task::yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "the watch loop exited immediately instead of ticking forever"
+        );
+        handle.abort();
     }
 
     /// The dispatch chokepoint must produce NO response for an accepted
