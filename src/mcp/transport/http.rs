@@ -480,9 +480,12 @@ async fn handle_post(
     // Get or create session
     let session_id = get_session_id(&headers).unwrap_or_else(new_session_id);
 
-    // Check if this is an initialize request — create session
+    // Check if this is the opening request — create session.
+    // 2026-07-28 replaced `initialize` with `server/discover` as the first
+    // message on the wire; keying off the old name here meant every Modern
+    // client got a session id header for a session that was never created.
     let is_initialize = match &incoming {
-        IncomingMessage::Single(msg) => msg.method.as_deref() == Some("initialize"),
+        IncomingMessage::Single(msg) => msg.method.as_deref() == Some("server/discover"),
         IncomingMessage::Batch(_) => false,
     };
 

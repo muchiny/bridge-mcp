@@ -33,9 +33,10 @@ use super::transport::{Session, Transport, stdio::StdioTransport};
 use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
-    BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, ClientInfo, CompletionRef, CompletionResult,
-    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult,
-    Icon, InitializeParams, InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
+    BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, CacheScope, ClientInfo, CompletionRef,
+    CompletionResult, CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult,
+    CreateTaskResult, DISCOVER_TTL_MS, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon,
+    InitializeParams, InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, LogLevel, LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION,
     PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
@@ -1275,6 +1276,7 @@ impl McpServer {
         let session = scoped_session.as_ref();
 
         match request.method.as_str() {
+            "server/discover" => self.handle_discover(id).await,
             "initialize" => self.handle_initialize(id, request.params, session).await,
             "tools/list" => self.handle_tools_list(id, request.params.as_ref()).await,
             "tools/call" => {
@@ -1384,6 +1386,46 @@ impl McpServer {
             },
             instructions,
         }
+    }
+
+    /// Handle `server/discover` (MCP 2026-07-28) — the Modern entry point.
+    ///
+    /// Unlike `initialize` this is a plain request with no follow-up
+    /// notification and no connection-scoped state: nothing here writes to the
+    /// server. Client identity, client capabilities and the per-request
+    /// protocol version all arrive in each request's `_meta` envelope instead,
+    /// which is why `params` is not read here.
+    ///
+    /// `cacheScope: "public"` is correct **only while this server has no
+    /// per-caller authorization**. Every caller gets byte-identical
+    /// capabilities, tool inventory and instructions, because group enablement
+    /// comes from `config.tool_groups` (global, process-wide) and never from
+    /// who is asking — which is also what 2026-07-28 requires of list
+    /// endpoints. `rbac.enabled: true` is rejected at config load
+    /// (`src/config/loader.rs:226`) precisely because nothing in the request
+    /// path enforces it. The day RBAC becomes real and `tools/list` starts
+    /// varying by caller, this value MUST become session-scoped and the
+    /// tripwire test `test_cache_scope_is_public_only_while_rbac_is_dead`
+    /// will fail to remind you.
+    async fn handle_discover(&self, id: Option<Value>) -> JsonRpcResponse {
+        let payload = self.build_discovery_payload().await;
+
+        let result = DiscoverResult {
+            result_type: DiscoverResultType::Complete,
+            supported_versions: SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .map(|v| (*v).to_string())
+                .collect(),
+            capabilities: payload.capabilities,
+            meta: Some(DiscoverMeta {
+                server_info: payload.server_info,
+            }),
+            instructions: Some(payload.instructions),
+            ttl_ms: DISCOVER_TTL_MS,
+            cache_scope: CacheScope::Public,
+        };
+
+        JsonRpcResponse::success_or_serialize_error(id, &result)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3083,6 +3125,113 @@ mod tests {
             json!(expected_instructions),
             "instructions no longer come from build_instructions(config, registry.len())"
         );
+    }
+
+    /// Full wire shape of `server/discover`, asserted against a literal.
+    ///
+    /// Source: MCP 2026-07-28 `/specification/2026-07-28/server/discover`.
+    /// Note `serverInfo` is NOT a sibling of `capabilities` any more — it moved
+    /// inside `result._meta` under the reverse-DNS key
+    /// `io.modelcontextprotocol/serverInfo`. A client that still reads
+    /// `result.serverInfo` gets `null`.
+    ///
+    /// `serverInfo` itself carries a nested `_meta` with build provenance
+    /// (`build_provenance_meta()`, keyed by `BUILD_META_KEY`) — the plan this
+    /// was written against omitted that field from its literal, the same gap
+    /// `test_handshake_payload_is_byte_identical` (Task 12) already had to
+    /// close. `build_discovery_payload` populates it unconditionally.
+    #[tokio::test]
+    async fn test_server_discover_full_wire_shape() {
+        let server = create_test_server();
+        let response = server.handle_discover(Some(json!("discover-1"))).await;
+
+        assert!(response.error.is_none(), "server/discover must not error");
+        assert_eq!(response.id, Some(json!("discover-1")));
+        let result = response
+            .result
+            .expect("server/discover must return a result");
+
+        let expected_instructions = {
+            let config = server.config.read().await;
+            instructions::build_instructions(&config, server.registry.len())
+        };
+
+        assert_eq!(
+            result,
+            json!({
+                "resultType": "complete",
+                "supportedVersions": ["2026-07-28"],
+                "capabilities": {
+                    "tools": {"listChanged": true},
+                    "prompts": {"listChanged": true},
+                    "resources": {"subscribe": false, "listChanged": true},
+                    "tasks": {
+                        "list": {},
+                        "cancel": {},
+                        "requests": {"tools": {"call": {}}}
+                    },
+                    "completions": {},
+                    "logging": {},
+                    "extensions": {
+                        "io.modelcontextprotocol/tasks": {},
+                        "com.bridge-mcp/output-pagination": {}
+                    }
+                },
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": SERVER_VERSION,
+                        "description": "Secure SSH bridge for remote server management via MCP",
+                        "websiteUrl": "https://github.com/muchiny/bridge-mcp",
+                        "icons": [{
+                            "src": SERVER_ICON_URL,
+                            "mimeType": "image/svg+xml",
+                            "sizes": ["any"]
+                        }],
+                        "_meta": {
+                            "io.github.muchiny/build": {
+                                "rev": BUILD_REV,
+                                "version": SERVER_VERSION
+                            }
+                        }
+                    }
+                },
+                "instructions": expected_instructions,
+                "ttlMs": 3_600_000,
+                "cacheScope": "public"
+            })
+        );
+    }
+
+    /// `server/discover` must be reachable through the public dispatcher, not
+    /// just as a direct method call.
+    #[tokio::test]
+    async fn test_server_discover_is_routed() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(7)),
+            method: "server/discover".to_string(),
+            params: Some(json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "ExampleClient",
+                        "version": "1.0.0"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            })),
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert!(
+            response.error.is_none(),
+            "server/discover fell through to -32601: {:?}",
+            response.error
+        );
+        assert_eq!(response.result.unwrap()["resultType"], "complete");
     }
 
     #[tokio::test]

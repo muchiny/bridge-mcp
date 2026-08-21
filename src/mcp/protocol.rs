@@ -139,6 +139,30 @@ impl JsonRpcError {
         }
     }
 
+    /// MCP 2026-07-28 `UnsupportedProtocolVersionError`.
+    ///
+    /// Code `-32022` is MCP-assigned: it sits inside JSON-RPC's reserved
+    /// `-32768..-32000` band but is not one of the pre-assigned codes.
+    ///
+    /// `data.supported` carries every revision this server accepts,
+    /// most-preferred first, and `data.requested` echoes back what the client
+    /// asked for. Both fields are load-bearing — this specific code is how a
+    /// dual-era client tells a Modern server from a Legacy one during its
+    /// `server/discover` probe.
+    ///
+    /// Spec: `/specification/2026-07-28/basic/versioning`.
+    #[must_use]
+    pub fn unsupported_protocol_version(requested: &str) -> Self {
+        Self {
+            code: -32022,
+            message: "Unsupported protocol version".to_string(),
+            data: Some(serde_json::json!({
+                "supported": SUPPORTED_PROTOCOL_VERSIONS,
+                "requested": requested,
+            })),
+        }
+    }
+
     /// Request-cancellation error.
     ///
     /// Emitted when a `notifications/cancelled` fires while a request is
@@ -986,6 +1010,66 @@ pub const PROTOCOL_VERSION: &str = "2026-07-28";
 /// payload of the `-32022 UnsupportedProtocolVersionError` returned to Legacy
 /// clients that still send `initialize`.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2026-07-28"];
+
+/// How long a client may cache a `server/discover` result, in milliseconds.
+///
+/// One hour, matching the spec's own example. The spec's normative wording for
+/// `ttlMs` (MUST-not-exceed vs. hint, and what a missing value implies) was not
+/// retrieved when this was written.
+/// SPEC: verify — `/specification/2026-07-28/server/discover`.
+pub const DISCOVER_TTL_MS: u64 = 3_600_000;
+
+/// Discriminator on a `server/discover` result.
+///
+/// Only `complete` is emitted. The full enum was not retrieved from the spec;
+/// this server never needs a non-complete variant because it computes the whole
+/// payload synchronously from local config.
+/// SPEC: verify — `/specification/2026-07-28/server/discover`.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiscoverResultType {
+    Complete,
+}
+
+/// Cache scope of a `server/discover` result.
+///
+/// See the decision note on `McpServer::handle_discover` before changing this.
+/// SPEC: verify — `/specification/2026-07-28/server/discover`.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CacheScope {
+    Public,
+}
+
+/// `result._meta` of a `server/discover` response.
+///
+/// In 2026-07-28 `serverInfo` is no longer a top-level sibling of
+/// `capabilities`; it lives here, under the reserved reverse-DNS key. The key
+/// string is spelled exactly once, in the `serde(rename)` below.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoverMeta {
+    #[serde(rename = "io.modelcontextprotocol/serverInfo")]
+    pub server_info: ServerInfo,
+}
+
+/// Result of `server/discover` (MCP 2026-07-28) — the Modern replacement for
+/// `InitializeResult`.
+///
+/// Field order below matches the spec's own example.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverResult {
+    pub result_type: DiscoverResultType,
+    pub supported_versions: Vec<String>,
+    pub capabilities: ServerCapabilities,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<DiscoverMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    pub ttl_ms: u64,
+    pub cache_scope: CacheScope,
+}
+
 pub const SERVER_NAME: &str = "bridge-mcp";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Git revision this binary was compiled from: 12 hex chars, optionally
@@ -1152,6 +1236,42 @@ mod tests {
         let error = JsonRpcError::cancelled(Some("User pressed ESC".to_string()));
         assert_eq!(error.code, -32800);
         assert_eq!(error.message, "User pressed ESC");
+    }
+
+    /// `-32022 UnsupportedProtocolVersionError`, MCP 2026-07-28
+    /// `/specification/2026-07-28/basic/versioning`. The literal example in
+    /// the spec is:
+    ///
+    /// ```json
+    /// {"code": -32022, "message": "Unsupported protocol version",
+    ///  "data": {"supported": ["2026-07-28", "2025-11-25"],
+    ///           "requested": "1900-01-01"}}
+    /// ```
+    ///
+    /// Clients match on `code`, not `message`, but emitting the spec's exact
+    /// string is free so we do.
+    #[test]
+    fn test_error_unsupported_protocol_version() {
+        let error = JsonRpcError::unsupported_protocol_version("2025-11-25");
+
+        assert_eq!(error.code, -32022);
+        assert_eq!(error.message, "Unsupported protocol version");
+
+        let data = error
+            .data
+            .expect("data payload is load-bearing for clients");
+        assert_eq!(data["supported"], json!(["2026-07-28"]));
+        assert_eq!(data["requested"], json!("2025-11-25"));
+    }
+
+    /// An empty `requested` must still serialize as a string, not be omitted —
+    /// a client that reads `data.requested` unconditionally would otherwise
+    /// panic on a request that carried no `protocolVersion` at all.
+    #[test]
+    fn test_error_unsupported_protocol_version_empty_requested() {
+        let error = JsonRpcError::unsupported_protocol_version("");
+        let data = error.data.expect("data payload");
+        assert_eq!(data["requested"], json!(""));
     }
 
     // ============== MCP Types Serialization Tests ==============
