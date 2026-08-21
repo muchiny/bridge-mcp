@@ -16,7 +16,7 @@ fuzz_target!(|data: (u8, u8, &str)| {
         let store = TaskStore::new(max, ttl_ms, 500);
 
         // Create a task
-        if let Some((id, _token)) = store.create_task(Some(ttl_ms)).await {
+        if let Some((id, _token)) = store.create_task().await {
             let _ = store.get_task(&id).await;
             let _ = store.get_result(&id).await;
 

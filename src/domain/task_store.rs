@@ -47,6 +47,35 @@ pub struct TaskStore {
     default_poll_interval_ms: u64,
 }
 
+/// Human-readable summary for a completed task's `statusMessage`.
+///
+/// **This function inspects a WIRE key from inside the domain layer**, which
+/// is why it is named rather than inlined: `result` is an opaque `Value` to
+/// this store, and reading `isError` out of it couples the domain to the
+/// `ToolCallResult` shape defined in the ports layer. Three lines buried in
+/// `complete_task` get moved or deleted without anyone meeting that question;
+/// a named function with this comment keeps it in view.
+///
+/// It is tolerated here for one reason. MCP 2026-07-28 makes a tool call that
+/// returned `isError: true` a COMPLETION, not a failure — so after that rule,
+/// a clean result and a failed one share a status **by design**, and
+/// `statusMessage` is the only field left that separates them for a human.
+/// The operator who used to filter on `status == "failed"` has this sentence
+/// and nothing else. Saying "successfully" over a failed playbook would be a
+/// lie in the last readable field. The spec lists "Summaries for `completed`
+/// status" as exactly this field's purpose.
+///
+/// The coupling is pre-existing, not new: `TaskEntry::result` is already
+/// documented as a serialized `ToolCallResult`. If it ever widens further,
+/// the honest fix is for the adapter to pass the summary in.
+fn completion_summary(result: &Value) -> &'static str {
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        "Task completed with a tool error."
+    } else {
+        "Task completed successfully."
+    }
+}
+
 /// Terminal-status predicate usable without a `TaskEntry` in hand.
 const fn is_terminal_status(status: TaskStatus) -> bool {
     matches!(
@@ -75,12 +104,17 @@ impl TaskStore {
     ///
     /// The caller should spawn a background worker using the returned
     /// `CancellationToken` and call `complete_task` or `fail_task` when done.
-    pub async fn create_task(
-        &self,
-        requested_ttl_ms: Option<u64>,
-    ) -> Option<(String, CancellationToken)> {
+    ///
+    /// Takes no TTL. MCP 2026-07-28 removed the client's ability to propose
+    /// one — "the server picks it unilaterally" — so this method used to
+    /// accept a `requested_ttl_ms` that it capped at the store default, and
+    /// after `params.task` was deleted no caller could pass anything but
+    /// `None`. The capping outlived the input it capped, exercised only by
+    /// the tests that pinned it. The store's configured default is now the
+    /// only source of a task's TTL.
+    pub async fn create_task(&self) -> Option<(String, CancellationToken)> {
         let task_id = uuid::Uuid::new_v4().to_string();
-        let ttl_ms = requested_ttl_ms.map_or(self.default_ttl_ms, |t| t.min(self.default_ttl_ms));
+        let ttl_ms = self.default_ttl_ms;
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let cancel_token = CancellationToken::new();
@@ -131,19 +165,7 @@ impl TaskStore {
         }
 
         entry.info.status = TaskStatus::Completed;
-        // A tool call that returned `isError: true` is a COMPLETION, not a
-        // failure (MCP 2026-07-28) — but calling it "successful" in the one
-        // human-readable field the task carries would be a lie, and it is
-        // exactly the signal an operator loses now that these no longer reach
-        // `failed`. The spec lists "Summaries for `completed` status" as a
-        // `statusMessage` use; this is that summary.
-        entry.info.status_message = Some(
-            if result.get("isError").and_then(Value::as_bool) == Some(true) {
-                "Task completed with a tool error.".to_string()
-            } else {
-                "Task completed successfully.".to_string()
-            },
-        );
+        entry.info.status_message = Some(completion_summary(&result).to_string());
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.result = Some(result);
@@ -266,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_task_returns_id_and_token() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let result = store.create_task(None).await;
+        let result = store.create_task().await;
         assert!(result.is_some());
 
         let (id, token) = result.unwrap();
@@ -274,29 +296,44 @@ mod tests {
         assert!(!token.is_cancelled());
     }
 
+    /// Supersedes `test_create_task_with_custom_ttl` AND
+    /// `test_custom_ttl_capped_at_default`, which both exercised a
+    /// client-proposed TTL: "There is no client-supplied TTL — the server
+    /// picks it unilaterally." Nothing is left to propose, so nothing is left
+    /// to cap.
+    ///
+    /// Two stores rather than one: a task carrying `Some(60_000)` proves
+    /// nothing about where the number came from, because a hardcoded constant
+    /// would satisfy it just as well. Two different defaults do.
     #[tokio::test]
-    async fn test_create_task_with_custom_ttl() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(Some(30_000)).await.unwrap();
+    async fn create_task_takes_its_ttl_from_the_store() {
+        let short = TaskStore::new(10, 30_000, 2_000);
+        let long = TaskStore::new(10, 60_000, 2_000);
 
-        let info = store.get_task(&id).await.unwrap();
-        assert_eq!(info.ttl_ms, Some(30_000));
+        let (short_id, _) = short.create_task().await.unwrap();
+        let (long_id, _) = long.create_task().await.unwrap();
+
+        assert_eq!(
+            short.get_task(&short_id).await.unwrap().ttl_ms,
+            Some(30_000)
+        );
+        assert_eq!(long.get_task(&long_id).await.unwrap().ttl_ms, Some(60_000));
     }
 
     #[tokio::test]
     async fn test_create_task_at_capacity_returns_none() {
         let store = TaskStore::new(2, 60_000, 2_000);
-        store.create_task(None).await.unwrap();
-        store.create_task(None).await.unwrap();
+        store.create_task().await.unwrap();
+        store.create_task().await.unwrap();
 
-        let result = store.create_task(None).await;
+        let result = store.create_task().await;
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn test_get_task_returns_working_status() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
 
         let info = store.get_task(&id).await.unwrap();
         assert_eq!(info.status, TaskStatus::Working);
@@ -312,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn test_complete_task_lifecycle() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
 
         let info = store.complete_task(&id, test_result()).await.unwrap();
         assert_eq!(info.status, TaskStatus::Completed);
@@ -324,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn test_fail_task_lifecycle() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
 
         let info = store
             .fail_task(&id, "SSH timeout", error_result())
@@ -343,8 +380,8 @@ mod tests {
     #[tokio::test]
     async fn complete_task_distinguishes_a_tool_error_in_its_status_message() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (ok_id, _) = store.create_task(None).await.unwrap();
-        let (err_id, _) = store.create_task(None).await.unwrap();
+        let (ok_id, _) = store.create_task().await.unwrap();
+        let (err_id, _) = store.create_task().await.unwrap();
 
         store.complete_task(&ok_id, test_result()).await;
         store.complete_task(&err_id, error_result()).await;
@@ -368,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_task_lifecycle() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, token) = store.create_task(None).await.unwrap();
+        let (id, token) = store.create_task().await.unwrap();
         assert!(!token.is_cancelled());
 
         let info = store.cancel_task(&id).await.unwrap();
@@ -386,7 +423,7 @@ mod tests {
     /// and would report work that finished as work that was called off.
     async fn cancel_after_complete_is_accepted_and_changes_nothing() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         store.complete_task(&id, test_result()).await;
 
         let info = store
@@ -415,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn test_double_complete_is_idempotent() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
 
         store.complete_task(&id, test_result()).await;
         let info = store
@@ -432,7 +469,7 @@ mod tests {
     async fn test_ttl_expiry() {
         // 0ms TTL = immediate expiry
         let store = TaskStore::new(10, 0, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
 
         // Task should be expired immediately
         assert!(store.get_task(&id).await.is_none());
@@ -441,8 +478,8 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_removes_expired() {
         let store = TaskStore::new(10, 0, 2_000);
-        store.create_task(None).await.unwrap();
-        store.create_task(None).await.unwrap();
+        store.create_task().await.unwrap();
+        store.create_task().await.unwrap();
 
         store.cleanup().await;
         assert_eq!(store.len().await, 0);
@@ -452,11 +489,11 @@ mod tests {
     async fn test_expired_tasks_freed_on_create() {
         // max 2 tasks, 0ms TTL
         let store = TaskStore::new(2, 0, 2_000);
-        store.create_task(None).await.unwrap();
-        store.create_task(None).await.unwrap();
+        store.create_task().await.unwrap();
+        store.create_task().await.unwrap();
 
         // Expired tasks should be cleaned up, allowing new creation
-        let result = store.create_task(None).await;
+        let result = store.create_task().await;
         assert!(result.is_some());
     }
 
@@ -465,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn test_complete_after_cancel_is_no_op() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         store.cancel_task(&id).await.unwrap();
 
         // Completing a cancelled task should be a no-op (already terminal)
@@ -478,7 +515,7 @@ mod tests {
     #[tokio::test]
     async fn test_fail_after_cancel_is_no_op() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         store.cancel_task(&id).await.unwrap();
 
         let info = store
@@ -493,7 +530,7 @@ mod tests {
     /// completed case, on the other terminal status.
     async fn cancel_after_fail_is_accepted_and_changes_nothing() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         store.fail_task(&id, "boom", error_result()).await;
 
         let info = store.cancel_task(&id).await.expect("a known task");
@@ -507,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn test_double_fail_is_idempotent() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
 
         store
             .fail_task(&id, "first error", error_result())
@@ -529,7 +566,7 @@ mod tests {
     /// second send must not be an error.
     async fn double_cancel_is_idempotent() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         store.cancel_task(&id).await.unwrap();
 
         let info = store.cancel_task(&id).await.expect("a known task");
@@ -547,7 +584,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_result_working_returns_none() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         // Working task has no result yet
         assert!(store.get_result(&id).await.is_none());
     }
@@ -555,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_result_after_fail() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         store.fail_task(&id, "error", error_result()).await;
 
         let result = store.get_result(&id).await.unwrap();
@@ -565,7 +602,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_result_after_cancel_returns_none() {
         let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
+        let (id, _) = store.create_task().await.unwrap();
         store.cancel_task(&id).await.unwrap();
 
         // Cancelled tasks have no result stored
@@ -575,23 +612,11 @@ mod tests {
     // ============== TTL Edge Cases ==============
 
     #[tokio::test]
-    async fn test_custom_ttl_capped_at_default() {
-        // Store has default TTL of 10_000ms
-        let store = TaskStore::new(10, 10_000, 2_000);
-        // Request a much larger TTL
-        let (id, _) = store.create_task(Some(1_000_000)).await.unwrap();
-
-        let info = store.get_task(&id).await.unwrap();
-        // Should be capped to the store default
-        assert_eq!(info.ttl_ms, Some(10_000));
-    }
-
-    #[tokio::test]
     async fn test_is_empty() {
         let store = TaskStore::new(10, 60_000, 2_000);
         assert!(store.is_empty().await);
 
-        store.create_task(None).await.unwrap();
+        store.create_task().await.unwrap();
         assert!(!store.is_empty().await);
     }
 
@@ -605,7 +630,7 @@ mod tests {
         for _ in 0..20 {
             let store = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
-                let (id, _) = store.create_task(None).await.unwrap();
+                let (id, _) = store.create_task().await.unwrap();
                 let info = store.get_task(&id).await.unwrap();
                 assert_eq!(info.status, TaskStatus::Working);
                 store.complete_task(&id, test_result()).await;

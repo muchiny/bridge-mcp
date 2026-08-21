@@ -1886,7 +1886,7 @@ impl McpServer {
         // `None`: the server picks the TTL unilaterally (spec 5.9). The
         // client used to propose one through `params.task.ttl` and the store
         // capped it; there is no client proposal left to cap.
-        let Some((task_id, cancel_token)) = self.task_store.create_task(None).await else {
+        let Some((task_id, cancel_token)) = self.task_store.create_task().await else {
             return JsonRpcResponse::error(
                 id,
                 JsonRpcError::internal_error("Task limit reached, try again later"),
@@ -2798,7 +2798,7 @@ mod tests {
         // shape the original `parked_polls` table walked.
         let mut task_ids = Vec::new();
         for _ in 0..6 {
-            let (task_id, _cancel) = server.task_store.create_task(Some(600_000)).await.unwrap();
+            let (task_id, _cancel) = server.task_store.create_task().await.unwrap();
             task_ids.push(task_id);
         }
 
@@ -4757,7 +4757,7 @@ mod tests {
     #[tokio::test]
     async fn test_tasks_cancel() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
 
         let params = json!({"taskId": task_id});
         let response = server
@@ -5014,7 +5014,7 @@ mod tests {
         // is the executable half of that guarantee — the `include_str!`
         // guard in `task_store.rs` only pins a NAME.
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
 
         let response = tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -5050,7 +5050,7 @@ mod tests {
     /// afterwards would tell an operator the work never ran.
     async fn tasks_cancel_on_a_completed_task_is_acknowledged_not_refused() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server
             .task_store
             .complete_task(
@@ -5083,7 +5083,7 @@ mod tests {
     /// client that deleted its state and re-sent cannot be punished for it.
     async fn tasks_cancel_is_idempotent() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server.task_store.cancel_task(&task_id).await.unwrap();
 
         let response = server
@@ -5101,7 +5101,7 @@ mod tests {
     #[tokio::test]
     async fn test_tasks_get_on_completed_task() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server
             .task_store
             .complete_task(
@@ -5132,7 +5132,7 @@ mod tests {
     #[tokio::test]
     async fn tasks_get_on_cancelled_carries_no_result() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server.task_store.cancel_task(&task_id).await.unwrap();
 
         let response = server
@@ -5254,7 +5254,7 @@ mod tests {
     #[tokio::test]
     async fn tasks_get_on_completed_inlines_the_result() {
         let server = create_test_server();
-        let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
         server
             .task_store
             .complete_task(
