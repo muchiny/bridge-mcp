@@ -18,9 +18,9 @@
 //! list, so it keeps flowing on the session channel directly.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -119,8 +119,13 @@ pub struct SubscriptionsListenParams {
 }
 
 /// One live subscription.
+///
+/// `id` is the JSON-RPC `id` of the `subscriptions/listen` request that
+/// created it (`RequestId = string | number`), never a server-minted
+/// value — MCP 2026-07-28 makes the subscription id and the request id
+/// the same thing, so clients can demultiplex a shared stdio pipe.
 struct Entry {
-    id: u64,
+    id: Value,
     filter: SubscriptionFilter,
     tx: mpsc::Sender<WriterMessage>,
 }
@@ -133,7 +138,6 @@ struct Entry {
 #[derive(Default, Clone)]
 pub struct SubscriptionRegistry {
     entries: Arc<std::sync::Mutex<Vec<Entry>>>,
-    next_id: Arc<AtomicU64>,
 }
 
 impl SubscriptionRegistry {
@@ -142,14 +146,17 @@ impl SubscriptionRegistry {
         Self::default()
     }
 
-    /// Register a subscription and return its id. Ids start at 1 so `0`
-    /// is never a valid subscription id on the wire.
-    pub fn register(&self, filter: SubscriptionFilter, tx: mpsc::Sender<WriterMessage>) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    /// Register a subscription under the JSON-RPC `id` of the
+    /// `subscriptions/listen` request that opened it.
+    ///
+    /// The registry deliberately mints NOTHING: MCP 2026-07-28 states the
+    /// subscription id "is not an independent identifier space" — it is
+    /// byte-for-byte the request id, and every notification on the stream
+    /// carries it so a client can correlate on a shared channel.
+    pub fn register(&self, id: Value, filter: SubscriptionFilter, tx: mpsc::Sender<WriterMessage>) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.push(Entry { id, filter, tx });
         }
-        id
     }
 
     /// Drop every subscription created over `tx` (session teardown).
@@ -177,11 +184,11 @@ impl SubscriptionRegistry {
 
     /// Snapshot of the filter registered under `id`.
     #[must_use]
-    pub fn filter_of(&self, id: u64) -> Option<SubscriptionFilter> {
+    pub fn filter_of(&self, id: &Value) -> Option<SubscriptionFilter> {
         let entries = self.entries.lock().ok()?;
         entries
             .iter()
-            .find(|e| e.id == id)
+            .find(|e| &e.id == id)
             .map(|e| e.filter.clone())
     }
 
@@ -220,7 +227,7 @@ impl SubscriptionRegistry {
         })
     }
 
-    fn targets<P>(&self, predicate: P) -> Vec<(u64, mpsc::Sender<WriterMessage>)>
+    fn targets<P>(&self, predicate: P) -> Vec<(Value, mpsc::Sender<WriterMessage>)>
     where
         P: Fn(&SubscriptionFilter) -> bool,
     {
@@ -230,23 +237,23 @@ impl SubscriptionRegistry {
         entries
             .iter()
             .filter(|e| predicate(&e.filter))
-            .map(|e| (e.id, e.tx.clone()))
+            .map(|e| (e.id.clone(), e.tx.clone()))
             .collect()
     }
 
     /// Fire-and-forget delivery. A full channel drops the message (the
     /// client refreshes on demand); a closed channel prunes the entry so
     /// dead subscriptions cannot accumulate.
-    fn deliver<F>(&self, targets: &[(u64, mpsc::Sender<WriterMessage>)], make: F) -> usize
+    fn deliver<F>(&self, targets: &[(Value, mpsc::Sender<WriterMessage>)], make: F) -> usize
     where
-        F: Fn(u64) -> JsonRpcNotification,
+        F: Fn(&Value) -> JsonRpcNotification,
     {
         let mut delivered = 0;
         let mut dead = Vec::new();
         for (id, tx) in targets {
-            match tx.try_send(WriterMessage::Notification(make(*id))) {
+            match tx.try_send(WriterMessage::Notification(make(id))) {
                 Ok(()) => delivered += 1,
-                Err(TrySendError::Closed(_)) => dead.push(*id),
+                Err(TrySendError::Closed(_)) => dead.push(id.clone()),
                 Err(TrySendError::Full(_)) => {}
             }
         }
@@ -310,8 +317,9 @@ mod tests {
         let (tx_tools, mut rx_tools) = ch();
         let (tx_res, mut rx_res) = ch();
 
-        reg.register(tools_only(), tx_tools);
+        reg.register(serde_json::json!(1), tools_only(), tx_tools);
         reg.register(
+            serde_json::json!(2),
             SubscriptionFilter {
                 resources_list_changed: true,
                 ..SubscriptionFilter::default()
@@ -337,7 +345,9 @@ mod tests {
     fn resource_updated_only_for_named_uris() {
         let reg = SubscriptionRegistry::new();
         let (tx, mut rx) = ch();
-        let id = reg.register(
+        let id = serde_json::json!("sub-a");
+        reg.register(
+            id.clone(),
             SubscriptionFilter {
                 resource_subscriptions: vec!["history://recent".to_string()],
                 ..SubscriptionFilter::default()
@@ -357,7 +367,7 @@ mod tests {
                 assert_eq!(n.method, "notifications/resources/updated");
                 let params = n.params.expect("params present");
                 assert_eq!(params["uri"], "history://recent");
-                assert_eq!(params["_meta"][META_SUBSCRIPTION_ID], serde_json::json!(id));
+                assert_eq!(params["_meta"][META_SUBSCRIPTION_ID], id);
             }
             _ => panic!("expected a Notification"),
         }
@@ -368,15 +378,16 @@ mod tests {
         let reg = SubscriptionRegistry::new();
         let (tx_a, _rx_a) = ch();
         let (tx_b, _rx_b) = ch();
-        reg.register(tools_only(), tx_a.clone());
+        reg.register(serde_json::json!(1), tools_only(), tx_a.clone());
         reg.register(
+            serde_json::json!(2),
             SubscriptionFilter {
                 prompts_list_changed: true,
                 ..SubscriptionFilter::default()
             },
             tx_a.clone(),
         );
-        reg.register(tools_only(), tx_b);
+        reg.register(serde_json::json!(3), tools_only(), tx_b);
 
         assert_eq!(reg.len(), 3);
         assert_eq!(reg.remove_for_tx(&tx_a), 2);
@@ -387,7 +398,7 @@ mod tests {
     fn closed_channels_are_pruned_on_publish() {
         let reg = SubscriptionRegistry::new();
         let (tx, rx) = ch();
-        reg.register(tools_only(), tx);
+        reg.register(serde_json::json!(1), tools_only(), tx);
         drop(rx);
 
         assert_eq!(reg.publish_topic(NotificationTopic::ToolsListChanged), 0);
@@ -416,6 +427,7 @@ mod tests {
         let (tx1, _rx1) = ch();
         let (tx2, _rx2) = ch();
         reg.register(
+            serde_json::json!(1),
             SubscriptionFilter {
                 resource_subscriptions: vec!["history://recent".to_string()],
                 ..SubscriptionFilter::default()
@@ -423,6 +435,7 @@ mod tests {
             tx1,
         );
         reg.register(
+            serde_json::json!(2),
             SubscriptionFilter {
                 resource_subscriptions: vec![
                     "history://recent".to_string(),
@@ -445,8 +458,40 @@ mod tests {
     fn filter_of_returns_the_registered_filter() {
         let reg = SubscriptionRegistry::new();
         let (tx, _rx) = ch();
-        let id = reg.register(tools_only(), tx);
-        assert_eq!(reg.filter_of(id), Some(tools_only()));
-        assert_eq!(reg.filter_of(id + 1_000), None);
+        let id = serde_json::json!(42);
+        reg.register(id.clone(), tools_only(), tx);
+        assert_eq!(reg.filter_of(&id), Some(tools_only()));
+        assert_eq!(reg.filter_of(&serde_json::json!(1042)), None);
+    }
+
+    /// MCP 2026-07-28: the subscription id is not an independent
+    /// identifier space — it is byte-for-byte the JSON-RPC `id` of the
+    /// `subscriptions/listen` request. A STRING id must survive as a
+    /// string, which a server-minted `u64` could never represent.
+    #[test]
+    fn registered_id_is_the_request_id_verbatim_including_strings() {
+        let reg = SubscriptionRegistry::new();
+        let (tx, mut rx) = ch();
+        let id = serde_json::json!("listen-7f3a");
+        reg.register(
+            id.clone(),
+            SubscriptionFilter {
+                resource_subscriptions: vec!["history://recent".to_string()],
+                ..SubscriptionFilter::default()
+            },
+            tx,
+        );
+
+        assert_eq!(reg.publish_resource_updated("history://recent"), 1);
+        match rx.try_recv().expect("subscriber receives") {
+            WriterMessage::Notification(n) => {
+                let params = n.params.expect("params present");
+                assert_eq!(
+                    params["_meta"][META_SUBSCRIPTION_ID], id,
+                    "the correlation id must be the request id verbatim"
+                );
+            }
+            _ => panic!("expected a Notification"),
+        }
     }
 }

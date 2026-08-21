@@ -933,12 +933,14 @@ impl JsonRpcNotification {
     }
 
     /// Build the `_meta` object carrying the subscription correlation id.
-    fn meta_subscription(subscription_id: u64) -> Value {
+    ///
+    /// The id is the JSON-RPC `id` of the `subscriptions/listen` request
+    /// that opened the stream — `RequestId = string | number` — so it is
+    /// carried as a `Value` and copied through byte-for-byte. It is NOT an
+    /// independent identifier space and must never be minted server-side.
+    fn meta_subscription(subscription_id: &Value) -> Value {
         let mut meta = serde_json::Map::new();
-        meta.insert(
-            META_SUBSCRIPTION_ID.to_string(),
-            Value::from(subscription_id),
-        );
+        meta.insert(META_SUBSCRIPTION_ID.to_string(), subscription_id.clone());
         Value::Object(meta)
     }
 
@@ -950,7 +952,7 @@ impl JsonRpcNotification {
     /// subscriptions share one stdio pipe, and the client routes on this
     /// id alone.
     #[must_use]
-    pub fn for_subscription(method: &str, subscription_id: u64) -> Self {
+    pub fn for_subscription(method: &str, subscription_id: &Value) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
@@ -962,7 +964,7 @@ impl JsonRpcNotification {
 
     /// Create a `notifications/resources/updated` notification for one URI.
     #[must_use]
-    pub fn resources_updated(uri: &str, subscription_id: u64) -> Self {
+    pub fn resources_updated(uri: &str, subscription_id: &Value) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             method: "notifications/resources/updated".to_string(),
@@ -983,7 +985,7 @@ impl JsonRpcNotification {
     /// This is a NOTIFICATION, not the JSON-RPC `result` for the listen
     /// request: a client's pending-request table must not resolve on it.
     #[must_use]
-    pub fn subscriptions_acknowledged(subscription_id: u64, notifications: &Value) -> Self {
+    pub fn subscriptions_acknowledged(subscription_id: &Value, notifications: &Value) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             method: "notifications/subscriptions/acknowledged".to_string(),
@@ -1698,7 +1700,10 @@ mod tests {
 
     #[test]
     fn test_notification_for_subscription_stamps_subscription_id() {
-        let n = JsonRpcNotification::for_subscription("notifications/tools/list_changed", 7);
+        let n = JsonRpcNotification::for_subscription(
+            "notifications/tools/list_changed",
+            &serde_json::json!(7),
+        );
         assert_eq!(n.jsonrpc, "2.0");
         assert_eq!(n.method, "notifications/tools/list_changed");
         let params = n.params.expect("subscription notifications carry params");
@@ -1707,7 +1712,7 @@ mod tests {
 
     #[test]
     fn test_notification_resources_updated_shape() {
-        let n = JsonRpcNotification::resources_updated("history://recent", 1);
+        let n = JsonRpcNotification::resources_updated("history://recent", &serde_json::json!(1));
         assert_eq!(n.method, "notifications/resources/updated");
         let params = n.params.clone().expect("params present");
         assert_eq!(params["uri"], "history://recent");
@@ -1723,7 +1728,8 @@ mod tests {
             "toolsListChanged": true,
             "resourceSubscriptions": ["history://recent"],
         });
-        let n = JsonRpcNotification::subscriptions_acknowledged(3, &notifications);
+        let n =
+            JsonRpcNotification::subscriptions_acknowledged(&serde_json::json!(3), &notifications);
         assert_eq!(n.method, "notifications/subscriptions/acknowledged");
         let params = n.params.expect("params present");
         assert_eq!(params["_meta"][META_SUBSCRIPTION_ID], serde_json::json!(3));
