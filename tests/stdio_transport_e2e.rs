@@ -6,9 +6,9 @@
 //! the (single-session) `accept()` returned `None`. The runtime then
 //! killed the still-warming-up session task before it had read a single
 //! byte from stdin, and `bridge-mcp serve` would exit silently
-//! without ever responding to an `initialize` request.
+//! without ever responding to a `server/discover` request.
 //!
-//! This test spawns the real binary, pipes a JSON-RPC `initialize`
+//! This test spawns the real binary, pipes a JSON-RPC `server/discover`
 //! request to its stdin, and asserts that a well-formed response comes
 //! back on stdout. If the regression returns, this test will time out.
 
@@ -40,7 +40,7 @@ fn write_test_config(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stdio_serve_responds_to_initialize() {
+async fn stdio_serve_responds_to_discover() {
     let tmp = TempDir::new().expect("tempdir");
     let config = write_test_config(tmp.path());
 
@@ -58,11 +58,14 @@ async fn stdio_serve_responds_to_initialize() {
     let stdout = child.stdout.take().expect("stdout");
     let mut stdout = BufReader::new(stdout);
 
-    // Send initialize.
-    let req = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\
-        \"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\
-        \"clientInfo\":{\"name\":\"e2e-test\",\"version\":\"1\"}}}\n";
-    stdin.write_all(req).await.expect("write initialize");
+    // Send server/discover — the 2026-07-28 entry point. `initialize` now
+    // answers -32022 and would fail the serverInfo assertion below.
+    let req = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\
+        \"params\":{\"_meta\":{\
+        \"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\
+        \"io.modelcontextprotocol/clientInfo\":{\"name\":\"e2e-test\",\"version\":\"1\"},\
+        \"io.modelcontextprotocol/clientCapabilities\":{}}}}\n";
+    stdin.write_all(req).await.expect("write server/discover");
     stdin.flush().await.expect("flush");
 
     // Read one line of response with a generous timeout. Pre-fix this
@@ -78,12 +81,14 @@ async fn stdio_serve_responds_to_initialize() {
         serde_json::from_str(line.trim()).expect("response must be valid JSON");
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
+    // serverInfo moved into result._meta in 2026-07-28.
     assert!(
-        response["result"]["serverInfo"]["name"]
+        response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"]
             .as_str()
             .is_some_and(|n| n == "bridge-mcp"),
-        "expected serverInfo.name = bridge-mcp, got: {response}"
+        "expected _meta serverInfo.name = bridge-mcp, got: {response}"
     );
+    assert_eq!(response["result"]["resultType"], "complete");
 
     // Closing stdin signals EOF, which lets the session's reader loop
     // exit and `serve()` shut down cleanly.

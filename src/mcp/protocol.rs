@@ -1013,18 +1013,35 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2026-07-28"];
 
 /// How long a client may cache a `server/discover` result, in milliseconds.
 ///
-/// One hour, matching the spec's own example. The spec's normative wording for
-/// `ttlMs` (MUST-not-exceed vs. hint, and what a missing value implies) was not
-/// retrieved when this was written.
-/// SPEC: verify — `/specification/2026-07-28/server/discover`.
+/// One hour, matching the spec's own example.
+///
+/// Normative wording is on `/specification/2026-07-28/server/utilities/caching`:
+/// `ttlMs` is *"a hint from the server indicating how long, in milliseconds, the
+/// client MAY consider the result fresh"*, with semantics analogous to HTTP
+/// `Cache-Control: max-age`. It is **not** a MUST-not-exceed bound on the
+/// server's data — the server MAY change the underlying data before it expires;
+/// the value only tells a client how long it can reasonably skip re-fetching.
+///
+/// Servers MUST provide a value `>= 0`, and MUST include caching hints on any
+/// `resultType: "complete"` result. `0` means immediately stale; an absent value
+/// makes clients assume `0`. Both are why this is a plain `u64` constant rather
+/// than an `Option` — a Modern server always sends one.
 pub const DISCOVER_TTL_MS: u64 = 3_600_000;
 
 /// Discriminator on a `server/discover` result.
 ///
-/// Only `complete` is emitted. The full enum was not retrieved from the spec;
-/// this server never needs a non-complete variant because it computes the whole
-/// payload synchronously from local config.
-/// SPEC: verify — `/specification/2026-07-28/server/discover`.
+/// The spec enum has exactly two named variants at 2026-07-28 —
+/// `"complete"` and `"input_required"` — over a `| string` extension point that
+/// is deliberate, not an omission. Servers implementing this revision MUST
+/// include the field; a client receiving a result without one MUST treat it as
+/// `"complete"`.
+///
+/// Only `Complete` is modelled: `input_required` announces that the server needs
+/// something from the client first (auth, elicitation) or is load-shedding, and
+/// carries `inputRequests`/`requestState`. This server computes the whole
+/// discovery payload synchronously from local config, so it has nothing to ask
+/// for. Note such results are also explicitly *not* cacheable and carry no
+/// `ttlMs`/`cacheScope`, which is why `DiscoverResult` can keep both non-`Option`.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DiscoverResultType {
@@ -1033,8 +1050,39 @@ pub enum DiscoverResultType {
 
 /// Cache scope of a `server/discover` result.
 ///
-/// See the decision note on `McpServer::handle_discover` before changing this.
-/// SPEC: verify — `/specification/2026-07-28/server/discover`.
+/// Borrowed from HTTP `Cache-Control` semantics: `public` means the result may
+/// be cached and replayed to *any* caller.
+///
+/// The spec enum is closed and has exactly two values
+/// (`/specification/2026-07-28/server/utilities/caching`, where all `ttlMs` and
+/// `cacheScope` normativity lives — not the discover page):
+///
+/// - `"public"` — the response contains no user-specific data; any client,
+///   shared gateway or caching proxy MAY store it and serve it to any user.
+///   Appropriate for tool/prompt/resource-template lists that are identical
+///   for all users.
+/// - `"private"` — the response contains data not meant to be shared between
+///   callers. Caches MUST NOT be shared across authorization contexts.
+///
+/// Only `Public` is modelled because it is the only value this server can
+/// honestly emit, and it is honest for exactly one reason: bridge-mcp has no
+/// per-caller authorization. Tool-group enablement is process-wide
+/// (`config.tool_groups`), and `rbac.enabled: true` is rejected at config load
+/// (`src/config/loader.rs:226`) because nothing in the request path enforces
+/// it. 2026-07-28 also requires list endpoints not to vary per connection, so a
+/// uniform answer is the conformant shape, not a shortcut.
+///
+/// The caching page is explicit that this flag is not itself a control:
+/// *"Servers MUST be aware that responses with a `"public"` `cacheScope` may be
+/// shared between callers even if the Result is coming from an authenticated
+/// endpoint. […] MUST apply appropriate per-primitive access controls, and MUST
+/// NOT rely on `cacheScope` alone to prevent unauthorized access."*
+///
+/// So if RBAC ever gains a request-path enforcement point, `public` becomes an
+/// information leak — one caller's cached capability list replayed to another —
+/// and this enum needs the `Private` variant. The tripwire test
+/// `test_cache_scope_is_public_only_while_rbac_is_dead` in `src/mcp/server.rs`
+/// fails the day either precondition changes.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CacheScope {

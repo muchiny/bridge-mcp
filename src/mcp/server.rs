@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -33,17 +33,16 @@ use super::transport::{Session, Transport, stdio::StdioTransport};
 use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
-    BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, CacheScope, ClientInfo, CompletionRef,
-    CompletionResult, CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult,
-    CreateTaskResult, DISCOVER_TTL_MS, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon,
-    InitializeParams, InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, LogLevel, LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION,
-    PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
-    ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
-    SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
-    TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability, TaskResultParams,
-    TaskToolsCapability, TasksCapability, ToolCallParams, ToolCallResult, ToolContent,
-    ToolsCapability, ToolsListResult, WriterMessage,
+    BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, CacheScope, CompletionRef, CompletionResult,
+    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult,
+    DISCOVER_TTL_MS, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon, JsonRpcError,
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel, LoggingCapability,
+    LoggingSetLevelParams, PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult,
+    PromptsListResult, ResourcesCapability, ResourcesListResult, ResourcesReadParams,
+    ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
+    ServerCapabilities, ServerInfo, TaskCancelParams, TaskGetParams, TaskListParams,
+    TaskListResult, TaskRequestsCapability, TaskResultParams, TaskToolsCapability, TasksCapability,
+    ToolCallParams, ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -78,9 +77,7 @@ pub struct McpServer {
     tunnel_manager: Arc<TunnelManager>,
     output_cache: Arc<OutputCache>,
     task_store: Arc<TaskStore>,
-    initialized: AtomicBool,
     concurrent_limit: Arc<Semaphore>,
-    client_info: RwLock<Option<ClientInfo>>,
     /// Server-wide fanout registry of live session writer channels.
     ///
     /// Used by the config watcher (and any other server-wide event
@@ -324,9 +321,7 @@ impl McpServer {
             tunnel_manager,
             output_cache,
             task_store,
-            initialized: AtomicBool::new(false),
             concurrent_limit,
-            client_info: RwLock::new(None),
             notification_fanout: NotificationFanout::new(),
             log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
             mcp_logger: Arc::new(RwLock::new(None)),
@@ -1277,7 +1272,7 @@ impl McpServer {
 
         match request.method.as_str() {
             "server/discover" => self.handle_discover(id).await,
-            "initialize" => self.handle_initialize(id, request.params, session).await,
+            "initialize" => Self::handle_initialize(id, request.params.as_ref()),
             "tools/list" => self.handle_tools_list(id, request.params.as_ref()).await,
             "tools/call" => {
                 self.handle_tools_call(id, request.params, cancel_token, session)
@@ -1342,8 +1337,9 @@ impl McpServer {
     /// `build_provenance_meta()`) — the plan this was written against
     /// omitted that field from its literal, but `handle_initialize` has
     /// unconditionally populated it since before this cluster started, and
-    /// `test_handshake_payload_is_byte_identical` pins it. Callers:
-    /// `handle_initialize` (Legacy) and `handle_discover` (Modern).
+    /// `test_server_discover_full_wire_shape` pins it. Sole caller:
+    /// `handle_discover`. It was shared with `handle_initialize` until that
+    /// arm stopped building a payload at all and became a bare `-32022`.
     async fn build_discovery_payload(&self) -> DiscoveryPayload {
         let instructions = {
             let config = self.config.read().await;
@@ -1428,126 +1424,63 @@ impl McpServer {
         JsonRpcResponse::success_or_serialize_error(id, &result)
     }
 
-    #[allow(clippy::too_many_lines)]
-    async fn handle_initialize(
-        &self,
-        id: Option<Value>,
-        params: Option<Value>,
-        session: Option<&SessionContext>,
-    ) -> JsonRpcResponse {
-        // Parse initialize params, negotiate version, and store client info
-        let mut negotiated_version = PROTOCOL_VERSION.to_string();
+    /// Handle the Legacy `initialize` handshake.
+    ///
+    /// bridge-mcp 3.0.0 speaks MCP 2026-07-28 only, where `initialize` and
+    /// `notifications/initialized` no longer exist — `server/discover` opens
+    /// the connection instead (see `handle_discover`).
+    ///
+    /// The arm is kept, rather than falling through to `-32601 Method not
+    /// found`, because a Legacy client cannot fall *forward* on its own. The
+    /// spec's compatibility contract is a client-side probe
+    /// (`/specification/2026-07-28/basic/transports/stdio`, "Backward
+    /// Compatibility"): *"Clients supporting both modern and legacy MCP
+    /// versions should probe using `server/discover` before sending other
+    /// requests. If the server returns a discovery result, it is modern and
+    /// the client should select a mutually supported version. If the server
+    /// returns a specific modern protocol error, it is modern but requires a
+    /// different version. If the server returns other errors or fails to
+    /// respond, it is treated as a legacy server, and the client should fall
+    /// back to the `initialize` handshake."*
+    ///
+    /// The server-side rule is on `/specification/2026-07-28/basic/versioning`:
+    /// *"A server that supports only modern versions **SHOULD** name the
+    /// protocol versions it supports in any error it returns to an
+    /// `initialize` request, on any transport: legacy clients have no
+    /// fall-forward mechanism, and this message may be the only diagnostic
+    /// they can surface to users."* The SHOULD constrains what the error must
+    /// *contain*, not which code it carries; `data.supported` is that naming,
+    /// in machine-readable form.
+    ///
+    /// **Which code is transport-dependent, and this function is only correct
+    /// for stdio.** The compatibility matrix leaves the stdio code
+    /// implementation-defined (a Legacy `initialize` is both an unknown method
+    /// and missing its `_meta` fields, i.e. `-32601` and `-32602` both apply),
+    /// so `-32022` is a free and strictly more informative choice. Over
+    /// Streamable HTTP the code is *pinned* elsewhere: a Legacy `initialize`
+    /// POST carries no `Mcp-Method` header, so Server Validation makes
+    /// `400` + `-32020 HeaderMismatch` a MUST, and answering `-32022` there
+    /// would violate it. That check is Task 66's `check_modern_headers`, which
+    /// rejects the request before dispatch ever reaches this arm — until it
+    /// lands, the HTTP path answers `-32022` and is non-conformant.
+    ///
+    /// The requested version is read straight off the raw `Value` rather than
+    /// through `InitializeParams`, so a payload that fails deserialization —
+    /// missing `clientInfo`, missing `capabilities` — still echoes back what
+    /// the client asked for. Nothing here mutates server or session state.
+    fn handle_initialize(id: Option<Value>, params: Option<&Value>) -> JsonRpcResponse {
+        let requested = params
+            .and_then(|p| p.get("protocolVersion"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
 
-        if let Some(p) = params {
-            // Read `protocolVersion` off the RAW value before the typed
-            // deserialize can swallow it. `InitializeParams` requires
-            // `clientInfo`, so a client that omits only `clientInfo.version`
-            // lost BOTH its requested protocol version and its advertised
-            // `capabilities.elicitation` to the `Err` arm below. The version
-            // is the one field we can always recover; do that first.
-            if let Some(requested) = p.get("protocolVersion").and_then(Value::as_str)
-                && SUPPORTED_PROTOCOL_VERSIONS.contains(&requested)
-            {
-                negotiated_version = requested.to_string();
-            }
+        warn!(
+            requested_version = requested,
+            "Legacy `initialize` rejected; this server speaks {PROTOCOL_VERSION} only \
+             (use server/discover)"
+        );
 
-            match serde_json::from_value::<InitializeParams>(p) {
-                Ok(init_params) => {
-                    info!(
-                        client = %init_params.client_info.name,
-                        version = %init_params.client_info.version,
-                        protocol = %init_params.protocol_version,
-                        "Client connected"
-                    );
-
-                    // MCP version negotiation: echo client version if we support it,
-                    // otherwise respond with our latest version
-                    if SUPPORTED_PROTOCOL_VERSIONS.contains(&init_params.protocol_version.as_str())
-                    {
-                        negotiated_version = init_params.protocol_version.clone();
-                    }
-
-                    // Resolve per-client max_output_chars override
-                    let (effective, yaml_default) = {
-                        let config = self.config.read().await;
-                        (
-                            config
-                                .limits
-                                .effective_max_output_chars(Some(&init_params.client_info.name)),
-                            config.limits.max_output_chars,
-                        )
-                    };
-                    if effective != yaml_default {
-                        info!(
-                            client = %init_params.client_info.name,
-                            max_output_chars = effective,
-                            "Applied client-specific max_output_chars override"
-                        );
-                        // Per-session runtime override (FIND-033 audit 2026-05-09):
-                        // write to THIS session's slot only; concurrent clients
-                        // with different `client_overrides` profiles do not
-                        // contaminate each other.
-                        if let Some(s) = session {
-                            *s.runtime_max_output.write().await = Some(effective);
-                        }
-                    }
-
-                    // Per-session capabilities (Vuln 9 audit 2026-05-09): write
-                    // each client's advertised flags to its OWN
-                    // `SessionCapabilities`, not a server-wide AtomicBool. The
-                    // legacy non-MCP code paths (`handle_request`) pass `None`
-                    // and silently drop these flags — that's fine because they
-                    // also can't initiate elicitation/sampling/roots.
-                    if init_params.capabilities.roots.is_some() {
-                        if let Some(s) = session {
-                            s.caps.set_supports_roots(true);
-                        }
-                        info!("Client supports roots capability");
-                    }
-
-                    if init_params.capabilities.elicitation.is_some() {
-                        if let Some(s) = session {
-                            s.caps.set_supports_elicitation(true);
-                        }
-                        info!("Client supports elicitation capability");
-                    }
-
-                    if init_params.capabilities.sampling.is_some() {
-                        if let Some(s) = session {
-                            s.caps.set_supports_sampling(true);
-                        }
-                        info!("Client supports sampling capability");
-                    }
-
-                    *self.client_info.write().await = Some(init_params.client_info);
-                }
-                Err(e) => {
-                    // Not fatal — the spec lets us fall forward — but this
-                    // silently costs the client its advertised capabilities
-                    // (elicitation, sampling, roots) and its clientInfo, so
-                    // it must be visible at the default log level.
-                    warn!(
-                        error = %e,
-                        negotiated_version = %negotiated_version,
-                        "Could not parse initialize params; client capabilities and clientInfo \
-                         are being ignored for this session"
-                    );
-                }
-            }
-        }
-
-        self.initialized.store(true, Ordering::SeqCst);
-
-        let payload = self.build_discovery_payload().await;
-
-        let result = InitializeResult {
-            protocol_version: negotiated_version,
-            capabilities: payload.capabilities,
-            server_info: payload.server_info,
-            instructions: Some(payload.instructions),
-        };
-
-        JsonRpcResponse::success_or_serialize_error(id, &result)
+        JsonRpcResponse::error(id, JsonRpcError::unsupported_protocol_version(requested))
     }
 
     async fn handle_tools_list(
@@ -2890,240 +2823,165 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_handle_initialize_negotiates_matching_version() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "2026-07-28",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        // Server echoes back the client's version when supported
-        assert_eq!(result["protocolVersion"], "2026-07-28");
-        assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
-        assert_eq!(result["serverInfo"]["version"], SERVER_VERSION);
-        assert!(result["capabilities"]["tools"].is_object());
-    }
-
-    /// G-6 (audit 2026-08-19): the handshake advertised
-    /// `resources.subscribe: true` while the server has no emitter at all —
-    /// `notifications/resources/updated` appears nowhere in the tree, and
-    /// `SessionContext::resource_subs` is now neither written nor read — both
-    /// `resources/subscribe` and `resources/unsubscribe` refuse with -32601.
-    /// A client that trusted the flag would subscribe and then wait forever.
-    /// Advertise the truth until an emitter exists.
-    #[tokio::test]
-    async fn test_initialize_does_not_advertise_resource_subscriptions() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-
-        assert_eq!(
-            result["capabilities"]["resources"]["subscribe"],
-            json!(false),
-            "resources.subscribe must stay false until the server actually \
-             emits notifications/resources/updated"
-        );
-        assert_eq!(
-            result["capabilities"]["resources"]["listChanged"],
-            json!(true),
-            "listChanged IS honored (config reload broadcasts \
-             resources_list_changed) and must stay advertised"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_handle_initialize_unsupported_version_returns_latest() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "1999-01-01",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        // Unsupported version: server responds with its latest
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-    }
-
-    #[tokio::test]
-    async fn test_handle_initialize_no_params_uses_default_version() {
-        let server = create_test_server();
-
-        let response = server.handle_initialize(Some(json!(1)), None, None).await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-    }
-
-    #[tokio::test]
-    async fn test_handle_initialize_includes_server_metadata() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-        let result = response.result.unwrap();
-
-        assert!(result["serverInfo"]["description"].is_string());
-        assert!(result["serverInfo"]["websiteUrl"].is_string());
-        assert!(result["instructions"].is_string());
-    }
-
-    #[tokio::test]
-    async fn test_handle_initialize_sets_initialized_flag() {
-        let server = create_test_server();
-        assert!(!server.initialized.load(Ordering::SeqCst));
-
-        server.handle_initialize(Some(json!(1)), None, None).await;
-
-        assert!(server.initialized.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn test_handle_initialize_includes_extensions() {
-        let server = create_test_server();
-        let response = server.handle_initialize(Some(json!(1)), None, None).await;
-        let result = response.result.unwrap();
-        let caps = &result["capabilities"];
-
-        // Completions and logging capabilities are present
-        assert!(caps["completions"].is_object());
-        assert!(caps["logging"].is_object());
-
-        // Extensions should contain tasks + output-pagination at minimum
-        let exts = &caps["extensions"];
-        assert!(exts.is_object(), "extensions should be an object");
+    /// 2026-07-28 has no handshake, so the server holds no "initialized"
+    /// state. This test is a grep-in-a-test: if someone reintroduces a
+    /// connection-scoped readiness flag, it fails and points them at
+    /// `server/discover`, which is stateless by construction.
+    ///
+    /// It searches only the PRODUCTION half of the file. Do not "simplify"
+    /// this back to `src.contains(...)`: the needle also occurs in this
+    /// test's own assertion, so searching the whole file matches itself and
+    /// the test can never pass — which is exactly how it was first written.
+    /// Splitting beats escaping the literal because it also survives a future
+    /// test that mentions the field name in passing.
+    ///
+    /// `expect` rather than a lenient fallback: if the anchor ever stops
+    /// matching, this must fail loudly on the anchor instead of silently
+    /// widening the search back to the whole file.
+    #[test]
+    fn test_server_holds_no_handshake_state() {
+        let src = include_str!("server.rs");
+        let (production, _tests) = src
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("anchor `#[cfg(test)]\\nmod tests {` not found; fix this test's split");
         assert!(
-            exts["io.modelcontextprotocol/tasks"].is_object(),
-            "tasks extension should be present"
-        );
-        assert!(
-            exts["com.bridge-mcp/output-pagination"].is_object(),
-            "output-pagination extension should be present"
+            !production.contains("initialized: AtomicBool"),
+            "McpServer regained an `initialized` flag; 2026-07-28 has no handshake \
+             and server/discover must stay stateless"
         );
     }
 
-    /// Characterization test for the handshake payload.
+    /// A Legacy client that still opens with `initialize` gets `-32022` with
+    /// the supported-version list — not `-32601`, and not a fake handshake.
     ///
-    /// Pins the exact JSON of the three pieces that `handle_initialize`
-    /// assembles today — capabilities, serverInfo, instructions — so that
-    /// hoisting them into `build_discovery_payload` can be proven
-    /// behavior-preserving. This test passes BEFORE the extraction and must
-    /// pass byte-for-byte AFTER it.
-    ///
-    /// `create_test_server()` uses `hosts: HashMap::new()`, so
-    /// `build_server_extensions` emits exactly two entries — the multi-host
-    /// extension is gated on `host_count > 1`.
-    ///
-    /// `serverInfo._meta` carries build provenance
-    /// (`build_provenance_meta()`, keyed by `BUILD_META_KEY`) — a field the
-    /// plan's own golden literal omitted; `BUILD_REV` and `SERVER_VERSION`
-    /// are read live rather than hardcoded so this test does not need
-    /// updating on every build or release.
+    /// The arm exists at all because of the 2026-07-28 client-side probe
+    /// (`/specification/2026-07-28/basic/transports/stdio`, "Backward
+    /// Compatibility"): a dual-era client sends `server/discover` first, and
+    /// reads "discovery result = modern", "specific modern protocol error =
+    /// modern but wrong version", "anything else = legacy". A Legacy-only
+    /// client never probes; `-32022` is the only response that tells it which
+    /// revision would have worked.
     #[tokio::test]
-    async fn test_handshake_payload_is_byte_identical() {
+    async fn test_legacy_initialize_returns_unsupported_protocol_version() {
         let server = create_test_server();
-        let response = server.handle_initialize(Some(json!(1)), None, None).await;
-        let result = response.result.expect("initialize must succeed");
-
-        assert_eq!(
-            result["capabilities"],
-            json!({
-                "tools": {"listChanged": true},
-                "prompts": {"listChanged": true},
-                "resources": {"subscribe": false, "listChanged": true},
-                "tasks": {
-                    "list": {},
-                    "cancel": {},
-                    "requests": {"tools": {"call": {}}}
-                },
-                "completions": {},
-                "logging": {},
-                "extensions": {
-                    "io.modelcontextprotocol/tasks": {},
-                    "com.bridge-mcp/output-pagination": {}
-                }
-            }),
-            "capabilities changed shape; the extraction was not behavior-preserving"
-        );
-
-        // This literal pins the CURRENT serialized shape, including fields
-        // that are absent because they are `None` under
-        // `skip_serializing_if` (e.g. `Icon.theme`, always `None` here). If
-        // a future change starts populating one of those, this literal must
-        // grow to match — it is not a hidden gap today, but it does not
-        // defend against one appearing tomorrow.
-        assert_eq!(
-            result["serverInfo"],
-            json!({
-                "name": SERVER_NAME,
-                "version": SERVER_VERSION,
-                "description": "Secure SSH bridge for remote server management via MCP",
-                "websiteUrl": "https://github.com/muchiny/bridge-mcp",
-                "icons": [{
-                    "src": SERVER_ICON_URL,
-                    "mimeType": "image/svg+xml",
-                    "sizes": ["any"]
-                }],
-                "_meta": {
-                    "io.github.muchiny/build": {
-                        "rev": BUILD_REV,
-                        "version": SERVER_VERSION
-                    }
-                }
-            }),
-            "serverInfo changed shape; the extraction was not behavior-preserving"
-        );
-
-        let expected_instructions = {
-            let config = server.config.read().await;
-            instructions::build_instructions(&config, server.registry.len())
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"elicitation": {}},
+                "clientInfo": {"name": "legacy-client", "version": "1.0.0"}
+            })),
         };
-        assert_eq!(
-            result["instructions"],
-            json!(expected_instructions),
-            "instructions no longer come from build_instructions(config, registry.len())"
+
+        let response = server.handle_request(request).await;
+
+        assert!(response.result.is_none(), "initialize must not succeed");
+        let error = response.error.expect("initialize must return an error");
+        assert_eq!(error.code, -32022);
+        assert_eq!(error.message, "Unsupported protocol version");
+
+        let data = error.data.expect("data payload");
+        assert_eq!(data["supported"], json!(["2026-07-28"]));
+        assert_eq!(data["requested"], json!("2025-11-25"));
+    }
+
+    /// Malformed `initialize` params must not change the answer. The handler
+    /// reads `protocolVersion` straight off the raw `Value`, so a payload that
+    /// would fail `InitializeParams` deserialization still round-trips the
+    /// requested version back to the client.
+    #[tokio::test]
+    async fn test_legacy_initialize_malformed_params_still_echoes_version() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(2)),
+            method: "initialize".to_string(),
+            // No clientInfo, no capabilities — `InitializeParams` cannot parse
+            // this, but `protocolVersion` is still right there.
+            params: Some(json!({"protocolVersion": "2024-11-05"})),
+        };
+
+        let response = server.handle_request(request).await;
+
+        let error = response.error.expect("initialize must return an error");
+        assert_eq!(error.code, -32022);
+        assert_eq!(error.data.unwrap()["requested"], json!("2024-11-05"));
+    }
+
+    /// No params at all: still `-32022`, with an empty `requested`.
+    #[tokio::test]
+    async fn test_legacy_initialize_without_params() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(3)),
+            method: "initialize".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+
+        let error = response.error.expect("initialize must return an error");
+        assert_eq!(error.code, -32022);
+        assert_eq!(error.data.unwrap()["requested"], json!(""));
+    }
+
+    /// `initialize` must mutate nothing. Before 3.0.0 it wrote three
+    /// `SessionCapabilities` `AtomicBool`s, the per-session
+    /// `runtime_max_output` slot, and a server-wide `client_info` — a Legacy
+    /// client could therefore hand itself elicitation rights through a
+    /// handshake this server no longer honors.
+    ///
+    /// Only the capability flags are asserted here because they are all that
+    /// still exists to assert. `McpServer::client_info` was deleted once this
+    /// arm stopped writing it: Modern carries `clientInfo` per request in the
+    /// `_meta` envelope (`RequestMeta::client_info`), so a server-wide "the
+    /// client" is meaningless for a stateless server serving concurrent
+    /// sessions. That guarantee is now structural — there is no field left to
+    /// record an identity into — which is stronger than this test was.
+    #[tokio::test]
+    async fn test_legacy_initialize_mutates_no_handshake_state() {
+        let server = create_test_server();
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session = SessionContext::new(tx);
+
+        assert!(!session.caps.supports_elicitation());
+        assert!(!session.caps.supports_roots());
+        assert!(!session.caps.supports_sampling());
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(4)),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {
+                    "elicitation": {},
+                    "sampling": {},
+                    "roots": {"listChanged": true}
+                },
+                "clientInfo": {"name": "legacy-client", "version": "1.0.0"}
+            })),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
+
+        assert_eq!(response.error.expect("must error").code, -32022);
+        assert!(
+            !session.caps.supports_elicitation(),
+            "a rejected handshake granted elicitation"
+        );
+        assert!(
+            !session.caps.supports_roots(),
+            "a rejected handshake granted roots"
+        );
+        assert!(
+            !session.caps.supports_sampling(),
+            "a rejected handshake granted sampling"
         );
     }
 
@@ -3201,6 +3059,81 @@ mod tests {
                 "cacheScope": "public"
             })
         );
+    }
+
+    /// Tripwire: `cacheScope: "public"` is only sound while this server has no
+    /// per-caller authorization.
+    ///
+    /// "public" means the discovery result — capabilities, tool inventory,
+    /// instructions — may be cached and replayed to any caller. That holds
+    /// today because group enablement lives in `config.tool_groups`
+    /// (process-wide) and `rbac.enabled: true` is rejected at config load
+    /// (`src/config/loader.rs:226`) since nothing in the request path enforces
+    /// it. 2026-07-28 in fact *requires* list endpoints not to vary per
+    /// connection, so this is the conformant shape.
+    ///
+    /// When RBAC becomes real — when `RbacConfig::default().enabled` can be
+    /// true, or when the loader stops rejecting it — this test fails, and
+    /// `handle_discover` must switch to a session-scoped cache scope before it
+    /// can pass again. Do not silence it by editing the assertion.
+    ///
+    /// Both preconditions are checked by BEHAVIOUR, not by grepping
+    /// `loader.rs` for the shape of its `if`. A source-text guard passes on a
+    /// rejection that has been refactored into something that no longer
+    /// rejects, which is precisely the state it exists to catch. This is also
+    /// the only test in the tree that exercises the load-time refusal at all.
+    #[tokio::test]
+    async fn test_cache_scope_is_public_only_while_rbac_is_dead() {
+        assert!(
+            !crate::security::rbac::RbacConfig::default().enabled,
+            "RBAC default flipped to enabled: server/discover's cacheScope must \
+             stop being \"public\" — a cached discovery result would replay one \
+             caller's capabilities to another"
+        );
+
+        // Second, independent encoding of the same precondition: an operator
+        // who asks for RBAC must still be refused at config load.
+        let yaml = "\
+hosts:
+  test:
+    hostname: \"10.0.0.1\"
+    user: testuser
+    auth:
+      type: agent
+security:
+  mode: permissive
+rbac:
+  enabled: true
+";
+        let config_file = tempfile::NamedTempFile::new().expect("create temp config");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(config_file.path(), std::fs::Permissions::from_mode(0o600))
+                .expect("tighten temp config permissions");
+        }
+        std::fs::write(config_file.path(), yaml).expect("write temp config");
+
+        let err = crate::config::load_config(config_file.path()).expect_err(
+            "`rbac.enabled: true` loaded successfully: per-caller authorization may now \
+             be live, so server/discover's cacheScope can no longer be \"public\"",
+        );
+        assert!(
+            matches!(
+                &err,
+                crate::error::BridgeError::ConfigInvalid { field, .. } if field == "rbac.enabled"
+            ),
+            "`rbac.enabled: true` was rejected for the wrong reason ({err}); the \
+             load-time RBAC refusal that makes cacheScope \"public\" honest is gone"
+        );
+
+        let server = create_test_server();
+        let result = server
+            .handle_discover(Some(json!(1)))
+            .await
+            .result
+            .expect("server/discover must return a result");
+        assert_eq!(result["cacheScope"], "public");
     }
 
     /// `server/discover` must be reachable through the public dispatcher, not
@@ -4123,183 +4056,6 @@ mod tests {
         assert_eq!(error.code, -32602);
     }
 
-    #[tokio::test]
-    async fn test_initialize_includes_prompts_capability() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["capabilities"]["prompts"].is_object());
-    }
-
-    // ============== Additional Initialize Tests ==============
-
-    #[tokio::test]
-    async fn test_initialize_with_null_id() {
-        let server = create_test_server();
-        let response = server.handle_initialize(None, None, None).await;
-
-        assert!(response.error.is_none());
-        // G-3: `route_incoming_message` now drops id-less messages, so the
-        // stdio path can no longer reach this handler with `id: None`. The
-        // handler must still emit a spec-legal `"id": null` for direct
-        // callers (HTTP, tests).
-        let serialized = serde_json::to_value(&response).unwrap();
-        assert!(serialized.as_object().unwrap().contains_key("id"));
-        assert!(serialized["id"].is_null());
-    }
-
-    #[tokio::test]
-    async fn test_initialize_with_string_id() {
-        let server = create_test_server();
-        let response = server
-            .handle_initialize(Some(json!("request-1")), None, None)
-            .await;
-
-        assert!(response.error.is_none());
-        assert_eq!(response.id, Some(json!("request-1")));
-    }
-
-    #[tokio::test]
-    async fn test_initialize_includes_resources_capability() {
-        let server = create_test_server();
-        let response = server.handle_initialize(Some(json!(1)), None, None).await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["capabilities"]["resources"].is_object());
-    }
-
-    #[tokio::test]
-    async fn test_initialize_multiple_times() {
-        let server = create_test_server();
-
-        let response1 = server.handle_initialize(Some(json!(1)), None, None).await;
-        let response2 = server.handle_initialize(Some(json!(2)), None, None).await;
-
-        // Both should succeed (no state prevents re-initialization)
-        assert!(response1.error.is_none());
-        assert!(response2.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_initialize_invalid_params_still_succeeds() {
-        let server = create_test_server();
-        let params = json!({
-            "invalid": "params",
-            "completely": "wrong"
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        // Should still succeed (params are optional/best-effort)
-        assert!(response.error.is_none());
-        // With no recoverable protocolVersion, we advertise our own latest.
-        let result = response.result.unwrap();
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-    }
-
-    #[tokio::test]
-    async fn test_initialize_recovers_protocol_version_from_malformed_params() {
-        let server = create_test_server();
-        // `clientInfo` is missing, so `InitializeParams` deserialization
-        // fails outright — the whole `params` object used to be discarded in
-        // a `debug!`, silently downgrading the session to our latest version.
-        //
-        // NON-DISCRIMINATING since task 11 (3.0.0, Modern-only): with a
-        // single supported version, "recovered from the raw Value" and
-        // "fell back to PROTOCOL_VERSION" now yield the same string, so this
-        // assertion can no longer tell the two paths apart. It is kept only
-        // as an interim green while `handle_initialize` still exists; task
-        // 15 deletes both `initialize` negotiation and this test.
-        let params = json!({
-            "protocolVersion": "2026-07-28",
-            "capabilities": { "elicitation": {} }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(
-            result["protocolVersion"], "2026-07-28",
-            "a supported protocolVersion must survive a failed typed parse"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_initialize_unsupported_protocol_version_falls_forward() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "1999-01-01",
-            "capabilities": {},
-            "clientInfo": { "name": "test-client", "version": "0.0.1" }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        // Spec: fall forward to our latest, do NOT return -32602.
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
-    }
-
-    #[tokio::test]
-    async fn test_initialize_recovers_capabilities_when_only_client_version_missing() {
-        // Fix-round follow-up to G-18: the original fix only recovered
-        // `protocolVersion` off the raw Value. `ClientInfo.version` had no
-        // serde default, so a client that omits ONLY `clientInfo.version`
-        // still failed the typed deserialize and still lost `capabilities`
-        // and `clientInfo` entirely — including `capabilities.elicitation`,
-        // which the destructive-tool gate depends on
-        // (`require_elicitation_on_destructive` defaults to true).
-        //
-        // The `protocolVersion` assertion below is NON-DISCRIMINATING since
-        // task 11 (3.0.0, Modern-only): with a single supported version,
-        // "recovered from the raw Value" and "fell back to PROTOCOL_VERSION"
-        // now yield the same string. The `supports_elicitation()` assertion
-        // is unaffected and still proves what it always did. Both die in
-        // task 15 along with the rest of `initialize` negotiation.
-        let server = create_test_server();
-        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
-        let session_ctx = SessionContext::new(tx);
-        let params = json!({
-            "protocolVersion": "2026-07-28",
-            "capabilities": { "elicitation": {} },
-            "clientInfo": { "name": "test-client" }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), Some(&session_ctx))
-            .await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(result["protocolVersion"], "2026-07-28");
-        assert!(
-            session_ctx.caps.supports_elicitation(),
-            "omitting only clientInfo.version must not drop capabilities.elicitation"
-        );
-    }
-
     // ============== Additional Tools Tests ==============
 
     #[tokio::test]
@@ -4670,25 +4426,11 @@ mod tests {
 
         let (server, audit_task) = McpServer::new(config);
 
-        // Server should be created
-        assert!(!server.initialized.load(std::sync::atomic::Ordering::SeqCst));
+        // Server should be created with its full tool inventory reachable.
+        assert!(!server.registry.is_empty(), "registry came up empty");
 
         // Audit task might be None if audit is disabled by default
         drop(audit_task);
-    }
-
-    #[tokio::test]
-    async fn test_server_initialized_flag() {
-        let server = create_test_server();
-
-        // Initially not initialized
-        assert!(!server.initialized.load(std::sync::atomic::Ordering::SeqCst));
-
-        // After initialize call
-        server.handle_initialize(Some(json!(1)), None, None).await;
-
-        // Should be initialized
-        assert!(server.initialized.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     // ============== Edge Cases ==============
@@ -4726,29 +4468,6 @@ mod tests {
     }
 
     // ============== Task Tests (MCP 2025-11-25+) ==============
-
-    #[tokio::test]
-    async fn test_initialize_includes_tasks_capability() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        let result = response.result.unwrap();
-        assert!(result["capabilities"]["tasks"].is_object());
-        assert!(result["capabilities"]["tasks"]["list"].is_object());
-        assert!(result["capabilities"]["tasks"]["cancel"].is_object());
-        assert!(result["capabilities"]["tasks"]["requests"]["tools"]["call"].is_object());
-    }
 
     /// NOT a mirror of dispatch, despite appearances: production never calls
     /// `task_support()` to build the listing — three independent hardcoded
@@ -6576,33 +6295,6 @@ mod tests {
         assert!(super::plan_command_from_args(None).is_none());
     }
 
-    #[tokio::test]
-    async fn test_initialize_server_info_meta_carries_build_rev() {
-        let server = create_test_server();
-        let params = json!({
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "test-client",
-                "version": "1.0.0"
-            }
-        });
-
-        let response = server
-            .handle_initialize(Some(json!(1)), Some(params), None)
-            .await;
-
-        let result = response.result.unwrap();
-        let build = &result["serverInfo"]["_meta"]["io.github.muchiny/build"];
-        assert!(
-            build.is_object(),
-            "serverInfo._meta must carry build provenance, got: {}",
-            result["serverInfo"]
-        );
-        assert_eq!(build["rev"], BUILD_REV);
-        assert_eq!(build["version"], SERVER_VERSION);
-    }
-
     /// Confirms the NON-mutation half of the dispatch-chokepoint contract:
     /// when `handle_request_with_cancel` scopes a request's `_meta` envelope
     /// onto a session clone (Task 3), the ORIGINAL `SessionContext` the
@@ -6792,32 +6484,31 @@ mod tests {
         );
     }
 
-    /// Legacy era: `initialize` declared elicitation, subsequent requests
-    /// carry no `_meta`. The fallback must keep working until the handshake
-    /// is removed in a later 3.0.0 task.
+    /// Not a Legacy-handshake test any more: task 15 deleted every
+    /// production writer of `SessionCapabilities` (`handle_initialize` used
+    /// to be the only one). What survives is a narrower but still-real
+    /// invariant — when a request carries no `_meta` envelope at all, the
+    /// destructive-elicitation gate falls back to `session.caps` rather than
+    /// denying by default. Its sibling,
+    /// `test_request_meta_empty_capabilities_overrides_initialize`, sends an
+    /// explicit empty `clientCapabilities: {}` (`Some(false)`, which beats
+    /// `caps`) — a different branch from the `None` case exercised here.
+    ///
+    /// Decision point for task 68: `SessionCapabilities` survives only if a
+    /// production caller still writes to it. This test is why the answer is
+    /// GO after this task — `session_ctx.caps.set_supports_elicitation(true)`
+    /// below is set directly, because no production code path does it any
+    /// more. A recon that ran task 68's writer-search before this task landed
+    /// found STOP.
     #[tokio::test]
-    async fn test_destructive_gate_falls_back_to_initialize_when_no_meta() {
+    async fn test_destructive_gate_falls_back_to_caps_when_no_meta() {
         let mut config = test_config();
         config.security.require_elicitation_on_destructive = true;
         let (server, _audit_task) = McpServer::new(config);
 
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-
-        // Legacy handshake declares elicitation.
-        let init = server
-            .handle_initialize(
-                Some(json!(0)),
-                Some(json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": { "elicitation": {} },
-                    "clientInfo": { "name": "LegacyClient", "version": "0.9.0" }
-                })),
-                Some(&session_ctx),
-            )
-            .await;
-        assert!(init.error.is_none());
-        assert!(session_ctx.caps.supports_elicitation());
+        session_ctx.caps.set_supports_elicitation(true);
 
         let pending = Arc::clone(&session_ctx.pending);
         let fake_client = tokio::spawn(async move {
