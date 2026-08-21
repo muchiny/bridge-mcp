@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -65,6 +66,14 @@ impl Default for HistoryConfig {
 pub struct CommandHistory {
     entries: Mutex<VecDeque<HistoryEntry>>,
     max_entries: usize,
+    /// Monotonic mutation counter.
+    ///
+    /// The MCP resource watcher publishes
+    /// `notifications/resources/updated` for `history://recent` only when
+    /// this value moves, so a poll tick over an idle bridge emits nothing.
+    /// `Relaxed` is sufficient: the watcher only compares the value with
+    /// the previous observation and never orders other memory against it.
+    revision: AtomicU64,
 }
 
 impl CommandHistory {
@@ -74,6 +83,7 @@ impl CommandHistory {
         Self {
             entries: Mutex::new(VecDeque::with_capacity(config.max_entries)),
             max_entries: config.max_entries,
+            revision: AtomicU64::new(0),
         }
     }
 
@@ -95,6 +105,10 @@ impl CommandHistory {
         }
 
         entries.push_back(entry);
+        drop(entries);
+        // Bumped only after the mutation actually landed: a poisoned
+        // lock returns above and must NOT advertise a change.
+        self.revision.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a successful command execution
@@ -185,7 +199,16 @@ impl CommandHistory {
     pub fn clear(&self) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.clear();
+            drop(entries);
+            self.revision.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Monotonic mutation counter — changes on every `add`/`clear` and
+    /// never on a read.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
     }
 }
 
@@ -321,5 +344,52 @@ mod tests {
             !history.is_empty(),
             "history with one entry must not be empty"
         );
+    }
+
+    /// The MCP resource watcher needs to know whether `history://recent`
+    /// actually changed. Cloning and comparing the whole entry list every
+    /// 30 s is wasteful; a monotonic counter is exact and O(1).
+    #[test]
+    fn test_revision_advances_only_on_mutation() {
+        let history = CommandHistory::with_defaults();
+        let start = history.revision();
+
+        assert_eq!(history.recent(10).len(), 0);
+        assert_eq!(
+            history.revision(),
+            start,
+            "a read must not bump the revision"
+        );
+
+        history.record_success("host", "uptime", 0, 12);
+        let after_add = history.revision();
+        assert_ne!(after_add, start, "add() must bump the revision");
+
+        history.record_failure("host", "bad-cmd");
+        assert_ne!(
+            history.revision(),
+            after_add,
+            "a second add must bump again"
+        );
+
+        let before_clear = history.revision();
+        history.clear();
+        assert_ne!(
+            history.revision(),
+            before_clear,
+            "clear() must bump the revision"
+        );
+    }
+
+    #[test]
+    fn test_revision_survives_capacity_eviction() {
+        let history = CommandHistory::new(&HistoryConfig { max_entries: 2 });
+        history.record_success("h", "a", 0, 1);
+        history.record_success("h", "b", 0, 1);
+        let before = history.revision();
+        // This one evicts the oldest entry — the content still changed.
+        history.record_success("h", "c", 0, 1);
+        assert_ne!(history.revision(), before);
+        assert_eq!(history.recent(10).len(), 2);
     }
 }
