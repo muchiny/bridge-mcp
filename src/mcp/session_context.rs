@@ -18,12 +18,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
 
 use tokio::sync::{RwLock, mpsc};
 
 use super::pending_requests::PendingRequests;
-use super::protocol::{LogLevel, RootEntry, WriterMessage};
+use super::protocol::{RootEntry, WriterMessage};
 use super::request_meta::RequestMeta;
 use super::session_capabilities::SessionCapabilities;
 
@@ -53,12 +52,6 @@ pub struct SessionContext {
     /// Per-session client-declared workspace roots. Written by
     /// `fetch_roots` after `notifications/initialized`. FIND-037.
     pub roots: Arc<RwLock<Vec<RootEntry>>>,
-    /// Per-session log-level threshold for `notifications/message`.
-    /// Updated by `notifications/setLevel` from THIS session, read by
-    /// the per-session `McpLogger`. FIND-035: previously a global
-    /// `Arc<AtomicU8>` on `McpServer`, so client B's setLevel could
-    /// mute client A's notifications.
-    pub log_level: Arc<AtomicU8>,
     /// The `_meta` envelope of the ONE request currently being handled
     /// (MCP 2026-07-28). `None` on the session-level bundle and on every
     /// request from a Legacy client.
@@ -83,7 +76,6 @@ impl SessionContext {
             runtime_max_output: Arc::new(RwLock::new(None)),
             resource_subs: Arc::new(RwLock::new(HashMap::new())),
             roots: Arc::new(RwLock::new(Vec::new())),
-            log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
             request_meta: None,
         }
     }
@@ -253,7 +245,7 @@ impl Drop for FanoutGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::protocol::{JsonRpcNotification, LogLevel};
+    use crate::mcp::protocol::JsonRpcNotification;
 
     fn dummy_writer_tx() -> mpsc::Sender<WriterMessage> {
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
@@ -264,12 +256,6 @@ mod tests {
     async fn session_context_new_initializes_default_state() {
         let tx = dummy_writer_tx();
         let ctx = SessionContext::new(tx);
-
-        // Default log level matches Warning severity (FIND-035 default).
-        assert_eq!(
-            ctx.log_level.load(std::sync::atomic::Ordering::Relaxed),
-            LogLevel::Warning.severity()
-        );
 
         // All map/list state empty on construction.
         assert!(ctx.runtime_max_output.read().await.is_none());

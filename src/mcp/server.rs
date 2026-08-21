@@ -36,8 +36,8 @@ use super::protocol::{
     BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, ClientInfo, CompletionRef, CompletionResult,
     CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult,
     Icon, InitializeParams, InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, LogLevel, LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION,
-    PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
+    JsonRpcResponse, LogLevel, LoggingCapability, PROTOCOL_VERSION, PromptsCapability,
+    PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
     SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
     TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability, TaskResultParams,
@@ -80,11 +80,6 @@ pub struct McpServer {
     /// last-writer-wins `notification_tx` slot with this fanout
     /// registry plus per-session `SessionContext` senders.
     notification_fanout: NotificationFanout,
-    /// Current minimum log level for MCP logging notifications.
-    log_level: Arc<AtomicU8>,
-    /// MCP logger for sending `notifications/message` to the client.
-    /// Initialized in `run()` once the writer channel is ready.
-    mcp_logger: Arc<RwLock<Option<Arc<McpLogger>>>>,
     /// Completion provider for argument auto-completion.
     completion_provider: DefaultCompletionProvider,
     /// Application metrics for token consumption analytics.
@@ -314,8 +309,6 @@ impl McpServer {
             concurrent_limit,
             client_info: RwLock::new(None),
             notification_fanout: NotificationFanout::new(),
-            log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
-            mcp_logger: Arc::new(RwLock::new(None)),
             completion_provider: DefaultCompletionProvider,
             metrics: Arc::new(crate::metrics::Metrics::new()),
         };
@@ -575,7 +568,6 @@ impl McpServer {
         // when no session handle is available (legacy non-MCP code paths).
         ctx.client_supports_elicitation = session.is_some_and(SessionContext::supports_elicitation);
         ctx.client_supports_sampling = session.is_some_and(SessionContext::supports_sampling);
-        ctx.mcp_logger = self.mcp_logger.read().await.as_ref().map(Arc::clone);
         ctx
     }
 
@@ -805,17 +797,6 @@ impl McpServer {
         // panics — so dead senders never accumulate (FIND-034).
         let fanout_guard = self.notification_fanout.register(tx.clone());
 
-        // Create / refresh MCP logger (writes `notifications/message`
-        // to the client) now that we have a tx for this session.
-        // FIND-035: McpLogger is gated by the SESSION's log_level so
-        // `notifications/setLevel` from this client cannot mute another
-        // client's notifications.
-        let mcp_logger = Arc::new(McpLogger::new(
-            Arc::clone(&session_ctx.log_level),
-            tx.clone(),
-        ));
-        *self.mcp_logger.write().await = Some(Arc::clone(&mcp_logger));
-
         // Writer task: consume the channel, forward every message to
         // the session's writer half. The writer is moved in here; it
         // cannot be shared (SessionWriter is Send but not Sync).
@@ -992,18 +973,27 @@ impl McpServer {
 
         info!("Client disconnected, session ending");
 
-        // The fanout guard removes our tx from the broadcast registry on
-        // drop (end of this function), so the config watcher stops
-        // trying to send into a dead channel without us touching any
-        // shared state here.
-
-        // Signal writer to stop and wait for it. Then explicitly drop
-        // the fanout guard so the session's tx is removed from the
-        // broadcast registry — the lexical drop at end-of-scope would
-        // do this too, but being explicit documents the contract.
+        // G-15: the writer task's `rx.recv()` yields `None` only when
+        // EVERY sender clone is gone. Three live here at once — the
+        // local `tx`, the clone inside `session_ctx`, and the clone
+        // owned by `FanoutGuard` — so dropping `tx` alone (or merely
+        // reordering the existing drops) leaves the channel open and
+        // `writer_handle.await` blocks forever. Drop all three, in this
+        // order, before awaiting the writer.
         drop(tx);
-        let _ = writer_handle.await;
+        drop(session_ctx);
         drop(fanout_guard);
+
+        // Per-request tasks spawned from the reader loop hold their own
+        // `session_ctx` clone and can outlive it, so the drops above are
+        // necessary but not sufficient. Bound the wait: a straggler must
+        // not keep the process alive after the client has gone.
+        if tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle)
+            .await
+            .is_err()
+        {
+            warn!("Session writer did not finish within 2s, abandoning it");
+        }
     }
 
     /// Whether a finished request's response should be written back.
@@ -1276,14 +1266,11 @@ impl McpServer {
             "tasks/result" => self.handle_tasks_result(id, request.params).await,
             "tasks/list" => self.handle_tasks_list(id, request.params).await,
             "tasks/cancel" => self.handle_tasks_cancel(id, request.params).await,
-            // The 2025-06-18 schema names this method `completion/complete`
-            // (SINGULAR) and that is the ONLY spelling the installed client
-            // sends. The plural was carried over from an earlier draft; keep
-            // both so neither client generation gets -32601.
-            "completion/complete" | "completions/complete" => {
-                self.handle_completions_complete(id, request.params)
-            }
-            "logging/setLevel" => self.handle_logging_set_level(id, request.params, session),
+            // The 2025-06-18 schema (and Modern after it) names this
+            // method `completion/complete`, singular. The plural spelling
+            // was a 2.2.0 compatibility alias for one release; 3.0.0 is
+            // Modern-only, so it is gone.
+            "completion/complete" => self.handle_completions_complete(id, request.params),
             "resources/templates/list" => self.handle_resource_templates_list(id),
             "resources/subscribe" => Self::handle_resource_subscribe(id, request.params, session),
             "resources/unsubscribe" => {
@@ -1724,7 +1711,25 @@ impl McpServer {
             reporter.report(1, Some("Preparing execution..."));
         }
 
-        let ctx = self
+        // Modern (2026-07-28) per-request logging: the level arrives in
+        // THIS call's `_meta`, not from a connection-scoped
+        // `logging/setLevel`. `Warning` is the default when the client
+        // sends none. The task-augmented path deliberately gets no
+        // logger: its enclosing request has already returned, so its
+        // progress is reported through `notifications/tasks/status`.
+        let request_logger: Option<Arc<McpLogger>> = session.map(|s| {
+            let level = call_params
+                .meta
+                .as_ref()
+                .and_then(|m| m.logging_level)
+                .unwrap_or(LogLevel::Warning);
+            Arc::new(McpLogger::new(
+                Arc::new(AtomicU8::new(level.severity())),
+                s.notification_tx.clone(),
+            ))
+        });
+
+        let mut ctx = self
             .create_tool_context(
                 cancel_token,
                 call_params
@@ -1734,6 +1739,7 @@ impl McpServer {
                 session,
             )
             .await;
+        ctx.mcp_logger = request_logger.clone();
 
         if let Some(ref reporter) = progress_reporter {
             reporter.report(2, Some(&format!("Executing {}...", call_params.name)));
@@ -1781,7 +1787,7 @@ impl McpServer {
                     .record_tool_output(&tool_name, output_chars as u64);
 
                 // Contextual log: give Claude structured info about the execution
-                if let Some(logger) = self.mcp_logger.read().await.as_ref() {
+                if let Some(logger) = request_logger.as_ref() {
                     logger.log(
                         super::protocol::LogLevel::Debug,
                         "bridge-mcp",
@@ -1807,7 +1813,7 @@ impl McpServer {
                 self.metrics.record_tool_call(&tool_name, "unknown");
                 self.metrics.record_tool_error();
 
-                if let Some(logger) = self.mcp_logger.read().await.as_ref() {
+                if let Some(logger) = request_logger.as_ref() {
                     logger.log(
                         super::protocol::LogLevel::Error,
                         "bridge-mcp",
@@ -2544,45 +2550,6 @@ impl McpServer {
                 },
             },
         )
-    }
-
-    // ========================================================================
-    // Logging
-    // ========================================================================
-
-    fn handle_logging_set_level(
-        &self,
-        id: Option<Value>,
-        params: Option<Value>,
-        session: Option<&SessionContext>,
-    ) -> JsonRpcResponse {
-        let Some(params) = params else {
-            return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
-        };
-
-        let level_params: LoggingSetLevelParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => {
-                return JsonRpcResponse::error(
-                    id,
-                    JsonRpcError::invalid_params(format!("Invalid params: {e}")),
-                );
-            }
-        };
-
-        // FIND-035: write to the SESSION's log_level so that
-        // `notifications/setLevel` from this client cannot mute another
-        // session's `notifications/message` stream. Falls back to the
-        // server-wide field for legacy non-session call paths (tests).
-        let target = if let Some(s) = session {
-            Arc::clone(&s.log_level)
-        } else {
-            Arc::clone(&self.log_level)
-        };
-        target.store(level_params.level.severity(), Ordering::Relaxed);
-        info!(level = ?level_params.level, "MCP log level updated");
-
-        JsonRpcResponse::success(id, json!({}))
     }
 }
 
@@ -5751,47 +5718,6 @@ mod tests {
         assert!(result["completion"]["values"].is_array());
     }
 
-    // ============== Logging Tests ==============
-
-    #[test]
-    fn test_logging_set_level_missing_params() {
-        let server = create_test_server();
-        let response = server.handle_logging_set_level(Some(json!(1)), None, None);
-
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602);
-    }
-
-    #[test]
-    fn test_logging_set_level_invalid_params() {
-        let server = create_test_server();
-        let params = json!({ "level": "nonexistent" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
-
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602);
-    }
-
-    #[test]
-    fn test_logging_set_level_debug() {
-        let server = create_test_server();
-        let params = json!({ "level": "debug" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
-
-        assert!(response.error.is_none());
-        assert_eq!(server.log_level.load(Ordering::Relaxed), 0); // debug = 0
-    }
-
-    #[test]
-    fn test_logging_set_level_error() {
-        let server = create_test_server();
-        let params = json!({ "level": "error" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
-
-        assert!(response.error.is_none());
-        assert_eq!(server.log_level.load(Ordering::Relaxed), 4); // error = 4
-    }
-
     // ============== Tools List Pagination Tests ==============
 
     #[tokio::test]
@@ -5927,13 +5853,54 @@ mod tests {
 
     // ============== Request Routing Coverage ==============
 
+    /// The plural spelling was a 2.2.0 compatibility alias only. Modern
+    /// (and the 2025-06-18 schema before it) names the method
+    /// `completion/complete`, singular.
+    #[tokio::test]
+    async fn test_plural_completions_complete_is_method_not_found() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completions/complete".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert_eq!(
+            response
+                .error
+                .expect("plural spelling must be rejected")
+                .code,
+            -32601
+        );
+    }
+
+    /// ...and the singular spelling still dispatches.
+    #[tokio::test]
+    async fn test_singular_completion_complete_dispatches() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completion/complete".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+
+        // Missing params -> invalid_params, not method_not_found.
+        assert_eq!(response.error.expect("must error").code, -32602);
+    }
+
     #[tokio::test]
     async fn test_handle_request_completions_complete_dispatch() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
-            method: "completions/complete".to_string(),
+            method: "completion/complete".to_string(),
             params: None,
         };
 
@@ -6006,21 +5973,6 @@ mod tests {
             "completion/complete must return DefaultCompletionProvider's real \
              values, not an empty/fallback array; got: {result}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_logging_set_level_dispatch() {
-        let server = create_test_server();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: "logging/setLevel".to_string(),
-            params: Some(json!({ "level": "info" })),
-        };
-
-        let response = server.handle_request(request).await;
-
-        assert!(response.error.is_none());
     }
 
     #[tokio::test]
@@ -6740,5 +6692,78 @@ mod tests {
             .create_tool_context(None, None, Some(&session_ctx))
             .await;
         assert_eq!(ctx.config.limits.max_output_chars, 40_000);
+    }
+
+    /// Modern (2026-07-28) removed `logging/setLevel`; the level rides on
+    /// each request's `_meta` instead.
+    #[tokio::test]
+    async fn test_logging_set_level_is_method_not_found() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "logging/setLevel".to_string(),
+            params: Some(json!({ "level": "info" })),
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert!(response.result.is_none());
+        assert_eq!(response.error.expect("must error").code, -32601);
+    }
+
+    /// G-15: a stdio session whose reader hits EOF must return promptly.
+    /// Three `Sender` clones of the writer channel are live at teardown —
+    /// the local `tx`, `session_ctx.notification_tx`, and the tx owned by
+    /// `FanoutGuard` — so `writer_handle.await` blocks forever unless all
+    /// three are dropped first. 500 ms is well under the 2 s belt-and-
+    /// braces timeout, so a version that only has the timeout still fails.
+    #[tokio::test]
+    async fn test_serve_session_returns_promptly_on_eof() {
+        use crate::mcp::transport::{Session, SessionReader, SessionWriter};
+
+        struct EofReader;
+
+        #[async_trait::async_trait]
+        impl SessionReader for EofReader {
+            async fn recv(
+                &mut self,
+            ) -> Option<std::result::Result<crate::mcp::protocol::IncomingMessage, String>>
+            {
+                None
+            }
+        }
+
+        struct NullWriter;
+
+        #[async_trait::async_trait]
+        impl SessionWriter for NullWriter {
+            async fn send(&mut self, _msg: WriterMessage) -> crate::error::Result<()> {
+                Ok(())
+            }
+        }
+
+        let server = Arc::new(create_test_server());
+        let session = Session {
+            reader: Box::new(EofReader),
+            writer: Box::new(NullWriter),
+        };
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Arc::clone(&server).serve_session(session),
+        )
+        .await
+        .expect("serve_session must return on EOF, not hang");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "serve_session took {elapsed:?} to return after EOF"
+        );
+
+        // The fanout registry must be empty again — no leaked sender.
+        assert_eq!(server.notification_fanout.live_session_count(), 0);
     }
 }

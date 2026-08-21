@@ -414,13 +414,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_logging_params"
-path = "fuzz_targets/fuzz_logging_params.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "fuzz_elicitation_params"
 path = "fuzz_targets/fuzz_elicitation_params.rs"
 test = false
