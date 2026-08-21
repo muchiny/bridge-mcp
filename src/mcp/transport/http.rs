@@ -38,8 +38,8 @@ use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator};
 use super::session_store::{InMemorySessionStore, SessionData, SessionStore};
 
 use crate::mcp::protocol::{
-    IncomingMessage, JsonRpcError, JsonRpcMessage, JsonRpcResponse, SUPPORTED_PROTOCOL_VERSIONS,
-    WriterMessage,
+    IncomingMessage, JsonRpcError, JsonRpcMessage, JsonRpcResponse, PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS, WriterMessage,
 };
 use crate::mcp::request_meta::{
     MISSING_CLIENT_CAPABILITIES_MSG, lacks_required_client_capabilities,
@@ -686,13 +686,28 @@ async fn handle_delete(
 }
 
 /// GET /.well-known/mcp.json — MCP server discovery metadata.
+///
+/// The revision is read from [`PROTOCOL_VERSION`], not written out. It was a
+/// hardcoded `"2025-11-25"` — so a conformance client probing discovery over
+/// HTTP was told this server speaks a revision it refuses on every other
+/// surface, by the one endpoint whose entire job is to say which revision it
+/// speaks. The release notes claimed this endpoint already read the constant
+/// and that `tests/discovery_metadata.rs` guarded it; neither was true, and
+/// the guard is now `test_well_known_mcp_json_reports_the_real_revision`
+/// below.
+///
+/// KNOWN AND NOT FIXED HERE: the `capabilities` block is four hardcoded
+/// booleans, and `roots` is among them — but `roots` is a CLIENT capability,
+/// declared per request in `_meta`, and a server cannot have it. Correcting
+/// that changes a payload third parties may parse, so it is left as a
+/// separate decision rather than folded into a version fix.
 async fn handle_mcp_discovery(State(state): State<Arc<HttpTransportState>>) -> Response {
     let bind = &state.config.bind;
     let base_url = format!("http://{bind}");
 
     Json(serde_json::json!({
         "mcp": {
-            "version": "2025-11-25",
+            "version": PROTOCOL_VERSION,
             "transport": {
                 "type": "streamable-http",
                 "url": format!("{base_url}/mcp"),
@@ -1136,6 +1151,49 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// The guard the release notes said already existed.
+    ///
+    /// `/.well-known/mcp.json` is the endpoint a conformance client reads to
+    /// learn which revision this server speaks. It answered a hardcoded
+    /// `"2025-11-25"` — a revision this server refuses on every other surface
+    /// — while the notes claimed it read `PROTOCOL_VERSION` and that
+    /// `tests/discovery_metadata.rs` guarded it. That file only checks the
+    /// JSON manifests on disk and never touches this endpoint.
+    ///
+    /// Asserted against the CONSTANT rather than the literal `"2026-07-28"`,
+    /// so the next revision bump cannot leave this endpoint behind again —
+    /// a literal here would have to be found and changed by hand, which is
+    /// exactly how the previous value survived a whole migration.
+    #[tokio::test]
+    async fn test_well_known_mcp_json_reports_the_real_revision() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/.well-known/mcp.json")
+                    .header("origin", "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["mcp"]["version"], PROTOCOL_VERSION,
+            "the discovery endpoint must name the revision this server actually \
+             speaks: {json}"
+        );
     }
 
     // ============== C3: mandatory clientCapabilities over HTTP ==============
