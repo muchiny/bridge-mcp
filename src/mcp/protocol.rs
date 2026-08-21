@@ -842,6 +842,16 @@ pub struct JsonRpcNotification {
     pub params: Option<Value>,
 }
 
+/// `_meta` key correlating a notification to the `subscriptions/listen`
+/// request that authorised it (MCP 2026-07-28,
+/// `basic/patterns/subscriptions`).
+///
+/// Re-exported from `request_meta::keys::SUBSCRIPTION_ID` rather than
+/// declared here a second time — the per-request `_meta`-envelope module
+/// already owns every `io.modelcontextprotocol/` wire key. Every producer
+/// and consumer of subscription notifications MUST use this constant.
+pub use super::request_meta::keys::SUBSCRIPTION_ID as META_SUBSCRIPTION_ID;
+
 impl JsonRpcNotification {
     /// Create a `notifications/tools/list_changed` notification.
     #[must_use]
@@ -918,6 +928,68 @@ impl JsonRpcNotification {
                 "level": level,
                 "logger": logger,
                 "data": data,
+            })),
+        }
+    }
+
+    /// Build the `_meta` object carrying the subscription correlation id.
+    fn meta_subscription(subscription_id: u64) -> Value {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            META_SUBSCRIPTION_ID.to_string(),
+            Value::from(subscription_id),
+        );
+        Value::Object(meta)
+    }
+
+    /// Create a subscription-scoped notification carrying only the
+    /// subscription correlation `_meta`.
+    ///
+    /// MCP 2026-07-28 requires every notification delivered because of a
+    /// `subscriptions/listen` request to name that subscription: several
+    /// subscriptions share one stdio pipe, and the client routes on this
+    /// id alone.
+    #[must_use]
+    pub fn for_subscription(method: &str, subscription_id: u64) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params: Some(serde_json::json!({
+                "_meta": Self::meta_subscription(subscription_id),
+            })),
+        }
+    }
+
+    /// Create a `notifications/resources/updated` notification for one URI.
+    #[must_use]
+    pub fn resources_updated(uri: &str, subscription_id: u64) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/resources/updated".to_string(),
+            params: Some(serde_json::json!({
+                "_meta": Self::meta_subscription(subscription_id),
+                "uri": uri,
+            })),
+        }
+    }
+
+    /// Create the `notifications/subscriptions/acknowledged` notification
+    /// answering a `subscriptions/listen` request.
+    ///
+    /// `notifications` is the subset the server actually honours — never a
+    /// blind echo of the request. The client treats this value, not its
+    /// own request, as the source of truth for what will arrive.
+    ///
+    /// This is a NOTIFICATION, not the JSON-RPC `result` for the listen
+    /// request: a client's pending-request table must not resolve on it.
+    #[must_use]
+    pub fn subscriptions_acknowledged(subscription_id: u64, notifications: &Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/subscriptions/acknowledged".to_string(),
+            params: Some(serde_json::json!({
+                "_meta": Self::meta_subscription(subscription_id),
+                "notifications": notifications,
             })),
         }
     }
@@ -1620,6 +1692,49 @@ mod tests {
         let n = JsonRpcNotification::tools_list_changed();
         let json = serde_json::to_string(&n).unwrap();
         assert!(!json.contains("\"params\""));
+    }
+
+    // ============== Subscription Notification Tests (2026-07-28) ==============
+
+    #[test]
+    fn test_notification_for_subscription_stamps_subscription_id() {
+        let n = JsonRpcNotification::for_subscription("notifications/tools/list_changed", 7);
+        assert_eq!(n.jsonrpc, "2.0");
+        assert_eq!(n.method, "notifications/tools/list_changed");
+        let params = n.params.expect("subscription notifications carry params");
+        assert_eq!(params["_meta"][META_SUBSCRIPTION_ID], serde_json::json!(7));
+    }
+
+    #[test]
+    fn test_notification_resources_updated_shape() {
+        let n = JsonRpcNotification::resources_updated("history://recent", 1);
+        assert_eq!(n.method, "notifications/resources/updated");
+        let params = n.params.clone().expect("params present");
+        assert_eq!(params["uri"], "history://recent");
+        assert_eq!(params["_meta"][META_SUBSCRIPTION_ID], serde_json::json!(1));
+
+        let v = serde_json::to_value(&n).expect("serializes");
+        assert!(v.get("id").is_none(), "a notification MUST NOT carry an id");
+    }
+
+    #[test]
+    fn test_notification_subscriptions_acknowledged_echoes_supported_subset() {
+        let notifications = serde_json::json!({
+            "toolsListChanged": true,
+            "resourceSubscriptions": ["history://recent"],
+        });
+        let n = JsonRpcNotification::subscriptions_acknowledged(3, &notifications);
+        assert_eq!(n.method, "notifications/subscriptions/acknowledged");
+        let params = n.params.expect("params present");
+        assert_eq!(params["_meta"][META_SUBSCRIPTION_ID], serde_json::json!(3));
+        assert_eq!(
+            params["notifications"]["toolsListChanged"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            params["notifications"]["resourceSubscriptions"][0],
+            "history://recent"
+        );
     }
 
     // ============== Task Types Tests (MCP 2025-11-25+) ==============
