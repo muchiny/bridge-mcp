@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::ports::protocol::{TaskInfo, TaskStatus};
@@ -29,25 +29,6 @@ struct TaskEntry {
     result: Option<Value>,
     /// Token to cancel the background worker.
     cancel_token: CancellationToken,
-    /// Signals `wait_for_result` waiters.
-    ///
-    /// A `watch` channel, not a `Notify`, because this must carry *state*
-    /// rather than an edge. Two failures follow from an edge: a
-    /// `notify_waiters()` landing between the waiter releasing the read
-    /// guard and arming `notified()` was simply lost, and an entry evicted
-    /// while a waiter was parked left nothing alive to ever notify it
-    /// again. A `watch` receiver subscribed under the read guard observes
-    /// any later send, and dropping this sender (which happens exactly when
-    /// the entry leaves the map) resolves parked waiters instead of
-    /// stranding them.
-    ///
-    /// It carries the RESULT, not a bare flag. A flag forced the woken waiter
-    /// to look the entry up again, and TTL eviction winning that second race
-    /// turned a genuinely completed task into `None` — indistinguishable from
-    /// "never had a result" (issue #132). Publishing the value through the
-    /// channel removes the second lookup entirely rather than narrowing the
-    /// window.
-    result_ready: watch::Sender<Option<Value>>,
     /// Monotonic creation time for TTL checks.
     created: Instant,
     /// Per-task TTL.
@@ -143,7 +124,6 @@ impl TaskStore {
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let cancel_token = CancellationToken::new();
-        let (result_ready, _) = watch::channel(None);
 
         let entry = TaskEntry {
             info: TaskInfo {
@@ -157,7 +137,6 @@ impl TaskStore {
             },
             result: None,
             cancel_token: cancel_token.clone(),
-            result_ready,
             created: Instant::now(),
             ttl: Duration::from_millis(ttl_ms),
         };
@@ -190,7 +169,6 @@ impl TaskStore {
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.result = Some(result);
-        entry.result_ready.send_replace(entry.result.clone());
 
         Some(entry.info.clone())
     }
@@ -209,7 +187,6 @@ impl TaskStore {
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.result = Some(result);
-        entry.result_ready.send_replace(entry.result.clone());
 
         Some(entry.info.clone())
     }
@@ -233,7 +210,6 @@ impl TaskStore {
         entry.info.last_updated_at =
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         entry.cancel_token.cancel();
-        entry.result_ready.send_replace(entry.result.clone());
 
         Ok(entry.info.clone())
     }
@@ -260,82 +236,6 @@ impl TaskStore {
         }
 
         entry.result.clone()
-    }
-
-    /// Wait for the task's result, bounded by `min(poll_interval * 30,
-    /// remaining_ttl)`.
-    ///
-    /// G-1 (audit 2026-08-19): this used to have no timeout at all, so a
-    /// `tasks/result` poll against a task that never terminates parked
-    /// forever — and with TTLs up to an hour the client had no way out.
-    /// The bound never outlives the entry: once the TTL lapses there is
-    /// nothing left that could ever publish a result.
-    ///
-    /// Returns [`TaskWaitOutcome::TimedOut`] with the task's CURRENT status
-    /// when the budget elapses; a slow task is not a missing one.
-    pub async fn wait_for_result(&self, task_id: &str) -> TaskWaitOutcome {
-        // Subscribe while still holding the read guard. The terminal check
-        // and the subscription are therefore atomic with respect to the
-        // writers, which all take the write guard — so a completion cannot
-        // slip through between the two.
-        let (mut rx, budget) = {
-            let tasks = self.tasks.read().await;
-            let Some(entry) = tasks.get(task_id) else {
-                return TaskWaitOutcome::NotFound;
-            };
-
-            if entry.is_terminal() {
-                return match entry.result.clone() {
-                    Some(result) => TaskWaitOutcome::Ready(result),
-                    None => TaskWaitOutcome::NotFound,
-                };
-            }
-
-            let remaining_ttl = entry.ttl.saturating_sub(entry.created.elapsed());
-            let budget = Duration::from_millis(entry.info.poll_interval.saturating_mul(30))
-                .min(remaining_ttl);
-
-            (entry.result_ready.subscribe(), budget)
-        };
-
-        match tokio::time::timeout(budget, rx.changed()).await {
-            // `changed()` errors only once every sender is gone, which
-            // happens exactly when the entry is dropped from the map — TTL
-            // eviction while this waiter was parked.
-            Ok(Err(_)) => TaskWaitOutcome::NotFound,
-            // Read the value out of the channel, not out of the map. The
-            // entry may already have been evicted by TTL — see the field's
-            // doc comment.
-            //
-            // The clone is bound to `value` before matching on it, rather
-            // than matching on `rx.borrow_and_update().clone()` directly:
-            // a match scrutinee keeps its temporaries alive for the whole
-            // match, so the `watch::Ref` guard borrowed here would
-            // otherwise still be live across the `.await` in the `None`
-            // arm below and make this function's future `!Send`.
-            Ok(Ok(())) => {
-                let value = rx.borrow_and_update().clone();
-                match value {
-                    Some(result) => TaskWaitOutcome::Ready(result),
-                    // Woken with no value: a cancellation, which stores no
-                    // result. Fall through to the same re-read as a timeout.
-                    None => self.outcome_without_result(task_id).await,
-                }
-            }
-            Err(_) => self.outcome_without_result(task_id).await,
-        }
-    }
-
-    /// Classify a wake or timeout that produced no result value.
-    async fn outcome_without_result(&self, task_id: &str) -> TaskWaitOutcome {
-        match self.get_task(task_id).await {
-            // Terminal with nothing stored (a cancelled task): there is no
-            // result to hand back, and the caller maps this exactly as it
-            // always has.
-            Some(info) if is_terminal_status(info.status) => TaskWaitOutcome::NotFound,
-            Some(info) => TaskWaitOutcome::TimedOut(Box::new(info)),
-            None => TaskWaitOutcome::NotFound,
-        }
     }
 
     /// List tasks with cursor-based pagination.
@@ -553,260 +453,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wait_for_result_already_terminal() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
-        store.complete_task(&id, test_result()).await;
-
-        let result = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
-            .await
-            .expect("must not hang")
-            .into_result()
-            .unwrap();
-        assert_eq!(result["content"][0]["text"], "ok");
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_result_blocks_then_resolves() {
-        let store = Arc::new(TaskStore::new(10, 60_000, 2_000));
-        let (id, _) = store.create_task(None).await.unwrap();
-
-        let store2 = Arc::clone(&store);
-        let id2 = id.clone();
-        let waiter = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
-        });
-
-        // Small delay then complete
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        store.complete_task(&id, test_result()).await;
-
-        let result = waiter
-            .await
-            .unwrap()
-            .expect("must not hang")
-            .into_result()
-            .unwrap();
-        assert_eq!(result["content"][0]["text"], "ok");
-    }
-
-    // Regression test straight from the audit brief: complete the task before
-    // `wait_for_result` is even called. NOTE (see task-7-report.md for the
-    // full write-up): this passes on both the old `Notify` code and the new
-    // `watch` code, because it never reaches the notifier at all — the
-    // sequential `.await`s here mean `complete_task` fully finishes (and the
-    // entry is already terminal) before `wait_for_result` starts, so it
-    // returns via the `is_terminal()` fast path either way. It is kept
-    // because the brief specifies it verbatim, but
-    // `wait_for_result_returns_none_when_evicted_while_parked` below is the
-    // test that actually distinguishes old from new behavior.
-    #[tokio::test(start_paused = true)]
-    async fn wait_for_result_survives_a_completion_between_subscribe_and_await() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
-        // Complete in exactly the window the old code lost: after the guard would
-        // have been released, before the waiter parks.
-        store.complete_task(&id, test_result()).await;
-        // 5s to match this file's other guards. The clock is paused, so this
-        // never costs wall-clock; a round hour here trips a stable-only clippy
-        // lint that wants `Duration::from_hours`, an API this crate's MSRV
-        // (1.94) cannot be assumed to have.
-        let got = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
-            .await
-            .expect("must not hang");
-        assert!(got.into_result().is_some());
-    }
-
-    /// Issue #132 (commit `8a7e90e`), made deterministic for G-1's bounded
-    /// wait (audit 2026-08-19, task 12 fix round). The invariant: a
-    /// published result must reach the waiter as an owned value already in
-    /// hand, never through a second lookup into `self.tasks` — a `retain`
-    /// or `remove` interposing between the wake and that second lookup
-    /// turns a real result into `None`, indistinguishable from "never had
-    /// one".
-    ///
-    /// This test used to drive that race with real sleeps and a completion
-    /// arriving after the entry's nominal TTL. Once `wait_for_result` grew
-    /// its own TTL-bounded timeout, that scenario stopped being reachable
-    /// by construction: the wait's budget is `<= remaining_ttl`, so it
-    /// always gives up no later than the instant eviction becomes
-    /// possible — the two events could never actually race, and the test
-    /// passed unchanged whether or not the channel-read fix was present.
-    ///
-    /// This version drives completion and eviction from a single held
-    /// write-lock critical section with no `.await` inside it, which
-    /// deterministically happens-before any re-read the woken waiter might
-    /// attempt — no TTL, no sleep, no flakiness. The waiter is spawned and
-    /// yielded to first, so it has already subscribed to the channel and
-    /// parked on `changed()` before this task ever takes the write lock;
-    /// everything from taking that lock to dropping it is synchronous, so
-    /// the waiter cannot be scheduled again until the entry is already
-    /// gone.
-    ///
-    /// Relies on `#[tokio::test]`'s default `current_thread` flavor: under
-    /// `multi_thread`, a single `yield_now()` no longer guarantees the
-    /// waiter has reached that parked state before this task resumes.
-    #[tokio::test]
-    async fn wait_for_result_yields_the_result_even_if_evicted_before_the_reread() {
-        let store = Arc::new(TaskStore::new(10, 60_000, 2_000));
-        let (id, _) = store.create_task(None).await.unwrap();
-
-        let store2 = Arc::clone(&store);
-        let id2 = id.clone();
-        let waiter = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
-        });
-
-        // Let the waiter actually run: it subscribes to the channel under
-        // a read guard, then parks on `rx.changed()` — the first genuinely
-        // pending await in `wait_for_result`. Only once that has happened
-        // does taking the write lock below guarantee this critical section
-        // happens-before any re-read the waiter might attempt.
-        tokio::task::yield_now().await;
-
-        {
-            // No `.await` anywhere in this block — that is what makes it
-            // atomic with respect to the waiter (see doc comment above).
-            let mut tasks = store.tasks.write().await;
-            let entry = tasks.get_mut(&id).expect("task must still be present");
-            entry.info.status = TaskStatus::Completed;
-            entry.result = Some(test_result());
-            // Wakes the parked waiter, but it cannot act on the wake until
-            // it is next polled — which cannot happen before this block
-            // ends, since nothing here is an `.await`.
-            entry.result_ready.send_replace(entry.result.clone());
-            // Evict before the waiter ever gets a chance to look the entry
-            // up again.
-            tasks.remove(&id);
-        }
-
-        let result = waiter.await.unwrap().expect("must not hang");
-        assert_eq!(
-            result
-                .into_result()
-                .expect("a result delivered through the channel must survive eviction")["content"]
-                [0]["text"],
-            "ok"
-        );
-        assert!(store.is_empty().await, "entry should already be evicted");
-    }
-
-    /// A dropped `Sender` (entry evicted from the map) must resolve a
-    /// parked waiter with `NotFound`, not hang it forever.
-    ///
-    /// G-1 (audit 2026-08-19) gave `wait_for_result` its own bound,
-    /// `min(poll_interval * 30, remaining_ttl)`. That bound tracks the same
-    /// clock TTL expiry does, so "genuinely parked on the channel" and
-    /// "TTL has actually elapsed" are now mutually exclusive (see
-    /// `wait_for_result_never_waits_past_the_remaining_ttl`) — a real TTL
-    /// wall-clock expiry followed by `cleanup()` can no longer land while a
-    /// waiter is still parked; the waiter's own internal timeout always
-    /// fires first. So eviction here is a direct removal from the map
-    /// rather than real TTL expiry — the `watch::Sender` drops either way,
-    /// which is exactly what a real `cleanup()` eviction does to a parked
-    /// waiter.
-    ///
-    /// The poll interval (2000ms, a ~60s internal budget) is not merely
-    /// "large enough" — it must dwarf the 5s outer `tokio::time::timeout`
-    /// guard below. An earlier version of this test used a 10ms poll
-    /// interval (300ms budget), which is *shorter* than that outer guard —
-    /// under that version, a wake path that silently did nothing (e.g. the
-    /// `Sender` failing to actually close the channel) was indistinguishable
-    /// from a working one: both eventually resolve to `NotFound`, one via
-    /// `Ok(Err(_))` from the closed channel, the other via the internal
-    /// timeout's own `outcome_without_result` fallback once `get_task` sees
-    /// the entry is gone. Only with the internal budget comfortably
-    /// outliving the outer guard does a broken wake path actually trip the
-    /// outer guard's `Elapsed` and fail the `.expect` below, instead of
-    /// quietly landing on the same `NotFound` a working wake would give.
-    ///
-    /// Relies on `#[tokio::test]`'s default `current_thread` flavor for the
-    /// same `yield_now()` ordering guarantee as the test above.
-    #[tokio::test]
-    async fn wait_for_result_returns_none_when_evicted_while_parked() {
-        let store = Arc::new(TaskStore::new(10, 60_000, 2_000));
-        let (id, _) = store.create_task(None).await.unwrap();
-
-        let store2 = Arc::clone(&store);
-        let id2 = id.clone();
-        let waiter = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
-        });
-
-        // Let the waiter subscribe and park on `rx.changed()` before the
-        // entry is removed out from under it.
-        tokio::task::yield_now().await;
-        store.tasks.write().await.remove(&id);
-
-        let result = waiter
-            .await
-            .unwrap()
-            .expect("eviction must wake the parked waiter, not hang it");
-        assert!(result.into_result().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_result_nonexistent() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), store.wait_for_result("nonexistent"))
-                .await
-                .expect("must not hang");
-        assert!(result.into_result().is_none());
-    }
-
-    /// G-1 (audit 2026-08-19). `wait_for_result` had no timeout, so a
-    /// `tasks/result` poll against a task that never completes parked
-    /// forever. The bound is 30 poll intervals, and the timeout must hand
-    /// back the task's CURRENT status: a slow task is not a missing one.
-    #[tokio::test]
-    async fn wait_for_result_gives_up_after_thirty_poll_intervals() {
-        // poll_interval 10ms => 300ms budget. The 60s TTL never binds.
-        let store = TaskStore::new(10, 60_000, 10);
-        let (id, _cancel) = store.create_task(None).await.unwrap();
-
-        let started = Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
-            .await
-            .expect("wait_for_result must not park forever");
-
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "wait should end after ~300ms, took {:?}",
-            started.elapsed()
-        );
-        match outcome {
-            TaskWaitOutcome::TimedOut(info) => {
-                assert_eq!(info.task_id, id);
-                assert_eq!(info.status, TaskStatus::Working);
-            }
-            other => panic!("expected TimedOut with the current status, got {other:?}"),
-        }
-    }
-
-    /// The budget must never outlive the entry. With a 200ms TTL and a
-    /// 2s poll interval the naive `poll_interval * 30` budget would be 60s,
-    /// i.e. 300x longer than the entry can possibly exist.
-    #[tokio::test]
-    async fn wait_for_result_never_waits_past_the_remaining_ttl() {
-        let store = TaskStore::new(10, 200, 2_000);
-        let (id, _cancel) = store.create_task(None).await.unwrap();
-
-        let started = Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
-            .await
-            .expect("wait_for_result must not park past the TTL");
-
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "wait should end with the 200ms TTL, took {:?}",
-            started.elapsed()
-        );
-        // The entry has expired, so there is genuinely nothing to report.
-        assert!(matches!(outcome, TaskWaitOutcome::NotFound));
-    }
-
-    #[tokio::test]
     async fn test_list_tasks_empty() {
         let store = TaskStore::new(10, 60_000, 2_000);
         let (tasks, cursor) = store.list_tasks(None, 10).await.unwrap();
@@ -982,53 +628,6 @@ mod tests {
         assert!(store.get_result(&id).await.is_none());
     }
 
-    // ============== wait_for_result Edge Cases ==============
-
-    #[tokio::test]
-    async fn test_wait_for_result_on_failed_task() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
-        store.fail_task(&id, "boom", error_result()).await;
-
-        let result = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
-            .await
-            .expect("must not hang")
-            .into_result()
-            .unwrap();
-        assert_eq!(result["isError"], true);
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_result_on_cancelled_task() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let (id, _) = store.create_task(None).await.unwrap();
-        store.cancel_task(&id).await.unwrap();
-
-        // Cancelled task: wait returns immediately with None (no result)
-        let result = tokio::time::timeout(Duration::from_secs(5), store.wait_for_result(&id))
-            .await
-            .expect("must not hang");
-        assert!(result.into_result().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_result_blocks_then_resolves_on_cancel() {
-        let store = Arc::new(TaskStore::new(10, 60_000, 2_000));
-        let (id, _) = store.create_task(None).await.unwrap();
-
-        let store2 = Arc::clone(&store);
-        let id2 = id.clone();
-        let waiter = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(5), store2.wait_for_result(&id2)).await
-        });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        store.cancel_task(&id).await.unwrap();
-
-        let result = waiter.await.unwrap().expect("must not hang");
-        assert!(result.into_result().is_none());
-    }
-
     // ============== Pagination Edge Cases ==============
 
     #[tokio::test]
@@ -1131,5 +730,32 @@ mod tests {
         for handle in handles {
             handle.await.unwrap();
         }
+    }
+
+    /// MCP 2026-07-28 tasks are polled: no store method may park its caller.
+    /// A source-text guard, because "this function does not exist" has no
+    /// runtime expression. `include_str!` resolves relative to this file.
+    ///
+    /// Scoped to the production half of the file, split at the `mod tests`
+    /// boundary: `include_str!` pulls in this very test, and its own
+    /// assertion arguments are the literal strings `"fn wait_for_result"`
+    /// and `"watch::Sender"` — scanning the whole file would make the guard
+    /// match itself and fail unconditionally, regardless of whether the
+    /// production code it is meant to police still exists.
+    #[test]
+    fn task_store_exposes_no_blocking_wait() {
+        let src = include_str!("task_store.rs");
+        let production = src
+            .split_once("#[cfg(test)]\nmod tests {")
+            .map_or(src, |(before, _)| before);
+        assert!(
+            !production.contains("fn wait_for_result"),
+            "tasks are polled in 3.0.0 — `wait_for_result` reintroduces the \
+             G-1 session freeze (issue #131) and must not exist"
+        );
+        assert!(
+            !production.contains("watch::Sender"),
+            "the watch channel existed only to wake `wait_for_result`"
+        );
     }
 }
