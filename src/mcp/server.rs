@@ -39,8 +39,8 @@ use super::protocol::{
     ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
     SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
     TaskGetParams, TaskNotificationParams, TaskRequestsCapability, TaskStatus, TaskToolsCapability,
-    TasksCapability, ToolCallParams, ToolCallResult, ToolContent, ToolsCapability, ToolsListResult,
-    WriterMessage,
+    TaskUpdateParams, TasksCapability, ToolCallParams, ToolCallResult, ToolContent,
+    ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -1227,6 +1227,19 @@ impl McpServer {
     /// this code path because no per-session pending-requests map is
     /// supplied. Use [`Self::serve`] / `Self::serve_session` (private) for full
     /// MCP feature support.
+    /// The `tasks/*` methods a client may only use after declaring the
+    /// extension ON THE REQUEST.
+    ///
+    /// Named methods, never the `tasks/` PREFIX. `tasks/list` and
+    /// `tasks/result` were deleted in 3.0.0 and must keep answering `-32601`
+    /// to everyone: a prefix gate would tell a non-declaring client to declare
+    /// a capability that would not make those methods exist. The prefix is
+    /// right for `is_concurrency_exempt`, which is about scheduling; it is
+    /// wrong here, where the answer has to distinguish "you may not" from
+    /// "there is no such thing".
+    const TASK_METHODS_REQUIRING_EXTENSION: [&'static str; 3] =
+        ["tasks/get", "tasks/update", "tasks/cancel"];
+
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
         self.handle_request_with_cancel(request, None, None).await
     }
@@ -1265,6 +1278,25 @@ impl McpServer {
             session.map(|s| s.with_request_meta(RequestMeta::from_params(request.params.as_ref())));
         let session = scoped_session.as_ref();
 
+        // The tasks extension is gated per REQUEST: "Servers MUST return this
+        // error for non-declaring clients issuing `tasks/get`,
+        // `tasks/update`, and `tasks/cancel` requests", and "Servers MUST NOT
+        // infer capabilities from prior requests" — so a declaration made on
+        // an earlier request, or at a handshake, grants nothing here.
+        //
+        // Ahead of the match, so that a `tasks/*` method cannot be added below
+        // without meeting this list.
+        if Self::TASK_METHODS_REQUIRING_EXTENSION.contains(&request.method.as_str())
+            && !Self::request_declares_tasks_extension(session)
+        {
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::missing_required_client_capability(&json!({
+                    "extensions": { super::protocol::extensions::TASKS: {} }
+                })),
+            );
+        }
+
         match request.method.as_str() {
             "initialize" => self.handle_initialize(id, request.params, session).await,
             "tools/list" => self.handle_tools_list(id, request.params.as_ref()).await,
@@ -1283,6 +1315,7 @@ impl McpServer {
             // (spec 5.15, cross-caller correlation). Both names now fall
             // through to -32601 like any other unknown method.
             "tasks/get" => self.handle_tasks_get(id, request.params).await,
+            "tasks/update" => self.handle_tasks_update(id, request.params).await,
             "tasks/cancel" => self.handle_tasks_cancel(id, request.params).await,
             // The 2025-06-18 schema names this method `completion/complete`
             // (SINGULAR) and that is the ONLY spelling the installed client
@@ -2424,6 +2457,65 @@ impl McpServer {
         JsonRpcResponse::success_or_serialize_error(id, &snapshot)
     }
 
+    /// `tasks/update` — deliver `inputResponses` for a task waiting on input.
+    ///
+    /// A no-op acknowledgement, and conformant as one. bridge-mcp never enters
+    /// `input_required`: no tool suspends mid-execution to elicit, and the
+    /// destructive-confirmation gate resolves on the ORIGINAL `tools/call`
+    /// through core multi-round-trip, before any task exists — which is what
+    /// the spec prescribes ("a server that needs client input _before_
+    /// returning a `CreateTaskResult` uses the multi round-trip request flow
+    /// on the original request").
+    ///
+    /// So this server never issues an `inputRequest`, so no key a client sends
+    /// can be outstanding, and the spec says what to do with those: "A server
+    /// SHOULD ignore any `inputResponses` responses mapped to a key that is
+    /// not currently outstanding for the task — including keys that were never
+    /// issued". Ignoring all of them is that rule at its limit.
+    ///
+    /// It exists rather than answering `-32601` because the extension
+    /// declaration promises the method: advertising a capability whose methods
+    /// the server then refuses is worse than the no-op.
+    async fn handle_tasks_update(
+        &self,
+        id: Option<Value>,
+        params: Option<Value>,
+    ) -> JsonRpcResponse {
+        let Some(params) = params else {
+            return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
+        };
+
+        let update_params: TaskUpdateParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    id,
+                    JsonRpcError::invalid_params(format!("Invalid params: {e}")),
+                );
+            }
+        };
+
+        // "Servers SHOULD return a JSON-RPC error if the `taskId` does not
+        // correspond to a known task." Checked before the ack, so the no-op
+        // does not silently absorb a typo'd or TTL-evicted id.
+        if self
+            .task_store
+            .get_task(&update_params.task_id)
+            .await
+            .is_none()
+        {
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params(format!("Task not found: {}", update_params.task_id)),
+            );
+        }
+
+        // "On success, the server MUST acknowledge the request with an empty
+        // result", and "The `resultType` field MUST be set to `"complete"` on
+        // `UpdateTaskResult`".
+        JsonRpcResponse::success(id, json!({ "resultType": "complete" }))
+    }
+
     async fn handle_tasks_cancel(
         &self,
         id: Option<Value>,
@@ -2669,6 +2761,23 @@ mod tests {
     /// so a test using this exercises the real capability seam instead of a
     /// flag set by hand. Nothing here touches `session.caps`: the handshake
     /// must not be able to grant this extension.
+    /// Params carrying the tasks-extension declaration the way a Modern
+    /// client sends it: inside this request's own `_meta`.
+    ///
+    /// Dispatcher-level tests must put it HERE rather than on the session,
+    /// because the chokepoint replaces the session's `request_meta` with
+    /// whatever it parses from the request it is handling. That is the whole
+    /// point of a per-request capability, and it makes these tests exercise
+    /// the real seam end to end.
+    fn params_declaring_tasks(mut params: Value) -> Value {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": { "io.modelcontextprotocol/tasks": {} }
+            }
+        });
+        params
+    }
+
     fn session_declaring_tasks() -> (SessionContext, mpsc::Receiver<WriterMessage>) {
         let (tx, rx) = mpsc::channel::<WriterMessage>(64);
         let params = json!({
@@ -2813,7 +2922,18 @@ mod tests {
                 .send(client_request(
                     id,
                     "tasks/get",
-                    Some(json!({ "taskId": task_id })),
+                    // The envelope is not decoration here: `tasks/get` is
+                    // capability-gated per request, so without it these polls
+                    // would be answered with `-32021` and the test would be
+                    // measuring the gate instead of the semaphore.
+                    Some(json!({
+                        "taskId": task_id,
+                        "_meta": {
+                            "io.modelcontextprotocol/clientCapabilities": {
+                                "extensions": { "io.modelcontextprotocol/tasks": {} }
+                            }
+                        }
+                    })),
                 ))
                 .unwrap();
             expected_ids.insert(Some(json!(id)));
@@ -5328,21 +5448,32 @@ mod tests {
         );
     }
 
+    /// The POSITIVE half of the capability gate: with the extension declared
+    /// on the request, `tasks/get` reaches its handler and answers on the
+    /// merits — here `-32602` for an id that does not exist.
+    ///
+    /// Without this, a gate that refused EVERY request would satisfy all
+    /// three refusal tests below and look perfectly conformant.
     #[tokio::test]
     async fn test_handle_request_tasks_get_dispatch() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tasks/get".to_string(),
-            params: Some(json!({"taskId": "nonexistent"})),
+            params: Some(params_declaring_tasks(json!({"taskId": "nonexistent"}))),
         };
 
-        let response = server.handle_request(request).await;
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
 
-        // Should be dispatched (not method_not_found)
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602); // Invalid params (task not found)
+        let error = response.error.expect("unknown task is an error");
+        assert_eq!(
+            error.code, -32602,
+            "a declaring client must be answered on the merits, not gated: {error:?}"
+        );
     }
 
     /// Replaces `test_handle_request_tasks_list_dispatch`, which asserted the
@@ -5371,21 +5502,176 @@ mod tests {
         );
     }
 
+    /// Same positive half for `tasks/cancel`.
+    ///
+    /// The old body asserted `assert_ne!(code, -32601)`, which kept passing
+    /// once the gate landed — `-32021` is not `-32601` either, so it was green
+    /// while proving nothing about dispatch. `assert_eq!` on the code it
+    /// should actually receive is what makes it a test again.
     #[tokio::test]
     async fn test_handle_request_tasks_cancel_dispatch() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tasks/cancel".to_string(),
-            params: Some(json!({"taskId": "nonexistent"})),
+            params: Some(params_declaring_tasks(json!({"taskId": "nonexistent"}))),
         };
 
-        let response = server.handle_request(request).await;
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
 
-        // Should be dispatched (not method_not_found)
-        assert!(response.error.is_some());
-        assert_ne!(response.error.unwrap().code, -32601);
+        let error = response.error.expect("unknown task is an error");
+        assert_eq!(error.code, -32602, "{error:?}");
+    }
+
+    /// The NEGATIVE half, on all three gated methods at once.
+    ///
+    /// `data.requiredCapabilities` is asserted LITERALLY, not merely present:
+    /// its whole purpose is to tell a client what to declare in order to
+    /// retry, so an invented shape would be as useless as an absent one while
+    /// passing any presence check.
+    #[tokio::test]
+    async fn the_three_task_methods_reject_a_non_declaring_client_with_32021() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+        // A real task, so the refusal cannot be mistaken for "not found".
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
+
+        for method in ["tasks/get", "tasks/update", "tasks/cancel"] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                // No `_meta`: this request declares nothing, whatever any
+                // earlier request or handshake may have said.
+                params: Some(json!({ "taskId": task_id })),
+            };
+
+            let response = server
+                .handle_request_with_cancel(request, None, Some(&session))
+                .await;
+
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{method} must be refused for a non-declaring client"));
+            assert_eq!(error.code, -32021, "{method}: {error:?}");
+
+            let data = error
+                .data
+                .unwrap_or_else(|| panic!("{method}: -32021 must carry requiredCapabilities"));
+            assert_eq!(
+                data,
+                json!({
+                    "requiredCapabilities": {
+                        "extensions": { "io.modelcontextprotocol/tasks": {} }
+                    }
+                }),
+                "{method}: the payload must name what to declare, exactly"
+            );
+        }
+
+        // And the task is untouched: a refused request must not have run.
+        assert_eq!(
+            server.task_store.get_task(&task_id).await.unwrap().status,
+            crate::ports::protocol::TaskStatus::Working
+        );
+    }
+
+    /// A deleted method stays deleted for everyone. This is why the gate lists
+    /// three method NAMES instead of matching the `tasks/` prefix: a prefix
+    /// gate would answer `-32021` here, telling a client to declare a
+    /// capability that would not bring `tasks/list` back.
+    #[tokio::test]
+    async fn a_deleted_task_method_is_32601_not_32021_for_a_non_declaring_client() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+
+        for method in ["tasks/list", "tasks/result"] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: Some(json!({"taskId": "whatever"})),
+            };
+
+            let response = server
+                .handle_request_with_cancel(request, None, Some(&session))
+                .await;
+
+            assert_eq!(
+                response.error.expect("deleted method").code,
+                -32601,
+                "{method} does not exist; the answer must say so, not blame a capability"
+            );
+        }
+    }
+
+    /// `tasks/update` acks with the discriminator and nothing else, and its
+    /// `inputResponses` are ignored rather than rejected — this server never
+    /// issues an `inputRequest`, so no key a client sends can be outstanding.
+    #[tokio::test]
+    async fn tasks_update_acknowledges_and_ignores_input_responses() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+        let (task_id, _) = server.task_store.create_task().await.unwrap();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tasks/update".to_string(),
+            params: Some(params_declaring_tasks(json!({
+                "taskId": task_id,
+                "inputResponses": {
+                    "never-issued": { "action": "accept", "content": { "input": "Luca" } }
+                }
+            }))),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.expect("an ack");
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(
+            result.as_object().map(serde_json::Map::len),
+            Some(1),
+            "UpdateTaskResult is an empty acknowledgement: {result}"
+        );
+
+        // A no-op is a no-op: the task must be exactly where it was.
+        let info = server.task_store.get_task(&task_id).await.unwrap();
+        assert_eq!(info.status, crate::ports::protocol::TaskStatus::Working);
+    }
+
+    /// An unknown id is still an error, so the no-op cannot silently absorb a
+    /// typo'd or TTL-evicted task.
+    #[tokio::test]
+    async fn tasks_update_on_an_unknown_task_is_invalid_params() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tasks/update".to_string(),
+            params: Some(params_declaring_tasks(json!({
+                "taskId": "no-such-task",
+                "inputResponses": {}
+            }))),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session))
+            .await;
+
+        let error = response.error.expect("unknown taskId is an error");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("no-such-task"), "{}", error.message);
     }
 
     // ============== Resources List/Read Tests ==============

@@ -72,6 +72,21 @@ impl JsonRpcResponse {
 /// Borrowed from LSP's `RequestCancelled`; see [`JsonRpcError::cancelled`].
 pub const CANCELLED_ERROR_CODE: i32 = -32800;
 
+/// Error code for a request needing a client capability the request did not
+/// declare (MCP 2026-07-28).
+///
+/// PROVENANCE, because two normative bodies disagree and one of them is
+/// stale: the ext-tasks specification text says `-32003` in all four places
+/// it names this error, while SEP-2663 — the proposal that actually landed
+/// for 2026-07-28 — says `-32021`. The core schema settles it, defining
+/// `MISSING_REQUIRED_CLIENT_CAPABILITY = -32021` and stating that a request
+/// requiring an undeclared capability "is signalled instead by
+/// `MissingRequiredClientCapabilityError` (-32021)". `-32003` appears nowhere
+/// in the core schema, and `-32000..-32019` is the legacy sub-range new
+/// implementations "SHOULD NOT use at all". A defensive CLIENT should accept
+/// either code; a server must emit this one.
+pub const MISSING_REQUIRED_CLIENT_CAPABILITY: i32 = -32021;
+
 /// JSON-RPC 2.0 Error
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonRpcError {
@@ -162,6 +177,25 @@ impl JsonRpcError {
             code: CANCELLED_ERROR_CODE,
             message: reason.unwrap_or_else(|| "Request cancelled by client".to_string()),
             data: None,
+        }
+    }
+
+    /// `-32021` — the request needs a client capability it did not declare.
+    ///
+    /// `data.requiredCapabilities` is REQUIRED and carries "the capabilities
+    /// the server requires from the client to process this request", shaped
+    /// exactly like the `clientCapabilities` object the client would have had
+    /// to send. It is not decoration: it is how a client learns what to
+    /// declare in order to retry, without parsing the message.
+    ///
+    /// The message text is explicitly non-normative in the spec's own
+    /// example.
+    #[must_use]
+    pub fn missing_required_client_capability(required: &Value) -> Self {
+        Self {
+            code: MISSING_REQUIRED_CLIENT_CAPABILITY,
+            message: "Missing required client capability".to_string(),
+            data: Some(serde_json::json!({ "requiredCapabilities": required })),
         }
     }
 }
@@ -608,6 +642,20 @@ impl DetailedTask {
 #[serde(rename_all = "camelCase")]
 pub struct TaskGetParams {
     pub task_id: String,
+}
+
+/// Parameters for `tasks/update`.
+///
+/// `inputResponses` is accepted and then ignored — see `handle_tasks_update`
+/// for why that is conformant here. It is typed as a raw `Value` rather than
+/// a map of `InputResponse`, because parsing a union this server can never
+/// have asked for would be modelling a state it cannot enter.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskUpdateParams {
+    pub task_id: String,
+    #[serde(default)]
+    pub input_responses: Option<Value>,
 }
 
 /// Parameters for `tasks/cancel`.
