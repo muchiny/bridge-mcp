@@ -392,6 +392,16 @@ mod tests {
         assert_eq!(reg.len(), 3);
         assert_eq!(reg.remove_for_tx(&tx_a), 2);
         assert_eq!(reg.len(), 1);
+
+        // FIND-036's guarantee, carried over from the deleted per-session
+        // `resources/subscribe` map: the survivor must be B's. A count
+        // alone would be satisfied by dropping B and keeping one of A's.
+        assert!(reg.filter_of(&serde_json::json!(1)).is_none());
+        assert!(reg.filter_of(&serde_json::json!(2)).is_none());
+        assert!(
+            reg.filter_of(&serde_json::json!(3)).is_some(),
+            "tearing down session A must not touch session B"
+        );
     }
 
     #[test]

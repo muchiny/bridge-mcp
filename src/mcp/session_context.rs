@@ -16,7 +16,6 @@
 //! owns an independent bundle, so cross-session leakage is impossible
 //! by construction.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 
@@ -47,9 +46,6 @@ pub struct SessionContext {
     /// `handle_initialize` based on this client's `client_overrides`
     /// profile and read by `create_tool_context`. FIND-033.
     pub runtime_max_output: Arc<RwLock<Option<usize>>>,
-    /// Per-session resource subscription map (URI -> subscription IDs).
-    /// FIND-036.
-    pub resource_subs: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Per-session client-declared workspace roots. Written by
     /// `fetch_roots` after `notifications/initialized`. FIND-037.
     pub roots: Arc<RwLock<Vec<RootEntry>>>,
@@ -81,7 +77,6 @@ impl SessionContext {
             active_requests: super::server::ActiveRequests::new(),
             notification_tx,
             runtime_max_output: Arc::new(RwLock::new(None)),
-            resource_subs: Arc::new(RwLock::new(HashMap::new())),
             roots: Arc::new(RwLock::new(Vec::new())),
             log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
             request_meta: None,
@@ -168,7 +163,6 @@ mod tests {
 
         // All map/list state empty on construction.
         assert!(ctx.runtime_max_output.read().await.is_none());
-        assert!(ctx.resource_subs.read().await.is_empty());
         assert!(ctx.roots.read().await.is_empty());
     }
 

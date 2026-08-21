@@ -17,12 +17,12 @@
 
 #![allow(clippy::doc_markdown)]
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bridge_mcp::config::Config;
 use bridge_mcp::mcp::McpServer;
 use bridge_mcp::mcp::protocol::{RootEntry, WriterMessage};
+use serde_json::json;
 use tokio::sync::{RwLock, mpsc};
 
 /// `FIND-033` — `runtime_max_output_chars` was a server-wide
@@ -131,66 +131,41 @@ async fn notification_tx_does_not_cross_sessions() {
     }
 }
 
-/// `FIND-036` — `resource_subscriptions` was a server-wide
-/// `HashMap<String, Vec<String>>` keyed on URI, not on session. Two
-/// clients subscribing to the same URI shared the Vec, so client A's
-/// `unsubscribe` could remove client B's subscription IDs. The fix
-/// allocates a fresh map per session in `serve_session()`.
+/// `FIND-036`'s 2026-07-28 replacement. The per-URI `resources/subscribe`
+/// RPC is gone — folded into `subscriptions/listen`'s
+/// `resourceSubscriptions` — so `SessionContext::resource_subs` and the
+/// per-session map it isolated are gone with it. What still has to hold is
+/// the guarantee the old test existed for: tearing down session A must not
+/// touch session B's subscriptions. The registry is server-wide now, so
+/// isolation is keyed on writer-channel identity rather than on per-session
+/// storage, and `remove_for_tx` is where it can break.
+///
+/// Reached through the public path (`bridge_mcp::mcp::subscriptions`)
+/// deliberately: that is the surface a downstream crate sees.
 #[tokio::test]
-async fn resource_subscriptions_keyed_per_session() {
-    let config = Config::default();
-    let (server, _audit_task) = McpServer::new(config);
-    let server = Arc::new(server);
+async fn subscriptions_are_removed_per_session_channel() {
+    use bridge_mcp::mcp::subscriptions::{SubscriptionFilter, SubscriptionRegistry};
 
-    let map_a: Arc<RwLock<HashMap<String, Vec<String>>>> =
-        server.allocate_session_resource_subs_for_test();
-    let map_b: Arc<RwLock<HashMap<String, Vec<String>>>> =
-        server.allocate_session_resource_subs_for_test();
+    let registry = SubscriptionRegistry::new();
+    let (tx_a, _rx_a) = mpsc::channel::<WriterMessage>(8);
+    let (tx_b, _rx_b) = mpsc::channel::<WriterMessage>(8);
 
-    // Session A subscribes to a URI.
-    {
-        let mut subs = map_a.write().await;
-        subs.entry("ssh://prod/etc/passwd".to_string())
-            .or_default()
-            .push("sub-A-1".to_string());
-    }
+    let watching_history = SubscriptionFilter {
+        resource_subscriptions: vec!["history://recent".to_string()],
+        ..SubscriptionFilter::default()
+    };
+    registry.register(json!("a-1"), watching_history.clone(), tx_a.clone());
+    registry.register(json!("b-1"), watching_history, tx_b);
 
-    // Session B independently subscribes to the SAME URI.
-    {
-        let mut subs = map_b.write().await;
-        subs.entry("ssh://prod/etc/passwd".to_string())
-            .or_default()
-            .push("sub-B-1".to_string());
-    }
-
-    // Each map sees only its own subscription IDs.
-    let snap_a = map_a.read().await.clone();
-    let snap_b = map_b.read().await.clone();
-    assert_eq!(
-        snap_a.get("ssh://prod/etc/passwd"),
-        Some(&vec!["sub-A-1".to_string()])
-    );
-    assert_eq!(
-        snap_b.get("ssh://prod/etc/passwd"),
-        Some(&vec!["sub-B-1".to_string()])
-    );
-
-    // Session A unsubscribes by URI — must NOT remove B's entry.
-    {
-        let mut subs = map_a.write().await;
-        subs.remove("ssh://prod/etc/passwd");
-    }
-
-    let after_a = map_a.read().await.clone();
-    let after_b = map_b.read().await.clone();
+    assert_eq!(registry.len(), 2);
+    assert_eq!(registry.remove_for_tx(&tx_a), 1);
     assert!(
-        !after_a.contains_key("ssh://prod/etc/passwd"),
-        "A's own unsubscribe clears A"
+        registry.filter_of(&json!("a-1")).is_none(),
+        "A's subscription is gone"
     );
-    assert_eq!(
-        after_b.get("ssh://prod/etc/passwd"),
-        Some(&vec!["sub-B-1".to_string()]),
-        "FIND-036: A's unsubscribe must not affect B's subscription map"
+    assert!(
+        registry.filter_of(&json!("b-1")).is_some(),
+        "A's teardown must not affect B's subscription"
     );
 }
 
