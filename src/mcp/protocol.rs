@@ -164,48 +164,6 @@ impl JsonRpcError {
             data: None,
         }
     }
-
-    /// MCP 2025-11-25: the task-augmented form of this call does not exist.
-    ///
-    /// A tool whose `execution.taskSupport` is `"forbidden"` has no
-    /// task-augmented method to invoke, so the answer is `-32601` — the same
-    /// code as an unknown method.
-    ///
-    /// `data` carries `{"tool": …}` so a client can identify the offending
-    /// tool without parsing the English message.
-    #[must_use]
-    pub fn task_not_supported(tool: &str) -> Self {
-        Self::task_not_supported_via(tool, None)
-    }
-
-    /// As [`Self::task_not_supported`], but also names the dispatcher a
-    /// task-forbidden tool was reached through.
-    ///
-    /// `mcp_call_tool` advertises `taskSupport: "optional"` and rewrites its
-    /// `name` argument into the outer request before the meta-tool dispatch
-    /// runs, so a task-augmented `mcp_call_tool` wrapping one of the three
-    /// discovery meta-tools is refused under a tool name the client never put
-    /// on the wire. Naming both ends makes the refusal attributable, and
-    /// `data.via` lets a client branch on it (audit D-F1, 2026-08-20).
-    #[must_use]
-    pub fn task_not_supported_via(tool: &str, via: Option<&str>) -> Self {
-        let base = format!(
-            "Tool does not support task augmentation \
-             (execution.taskSupport = \"forbidden\"): {tool}"
-        );
-        let (message, data) = match via {
-            Some(via) => (
-                format!("{base}, reached via {via}"),
-                serde_json::json!({ "tool": tool, "via": via }),
-            ),
-            None => (base, serde_json::json!({ "tool": tool })),
-        };
-        Self {
-            code: -32601,
-            message,
-            data: Some(data),
-        }
-    }
 }
 
 // ============================================================================
@@ -407,9 +365,6 @@ pub struct ToolCallParams {
     /// Client-provided metadata (e.g., `progressToken` for progress notifications).
     #[serde(rename = "_meta", default)]
     pub meta: Option<ToolCallMeta>,
-    /// When present, the client requests task-augmented execution (MCP 2025-11-25+).
-    #[serde(default)]
-    pub task: Option<TaskRequest>,
 }
 
 /// Client-provided metadata for tool calls.
@@ -418,14 +373,6 @@ pub struct ToolCallMeta {
     /// Token for sending progress notifications back to the client.
     #[serde(rename = "progressToken")]
     pub progress_token: Option<Value>,
-}
-
-/// Client-provided task parameters for task-augmented requests.
-#[derive(Debug, Clone, Deserialize)]
-pub struct TaskRequest {
-    /// Requested TTL in milliseconds. Server may cap this.
-    #[serde(default)]
-    pub ttl: Option<u64>,
 }
 
 // Contract types re-exported from ports (canonical location: crate::ports::protocol)
@@ -1907,8 +1854,17 @@ mod tests {
         assert_eq!(params.task_id, "ghi-789");
     }
 
+    /// MCP 2026-07-28 deleted `params.task`. `ToolCallParams` carries no
+    /// `deny_unknown_fields`, so a 2025-11-25 client that still sends the
+    /// object is not rejected — the key is ignored and the call runs
+    /// synchronously.
+    ///
+    /// That silent-ignore IS the migration behaviour operators will meet, so
+    /// it is pinned rather than left to chance: the alternative (a parse
+    /// error) would take a working legacy client off the air, and the
+    /// difference between the two is invisible without a test.
     #[test]
-    fn test_tool_call_params_with_task() {
+    fn tool_call_params_ignores_a_legacy_task_field() {
         let json = json!({
             "name": "ssh_exec",
             "arguments": {"host": "web1", "command": "ls"},
@@ -1916,30 +1872,7 @@ mod tests {
         });
         let params: ToolCallParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.name, "ssh_exec");
-        assert!(params.task.is_some());
-        assert_eq!(params.task.unwrap().ttl, Some(60000));
-    }
-
-    #[test]
-    fn test_tool_call_params_without_task() {
-        let json = json!({
-            "name": "ssh_status",
-            "arguments": {}
-        });
-        let params: ToolCallParams = serde_json::from_value(json).unwrap();
-        assert!(params.task.is_none());
-    }
-
-    #[test]
-    fn test_tool_call_params_with_empty_task() {
-        let json = json!({
-            "name": "ssh_exec",
-            "arguments": {},
-            "task": {}
-        });
-        let params: ToolCallParams = serde_json::from_value(json).unwrap();
-        assert!(params.task.is_some());
-        assert!(params.task.unwrap().ttl.is_none());
+        assert_eq!(params.arguments.unwrap()["host"], "web1");
     }
 
     #[test]

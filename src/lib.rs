@@ -96,5 +96,5 @@ pub use ssh::TransferMode;
 pub use mcp::protocol::{
     CompletionsCompleteParams, ElicitationCreateParams, ElicitationCreateResult, InitializeParams,
     LoggingSetLevelParams, PromptsGetParams, ResourcesReadParams, SamplingCreateMessageParams,
-    SamplingCreateMessageResult, TaskCancelParams, TaskGetParams, TaskRequest,
+    SamplingCreateMessageResult, TaskCancelParams, TaskGetParams,
 };

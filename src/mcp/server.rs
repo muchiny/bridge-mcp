@@ -1621,12 +1621,6 @@ impl McpServer {
 
         info!(tool = %call_params.name, "Tool call");
 
-        // The name the client actually put on the wire, captured before the
-        // `mcp_call_tool` rewrite below replaces it with the inner tool. Any
-        // error raised after that point must still be attributable to the
-        // request the client sent (audit D-F1, 2026-08-20).
-        let outer_name = call_params.name.clone();
-
         // Generic dispatcher (progressive listing mode): rewrite to the inner
         // tool BEFORE the elicitation gate and annotation lookups, so the
         // target tool's own safety semantics apply. A rewritten name equal to
@@ -1656,20 +1650,6 @@ impl McpServer {
         // argument-validated locally, so they skip the elicitation gate and
         // the task/progress plumbing.
         if super::meta_tools::is_meta_tool(&call_params.name) {
-            // `execution.taskSupport` is "forbidden" for the three meta-tools:
-            // they are dispatched here, ahead of the task branch below, so a
-            // `task` object would otherwise be accepted and silently dropped.
-            //
-            // `mcp_call_tool` advertises "optional" and rewrote `name` above,
-            // so this can fire for a request whose wire-level tool name was the
-            // dispatcher. Name both ends rather than only the rewritten one.
-            if call_params.task.is_some() {
-                let via = (outer_name != call_params.name).then_some(outer_name.as_str());
-                return JsonRpcResponse::error(
-                    id,
-                    JsonRpcError::task_not_supported_via(&call_params.name, via),
-                );
-            }
             let result = super::meta_tools::execute(
                 &call_params.name,
                 call_params.arguments.as_ref(),
@@ -1706,16 +1686,27 @@ impl McpServer {
             return JsonRpcResponse::success_or_serialize_error(id, &ToolCallResult::error(msg));
         }
 
-        // Task-augmented request: spawn background worker and return immediately.
+        // Server-elected task. MCP 2026-07-28 deleted `params.task`: "The
+        // server is the sole decider; clients do not signal task preference on
+        // the request itself." The policy lives in `task_policy`.
+        //
+        // BOTH conditions are required, and the second is a MUST NOT, not a
+        // courtesy: "A server MUST NOT return `CreateTaskResult` to a client
+        // that did not include the extension capability on its request,
+        // regardless of prior declarations." A non-declaring client asking for
+        // a long-running tool gets the ordinary synchronous answer — the same
+        // one it got before this release — never a handle it cannot poll.
+        //
         // MCP Tasks have their own cancellation via `tasks/cancel`; we don't
         // propagate the request-level `cancel_token` here because the task
         // lives beyond the enclosing request.
-        if let Some(task_request) = call_params.task {
+        if super::task_policy::is_long_running(&call_params.name)
+            && Self::request_declares_tasks_extension(session)
+        {
             return self
                 .handle_tools_call_async(
                     call_params.name,
                     call_params.arguments,
-                    task_request,
                     id,
                     call_params
                         .meta
@@ -1855,13 +1846,32 @@ impl McpServer {
         }
     }
 
-    /// Handle a task-augmented `tools/call`: create a task, spawn a background
-    /// worker, and return `CreateTaskResult` immediately.
+    /// Whether THIS request declared the tasks extension.
+    ///
+    /// Reads `request_meta` and nothing else. There is deliberately no
+    /// `SessionContext::supports_tasks_extension()` alongside
+    /// `supports_elicitation()` / `supports_sampling()` / `supports_roots()`:
+    /// those three fall back to the connection handshake when the request
+    /// declares nothing, and for the tasks extension that fallback is
+    /// forbidden — "regardless of prior declarations", and "Servers MUST NOT
+    /// infer capabilities from prior requests". An accessor built on the
+    /// neighbouring pattern would be a capability cache wearing the right
+    /// clothes.
+    ///
+    /// A session with no `request_meta` at all (the non-MCP internal call
+    /// path) declares nothing, so it is `false` — never a handle.
+    fn request_declares_tasks_extension(session: Option<&SessionContext>) -> bool {
+        session
+            .and_then(|s| s.request_meta.as_ref())
+            .is_some_and(|meta| meta.declares_extension(super::protocol::extensions::TASKS))
+    }
+
+    /// Handle a server-elected task: create the task, spawn a background
+    /// worker, and return the flat task handle immediately.
     async fn handle_tools_call_async(
         &self,
         tool_name: String,
         arguments: Option<Value>,
-        task_request: super::protocol::TaskRequest,
         id: Option<Value>,
         progress_token: Option<Value>,
         session: Option<&SessionContext>,
@@ -1878,8 +1888,10 @@ impl McpServer {
         let handler = Arc::clone(handler);
 
         // Create the task
-        let Some((task_id, cancel_token)) = self.task_store.create_task(task_request.ttl).await
-        else {
+        // `None`: the server picks the TTL unilaterally (spec 5.9). The
+        // client used to propose one through `params.task.ttl` and the store
+        // capped it; there is no client proposal left to cap.
+        let Some((task_id, cancel_token)) = self.task_store.create_task(None).await else {
             return JsonRpcResponse::error(
                 id,
                 JsonRpcError::internal_error("Task limit reached, try again later"),
@@ -2558,6 +2570,27 @@ mod tests {
         }
     }
 
+    /// A session whose CURRENT request declares the tasks extension.
+    ///
+    /// Goes through `with_request_meta(RequestMeta::from_params(..))`, which
+    /// is exactly what `handle_request_with_cancel` does at the chokepoint —
+    /// so a test using this exercises the real capability seam instead of a
+    /// flag set by hand. Nothing here touches `session.caps`: the handshake
+    /// must not be able to grant this extension.
+    fn session_declaring_tasks() -> (SessionContext, mpsc::Receiver<WriterMessage>) {
+        let (tx, rx) = mpsc::channel::<WriterMessage>(64);
+        let params = json!({
+            "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "extensions": { "io.modelcontextprotocol/tasks": {} }
+                }
+            }
+        });
+        let session =
+            SessionContext::new(tx).with_request_meta(RequestMeta::from_params(Some(&params)));
+        (session, rx)
+    }
+
     fn create_test_server() -> McpServer {
         let (server, _audit_task) = McpServer::new(test_config());
         server
@@ -3203,109 +3236,51 @@ mod tests {
         );
     }
 
+    /// Supersedes `test_task_through_call_tool_is_accepted`, which asked for
+    /// the task with `params.task` through the dispatcher.
+    ///
+    /// The dispatcher rewrites `params.name` to the INNER tool before the
+    /// promotion check runs, so promotion keys on the tool that will actually
+    /// execute — the same rule the dispatcher's own comment demands of any
+    /// future RBAC enforcement, for the same reason: a decision keyed on the
+    /// outer name (`mcp_call_tool`) would be steerable by wrapping.
+    ///
+    /// The negative half is what makes it a test of the KEY rather than of
+    /// the dispatcher: the same wrapper around a tool that is not on the list
+    /// must stay synchronous.
     #[tokio::test]
-    async fn test_task_on_meta_tool_is_rejected() {
+    async fn promotion_keys_on_the_inner_tool_of_mcp_call_tool() {
         let server = create_test_server();
-        let params = json!({
-            "name": super::super::meta_tools::LIST_TOOL_GROUPS,
-            "arguments": {},
-            "task": {"ttl": 60000}
-        });
-        let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
-            .await;
+        let (session, _rx) = session_declaring_tasks();
 
-        let error = response
-            .error
-            .expect("a task on a taskSupport=forbidden tool must be a JSON-RPC error");
-        assert_eq!(error.code, -32601);
-        assert!(
-            error.message.contains("taskSupport"),
-            "got: {}",
-            error.message
-        );
-        // Called directly, so nothing to attribute: the message stays as it
-        // was and `data` carries no `via` (audit D-F1, 2026-08-20).
-        assert!(
-            !error.message.contains("reached via"),
-            "a direct call has no dispatcher to name: {}",
-            error.message
-        );
-        let data = error.data.expect("structured error data");
-        assert_eq!(
-            data["tool"],
-            json!(super::super::meta_tools::LIST_TOOL_GROUPS)
-        );
-        assert!(data.get("via").is_none(), "got: {data}");
-    }
-
-    /// D-F1 (audit 2026-08-20): `mcp_call_tool` advertises
-    /// `execution.taskSupport: "optional"` and, in `listing: progressive`, is
-    /// the client's only tool that does — the other three advertise
-    /// `"forbidden"`. But the dispatcher rewrites `params.name` to the inner
-    /// tool BEFORE the meta-tool guard runs, so a task-augmented
-    /// `mcp_call_tool` wrapping a discovery meta-tool was refused under a name
-    /// (`mcp_search_tools`) the client never put on the wire. The refusal is
-    /// correct — the meta-tools are dispatched ahead of the task branch — but
-    /// it must name both ends and carry machine-readable `data` so a client can
-    /// branch without parsing English.
-    #[tokio::test]
-    async fn test_task_via_call_tool_names_both_tools() {
-        let server = create_test_server();
-
-        for inner in [
-            super::super::meta_tools::LIST_TOOL_GROUPS,
-            super::super::meta_tools::SEARCH_TOOLS,
-            super::super::meta_tools::DESCRIBE_TOOL,
-        ] {
-            let params = json!({
-                "name": super::super::meta_tools::CALL_TOOL,
-                "arguments": {
-                    "name": inner,
-                    "arguments": {"query": "restart", "name": "ssh_status"}
-                },
-                "task": {"ttl": 60000}
-            });
-            let response = server
-                .handle_tools_call(Some(json!(1)), Some(params), None, None)
-                .await;
-
-            let error = response
-                .error
-                .unwrap_or_else(|| panic!("{inner} via mcp_call_tool must be a JSON-RPC error"));
-            assert_eq!(error.code, -32601);
-            assert!(
-                error.message.contains(inner),
-                "error must name the inner tool, got: {}",
-                error.message
-            );
-            assert!(
-                error.message.contains(super::super::meta_tools::CALL_TOOL),
-                "error must name the dispatcher the client actually called, got: {}",
-                error.message
-            );
-
-            let data = error.data.expect("structured error data");
-            assert_eq!(data["tool"], json!(inner));
-            assert_eq!(data["via"], json!(super::super::meta_tools::CALL_TOOL));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_task_through_call_tool_is_accepted() {
-        let server = create_test_server();
-        let params = json!({
+        let promoted = json!({
             "name": super::super::meta_tools::CALL_TOOL,
-            "arguments": {"name": "ssh_status", "arguments": {}},
-            "task": {"ttl": 60000}
+            "arguments": {
+                "name": "ssh_ansible_playbook",
+                "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            }
         });
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(promoted), None, Some(&session))
             .await;
-
         assert!(response.error.is_none(), "{:?}", response.error);
-        let result = response.result.expect("CreateTaskResult");
-        assert_eq!(result["task"]["status"], "working");
+        let result = response.result.expect("task handle");
+        assert_eq!(result["resultType"], "task");
+        assert_eq!(result["status"], "working");
+
+        let plain = json!({
+            "name": super::super::meta_tools::CALL_TOOL,
+            "arguments": {"name": "ssh_status", "arguments": {}}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(2)), Some(plain), None, Some(&session))
+            .await;
+        let result = response.result.expect("synchronous result");
+        assert!(
+            result.get("resultType").is_none(),
+            "an unlisted inner tool must not be promoted: {result}"
+        );
+        assert!(result["content"].is_array());
     }
 
     #[tokio::test]
@@ -4463,58 +4438,115 @@ mod tests {
         }
     }
 
+    /// A tool that is not on the promotion list is answered synchronously —
+    /// even for a client that declared the extension. Declaring it is
+    /// permission, not a request: "The client declaring the extension
+    /// capability does not suggest that it requires a `CreateTaskResult` in
+    /// response to that request."
     #[tokio::test]
-    async fn test_tools_call_without_task_field_is_synchronous() {
+    async fn an_unlisted_tool_is_answered_synchronously() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
             "name": "ssh_status",
             "arguments": {}
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
 
-        // Synchronous: should return content directly (not CreateTaskResult)
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         assert!(result["content"].is_array());
+        assert!(
+            result.get("resultType").is_none(),
+            "a synchronous answer carries no task discriminator: {result}"
+        );
     }
 
+    /// Supersedes `test_tools_call_with_task_field_returns_create_task_result`.
+    /// Same subject — the shape of the handle — on the trigger that replaced
+    /// `params.task`, and on the 2026-07-28 field names.
     #[tokio::test]
-    async fn test_tools_call_with_task_field_returns_create_task_result() {
+    async fn a_promoted_call_returns_a_flat_task_handle() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 30000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        // Should have task field with taskId and status
-        assert!(result["task"]["taskId"].is_string());
-        assert_eq!(result["task"]["status"], "working");
-        assert!(result["task"]["createdAt"].is_string());
-        assert!(result["task"]["pollInterval"].is_number());
+        // FLAT and discriminated: `resultType: "task"` is the MUST that tells
+        // a client this is a handle and not a `CallToolResult`.
+        assert_eq!(result["resultType"], "task");
+        assert!(result["taskId"].is_string());
+        assert_eq!(result["status"], "working");
+        assert!(result["createdAt"].is_string());
+        assert!(result["ttlMs"].is_number());
+        assert!(result["pollIntervalMs"].is_number());
+        assert!(
+            result.get("task").is_none(),
+            "the enclosing `task` object is the 2025-11-25 shape: {result}"
+        );
     }
 
+    /// The MUST NOT, and the reason the promotion is a conjunction rather
+    /// than a lookup: "A server MUST NOT return `CreateTaskResult` to a client
+    /// that did not include the extension capability on its request, regardless
+    /// of prior declarations."
+    ///
+    /// The two assertions are not redundant. `error.is_none()` alone would
+    /// pass for a server that answered with a handle; `content.is_array()`
+    /// alone would pass for one that answered with an isError envelope. What
+    /// has to be true is that this client got the ordinary result it would
+    /// have got before the extension existed.
     #[tokio::test]
-    async fn test_tools_call_with_task_emits_status_working_notification() {
-        // SEP-1686: every status transition (including non-existent → working at
-        // creation) MUST emit `notifications/tasks/status` so clients can track
-        // the task lifecycle without polling.
+    async fn a_long_running_tool_stays_synchronous_for_a_non_declaring_client() {
         let server = create_test_server();
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
-        let session_ctx = SessionContext::new(tx);
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        // A session with NO envelope on this request: the non-declaring case.
+        let session = SessionContext::new(tx);
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 30000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+        });
+
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
+            .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert!(
+            result.get("resultType").is_none(),
+            "a non-declaring client must never receive a task handle: {result}"
+        );
+        assert!(result.get("taskId").is_none(), "{result}");
+        assert!(result["content"].is_array(), "{result}");
+    }
+
+    /// Every status transition (including non-existent → working at creation)
+    /// emits a task notification, so a subscribed client can track the
+    /// lifecycle without polling.
+    ///
+    /// Still asserts the 2025-11-25 method name `notifications/tasks/status`:
+    /// renaming it to `notifications/tasks` and carrying a full `DetailedTask`
+    /// is a separate change, and pinning today's wire keeps that change
+    /// visible when it happens instead of silent.
+    #[tokio::test]
+    async fn a_promoted_call_emits_the_working_status_notification() {
+        let server = create_test_server();
+        let (session_ctx, mut rx) = session_declaring_tasks();
+        let params = json!({
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let response = server
@@ -4523,9 +4555,9 @@ mod tests {
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        let task_id = result["task"]["taskId"]
+        let task_id = result["taskId"]
             .as_str()
-            .expect("response should carry task.taskId")
+            .expect("response should carry a flat taskId")
             .to_string();
 
         // The creation notification is emitted synchronously before the response
@@ -4553,41 +4585,55 @@ mod tests {
         );
     }
 
+    /// Supersedes `test_tools_call_async_unknown_tool`, which reached the task
+    /// path with `params.task` on a name that never existed.
+    ///
+    /// That exact shape is now unreachable — the promotion list holds only
+    /// registered names, and `long_running_tools_are_never_destructive`
+    /// enforces it. The reachable form is the divergence between the two:
+    /// a listed tool whose GROUP the operator disabled. The task path must
+    /// then agree with the synchronous one — `-32602`, not a handle to a task
+    /// that can never run, and not an isError envelope.
     #[tokio::test]
-    async fn test_tools_call_async_unknown_tool() {
-        let server = create_test_server();
+    async fn a_listed_tool_from_a_disabled_group_is_invalid_params_not_a_task() {
+        let mut config = test_config();
+        config
+            .tool_groups
+            .groups
+            .insert("ansible".to_string(), false);
+        let (server, _audit_task) = McpServer::new(config);
+        let (session, _rx) = session_declaring_tasks();
+
         let params = json!({
-            "name": "nonexistent_tool",
-            "arguments": {},
-            "task": {}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
 
-        // Task-augmented path must agree with the synchronous one: -32602,
-        // not a CreateTaskResult and not an isError envelope.
         let error = response
             .error
-            .expect("an unknown tool must be a JSON-RPC error on the task path too");
+            .expect("a tool that is not registered must be a JSON-RPC error");
         assert_eq!(error.code, -32602);
-        assert!(error.message.contains("nonexistent_tool"));
+        assert!(error.message.contains("ssh_ansible_playbook"));
     }
 
     #[tokio::test]
     async fn test_tasks_get_returns_status() {
         let server = create_test_server();
-        // Create a task via tools/call
+        let (session, _rx) = session_declaring_tasks();
+        // Create a task the only way a client can now: call a listed tool
+        // while declaring the extension.
         let call_params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 60000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(call_params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(call_params), None, Some(&session))
             .await;
-        let task_id = call_response.result.unwrap()["task"]["taskId"]
+        let task_id = call_response.result.unwrap()["taskId"]
             .as_str()
             .unwrap()
             .to_string();
@@ -4669,14 +4715,14 @@ mod tests {
     #[tokio::test]
     async fn tasks_get_polls_until_terminal() {
         let server = create_test_server();
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 60000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
 
         let call_response = server
-            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
             .await;
         // FLAT: taskId at the root of `result`, no nested `task` object.
         let task_id = call_response.result.unwrap()["taskId"]
@@ -4698,23 +4744,41 @@ mod tests {
             // axes independently observable.
             assert_eq!(body["resultType"], "complete");
             assert_eq!(body["taskId"], task_id.as_str());
-            if body["status"] == "completed" {
+            if body["status"] != "working" {
                 terminal = body;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        assert_eq!(
-            terminal["status"], "completed",
+        assert!(
+            terminal["status"].is_string(),
             "worker never reached a terminal state within 2s"
         );
         assert_eq!(terminal["resultType"], "complete");
-        // The payload folded in from the deleted `tasks/result`, inlined
-        // under `result` rather than spliced into the response root.
-        assert!(terminal["result"]["content"].is_array());
         // `related-task` is gone: it was emitted only by `tasks/result`.
         assert!(terminal.get("_meta").is_none());
+
+        // The payload folded in from the deleted `tasks/result` — and the
+        // correspondence the five `tasks/get` MUSTs demand: a completed task
+        // carries `result`, a failed one carries `error`, and never both.
+        //
+        // The tool here cannot reach a real host, so today it lands on the
+        // `failed` branch. Asserting the CORRESPONDENCE rather than one
+        // outcome is what lets this test survive the `isError` inversion
+        // (which moves this very call to `completed`) without being rewritten
+        // — and still catch a payload that disagrees with its own status.
+        match terminal["status"].as_str().unwrap() {
+            "completed" => {
+                assert!(terminal["result"]["content"].is_array(), "{terminal}");
+                assert!(terminal.get("error").is_none(), "{terminal}");
+            }
+            "failed" => {
+                assert!(!terminal["error"].is_null(), "{terminal}");
+                assert!(terminal.get("result").is_none(), "{terminal}");
+            }
+            other => panic!("unexpected terminal status {other}: {terminal}"),
+        }
     }
 
     #[tokio::test]
@@ -4874,10 +4938,10 @@ mod tests {
             .await
             .unwrap();
 
+        let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_status",
-            "arguments": {},
-            "task": {"ttl": 60000}
+            "name": "ssh_ansible_playbook",
+            "arguments": {"host": "nowhere", "playbook": "site.yml"}
         });
         // If the permit were acquired BEFORE the `tokio::spawn` (i.e. still
         // in the dispatch path, the exact regression this test guards
@@ -4889,7 +4953,7 @@ mod tests {
         // instead of hanging the test (and CI) forever.
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            server.handle_tools_call(Some(json!(1)), Some(params), None, None),
+            server.handle_tools_call(Some(json!(1)), Some(params), None, Some(&session)),
         )
         .await
         .expect(
@@ -4898,7 +4962,7 @@ mod tests {
              path) instead of inside the spawned worker, so the enclosing \
              request itself blocked on the permits this test is holding",
         );
-        let task_id = response.result.unwrap()["task"]["taskId"]
+        let task_id = response.result.unwrap()["taskId"]
             .as_str()
             .unwrap()
             .to_string();
