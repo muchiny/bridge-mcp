@@ -24,7 +24,9 @@ use super::logger::McpLogger;
 use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{IncomingMessage, JsonRpcMessage, RootsListResult};
-use super::request_meta::RequestMeta;
+use super::request_meta::{
+    MISSING_CLIENT_CAPABILITIES_MSG, RequestMeta, lacks_required_client_capabilities,
+};
 use super::session_context::SessionContext;
 use super::subscriptions::{NotificationTopic, SubscriptionRegistry, SubscriptionsListenParams};
 use super::transport::{Session, Transport, stdio::StdioTransport};
@@ -1265,9 +1267,21 @@ impl McpServer {
         // `supports_roots()` gate inside `spawn_fetch_roots` would read the
         // session-level flags — always `false` with no handshake — and
         // never fetch anything.
-        if !session.roots_fetched.swap(true, Ordering::Relaxed) {
-            let scoped =
-                session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
+        // The capability is evaluated BEFORE the latch is consumed, and the
+        // order is a fix, not a style choice. `swap` used to fire on the
+        // first request to arrive, whatever it was — and the first request a
+        // Modern client sends is `server/discover`, whose envelope declares
+        // `{}` (no roots, authoritatively). The latch burned on that probe,
+        // `supports_roots()` was false, no fetch was spawned, and every later
+        // request found the latch already spent: a client that declares
+        // `roots` on all its real requests got its roots fetched NEVER.
+        //
+        // Short-circuiting on `supports_roots()` keeps the exactly-once
+        // guarantee (the `swap` is still the only gate) while spending the
+        // latch only on a request that can actually fetch. The cost is one
+        // capability read per request instead of one atomic swap.
+        let scoped = session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
+        if scoped.supports_roots() && !session.roots_fetched.swap(true, Ordering::Relaxed) {
             Self::spawn_fetch_roots(&scoped);
         }
 
@@ -1430,8 +1444,36 @@ impl McpServer {
         // receives `Option<&SessionContext>`, so no handler signature
         // changes. Parsing must happen before `handle_tools_call`, which
         // consumes `params` by value into `ToolCallParams`.
-        let scoped_session =
-            session.map(|s| s.with_request_meta(RequestMeta::from_params(request.params.as_ref())));
+        let request_meta = RequestMeta::from_params(request.params.as_ref());
+
+        // C3: 2026-07-28 makes `_meta.clientCapabilities` mandatory on every
+        // client-to-server request, so its absence makes the request
+        // MALFORMED — `-32602`, not a capability-specific refusal.
+        //
+        // The predicate reads `request.params` rather than the scoped session
+        // below, and that is load-bearing rather than stylistic: the scoped
+        // session is built with `session.map(..)`, so on the HTTP transport
+        // and the stdio BATCH path — both of which reach here through
+        // `handle_request` with `session: None` — the envelope is never
+        // parsed at all. A gate hung off `SessionContext` would be inert
+        // exactly where the HTTP `400` is required.
+        //
+        // Ahead of the `-32021` tasks gate on purpose. `-32021` answers "you
+        // did not declare capability X" and presumes a well-formed envelope;
+        // when the envelope itself is absent, "add the envelope" is the
+        // actionable first step, and the message names the key.
+        if lacks_required_client_capabilities(
+            &request.method,
+            id.is_some(),
+            request.params.as_ref(),
+        ) {
+            return Some(JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params(MISSING_CLIENT_CAPABILITIES_MSG),
+            ));
+        }
+
+        let scoped_session = session.map(|s| s.with_request_meta(request_meta));
         let session = scoped_session.as_ref();
 
         // The tasks extension is gated per REQUEST: "Servers MUST return this
@@ -2964,6 +3006,23 @@ mod tests {
     /// whatever it parses from the request it is handling. That is the whole
     /// point of a per-request capability, and it makes these tests exercise
     /// the real seam end to end.
+    /// The MINIMAL conforming envelope: capabilities declared, none supported.
+    ///
+    /// C3 refuses any request whose `_meta.clientCapabilities` is absent, so a
+    /// dispatcher-level test that is not ABOUT the envelope has to carry one.
+    /// `{}` is the smallest conforming value and asserts nothing about what
+    /// the client supports, which is what keeps these tests testing DISPATCH
+    /// rather than accidentally testing capability negotiation.
+    ///
+    /// Deliberately not a bare constant: `params["_meta"] = ..` lets a test
+    /// keep whatever real params it needs and add only the envelope.
+    fn params_declaring_nothing(mut params: Value) -> Value {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        params
+    }
+
     fn params_declaring_tasks(mut params: Value) -> Value {
         params["_meta"] = json!({
             "io.modelcontextprotocol/clientCapabilities": {
@@ -4194,7 +4253,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "unknown/method".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -4214,7 +4273,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(42)),
             method: "ping".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -4856,7 +4915,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(99)),
             method: "tools/list".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -4872,7 +4931,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(100)),
             method: "prompts/list".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -4887,7 +4946,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(101)),
             method: "resources/list".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -4936,7 +4995,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: String::new(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -5852,7 +5911,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tasks/result".to_string(),
-            params: Some(json!({"taskId": "nonexistent"})),
+            params: Some(params_declaring_nothing(json!({"taskId": "nonexistent"}))),
         };
 
         let response = server.handle_request(request).await;
@@ -5907,7 +5966,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tasks/list".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -5965,7 +6024,7 @@ rbac:
                 method: method.to_string(),
                 // No `_meta`: this request declares nothing, whatever any
                 // earlier request or handshake may have said.
-                params: Some(json!({ "taskId": task_id })),
+                params: Some(params_declaring_nothing(json!({ "taskId": task_id }))),
             };
 
             let response = server
@@ -6013,7 +6072,7 @@ rbac:
                 jsonrpc: "2.0".to_string(),
                 id: Some(json!(1)),
                 method: method.to_string(),
-                params: Some(json!({"taskId": "whatever"})),
+                params: Some(params_declaring_nothing(json!({"taskId": "whatever"}))),
             };
 
             let response = server
@@ -6484,7 +6543,9 @@ rbac:
                 jsonrpc: "2.0".to_string(),
                 id: Some(json!(1)),
                 method: method.to_string(),
-                params: Some(json!({ "uri": "history://recent" })),
+                params: Some(params_declaring_nothing(
+                    json!({ "uri": "history://recent" }),
+                )),
             };
             let error = server
                 .handle_request(request)
@@ -6731,7 +6792,9 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "subscriptions/listen".to_string(),
-            params: Some(json!({ "notifications": { "toolsListChanged": true } })),
+            params: Some(params_declaring_nothing(
+                json!({ "notifications": { "toolsListChanged": true } }),
+            )),
         };
 
         // The session-less public entry point refuses it — but with
@@ -7032,7 +7095,9 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "subscriptions/listen".to_string(),
-            params: Some(json!({ "notifications": { "toolsListChanged": true } })),
+            params: Some(params_declaring_nothing(
+                json!({ "notifications": { "toolsListChanged": true } }),
+            )),
         };
 
         let response = server
@@ -7071,10 +7136,21 @@ rbac:
             .send(client_request(
                 1,
                 "subscriptions/listen",
-                Some(json!({ "notifications": { "toolsListChanged": true } })),
+                Some(params_declaring_nothing(
+                    json!({ "notifications": { "toolsListChanged": true } }),
+                )),
             ))
             .unwrap();
-        client_tx.send(client_request(2, "ping", None)).unwrap();
+        // The sequencer carries the envelope too. Without it C3 would answer
+        // it -32602 -- which sequences just as well, and would therefore mask
+        // a later change in what this test is about.
+        client_tx
+            .send(client_request(
+                2,
+                "ping",
+                Some(params_declaring_nothing(json!({}))),
+            ))
+            .unwrap();
 
         // Every read is bounded. An unbounded `recv().await` would hang
         // forever here rather than fail: `serve_session` keeps the reader
@@ -7414,7 +7490,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "completions/complete".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -7502,10 +7578,10 @@ rbac:
             // used to let through (an empty array also satisfies `is_array`
             // and is what both the `try_read` fallback and
             // `unwrap_or_default()` produce).
-            params: Some(json!({
+            params: Some(params_declaring_nothing(json!({
                 "ref": { "type": "ref/prompt", "name": "diagnose_host" },
                 "argument": { "name": "environment", "value": "" }
-            })),
+            }))),
         };
 
         let response = server.handle_request(request).await;
@@ -7533,7 +7609,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "resources/templates/list".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
 
         let response = server.handle_request(request).await;
@@ -7550,7 +7626,9 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "resources/read".to_string(),
-            params: Some(json!({ "uri": "history://recent" })),
+            params: Some(params_declaring_nothing(
+                json!({ "uri": "history://recent" }),
+            )),
         };
 
         let response = server.handle_request(request).await;
@@ -7721,7 +7799,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!("wrap-1")),
             method: "tools/list".to_string(),
-            params: None,
+            params: Some(params_declaring_nothing(json!({}))),
         };
         let response = server.handle_request(request).await;
         assert!(response.error.is_none());
@@ -7960,10 +8038,10 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tools/call".to_string(),
-            params: Some(json!({
+            params: Some(params_declaring_nothing(json!({
                 "name": "ssh_cron_remove",
                 "arguments": { "host": "prod", "name": "backup" }
-            })),
+            }))),
         };
 
         let response = server
@@ -7980,24 +8058,30 @@ rbac:
         );
     }
 
-    /// Not a Legacy-handshake test any more: task 15 deleted every
-    /// production writer of `SessionCapabilities` (`handle_initialize` used
-    /// to be the only one). What survives is a narrower but still-real
-    /// invariant — when a request carries no `_meta` envelope at all, the
-    /// destructive-elicitation gate falls back to `session.caps` rather than
-    /// denying by default. Its sibling,
-    /// `test_request_meta_empty_capabilities_overrides_initialize`, sends an
-    /// explicit empty `clientCapabilities: {}` (`Some(false)`, which beats
-    /// `caps`) — a different branch from the `None` case exercised here.
+    /// INVERTED by C3, and kept rather than deleted because the property
+    /// that replaced the old one is worth as much and is newly true.
     ///
-    /// Decision point for task 68: `SessionCapabilities` survives only if a
-    /// production caller still writes to it. This test is why the answer is
-    /// GO after this task — `session_ctx.caps.set_supports_elicitation(true)`
-    /// below is set directly, because no production code path does it any
-    /// more. A recon that ran task 68's writer-search before this task landed
-    /// found STOP.
+    /// This test used to assert the Legacy fallback: a request carrying no
+    /// `_meta` reached the destructive-elicitation gate, which fell back to
+    /// `session.caps` instead of denying by default. C3 makes that
+    /// unreachable — a capability-less request is refused `-32602` at the
+    /// dispatch chokepoint and never arrives. Asserting the old behaviour
+    /// would now be asserting something no request can produce.
+    ///
+    /// What is asserted instead is that the path is CLOSED, not merely that
+    /// the old test disappeared: `caps` is deliberately set to grant
+    /// elicitation, and the point is that granting it changes nothing,
+    /// because C3 fires first. A bare deletion would have left "the fallback
+    /// is unreachable" as a claim in a commit message with no test behind it.
+    ///
+    /// It also still carries task 68's evidence. `SessionCapabilities`
+    /// survives only if a production caller writes to it; nothing does, which
+    /// is why `set_supports_elicitation(true)` has to be called by hand here.
+    /// A recon that ran task 68's writer-search before task 15 landed found
+    /// STOP; after it, GO. What C3 adds is that the READ side is dead too, so
+    /// task 68 removes a fallback branch rather than a live security gate.
     #[tokio::test]
-    async fn test_destructive_gate_falls_back_to_caps_when_no_meta() {
+    async fn the_legacy_capability_fallback_is_unreachable_through_dispatch() {
         let mut config = test_config();
         config.security.require_elicitation_on_destructive = true;
         let (server, _audit_task) = McpServer::new(config);
@@ -8020,7 +8104,7 @@ rbac:
             false
         });
 
-        // No `_meta` anywhere on this request.
+        // No `_meta` anywhere on this request — the exact shape C3 refuses.
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
@@ -8036,19 +8120,282 @@ rbac:
             .await
             .expect("only subscriptions/listen yields no response");
 
-        let elicited = tokio::time::timeout(std::time::Duration::from_secs(5), fake_client)
-            .await
-            .expect("timed out waiting for elicitation/create — legacy fallback broken")
-            .unwrap();
-        assert!(
-            elicited,
-            "legacy fallback broken: no elicitation/create was sent"
+        let error = response
+            .error
+            .expect("a capability-less request must be refused, not served");
+        assert_eq!(
+            error.code, -32602,
+            "C3 must refuse before the destructive gate is consulted: {error:?}"
         );
-        let result = response.result.unwrap();
-        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+
+        // The gate was never consulted, so nothing was elicited — even though
+        // `caps` says elicitation is supported. That is the whole point: the
+        // fallback cannot be reached, so it cannot grant anything.
+        match tokio::time::timeout(std::time::Duration::from_millis(500), fake_client).await {
+            // Timed out with nothing sent: the gate was never reached.
+            Err(_) => {}
+            Ok(joined) => assert!(
+                !joined.expect("the fake client task panicked"),
+                "an elicitation/create was sent for a request C3 refused before \
+                 the destructive gate could run"
+            ),
+        }
+
+        // And no tool ran. The old test asserted a `result` here — the
+        // decline path's content block — which only exists when the call
+        // reaches the gate. A refused request has no result at all, and
+        // asserting that is what distinguishes "refused early" from
+        // "elicited and declined": both leave the tool unexecuted, but only
+        // one of them leaves the client without an answer it can act on.
         assert!(
-            text.contains("User declined execution of destructive tool"),
-            "unexpected error text: {text}"
+            response.result.is_none(),
+            "a refused request must carry no result: {:?}",
+            response.result
+        );
+    }
+
+    // ============== C3: mandatory clientCapabilities envelope ==============
+
+    /// The refusal itself. `-32602`, because an absent envelope makes the
+    /// request MALFORMED — it is not a capability negotiation failure, which
+    /// is what `-32021` means and which presumes a well-formed envelope.
+    #[tokio::test]
+    async fn a_request_without_client_capabilities_is_invalid_params() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let error = server
+            .handle_request(request)
+            .await
+            .error
+            .expect("a capability-less request must be refused");
+
+        assert_eq!(error.code, -32602, "{error:?}");
+        // The message is asserted, not merely the code. A client that gets
+        // "Invalid params" on `tools/list` has no way to guess which param;
+        // naming the key is the whole difference between an actionable
+        // refusal and a dead end.
+        assert!(
+            error.message.contains("clientCapabilities"),
+            "the refusal must name the missing key: {}",
+            error.message
+        );
+    }
+
+    /// An `_meta` that carries everything EXCEPT `clientCapabilities` is
+    /// refused too.
+    ///
+    /// Not the same case as the test above, and worth its own: a client that
+    /// sends `protocolVersion` and `clientInfo` has clearly implemented the
+    /// envelope and merely omitted one key, which is the likeliest real
+    /// mistake. `RequestMeta` collapses both to the same `None`, so without
+    /// this test the gate could be narrowed to "no `_meta` at all" and stay
+    /// green.
+    #[tokio::test]
+    async fn a_meta_without_client_capabilities_is_also_invalid_params() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "test-client", "version": "1.0.0"
+                    }
+                }
+            })),
+        };
+
+        let error = server
+            .handle_request(request)
+            .await
+            .error
+            .expect("an envelope missing only clientCapabilities is still malformed");
+        assert_eq!(error.code, -32602, "{error:?}");
+    }
+
+    /// THE POSITIVE TWIN of the two above. An empty `{}` is an authoritative
+    /// declaration of no capabilities, not an omission, and must be SERVED.
+    ///
+    /// Without this, "C3 refuses requests without capabilities" is equally
+    /// satisfied by a server that refuses every request, which would be a far
+    /// worse bug with the same green tests.
+    #[tokio::test]
+    async fn an_empty_capabilities_object_is_served_not_refused() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(params_declaring_nothing(json!({}))),
+        };
+
+        let response = server.handle_request(request).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(
+            response.result.expect("a tools/list result")["tools"].is_array(),
+            "the request must be served on its merits, not merely not-refused"
+        );
+    }
+
+    /// EXEMPTION 1, and its reason is an interop contract rather than
+    /// convenience.
+    ///
+    /// The client-side probe reads "a discovery result = modern", "a specific
+    /// modern protocol error = modern but wrong version", and "other errors =
+    /// LEGACY, fall back to `initialize`". A `-32602` is an "other error", so
+    /// gating discover would make every dual-era client classify this Modern
+    /// server as Legacy, send `initialize`, get `-32022`, and give up.
+    ///
+    /// Asserted on the RESULT, not on "no error": a server that answered
+    /// `-32601` would also have `error.is_some()` false-negative-free but
+    /// would fail the probe just the same.
+    #[tokio::test]
+    async fn server_discover_is_exempt_so_the_client_probe_still_works() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "server/discover".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+        assert!(
+            response.error.is_none(),
+            "a bare server/discover must not be refused — the probe reads any \
+             error other than -32022 as `this server is Legacy`: {:?}",
+            response.error
+        );
+        assert_eq!(
+            response.result.expect("a discovery result")["resultType"],
+            json!("complete"),
+            "the probe needs a discovery RESULT, not merely a non-error"
+        );
+    }
+
+    /// EXEMPTION 2, failing in the opposite direction from exemption 1.
+    ///
+    /// A Legacy client has no `_meta` by construction — it predates the
+    /// envelope. Versioning says a modern-only server SHOULD name the
+    /// versions it supports in any error it returns to `initialize`, because
+    /// "this message may be the only diagnostic they can surface to users".
+    /// A `-32602` names no version, so gating `initialize` would replace the
+    /// one actionable message a Legacy client can show with "invalid params".
+    #[tokio::test]
+    async fn legacy_initialize_is_exempt_so_it_still_names_its_versions() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "legacy", "version": "1.0.0" }
+            })),
+        };
+
+        let error = server
+            .handle_request(request)
+            .await
+            .error
+            .expect("Legacy initialize is still refused, just not by C3");
+        assert_eq!(
+            error.code, -32022,
+            "C3 must not shadow the one error a Legacy client can act on: {error:?}"
+        );
+        assert_eq!(
+            error.data.expect("-32022 must carry the supported list")["supported"],
+            json!(["2026-07-28"]),
+            "the SHOULD is about NAMING the versions, so the payload is the test"
+        );
+    }
+
+    /// A Notification is exempt, and for a reason stronger than the spec's
+    /// wording: JSON-RPC 2.0 §4.1 forbids answering one, so there is no id a
+    /// `-32602` could be addressed to. Gating notifications would mean either
+    /// inventing a response for a message that must not receive one, or
+    /// refusing silently — and a silent refusal is indistinguishable from
+    /// delivery.
+    #[tokio::test]
+    async fn a_notification_without_capabilities_is_not_refused() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: "notifications/cancelled".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+        assert_ne!(
+            response.error.as_ref().map(|e| e.code),
+            Some(-32602),
+            "a notification carries no id, so C3 must not fire on it: {:?}",
+            response.error
+        );
+    }
+
+    // ============== The roots latch is spent on a FETCH ==============
+
+    /// Regression: `roots_fetched` used to be consumed by the first request
+    /// to ARRIVE, whatever it was.
+    ///
+    /// The first request a Modern client sends is `server/discover`, whose
+    /// envelope declares `{}` — no roots, authoritatively. The latch burned
+    /// on that probe, no fetch was spawned, and every later request found it
+    /// already spent: a client that declares `roots` on all its real requests
+    /// got its roots fetched NEVER.
+    ///
+    /// Two measurement points, because one proves nothing about ordering: a
+    /// non-declaring request must leave the latch UNSPENT, and a declaring
+    /// one must spend it. Asserting only the second is satisfied by the buggy
+    /// version too.
+    #[tokio::test]
+    async fn the_roots_latch_is_spent_on_a_fetch_not_on_the_first_request() {
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session = SessionContext::new(tx);
+
+        // The probe: declares capabilities, but not roots.
+        let probe = JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: Some("server/discover".to_string()),
+            params: Some(params_declaring_nothing(json!({}))),
+            result: None,
+            error: None,
+        };
+        let _ = McpServer::route_incoming_message(probe, &session);
+        assert!(
+            !session.roots_fetched.load(Ordering::Relaxed),
+            "a request that cannot fetch roots must not spend the one-shot latch"
+        );
+
+        // A later request that DOES declare roots.
+        let declaring = JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(2)),
+            method: Some("tools/list".to_string()),
+            params: Some(json!({
+                "_meta": {
+                    "io.modelcontextprotocol/clientCapabilities": { "roots": {} }
+                }
+            })),
+            result: None,
+            error: None,
+        };
+        let _ = McpServer::route_incoming_message(declaring, &session);
+        assert!(
+            session.roots_fetched.load(Ordering::Relaxed),
+            "a request declaring roots must spend the latch and fetch"
         );
     }
 
@@ -8186,7 +8533,7 @@ rbac:
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "logging/setLevel".to_string(),
-            params: Some(json!({ "level": "info" })),
+            params: Some(params_declaring_nothing(json!({ "level": "info" }))),
         };
 
         let response = server.handle_request(request).await;

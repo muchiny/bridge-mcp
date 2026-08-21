@@ -92,7 +92,14 @@ fn exec_request() -> Request<Body> {
         "method": "tools/call",
         "params": {
             "name": "ssh_exec",
-            "arguments": {"host": "server1", "command": "id"}
+            "arguments": {"host": "server1", "command": "id"},
+            // MCP 2026-07-28 requires the capability envelope on every
+            // request; without it the POST is refused 400 at the transport
+            // and the tool never runs, so no audit event is written and this
+            // file's subject is never reached.
+            "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
         }
     });
 

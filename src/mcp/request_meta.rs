@@ -35,6 +35,83 @@ pub mod keys {
     pub const TRACEPARENT: &str = "traceparent";
 }
 
+/// Methods exempt from the mandatory `_meta.clientCapabilities` envelope.
+///
+/// Both entries are exempt because gating them would DESTROY A DIAGNOSTIC the
+/// spec requires, not because the envelope is inconvenient there. Neither
+/// method reads `params` for capabilities, but that is incidental — the
+/// reason is what the client does with the answer.
+///
+/// `initialize` is the Legacy handshake, and a Legacy client has no `_meta`
+/// by construction: it predates the envelope. Versioning says a
+/// modern-only server *"**SHOULD** name the protocol versions it supports in
+/// any error it returns to an `initialize` request, on any transport: legacy
+/// clients have no fall-forward mechanism, and this message may be the only
+/// diagnostic they can surface to users."* A `-32602` names no version. C3
+/// would shadow the `-32022` arm for EVERY Legacy client — which is every
+/// client that arm exists for — and replace the one actionable message they
+/// can see with "your params are invalid".
+///
+/// `server/discover` is exempt under the client-side probe
+/// (`/specification/2026-07-28/basic/transports/stdio`, "Backward
+/// Compatibility") classifies a server by what `server/discover` answers: a
+/// discovery result means modern; "a specific modern protocol error" means
+/// modern but requiring a different version; and **"other errors or fails to
+/// respond" means LEGACY**, at which point the client falls back to the
+/// `initialize` handshake — which this server answers `-32022`, killing the
+/// connection. A generic `-32602` is an "other error". Gating discover would
+/// therefore make every dual-era client misclassify this Modern server as
+/// Legacy and give up, which is the exact outcome the `-32022` arm exists to
+/// prevent.
+///
+/// Note the two exemptions fail in OPPOSITE directions if removed: gating
+/// `server/discover` makes a Modern client think the server is Legacy, and
+/// gating `initialize` makes a Legacy client unable to learn the server is
+/// Modern. Together they are the whole of the era-crossing surface.
+pub const CAPABILITY_EXEMPT_METHODS: &[&str] = &["server/discover", "initialize"];
+
+/// The one wording both transports use when the envelope is missing.
+///
+/// Shared so the stdio `-32602` body and the HTTP `400` body cannot drift
+/// into describing the same refusal two different ways.
+pub const MISSING_CLIENT_CAPABILITIES_MSG: &str = concat!(
+    "missing `_meta[\"io.modelcontextprotocol/clientCapabilities\"]`: MCP 2026-07-28 ",
+    "requires it on every client-to-server request. Send `{}` to declare no ",
+    "capabilities; omitting the key entirely is a malformed request."
+);
+
+/// Whether this client-to-server message is a REQUEST that must carry
+/// `_meta.clientCapabilities` and does not.
+///
+/// ONE definition, called from both the dispatch chokepoint (which turns it
+/// into a `-32602` body) and the HTTP transport (which turns it into a `400`
+/// status). Two copies of this rule would drift, and the drift would be
+/// invisible: each transport's tests only exercise its own copy.
+///
+/// `has_id` is what separates a Request from a Notification. A Notification
+/// is exempt for a reason stronger than the spec's wording ("every
+/// client-to-server *request*"): JSON-RPC 2.0 §4.1 forbids answering one at
+/// all, so there is no id a `-32602` could be addressed to. Gating
+/// notifications would mean either inventing a response for a message that
+/// must not receive one, or refusing silently — and a silent refusal is
+/// indistinguishable from delivery.
+///
+/// An EMPTY `{}` passes. It is an authoritative declaration of no
+/// capabilities, not an omission; `empty_capabilities_object_is_declared_
+/// false_not_absent` pins that distinction on the parser side.
+#[must_use]
+pub fn lacks_required_client_capabilities(
+    method: &str,
+    has_id: bool,
+    params: Option<&Value>,
+) -> bool {
+    has_id
+        && !CAPABILITY_EXEMPT_METHODS.contains(&method)
+        && RequestMeta::from_params(params)
+            .client_capabilities
+            .is_none()
+}
+
 /// The parsed per-request `_meta` envelope.
 #[derive(Debug, Clone, Default)]
 pub struct RequestMeta {

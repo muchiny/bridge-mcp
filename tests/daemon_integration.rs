@@ -96,7 +96,11 @@ async fn test_daemon_lifecycle_start_call_stop() {
 
     // Stage 3: JSON-RPC tools/list over the socket.
     let mut client = UnixStream::connect(&socket).await.expect("connect");
-    let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":null}\n";
+    // `\"params\": null` is a capability-less request: MCP 2026-07-28
+    // requires `_meta.clientCapabilities` on every one, so the daemon now
+    // answers -32602 without it and this stage would measure the refusal
+    // rather than the tool list.
+    let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n";
     client.write_all(request).await.expect("write");
     client.flush().await.expect("flush");
 
@@ -204,7 +208,7 @@ async fn test_daemon_batch_requests_are_dispatched() {
 
     // Send a batch of three tools/list + resources/list + prompts/list.
     let mut client = UnixStream::connect(&socket).await.expect("connect");
-    let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"resources/list"},{"jsonrpc":"2.0","id":3,"method":"prompts/list"}]
+    let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}]
 "#;
     client.write_all(batch).await.expect("write");
     client.flush().await.expect("flush");
@@ -283,8 +287,15 @@ async fn test_daemon_parse_error_response_sent_for_bad_json() {
         .await
         .expect("write");
     // Line 2: valid request to confirm the session survived.
+    //
+    // The probe was `ping` until 2026-07-28 deleted the method. A deleted
+    // method still proves the reader loop is alive -- it answers -32601 --
+    // but it cannot satisfy the `result.is_some()` assertion below, which
+    // is the half that proves the session still SERVES rather than merely
+    // still replies. `tools/list` is the smallest method that does both,
+    // and it carries the capability envelope every request now needs.
     client
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"ping\"}\n")
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n")
         .await
         .expect("write");
     client.flush().await.expect("flush");
@@ -306,14 +317,14 @@ async fn test_daemon_parse_error_response_sent_for_bad_json() {
         "expected parse_error code, got: {err_line}"
     );
 
-    // Second response should be the successful ping with id=99.
+    // Second response should be the successful probe with id=99.
     let mut ok_line = String::new();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut ok_line))
         .await
         .expect("read timeout")
         .expect("read ok");
     let ok_resp: serde_json::Value =
-        serde_json::from_str(ok_line.trim()).expect("valid ping response");
+        serde_json::from_str(ok_line.trim()).expect("valid probe response");
     assert_eq!(ok_resp["id"].as_i64(), Some(99));
     assert!(ok_resp.get("result").is_some());
 

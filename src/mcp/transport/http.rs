@@ -41,6 +41,9 @@ use crate::mcp::protocol::{
     IncomingMessage, JsonRpcError, JsonRpcMessage, JsonRpcResponse, SUPPORTED_PROTOCOL_VERSIONS,
     WriterMessage,
 };
+use crate::mcp::request_meta::{
+    MISSING_CLIENT_CAPABILITIES_MSG, lacks_required_client_capabilities,
+};
 use crate::mcp::server::McpServer;
 
 /// Default allowlist for the `Origin` header — localhost variants only.
@@ -150,6 +153,23 @@ async fn origin_guard(
             forbidden("Missing Origin header (anti-DNS-rebinding)")
         }
     }
+}
+
+/// A JSON-RPC error body carried by HTTP `400`.
+///
+/// Modelled on [`forbidden`], which was the only place in this file pairing a
+/// JSON-RPC error with a non-200 status. The body is built through
+/// `JsonRpcResponse::error` rather than a hand-written literal so it is
+/// byte-identical to what the stdio transport returns for the same refusal —
+/// two hand-written shapes would drift, and only one transport's tests would
+/// notice.
+///
+/// Contrast `validate_protocol_version`'s 400, which answers a bare string a
+/// JSON-RPC client cannot parse. That is inherited and is Task 66's to
+/// reconcile.
+fn bad_request(id: Option<Value>, message: &str) -> Response {
+    let resp = JsonRpcResponse::error(id, JsonRpcError::invalid_params(message));
+    (StatusCode::BAD_REQUEST, Json(resp)).into_response()
 }
 
 fn forbidden(message: &str) -> Response {
@@ -530,6 +550,30 @@ async fn handle_post(
             // `method_not_found`, which is discarded below just like any
             // real result would be.
             let is_notification = msg.id.is_none();
+
+            // C3: the SAME predicate the dispatch chokepoint uses, answered
+            // here with a real HTTP status. `handle_request` produces the
+            // `-32602` body on its own; what it cannot do is set the status,
+            // because it has no idea it is being called over HTTP.
+            //
+            // Before dispatch, so a malformed request does no work — the same
+            // placement as `validate_protocol_version` at the top of this
+            // function.
+            //
+            // The BATCH arm below deliberately does NOT do this. A batch is a
+            // transport container of independent messages and HTTP has only
+            // one status; voiding conforming members because a sibling was
+            // malformed would be worse than answering each on its own merits.
+            // Each malformed member still gets its own `-32602`, from the
+            // dispatch gate, inside the 200 array.
+            if lacks_required_client_capabilities(
+                msg.method.as_deref().unwrap_or_default(),
+                msg.id.is_some(),
+                msg.params.as_ref(),
+            ) {
+                return bad_request(msg.id.clone(), MISSING_CLIENT_CAPABILITIES_MSG);
+            }
+
             let request = crate::mcp::protocol::JsonRpcRequest {
                 jsonrpc: msg.jsonrpc,
                 id: msg.id,
@@ -1032,8 +1076,11 @@ mod tests {
                     .uri("/mcp")
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
-                    .header("mcp-protocol-version", "2025-11-25")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    // Was "2025-11-25" until SUPPORTED_PROTOCOL_VERSIONS
+                    // was narrowed to one element. The test name says
+                    // "supported", so it follows the constant.
+                    .header("mcp-protocol-version", "2026-07-28")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
                     .unwrap(),
             )
             .await
@@ -1057,7 +1104,7 @@ mod tests {
                     .uri("/mcp")
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
                     .unwrap(),
             )
             .await
@@ -1082,13 +1129,146 @@ mod tests {
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
                     .header("mcp-protocol-version", "2025-03-26")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ============== C3: mandatory clientCapabilities over HTTP ==============
+
+    /// The stdio dispatcher answers this `-32602` on its own; what it cannot
+    /// do is set an HTTP status, because it has no idea which transport is
+    /// calling it. So the status is asserted here, and the BODY is asserted
+    /// too — a bare 400 with an unparseable string body (which is what
+    /// `validate_protocol_version` still returns) leaves a JSON-RPC client
+    /// with nothing to act on.
+    #[tokio::test]
+    async fn test_post_without_client_capabilities_is_400_with_a_jsonrpc_body() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body)
+            .expect("the 400 must carry a parseable JSON-RPC body, not a bare string");
+        assert_eq!(json["error"]["code"], serde_json::json!(-32602));
+        assert_eq!(
+            json["id"],
+            serde_json::json!(1),
+            "the refusal must be addressed to the request it refuses"
+        );
+    }
+
+    /// THE POSITIVE TWIN. The same request with an empty `{}` envelope is
+    /// served at 200. Without it, "capability-less POSTs get 400" is equally
+    /// satisfied by a transport that 400s everything.
+    #[tokio::test]
+    async fn test_post_with_empty_client_capabilities_is_200() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// A BATCH is answered per member, not voided as a whole.
+    ///
+    /// The single-message arm returns 400 before dispatch; the batch arm
+    /// deliberately does not. A batch is a transport container of independent
+    /// messages and HTTP carries one status, so refusing the whole POST would
+    /// destroy the conforming member's answer because of its sibling. Each
+    /// malformed member gets its own `-32602` from the dispatch gate, inside
+    /// a 200 array.
+    ///
+    /// This is the test that would catch someone "making the batch arm
+    /// consistent" with the single arm later.
+    #[tokio::test]
+    async fn test_post_batch_answers_each_member_on_its_own_merits() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "one malformed member must not void the conforming one"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().expect("a batch answers with an array");
+        assert_eq!(arr.len(), 2);
+
+        let conforming = arr
+            .iter()
+            .find(|r| r["id"] == serde_json::json!(1))
+            .unwrap();
+        assert!(
+            conforming.get("result").is_some(),
+            "the conforming member must be served: {conforming}"
+        );
+        let malformed = arr
+            .iter()
+            .find(|r| r["id"] == serde_json::json!(2))
+            .unwrap();
+        assert_eq!(
+            malformed["error"]["code"],
+            serde_json::json!(-32602),
+            "the malformed member must be refused on its own: {malformed}"
+        );
     }
 
     // ============== Single-message notification suppression (G-18) ==============
@@ -1155,7 +1335,7 @@ mod tests {
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized"}"#,
+                        r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
                     ))
                     .unwrap(),
             )
