@@ -342,17 +342,43 @@ pub struct ResourceContent {
 // Task Contract Types (MCP 2025-11-25+)
 // ============================================================================
 
-/// Task lifecycle status values.
+/// Task lifecycle status values — the five of MCP 2026-07-28.
+///
+/// `snake_case`, not `lowercase`: `InputRequired` must reach the wire as
+/// `"input_required"`, and `lowercase` would spell it `"inputrequired"`. The
+/// other four variants are single words and serialize identically under both
+/// renamings, so the switch is invisible to them.
+///
+/// Note the spelling: `Cancelled`, double-l.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// The request is currently being processed.
     Working,
+    /// The server needs input from the client before the task can proceed.
+    ///
+    /// Nothing in bridge-mcp constructs this variant today, and nothing is
+    /// planned to: no tool suspends mid-execution to elicit. It exists so the
+    /// type is complete and the wire value is spellable — a client that
+    /// negotiated the extension may legitimately expect all five.
+    InputRequired,
+    /// Completed successfully and results are available. **Includes tool
+    /// calls that returned `isError: true`** — those are completions, not
+    /// failures.
     Completed,
+    /// Failed due to a JSON-RPC error during execution. MUST NOT be used for
+    /// non-JSON-RPC errors.
     Failed,
+    /// Cancelled before completion.
     Cancelled,
 }
 
-/// Task metadata returned by task operations.
+/// The bare `Task` object of MCP 2026-07-28 — seven fields, no payload.
+///
+/// The adapter layer flattens this into `DetailedTask` to add the protocol
+/// artefacts (`resultType`, `result`/`error`/`inputRequests`). Keeping the
+/// two apart is what stops `ResultType` — a pure wire concept — from leaking
+/// into the ports layer.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskInfo {
@@ -362,10 +388,27 @@ pub struct TaskInfo {
     pub status_message: Option<String>,
     pub created_at: String,
     pub last_updated_at: String,
-    /// Time-to-live in milliseconds before the task expires.
-    pub ttl: u64,
+    /// Time-to-live in milliseconds before the task expires; `null` for
+    /// unlimited retention.
+    ///
+    /// REQUIRED and NULLABLE — deliberately no `skip_serializing_if`. The
+    /// spec types this `number | null`, so an absent key is not a legal
+    /// encoding of "unlimited"; `null` is. bridge-mcp always evicts on TTL
+    /// (`TaskEntry::is_expired`), so in practice this is always `Some`, but
+    /// the shape must stay spellable.
+    ///
+    /// 2025-11-25 called this `ttl`. The wire key is now `ttlMs`.
+    pub ttl_ms: Option<i64>,
     /// Suggested poll interval in milliseconds.
-    pub poll_interval: u64,
+    ///
+    /// OPTIONAL per the spec (may be absent entirely), but bridge-mcp always
+    /// emits it: clients "SHOULD respect the `pollIntervalMs` provided in
+    /// responses", and omitting it leaves them nothing to pace against.
+    ///
+    /// 2025-11-25 called this `pollInterval`. The wire key is now
+    /// `pollIntervalMs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_interval_ms: Option<i64>,
 }
 
 #[cfg(test)]
@@ -750,17 +793,26 @@ mod tests {
     // TaskStatus / TaskInfo tests
     // ========================================================================
 
+    /// Pins the WIRE spellings, not the Rust symbols: rename the variants
+    /// and this test stays green; change `rename_all` and it goes red.
     #[test]
-    fn test_task_status_serializes_lowercase() {
+    fn task_status_serializes_the_five_modern_spellings() {
         assert_eq!(
             serde_json::to_value(TaskStatus::Working).unwrap(),
             "working"
+        );
+        // The underscore is the whole point. Under the pre-3.0.0
+        // `rename_all = "lowercase"` this would be `"inputrequired"`.
+        assert_eq!(
+            serde_json::to_value(TaskStatus::InputRequired).unwrap(),
+            "input_required"
         );
         assert_eq!(
             serde_json::to_value(TaskStatus::Completed).unwrap(),
             "completed"
         );
         assert_eq!(serde_json::to_value(TaskStatus::Failed).unwrap(), "failed");
+        // Double-l, per the spec's own explicit note.
         assert_eq!(
             serde_json::to_value(TaskStatus::Cancelled).unwrap(),
             "cancelled"
@@ -775,8 +827,8 @@ mod tests {
             status_message: Some("In progress".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),
             last_updated_at: "2025-01-01T00:00:01Z".to_string(),
-            ttl: 60000,
-            poll_interval: 1000,
+            ttl_ms: Some(60000),
+            poll_interval_ms: Some(1000),
         };
         let json = serde_json::to_value(&info).unwrap();
 
@@ -785,8 +837,8 @@ mod tests {
         assert_eq!(json["statusMessage"], "In progress");
         assert_eq!(json["createdAt"], "2025-01-01T00:00:00Z");
         assert_eq!(json["lastUpdatedAt"], "2025-01-01T00:00:01Z");
-        assert_eq!(json["ttl"], 60000);
-        assert_eq!(json["pollInterval"], 1000);
+        assert_eq!(json["ttlMs"], 60000);
+        assert_eq!(json["pollIntervalMs"], 1000);
 
         // snake_case keys must NOT be present
         assert!(json.get("task_id").is_none());
@@ -802,8 +854,8 @@ mod tests {
             status_message: None,
             created_at: "t".to_string(),
             last_updated_at: "t".to_string(),
-            ttl: 1000,
-            poll_interval: 500,
+            ttl_ms: Some(1000),
+            poll_interval_ms: Some(500),
         };
         let json_str = serde_json::to_string(&info).unwrap();
         assert!(!json_str.contains("statusMessage"));

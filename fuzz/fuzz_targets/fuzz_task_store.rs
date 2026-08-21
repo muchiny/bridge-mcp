@@ -41,9 +41,8 @@ fuzz_target!(|data: (u8, u8, &str)| {
             let _ = store.get_result(&id).await;
         }
 
-        // Fuzz list with arbitrary cursor
-        let _ = store.list_tasks(Some(id_data), 10).await;
-        let _ = store.list_tasks(None, 10).await;
+        // No cursor fuzzing left: `list_tasks` went with `tasks/list`,
+        // and with it the only cursor this store ever parsed.
 
         // Try operations on non-existent task
         let _ = store.cancel_task(id_data).await;

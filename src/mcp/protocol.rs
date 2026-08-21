@@ -521,14 +521,30 @@ pub struct ResourceTemplate {
 
 // TaskStatus and TaskInfo re-exported from ports::protocol above.
 
-/// Modern (2026-07-28) discriminator telling a client whether a result is
-/// final or a partial it must poll again.
+/// Modern (2026-07-28) discriminator telling a client which *shape* of result
+/// it is holding — NOT how far along the work is.
 ///
-/// PROVENANCE: only `"complete"` is attested by the 2026-07-28 wire reference
-/// (it appears in the `server/discover` result). `"working"` is chosen here to
-/// reuse the spelling `TaskStatus::Working` already puts on the wire, so a
-/// client sees one vocabulary for "not finished yet". Re-check against
-/// `schema/2026-07-28/schema.ts` before adding a third variant.
+/// PROVENANCE: the core union is
+/// `"complete" | "input_required" | "task" | string`. Two MUSTs bound the two
+/// variants spelled here:
+///
+/// - "Servers **MUST** set `resultType` to `"task"` when returning a
+///   `CreateTaskResult` so that clients can distinguish it from a standard
+///   result. Servers **MUST NOT** set `resultType` to `"task"` on result types
+///   other than `CreateTaskResult`."
+/// - On a `tasks/get` response: "The `resultType` field **MUST** be set to
+///   `"complete"` on this object as it is the standard result shape for the
+///   `tasks/get` request."
+///
+/// A pre-3.0.0 draft of this enum carried a `Working` variant, reasoning that
+/// it should "reuse the spelling `TaskStatus::Working` already puts on the
+/// wire". That was the mistake this doc-comment exists to prevent: `"working"`
+/// is a `TaskStatus` and never a `ResultType`. The two are orthogonal axes —
+/// every `tasks/get` answer carries `resultType: "complete"`, including one
+/// reporting `status: "working"`.
+///
+/// `input_required` is in the core union but is not spelled here: bridge-mcp
+/// never enters that state (see `TaskStatus::InputRequired`).
 ///
 /// `Serialize` only, on purpose: this server emits `resultType` and never
 /// parses one. Adding `Deserialize` would need a catch-all variant, and
@@ -537,24 +553,107 @@ pub struct ResourceTemplate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ResultType {
-    /// Final. No further polling required.
+    /// The standard result shape. Carried by every `tasks/get` answer
+    /// whatever the task's status, and by the `tasks/cancel` /`tasks/update`
+    /// acks.
     Complete,
-    /// Not final. Poll again after `TaskInfo::poll_interval` milliseconds.
-    Working,
+    /// A task handle returned in lieu of a standard result. Legal on
+    /// `CreateTaskResult` and nowhere else.
+    Task,
 }
 
-/// Response for a task-augmented `tools/call` request.
+/// One flat struct covering `CreateTaskResult` and `GetTaskResult`.
+///
+/// Both are `Result & Task` / `Result & DetailedTask` in 2026-07-28, so one
+/// type serves both; only `result_type` and which payload field is populated
+/// distinguish them. This replaces the pre-3.0.0 `CreateTaskResult`, whose
+/// nested `result.task` object was the 2025-11-25 shape.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateTaskResult {
-    /// `Working` whenever the server hands back a handle instead of an
-    /// answer. Omitted entirely when `None`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<ResultType>,
+pub struct DetailedTask {
+    /// [`ResultType::Task`] on the handle returned in lieu of a tool result;
+    /// [`ResultType::Complete`] on every `tasks/get` snapshot. Not optional
+    /// and never skipped: the spec makes the discriminator a MUST on both,
+    /// and an omitted `resultType` is exactly what a client cannot
+    /// distinguish from a standard `CallToolResult`.
+    pub result_type: ResultType,
+
+    /// The seven `Task` fields, FLATTENED to the root of the result.
+    ///
+    /// `Result & Task` is flat in 2026-07-28 — `taskId`, `status`, `ttlMs`
+    /// and the rest sit directly on `result`, with no enclosing `task`
+    /// object. 2025-11-25 nested them; this is the exact reversal.
+    ///
+    /// The flatten is what lets the domain keep an unpolluted [`TaskInfo`]
+    /// while the wire stays flat. Note that `#[serde(flatten)]` is
+    /// incompatible with `deny_unknown_fields` — harmless here, since this
+    /// type is `Serialize`-only.
+    #[serde(flatten)]
     pub task: TaskInfo,
+
+    /// Present iff `status == Completed`: the original `ToolCallResult`,
+    /// including ones carrying `isError: true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+
+    /// Present iff `status == Failed`: a JSON-RPC error object. Protocol
+    /// faults only — a tool that ran and failed is `Completed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
+
+    /// Present iff `status == InputRequired`. bridge-mcp never enters that
+    /// state, so this is always `None`; the field exists so the shape is
+    /// complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_requests: Option<Value>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "_meta")]
     pub meta: Option<Value>,
+}
+
+impl DetailedTask {
+    /// The handle returned in lieu of a tool result: `resultType: "task"`,
+    /// no payload (the task has not produced one yet).
+    #[must_use]
+    pub fn handle(task: TaskInfo) -> Self {
+        Self {
+            result_type: ResultType::Task,
+            task,
+            result: None,
+            error: None,
+            input_requests: None,
+            meta: None,
+        }
+    }
+
+    /// A `tasks/get` snapshot: `resultType: "complete"` whatever the status,
+    /// because a snapshot IS the standard result shape for that method.
+    #[must_use]
+    pub fn snapshot(task: TaskInfo) -> Self {
+        Self {
+            result_type: ResultType::Complete,
+            task,
+            result: None,
+            error: None,
+            input_requests: None,
+            meta: None,
+        }
+    }
+
+    /// Attach the completed task's `ToolCallResult`.
+    #[must_use]
+    pub fn with_result(mut self, result: Value) -> Self {
+        self.result = Some(result);
+        self
+    }
+
+    /// Attach the failed task's JSON-RPC error object.
+    #[must_use]
+    pub fn with_error(mut self, error: Value) -> Self {
+        self.error = Some(error);
+        self
+    }
 }
 
 /// Parameters for `tasks/get`.
@@ -564,34 +663,11 @@ pub struct TaskGetParams {
     pub task_id: String,
 }
 
-/// Parameters for `tasks/result`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskResultParams {
-    pub task_id: String,
-}
-
 /// Parameters for `tasks/cancel`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCancelParams {
     pub task_id: String,
-}
-
-/// Parameters for `tasks/list`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct TaskListParams {
-    #[serde(default)]
-    pub cursor: Option<String>,
-}
-
-/// Response for `tasks/list`.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskListResult {
-    pub tasks: Vec<TaskInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
 }
 
 // ============================================================================
@@ -1658,6 +1734,10 @@ mod tests {
             "\"working\""
         );
         assert_eq!(
+            serde_json::to_string(&TaskStatus::InputRequired).unwrap(),
+            "\"input_required\""
+        );
+        assert_eq!(
             serde_json::to_string(&TaskStatus::Completed).unwrap(),
             "\"completed\""
         );
@@ -1679,8 +1759,8 @@ mod tests {
             status_message: Some("Processing...".to_string()),
             created_at: "2025-11-25T10:30:00Z".to_string(),
             last_updated_at: "2025-11-25T10:30:00Z".to_string(),
-            ttl: 60000,
-            poll_interval: 5000,
+            ttl_ms: Some(60000),
+            poll_interval_ms: Some(5000),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["taskId"], "abc-123");
@@ -1688,10 +1768,36 @@ mod tests {
         assert_eq!(json["statusMessage"], "Processing...");
         assert_eq!(json["createdAt"], "2025-11-25T10:30:00Z");
         assert_eq!(json["lastUpdatedAt"], "2025-11-25T10:30:00Z");
-        assert_eq!(json["ttl"], 60000);
-        assert_eq!(json["pollInterval"], 5000);
+        assert_eq!(json["ttlMs"], 60000);
+        assert_eq!(json["pollIntervalMs"], 5000);
+        // The 2025-11-25 keys must be gone, not merely joined by the new
+        // ones — a client reading `ttl` would silently see nothing.
+        assert!(json.get("ttl").is_none());
+        assert!(json.get("pollInterval").is_none());
         // Verify camelCase, not snake_case
         assert!(json.get("task_id").is_none());
+    }
+
+    /// `ttlMs` is `number | null`, so "unlimited retention" is spelled
+    /// `null` — an absent key is not a legal encoding of it. Without this,
+    /// adding `skip_serializing_if` to the field would break the wire
+    /// contract and nothing would notice.
+    #[test]
+    fn ttl_ms_serializes_as_null_never_as_an_absent_key() {
+        let info = TaskInfo {
+            task_id: "unlimited".to_string(),
+            status: TaskStatus::Working,
+            status_message: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_updated_at: "2025-01-01T00:00:00Z".to_string(),
+            ttl_ms: None,
+            poll_interval_ms: None,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json.get("ttlMs").is_some(), "ttlMs must be present");
+        assert!(json["ttlMs"].is_null(), "ttlMs must be null, not absent");
+        // pollIntervalMs is genuinely optional and IS skipped when absent.
+        assert!(json.get("pollIntervalMs").is_none());
     }
 
     #[test]
@@ -1702,8 +1808,8 @@ mod tests {
             status_message: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             last_updated_at: "2025-01-01T00:00:00Z".to_string(),
-            ttl: 1000,
-            poll_interval: 500,
+            ttl_ms: Some(1000),
+            poll_interval_ms: Some(500),
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(!json.contains("statusMessage"));
@@ -1711,42 +1817,41 @@ mod tests {
 
     #[test]
     fn test_create_task_result_serialization() {
-        let result = CreateTaskResult {
-            result_type: None,
-            task: TaskInfo {
-                task_id: "task-1".to_string(),
-                status: TaskStatus::Working,
-                status_message: None,
-                created_at: "2025-01-01T00:00:00Z".to_string(),
-                last_updated_at: "2025-01-01T00:00:00Z".to_string(),
-                ttl: 30000,
-                poll_interval: 2000,
-            },
-            meta: None,
-        };
+        let result = DetailedTask::handle(TaskInfo {
+            task_id: "task-1".to_string(),
+            status: TaskStatus::Working,
+            status_message: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_updated_at: "2025-01-01T00:00:00Z".to_string(),
+            ttl_ms: Some(30000),
+            poll_interval_ms: Some(2000),
+        });
         let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["task"]["taskId"], "task-1");
-        assert_eq!(json["task"]["status"], "working");
+        // FLAT, not nested. 2025-11-25 wrapped these in a `task` object;
+        // `Result & Task` in 2026-07-28 puts them at the root.
+        assert_eq!(json["taskId"], "task-1");
+        assert_eq!(json["status"], "working");
+        assert!(
+            json.get("task").is_none(),
+            "the enclosing `task` object is the 2025-11-25 shape"
+        );
         assert!(json.get("_meta").is_none());
     }
 
     #[test]
     fn test_create_task_result_with_meta() {
-        let result = CreateTaskResult {
-            result_type: None,
-            task: TaskInfo {
-                task_id: "task-2".to_string(),
-                status: TaskStatus::Working,
-                status_message: None,
-                created_at: "2025-01-01T00:00:00Z".to_string(),
-                last_updated_at: "2025-01-01T00:00:00Z".to_string(),
-                ttl: 30000,
-                poll_interval: 2000,
-            },
-            meta: Some(json!({
-                "io.modelcontextprotocol/model-immediate-response": "Task started"
-            })),
-        };
+        let mut result = DetailedTask::handle(TaskInfo {
+            task_id: "task-2".to_string(),
+            status: TaskStatus::Working,
+            status_message: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_updated_at: "2025-01-01T00:00:00Z".to_string(),
+            ttl_ms: Some(30000),
+            poll_interval_ms: Some(2000),
+        });
+        result.meta = Some(json!({
+            "io.modelcontextprotocol/model-immediate-response": "Task started"
+        }));
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(
             json["_meta"]["io.modelcontextprotocol/model-immediate-response"],
@@ -1760,40 +1865,32 @@ mod tests {
             serde_json::to_value(ResultType::Complete).unwrap(),
             "complete"
         );
-        assert_eq!(
-            serde_json::to_value(ResultType::Working).unwrap(),
-            "working"
-        );
+        assert_eq!(serde_json::to_value(ResultType::Task).unwrap(), "task");
     }
 
+    /// Replaces `create_task_result_emits_result_type_only_when_present`,
+    /// which pinned the one property the spec forbids — that the
+    /// discriminator MAY be absent.
     #[test]
-    fn create_task_result_emits_result_type_only_when_present() {
+    fn create_task_result_always_carries_result_type_task() {
         let task = TaskInfo {
             task_id: "task-3".to_string(),
             status: TaskStatus::Working,
             status_message: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             last_updated_at: "2025-01-01T00:00:00Z".to_string(),
-            ttl: 30000,
-            poll_interval: 2000,
+            ttl_ms: Some(30000),
+            poll_interval_ms: Some(2000),
         };
 
-        let without = CreateTaskResult {
-            result_type: None,
-            task: task.clone(),
-            meta: None,
-        };
-        let json = serde_json::to_value(&without).unwrap();
-        assert!(json.get("resultType").is_none());
+        let result = DetailedTask::handle(task);
+        let json = serde_json::to_value(&result).unwrap();
 
-        let with = CreateTaskResult {
-            result_type: Some(ResultType::Working),
-            task,
-            meta: None,
-        };
-        let json = serde_json::to_value(&with).unwrap();
-        assert_eq!(json["resultType"], "working");
-        assert_eq!(json["task"]["taskId"], "task-3");
+        // Presence AND value. Presence alone would survive a handle that
+        // says `"complete"` — indistinguishable from a standard result.
+        assert!(json.get("resultType").is_some());
+        assert_eq!(json["resultType"], "task");
+        assert_eq!(json["taskId"], "task-3");
     }
 
     #[test]
@@ -1804,52 +1901,10 @@ mod tests {
     }
 
     #[test]
-    fn test_task_result_params_deserialization() {
-        let json = json!({"taskId": "def-456"});
-        let params: TaskResultParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.task_id, "def-456");
-    }
-
-    #[test]
     fn test_task_cancel_params_deserialization() {
         let json = json!({"taskId": "ghi-789"});
         let params: TaskCancelParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.task_id, "ghi-789");
-    }
-
-    #[test]
-    fn test_task_list_params_deserialization_with_cursor() {
-        let json = json!({"cursor": "page2"});
-        let params: TaskListParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.cursor.as_deref(), Some("page2"));
-    }
-
-    #[test]
-    fn test_task_list_params_deserialization_without_cursor() {
-        let json = json!({});
-        let params: TaskListParams = serde_json::from_value(json).unwrap();
-        assert!(params.cursor.is_none());
-    }
-
-    #[test]
-    fn test_task_list_result_serialization() {
-        let result = TaskListResult {
-            tasks: vec![],
-            next_cursor: Some("next".to_string()),
-        };
-        let json = serde_json::to_value(&result).unwrap();
-        assert!(json["tasks"].as_array().unwrap().is_empty());
-        assert_eq!(json["nextCursor"], "next");
-    }
-
-    #[test]
-    fn test_task_list_result_omits_none_cursor() {
-        let result = TaskListResult {
-            tasks: vec![],
-            next_cursor: None,
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(!json.contains("nextCursor"));
     }
 
     #[test]
@@ -1991,8 +2046,8 @@ mod tests {
             status_message: Some("Done".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),
             last_updated_at: "2025-01-01T00:01:00Z".to_string(),
-            ttl: 60000,
-            poll_interval: 5000,
+            ttl_ms: Some(60000),
+            poll_interval_ms: Some(5000),
         };
         let n = JsonRpcNotification::task_status(&info);
         assert_eq!(n.method, "notifications/tasks/status");

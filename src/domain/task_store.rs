@@ -13,15 +13,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ports::protocol::{TaskInfo, TaskStatus};
 
-/// Returned by [`TaskStore::list_tasks`] when the supplied pagination cursor
-/// names no live task.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("Invalid pagination cursor: {cursor}")]
-pub struct InvalidCursor {
-    /// The cursor value the client sent.
-    pub cursor: String,
-}
-
 /// Internal task entry stored in the registry.
 struct TaskEntry {
     info: TaskInfo,
@@ -54,37 +45,6 @@ pub struct TaskStore {
     max_tasks: usize,
     default_ttl_ms: u64,
     default_poll_interval_ms: u64,
-}
-
-/// Outcome of a bounded wait on a task's result.
-///
-/// G-1 (audit 2026-08-19): the wait used to be unbounded and returned a
-/// bare `Option<Value>`, which had no way to say "still running" — so the
-/// only honest thing it could do was park forever. Three outcomes make the
-/// bound expressible.
-#[derive(Debug, Clone)]
-pub enum TaskWaitOutcome {
-    /// The task reached a terminal state and published a result.
-    Ready(Value),
-    /// The wait budget elapsed with the task still running. Carries the
-    /// task's current status so the caller can answer the poll instead of
-    /// erroring.
-    TimedOut(Box<TaskInfo>),
-    /// No such task, the entry expired, or it is terminal with no stored
-    /// result (a cancelled task). Callers map all three to the same
-    /// "no result" answer they always have.
-    NotFound,
-}
-
-impl TaskWaitOutcome {
-    /// The stored result, if the wait resolved with one.
-    #[must_use]
-    pub fn into_result(self) -> Option<Value> {
-        match self {
-            Self::Ready(value) => Some(value),
-            Self::TimedOut(_) | Self::NotFound => None,
-        }
-    }
 }
 
 /// Terminal-status predicate usable without a `TaskEntry` in hand.
@@ -132,8 +92,14 @@ impl TaskStore {
                 status_message: Some("Task is being processed.".to_string()),
                 created_at: now.clone(),
                 last_updated_at: now,
-                ttl: ttl_ms,
-                poll_interval: self.default_poll_interval_ms,
+                // `Some`, always: this store evicts on TTL, so claiming
+                // unlimited retention with `null` would be a lie. Clamping
+                // rather than refusing: a TTL beyond `i64::MAX` ms is 292
+                // million years.
+                ttl_ms: Some(i64::try_from(ttl_ms).unwrap_or(i64::MAX)),
+                poll_interval_ms: Some(
+                    i64::try_from(self.default_poll_interval_ms).unwrap_or(i64::MAX),
+                ),
             },
             result: None,
             cancel_token: cancel_token.clone(),
@@ -238,62 +204,6 @@ impl TaskStore {
         entry.result.clone()
     }
 
-    /// List tasks with cursor-based pagination.
-    ///
-    /// Tasks are sorted by creation time (task ID is UUID, so we sort by
-    /// `created_at`). Returns `(tasks, next_cursor)`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidCursor`] when `cursor` names no live task. Clamping
-    /// to the head instead replayed a page the client had already consumed,
-    /// and TTL eviction can stale a cursor mid-loop, so the two cases must
-    /// be distinguishable.
-    pub async fn list_tasks(
-        &self,
-        cursor: Option<&str>,
-        page_size: usize,
-    ) -> Result<(Vec<TaskInfo>, Option<String>), InvalidCursor> {
-        let tasks = self.tasks.read().await;
-
-        let mut entries: Vec<_> = tasks
-            .values()
-            .filter(|e| !e.is_expired())
-            .map(|e| &e.info)
-            .collect();
-
-        // Sort by creation time for stable pagination
-        entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-
-        // Apply cursor: skip entries up to and including the cursor task_id
-        let start = if let Some(cursor_id) = cursor {
-            entries
-                .iter()
-                .position(|info| info.task_id == cursor_id)
-                .ok_or_else(|| InvalidCursor {
-                    cursor: cursor_id.to_string(),
-                })?
-                + 1
-        } else {
-            0
-        };
-
-        let page: Vec<TaskInfo> = entries
-            .into_iter()
-            .skip(start)
-            .take(page_size)
-            .cloned()
-            .collect();
-
-        let next_cursor = if page.len() == page_size {
-            page.last().map(|info| info.task_id.clone())
-        } else {
-            None
-        };
-
-        Ok((page, next_cursor))
-    }
-
     /// Remove all expired tasks.
     pub async fn cleanup(&self) {
         let mut tasks = self.tasks.write().await;
@@ -349,7 +259,7 @@ mod tests {
         let (id, _) = store.create_task(Some(30_000)).await.unwrap();
 
         let info = store.get_task(&id).await.unwrap();
-        assert_eq!(info.ttl, 30_000);
+        assert_eq!(info.ttl_ms, Some(30_000));
     }
 
     #[tokio::test]
@@ -369,7 +279,7 @@ mod tests {
 
         let info = store.get_task(&id).await.unwrap();
         assert_eq!(info.status, TaskStatus::Working);
-        assert_eq!(info.poll_interval, 2_000);
+        assert_eq!(info.poll_interval_ms, Some(2_000));
     }
 
     #[tokio::test]
@@ -450,46 +360,6 @@ mod tests {
         assert_eq!(info.status, TaskStatus::Completed);
         let result = store.get_result(&id).await.unwrap();
         assert_eq!(result["content"][0]["text"], "ok");
-    }
-
-    #[tokio::test]
-    async fn test_list_tasks_empty() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let (tasks, cursor) = store.list_tasks(None, 10).await.unwrap();
-        assert!(tasks.is_empty());
-        assert!(cursor.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_list_tasks_returns_all() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        store.create_task(None).await.unwrap();
-        store.create_task(None).await.unwrap();
-        store.create_task(None).await.unwrap();
-
-        let (tasks, cursor) = store.list_tasks(None, 10).await.unwrap();
-        assert_eq!(tasks.len(), 3);
-        assert!(cursor.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_list_tasks_pagination() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        for _ in 0..5 {
-            store.create_task(None).await.unwrap();
-        }
-
-        let (page1, cursor1) = store.list_tasks(None, 2).await.unwrap();
-        assert_eq!(page1.len(), 2);
-        assert!(cursor1.is_some());
-
-        let (page2, cursor2) = store.list_tasks(cursor1.as_deref(), 2).await.unwrap();
-        assert_eq!(page2.len(), 2);
-        assert!(cursor2.is_some());
-
-        let (page3, cursor3) = store.list_tasks(cursor2.as_deref(), 2).await.unwrap();
-        assert_eq!(page3.len(), 1);
-        assert!(cursor3.is_none());
     }
 
     #[tokio::test]
@@ -628,63 +498,6 @@ mod tests {
         assert!(store.get_result(&id).await.is_none());
     }
 
-    // ============== Pagination Edge Cases ==============
-
-    #[tokio::test]
-    async fn test_list_tasks_with_stale_cursor_is_rejected() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        store.create_task(None).await.unwrap();
-        store.create_task(None).await.unwrap();
-
-        // A cursor naming no live task used to silently restart from the
-        // head, replaying a page the client had already consumed. TTL
-        // eviction can stale a cursor mid-loop, so the caller must be able
-        // to tell "start over" from "your cursor is gone".
-        let err = store
-            .list_tasks(Some("stale-cursor-id"), 10)
-            .await
-            .expect_err("a stale cursor must be an error, not a silent restart");
-        assert_eq!(err.cursor, "stale-cursor-id");
-        assert!(err.to_string().contains("stale-cursor-id"));
-    }
-
-    #[tokio::test]
-    async fn test_list_tasks_valid_cursor_still_paginates() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        for _ in 0..3 {
-            store.create_task(None).await.unwrap();
-        }
-
-        let (page1, cursor1) = store.list_tasks(None, 2).await.unwrap();
-        assert_eq!(page1.len(), 2);
-        let cursor1 = cursor1.expect("first page must yield a cursor");
-
-        let (page2, cursor2) = store.list_tasks(Some(&cursor1), 2).await.unwrap();
-        assert_eq!(page2.len(), 1);
-        assert!(cursor2.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_list_tasks_mixed_statuses() {
-        let store = TaskStore::new(10, 60_000, 2_000);
-        let (id1, _) = store.create_task(None).await.unwrap();
-        let (id2, _) = store.create_task(None).await.unwrap();
-        let (id3, _) = store.create_task(None).await.unwrap();
-
-        store.complete_task(&id1, test_result()).await;
-        store.fail_task(&id2, "error", error_result()).await;
-        store.cancel_task(&id3).await.unwrap();
-
-        // All should be listed regardless of status
-        let (tasks, _) = store.list_tasks(None, 10).await.unwrap();
-        assert_eq!(tasks.len(), 3);
-
-        let statuses: Vec<_> = tasks.iter().map(|t| t.status).collect();
-        assert!(statuses.contains(&TaskStatus::Completed));
-        assert!(statuses.contains(&TaskStatus::Failed));
-        assert!(statuses.contains(&TaskStatus::Cancelled));
-    }
-
     // ============== TTL Edge Cases ==============
 
     #[tokio::test]
@@ -696,7 +509,7 @@ mod tests {
 
         let info = store.get_task(&id).await.unwrap();
         // Should be capped to the store default
-        assert_eq!(info.ttl, 10_000);
+        assert_eq!(info.ttl_ms, Some(10_000));
     }
 
     #[tokio::test]
@@ -745,9 +558,15 @@ mod tests {
     #[test]
     fn task_store_exposes_no_blocking_wait() {
         let src = include_str!("task_store.rs");
-        let production = src
-            .split_once("#[cfg(test)]\nmod tests {")
-            .map_or(src, |(before, _)| before);
+        // `expect`, never `map_or(src, ..)`: falling back to the WHOLE file
+        // makes this guard scan its own assertion arguments, so it fails
+        // unconditionally — red for a reason that has nothing to do with
+        // the production code it polices, and the next reader "repairs"
+        // the wrong thing. A missing boundary is a broken guard, and a
+        // broken guard must say which of the two it is.
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
         assert!(
             !production.contains("fn wait_for_result"),
             "tasks are polled in 3.0.0 — `wait_for_result` reintroduces the \

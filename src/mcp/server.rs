@@ -32,15 +32,14 @@ use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
     BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, ClientInfo, CompletionRef, CompletionResult,
-    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, CreateTaskResult,
+    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, DetailedTask,
     Icon, InitializeParams, InitializeResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, LogLevel, LoggingCapability, LoggingSetLevelParams, PROTOCOL_VERSION,
     PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult, ResourcesCapability,
-    ResourcesListResult, ResourcesReadParams, ResourcesReadResult, ResultType, SERVER_ICON_URL,
-    SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo,
-    TaskCancelParams, TaskGetParams, TaskListParams, TaskListResult, TaskRequestsCapability,
-    TaskResultParams, TaskStatus, TaskToolsCapability, TasksCapability, ToolCallParams,
-    ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
+    ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
+    SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
+    TaskGetParams, TaskRequestsCapability, TaskStatus, TaskToolsCapability, TasksCapability,
+    ToolCallParams, ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -763,12 +762,18 @@ impl McpServer {
     /// G-1 (audit 2026-08-19): `limits.max_concurrent_commands` exists to
     /// cap concurrent *command execution*. Applying it to every method
     /// froze whole sessions, because the reader loop acquires the permit
-    /// BEFORE it spawns the handler — so N parked `tasks/result` long
-    /// polls (N = the limit, 5 by default) meant the client's next message
-    /// was never read at all. Measured: N=4 still answered `ping`; N=5
-    /// answered neither `ping` nor `tasks/cancel` — the one request that
-    /// could have released the parked polls — and was still dead after
-    /// 208 s.
+    /// BEFORE it spawns the handler — so N parked `tasks/result` long polls
+    /// (N = the limit, 5 by default) meant the client's next message was
+    /// never read at all. Measured: N=4 still answered `ping`; N=5 answered
+    /// neither `ping` nor `tasks/cancel` — the one request that could have
+    /// released the parked polls — and was still dead after 208 s.
+    ///
+    /// `tasks/result` was deleted in 3.0.0, so that exact scenario is no
+    /// longer reachable; the measurement is recorded as the historical
+    /// reason the exemption exists, not as a description of any method
+    /// this server still dispatches. The exemption itself still earns its
+    /// keep: task WORKERS legitimately hold all N permits during normal
+    /// operation, and the control plane must stay answerable through it.
     ///
     /// Neither `ping` nor any `tasks/*` method does remote work, so
     /// exempting them costs no concurrency budget. Task-augmented
@@ -1270,9 +1275,13 @@ impl McpServer {
             "prompts/get" => self.handle_prompts_get(id, request.params).await,
             "resources/list" => self.handle_resources_list(id).await,
             "resources/read" => self.handle_resources_read(id, request.params).await,
+            // No `tasks/result` and no `tasks/list` arm: MCP 2026-07-28 has
+            // neither method. `tasks/result`'s payload is inlined into the
+            // `tasks/get` below; `tasks/list` was removed deliberately, so
+            // that a server cannot leak one caller's task ids to another
+            // (spec 5.15, cross-caller correlation). Both names now fall
+            // through to -32601 like any other unknown method.
             "tasks/get" => self.handle_tasks_get(id, request.params).await,
-            "tasks/result" => self.handle_tasks_result(id, request.params).await,
-            "tasks/list" => self.handle_tasks_list(id, request.params).await,
             "tasks/cancel" => self.handle_tasks_cancel(id, request.params).await,
             // The 2025-06-18 schema names this method `completion/complete`
             // (SINGULAR) and that is the ONLY spelling the installed client
@@ -1981,13 +1990,14 @@ impl McpServer {
             }
         });
 
-        // Return CreateTaskResult immediately. `resultType: "working"` marks
-        // it as a handle, not an answer — the client must poll `tasks/result`.
-        let create_result = CreateTaskResult {
-            result_type: Some(ResultType::Working),
-            task: task_info,
-            meta: None,
-        };
+        // Return the task handle immediately. `resultType: "task"` is the
+        // MUST that lets a client tell this apart from a standard
+        // `ToolCallResult`; it says nothing about progress, which lives in
+        // `status`. The client polls `tasks/get`.
+        //
+        // The handle is FLAT: `taskId`/`status`/`ttlMs` sit at the root of
+        // `result`, not under a nested `task` object.
+        let create_result = DetailedTask::handle(task_info);
         JsonRpcResponse::success_or_serialize_error(id, &create_result)
     }
 
@@ -2275,6 +2285,16 @@ impl McpServer {
     // Task handlers (MCP 2025-11-25+)
     // =========================================================================
 
+    /// Point-in-time snapshot of a task — the ONLY way to read one.
+    ///
+    /// Never blocks. MCP 2026-07-28 deleted `tasks/result` and folded its
+    /// payload in here: the answer carries the status AND, at a terminal
+    /// status, the stored `result` (completed) or `error` (failed), inlined
+    /// flat alongside the task fields.
+    ///
+    /// `resultType` is `"complete"` on every answer, whatever the status —
+    /// it names the result SHAPE, not the progress. A `working` snapshot is
+    /// still a complete `tasks/get` result.
     async fn handle_tasks_get(&self, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
@@ -2290,129 +2310,36 @@ impl McpServer {
             }
         };
 
-        match self.task_store.get_task(&get_params.task_id).await {
-            Some(info) => JsonRpcResponse::success_or_serialize_error(id, &info),
-            None => JsonRpcResponse::error(
-                id,
-                JsonRpcError::invalid_params(format!("Task not found: {}", get_params.task_id)),
-            ),
-        }
-    }
-
-    /// Poll a task for its result.
-    ///
-    /// MCP 2026-07-28 moved Tasks out of core into a POLLED extension, so this
-    /// answers with whatever state the task is in right now and never waits.
-    /// The pre-3.0.0 handler called `TaskStore::wait_for_result`, which parked
-    /// the caller — and, because the request held a concurrency permit, parked
-    /// the whole session with it (G-1 / issue #131). There is nothing left to
-    /// bound: the wait is gone, not shortened.
-    async fn handle_tasks_result(
-        &self,
-        id: Option<Value>,
-        params: Option<Value>,
-    ) -> JsonRpcResponse {
-        let Some(params) = params else {
-            return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
-        };
-
-        let result_params: TaskResultParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => {
-                return JsonRpcResponse::error(
-                    id,
-                    JsonRpcError::invalid_params(format!("Invalid params: {e}")),
-                );
-            }
-        };
-
-        let task_id = result_params.task_id;
-
-        let Some(info) = self.task_store.get_task(&task_id).await else {
+        // Unknown or TTL-evicted id is -32602. This is also where eviction
+        // surfaces: as an error from a non-blocking call, never as a hang.
+        let Some(info) = self.task_store.get_task(&get_params.task_id).await else {
             return JsonRpcResponse::error(
                 id,
-                JsonRpcError::invalid_params(format!("Task not found: {task_id}")),
+                JsonRpcError::invalid_params(format!("Task not found: {}", get_params.task_id)),
             );
         };
 
-        let related = json!({
-            "io.modelcontextprotocol/related-task": { "taskId": task_id }
-        });
-
-        // Still running: hand back the current TaskInfo so the client knows
-        // when to poll again (`pollInterval`), not an error and not a wait.
-        if !matches!(
-            info.status,
-            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
-        ) {
-            return JsonRpcResponse::success_or_serialize_error(
-                id,
-                &json!({
-                    "resultType": ResultType::Working,
-                    "task": info,
-                    "_meta": related,
-                }),
-            );
-        }
-
-        // Terminal but no stored result. Today the only way to reach this is
-        // a cancelled task: `cancel_task` never assigns `entry.result`, so it
-        // is still visible via `tasks/get`/`tasks/list` but has nothing here
-        // (audit G-23, 2026-08-19). Reporting "Task not found" would
-        // contradict both other endpoints. Task 24 gives cancellation a
-        // stored terminal result, which will close this arm off for
-        // `Cancelled`; until then keep the wire-spelled, machine-readable
-        // error those audits required.
-        let Some(result) = self.task_store.get_result(&task_id).await else {
-            // Wire spelling, not `{:?}`: `TaskStatus` carries
-            // `#[serde(rename_all = "lowercase")]`, so Debug would say
-            // `Cancelled` here while `tasks/get` says `cancelled` for the
-            // same task (audit D-F3, 2026-08-20).
-            let status = serde_json::to_value(info.status).unwrap_or(Value::Null);
-            let status_text = status.as_str().unwrap_or("unknown");
-            let message = format!(
-                "Task {task_id} reached terminal state {status_text} without storing a result \
-                 (cancelled tasks record none); use tasks/get for its status"
-            );
-            let error = JsonRpcError::invalid_params(message).with_data(json!({
-                "taskId": task_id,
-                "status": status,
-            }));
-            return JsonRpcResponse::error(id, error);
+        let status = info.status;
+        let snapshot = DetailedTask::snapshot(info);
+        let snapshot = match status {
+            // `result` MUST be present on a completed task. `get_result`
+            // returning None here would mean the store completed a task
+            // without storing anything, which `complete_task` cannot do.
+            TaskStatus::Completed => match self.task_store.get_result(&get_params.task_id).await {
+                Some(result) => snapshot.with_result(result),
+                None => snapshot,
+            },
+            TaskStatus::Failed => match self.task_store.get_result(&get_params.task_id).await {
+                Some(error) => snapshot.with_error(error),
+                None => snapshot,
+            },
+            // `working` carries no payload; `cancelled` carries none either
+            // — `CancelledTask` extends `Task` with no `result` field, so
+            // inventing one would be an extension of our own.
+            TaskStatus::Working | TaskStatus::InputRequired | TaskStatus::Cancelled => snapshot,
         };
 
-        let mut response = result;
-        if let Some(obj) = response.as_object_mut() {
-            obj.insert(
-                "resultType".to_string(),
-                serde_json::to_value(ResultType::Complete).unwrap_or(Value::Null),
-            );
-            obj.insert("_meta".to_string(), related);
-        }
-        JsonRpcResponse::success(id, response)
-    }
-
-    async fn handle_tasks_list(&self, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
-        let list_params: TaskListParams = params
-            .and_then(|p| serde_json::from_value(p).ok())
-            .unwrap_or(TaskListParams { cursor: None });
-
-        let (tasks, next_cursor) = match self
-            .task_store
-            .list_tasks(list_params.cursor.as_deref(), 20)
-            .await
-        {
-            Ok(page) => page,
-            Err(e) => {
-                // A cursor naming no live task is a client error, not a
-                // reason to silently replay page 1. TTL eviction can stale a
-                // cursor between two polls of the same loop.
-                return JsonRpcResponse::error(id, JsonRpcError::invalid_params(e.to_string()));
-            }
-        };
-
-        let result = TaskListResult { tasks, next_cursor };
-        JsonRpcResponse::success_or_serialize_error(id, &result)
+        JsonRpcResponse::success_or_serialize_error(id, &snapshot)
     }
 
     async fn handle_tasks_cancel(
@@ -2710,25 +2637,25 @@ mod tests {
     /// `tasks/cancel` (the one call that could have released the polls),
     /// and it was still dead 208 s later.
     ///
-    /// 3.0.0 (task 22) deletes the long poll itself: `tasks/result` now
-    /// always answers immediately, so nothing parks, and the original
-    /// reproduction (many never-completing tasks, each held open by a
-    /// blocking `tasks/result` call) no longer creates the condition it
-    /// tested — every handler in it is instant now, so "which answer comes
-    /// back first" degenerates into a race between equally fast spawns
-    /// instead of a proof of anything.
+    /// 3.0.0 deletes the long poll — and then the method: MCP 2026-07-28 has
+    /// no `tasks/result` at all, and `tasks/get` is a non-blocking snapshot.
+    /// The original reproduction (many never-completing tasks, each held open
+    /// by a blocking poll) can no longer be built.
     ///
-    /// The exemption this guards, `is_concurrency_exempt`, is untouched by
-    /// task 22 and still load-bearing — it is unconditional on method name,
-    /// so what actually needs proving is that `ping` and `tasks/*` never go
-    /// through `acquire_owned()` at all. This re-anchors the same shape as
-    /// the original: N `tasks/result` polls at and past the concurrency
-    /// limit (5), all held off by an entirely separate mechanism (every
-    /// permit taken by ordinary means, nothing to do with tasks/result),
-    /// plus a `ping`. All of them must still answer — none of them may
-    /// queue behind the held permits.
+    /// The exemption this guards, `is_concurrency_exempt`, survives both
+    /// changes and is still load-bearing — it keys on the method PREFIX, so
+    /// what needs proving is that `ping` and `tasks/*` never reach
+    /// `acquire_owned()` at all. That matters more now, not less: task
+    /// workers legitimately hold every permit during normal operation, so a
+    /// full semaphore is the busy state, not a fault. This re-anchors the
+    /// original shape onto the surviving method — N `tasks/get` polls at and
+    /// past the concurrency limit (5), with every permit held by an entirely
+    /// separate mechanism, plus a `ping`. All must still answer.
+    ///
+    /// This is the ONLY execution coverage of `is_concurrency_exempt`;
+    /// deleting it would leave the exemption pinned by nothing.
     #[tokio::test]
-    async fn ping_and_tasks_result_survive_a_full_concurrency_semaphore() {
+    async fn control_plane_survives_a_full_concurrency_semaphore() {
         let server = Arc::new(create_test_server());
         assert_eq!(
             server.concurrent_limit.available_permits(),
@@ -2760,7 +2687,7 @@ mod tests {
             client_tx
                 .send(client_request(
                     id,
-                    "tasks/result",
+                    "tasks/get",
                     Some(json!({ "taskId": task_id })),
                 ))
                 .unwrap();
@@ -2792,7 +2719,7 @@ mod tests {
 
         assert_eq!(
             answered, expected_ids,
-            "every tasks/result poll and the ping must all be answered despite every \
+            "every tasks/get poll and the ping must all be answered despite every \
              concurrency permit being held"
         );
 
@@ -4720,48 +4647,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tasks_list_empty() {
-        let server = create_test_server();
-
-        let response = server.handle_tasks_list(Some(json!(1)), None).await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["tasks"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_tasks_list_with_tasks() {
-        let server = create_test_server();
-        server.task_store.create_task(Some(60_000)).await.unwrap();
-        server.task_store.create_task(Some(60_000)).await.unwrap();
-
-        let response = server.handle_tasks_list(Some(json!(1)), None).await;
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(result["tasks"].as_array().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_tasks_list_invalid_cursor_returns_invalid_params() {
-        let server = create_test_server();
-        let params = json!({ "cursor": "no-such-task-id" });
-
-        let response = server.handle_tasks_list(Some(json!(1)), Some(params)).await;
-
-        let error = response
-            .error
-            .expect("an unknown tasks/list cursor must be a JSON-RPC error");
-        assert_eq!(error.code, -32602);
-        assert!(
-            error.message.contains("no-such-task-id"),
-            "error must name the offending cursor, got: {}",
-            error.message
-        );
-    }
-
-    #[tokio::test]
     async fn test_tools_list_non_numeric_cursor_returns_invalid_params() {
         let server = create_test_server();
         let params = json!({ "cursor": "not-a-number" });
@@ -4782,7 +4667,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tasks_result_polls_until_terminal() {
+    async fn tasks_get_polls_until_terminal() {
         let server = create_test_server();
         let params = json!({
             "name": "ssh_status",
@@ -4793,7 +4678,8 @@ mod tests {
         let call_response = server
             .handle_tools_call(Some(json!(1)), Some(params), None, None)
             .await;
-        let task_id = call_response.result.unwrap()["task"]["taskId"]
+        // FLAT: taskId at the root of `result`, no nested `task` object.
+        let task_id = call_response.result.unwrap()["taskId"]
             .as_str()
             .unwrap()
             .to_string();
@@ -4802,66 +4688,64 @@ mod tests {
         let mut terminal = json!(null);
         for _ in 0..200 {
             let response = server
-                .handle_tasks_result(Some(json!(2)), Some(json!({"taskId": task_id})))
+                .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
                 .await;
             assert!(response.error.is_none());
             let body = response.result.unwrap();
-            if body["resultType"] == "complete" {
+            // "complete" on EVERY turn, including while still `working`:
+            // the discriminator names the shape, `status` names the
+            // progress. Asserting it inside the loop is what makes the two
+            // axes independently observable.
+            assert_eq!(body["resultType"], "complete");
+            assert_eq!(body["taskId"], task_id.as_str());
+            if body["status"] == "completed" {
                 terminal = body;
                 break;
             }
-            assert_eq!(body["resultType"], "working");
-            assert_eq!(body["task"]["taskId"], task_id.as_str());
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
         assert_eq!(
-            terminal["resultType"], "complete",
+            terminal["status"], "completed",
             "worker never reached a terminal state within 2s"
         );
-        assert_eq!(
-            terminal["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id.as_str()
-        );
-        assert!(terminal["content"].is_array());
+        assert_eq!(terminal["resultType"], "complete");
+        // The payload folded in from the deleted `tasks/result`, inlined
+        // under `result` rather than spliced into the response root.
+        assert!(terminal["result"]["content"].is_array());
+        // `related-task` is gone: it was emitted only by `tasks/result`.
+        assert!(terminal.get("_meta").is_none());
     }
 
     #[tokio::test]
-    async fn test_tasks_result_nonexistent() {
-        let server = create_test_server();
-        let params = json!({"taskId": "no-such-task"});
-
-        let response = server
-            .handle_tasks_result(Some(json!(1)), Some(params))
-            .await;
-
-        assert!(response.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_tasks_result_returns_working_immediately_for_a_live_task() {
-        // MCP 2026-07-28: tasks are POLLED. `tasks/result` must answer with
-        // the state at call time. The pre-3.0.0 handler parked here until the
-        // task went terminal, which is the G-1 freeze (issue #131).
+    async fn tasks_get_never_blocks_on_a_working_task() {
+        // MCP 2026-07-28: `tasks/get` is a point-in-time snapshot and never
+        // blocks. The pre-3.0.0 `tasks/result` parked here until the task
+        // went terminal, which is the G-1 freeze (issue #131). The timeout
+        // is the executable half of that guarantee — the `include_str!`
+        // guard in `task_store.rs` only pins a NAME.
         let server = create_test_server();
         let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
 
         let response = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            server.handle_tasks_result(Some(json!(1)), Some(json!({"taskId": task_id}))),
+            std::time::Duration::from_millis(50),
+            server.handle_tasks_get(Some(json!(1)), Some(json!({"taskId": task_id}))),
         )
         .await
-        .expect("tasks/result must not block on a working task");
+        .expect("tasks/get must not block on a working task");
 
         assert!(response.error.is_none());
         let body = response.result.unwrap();
-        assert_eq!(body["resultType"], "working");
-        assert_eq!(body["task"]["status"], "working");
-        assert_eq!(body["task"]["taskId"], task_id.as_str());
-        assert_eq!(
-            body["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id.as_str()
-        );
+        // The pair that proves the two axes are distinct: the discriminator
+        // says "complete" (this IS the standard result shape) while the task
+        // status says "working". Conflating them was the pre-3.0.0 error
+        // that invented a `ResultType::Working`.
+        assert_eq!(body["resultType"], "complete");
+        assert_eq!(body["status"], "working");
+        assert_eq!(body["taskId"], task_id.as_str());
+        // A non-terminal task carries neither payload field.
+        assert!(body.get("result").is_none());
+        assert!(body.get("error").is_none());
     }
 
     #[tokio::test]
@@ -4921,72 +4805,50 @@ mod tests {
         assert_eq!(result["taskId"], task_id);
     }
 
-    /// G-23 (audit 2026-08-19): `cancel_task` stores no result, so
-    /// `wait_for_result` returns `None` and the handler answered "Task not
-    /// found" — while `tasks/get` and `tasks/list` both still returned the same
-    /// task. Wording fix only; storing a terminal result for cancelled tasks is
-    /// out of scope for 2.2.0.
+    /// Supersedes `test_tasks_result_on_cancelled_task`.
     ///
-    /// D-F3 (audit 2026-08-20): the message was built with `{:?}` on a
-    /// `TaskStatus` carrying `#[serde(rename_all = "lowercase")]`, so this
-    /// endpoint said `Cancelled` while `tasks/get` said `cancelled` for the
-    /// same task — and the terminal state was reachable only by string-matching
-    /// English. Both spellings were asserted in this one test, fourteen lines
-    /// apart.
+    /// The G-23 / D-F3 audit guards it carried protected `tasks/result`'s
+    /// "terminal state without a stored result" error path — its wire-spelled
+    /// status text and its machine-readable `data`. That path is unreachable
+    /// in 3.0.0: it belonged to a method that no longer exists. The guard is
+    /// not reverted, it is rendered moot — `tasks/get` never had to synthesize
+    /// a result for a cancelled task. It returns the snapshot, with
+    /// `status: "cancelled"` and no `result` key, which is exactly
+    /// `CancelledTask` (`extends Task`, no `result` field).
     #[tokio::test]
-    async fn test_tasks_result_on_cancelled_task() {
+    async fn tasks_get_on_cancelled_carries_no_result() {
         let server = create_test_server();
         let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
         server.task_store.cancel_task(&task_id).await.unwrap();
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_result(Some(json!(1)), Some(params))
+            .handle_tasks_get(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
-        let error = response.error.expect("cancelled tasks store no result");
+        // A cancelled task is reported, not errored on.
+        assert!(response.error.is_none());
+        let body = response.result.expect("cancelled task is still readable");
+        assert_eq!(body["resultType"], "complete");
+        // The wire spelling, lowercase double-l — never Rust's `Cancelled`.
+        assert_eq!(body["status"], "cancelled");
+        assert_eq!(body["taskId"], task_id.as_str());
+        // The half that carries the guarantee: no invented payload.
         assert!(
-            !error.message.contains("Task not found"),
-            "misleading message: {}",
-            error.message
+            body.get("result").is_none(),
+            "CancelledTask has no `result` field"
         );
-        // The wire spelling, not Rust's. Anchored on the substitution site:
-        // the trailing "(cancelled tasks record none)" parenthetical contains
-        // the lowercase word regardless, so a bare `contains("cancelled")`
-        // would pass even with `{:?}`.
-        assert!(
-            error.message.contains("terminal state cancelled"),
-            "message must name the terminal state in its wire spelling: {}",
-            error.message
-        );
-        assert!(
-            !error.message.contains("Cancelled"),
-            "Rust Debug casing must not reach the wire: {}",
-            error.message
-        );
-
-        // Machine-readable: no client should have to parse the prose above.
-        let data = error
-            .data
-            .expect("a terminal-state tasks/result error must carry data");
-        assert_eq!(data["taskId"], json!(task_id));
-        assert_eq!(data["status"], json!("cancelled"));
-
-        // The two endpoints must agree: tasks/get still reports the task.
-        let get = server
-            .handle_tasks_get(Some(json!(2)), Some(json!({"taskId": task_id})))
-            .await;
-        assert_eq!(get.result.expect("task info")["status"], "cancelled");
+        assert!(body.get("error").is_none());
     }
 
     #[tokio::test]
-    async fn test_tasks_result_unknown_id_still_says_not_found() {
+    async fn tasks_get_unknown_id_still_says_not_found() {
         let server = create_test_server();
         let response = server
-            .handle_tasks_result(Some(json!(1)), Some(json!({"taskId": "no-such-task"})))
+            .handle_tasks_get(Some(json!(1)), Some(json!({"taskId": "no-such-task"})))
             .await;
 
         let error = response.error.expect("unknown task is an error");
+        assert_eq!(error.code, -32602);
         assert!(
             error.message.contains("Task not found"),
             "got: {}",
@@ -5076,7 +4938,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tasks_result_on_already_completed() {
+    async fn tasks_get_on_completed_inlines_the_result() {
         let server = create_test_server();
         let (task_id, _) = server.task_store.create_task(Some(60_000)).await.unwrap();
         server
@@ -5087,18 +4949,23 @@ mod tests {
             )
             .await;
 
-        let params = json!({"taskId": task_id});
         let response = server
-            .handle_tasks_result(Some(json!(1)), Some(params))
+            .handle_tasks_get(Some(json!(1)), Some(json!({"taskId": task_id})))
             .await;
 
         assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert_eq!(
-            result["_meta"]["io.modelcontextprotocol/related-task"]["taskId"],
-            task_id
-        );
-        assert!(result["content"].is_array());
+        let body = response.result.unwrap();
+        assert_eq!(body["resultType"], "complete");
+        assert_eq!(body["status"], "completed");
+        // Named key AND shape. `assert!(response.error.is_none())` alone
+        // survives both deleting the line that populates `result` and
+        // renaming the key; these two assertions survive neither.
+        assert!(body["result"]["content"].is_array());
+        assert_eq!(body["result"]["content"][0]["text"], "result data");
+        // The completed task carries no `error` — the two payload fields are
+        // mutually exclusive, and a lazy implementation setting both would
+        // pass a test written without this negation.
+        assert!(body.get("error").is_none());
     }
 
     #[tokio::test]
@@ -5121,18 +4988,15 @@ mod tests {
         assert_eq!(response.error.unwrap().code, -32602);
     }
 
+    /// Replaces `test_handle_request_tasks_result_dispatch`, which asserted
+    /// the exact opposite (`assert_ne!(code, -32601)`).
+    ///
+    /// `assert_eq!` on the code, not `error.is_some()`: an `is_some()` test
+    /// stays green if the method still exists and merely fails for some
+    /// other reason — here, "Task not found" for the nonexistent id — which
+    /// is precisely the failure mode this test has to catch.
     #[tokio::test]
-    async fn test_tasks_result_missing_params() {
-        let server = create_test_server();
-
-        let response = server.handle_tasks_result(Some(json!(1)), None).await;
-
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602);
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_tasks_result_dispatch() {
+    async fn tasks_result_is_no_longer_a_method() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -5143,9 +5007,11 @@ mod tests {
 
         let response = server.handle_request(request).await;
 
-        // Should be dispatched (not method_not_found)
-        assert!(response.error.is_some());
-        assert_ne!(response.error.unwrap().code, -32601);
+        assert_eq!(
+            response.error.expect("tasks/result must not dispatch").code,
+            -32601,
+            "MCP 2026-07-28 has no tasks/result method"
+        );
     }
 
     #[tokio::test]
@@ -5165,8 +5031,15 @@ mod tests {
         assert_eq!(response.error.unwrap().code, -32602); // Invalid params (task not found)
     }
 
+    /// Replaces `test_handle_request_tasks_list_dispatch`, which asserted the
+    /// exact opposite (a successful empty listing).
+    ///
+    /// `assert_eq!` on the code rather than `error.is_some()`: `tasks/list`
+    /// required no params, so a surviving handler answers SUCCESSFULLY here.
+    /// A test written as `is_some()` would fail for the right reason today
+    /// and pass for the wrong one the moment anyone restored the arm.
     #[tokio::test]
-    async fn test_handle_request_tasks_list_dispatch() {
+    async fn tasks_list_is_no_longer_a_method() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -5177,10 +5050,11 @@ mod tests {
 
         let response = server.handle_request(request).await;
 
-        // Should succeed with empty tasks list
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        assert!(result["tasks"].is_array());
+        assert_eq!(
+            response.error.expect("tasks/list must not dispatch").code,
+            -32601,
+            "MCP 2026-07-28 removed tasks/list deliberately"
+        );
     }
 
     #[tokio::test]
