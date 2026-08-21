@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`subscriptions/listen`** (MCP 2026-07-28) — clients opt into
+  `toolsListChanged`, `promptsListChanged`, `resourcesListChanged` and a
+  list of `resourceSubscriptions` URIs. The request gets **no immediate
+  result**: its JSON-RPC `id` IS the subscription id and stays open until
+  teardown, and the server acknowledges out of band with
+  `notifications/subscriptions/acknowledged` carrying the subset it can
+  actually honour (URIs whose scheme no resource handler serves are
+  dropped from the echo).
+- **`notifications/resources/updated`** now has a real producer.
+  `history://recent` is change-detected exactly, via a new monotonic
+  revision counter on `CommandHistory`; remote-backed schemes
+  (`metrics://`, `services://`, `health://`, `file://`, `log://`) are
+  emitted on a 30 s poll interval as a "poll again" hint, because the
+  bridge has no change feed for the remote host.
+
+### Changed
+
+- **BREAKING**: `resources/subscribe` and `resources/unsubscribe` are
+  removed — folded into `subscriptions/listen`'s `resourceSubscriptions`,
+  per the 2026-07-28 schema ("It replaces the former
+  `resources/subscribe` RPC"). Since 2.2.0 both already answered `-32601`
+  from live dispatch arms; now the arms are gone too, so the refusal is
+  the ordinary unknown-method one.
+- **BREAKING**: notifications are opt-in. A session that never sent
+  `subscriptions/listen` now receives no `list_changed` notifications at
+  all; config hot-reload previously broadcast them to every live session.
+- `resources.subscribe` is advertised as `true` again (2.2.0 set it to
+  `false` because nothing emitted `resources/updated`).
+- **BREAKING (lib API)**: `NotificationFanout` and `FanoutGuard` are
+  removed from `bridge_mcp::mcp::session_context`, superseded by
+  `bridge_mcp::mcp::subscriptions::SubscriptionRegistry`.
+  `SessionContext::resource_subs` and
+  `McpServer::allocate_session_resource_subs_for_test` are removed with
+  the RPC pair they existed for.
+
 ## [2.2.0] - 2026-08-19
 
 Major version because this release breaks compatibility in **21 places, ten

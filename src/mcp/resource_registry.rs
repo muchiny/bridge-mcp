@@ -86,18 +86,17 @@ impl ResourceRegistry {
     /// Every URI scheme that has a registered handler.
     ///
     /// Used by `resources/templates/list` tests to prove that every published
-    /// `uriTemplate` can actually be routed by `read`.
+    /// `uriTemplate` can actually be routed by `read`, and by
+    /// `subscriptions/listen` (task 33, 2026-07-28 spec) to restrict a
+    /// client's `resourceSubscriptions` to URIs this server can actually
+    /// serve — a subscription to a scheme nobody handles would never
+    /// produce a single notification.
     ///
-    /// `#[cfg(test)]` (fix round 1, audit 2026-08-19, MINOR): its only
-    /// caller is a same-crate test, unlike `templated_handlers`, which
-    /// `handle_resource_templates_list` actually calls in production. New
-    /// public API with no production caller is exactly the pattern this
-    /// batch exists to delete; `pub(crate)` alone still left it flagged as
-    /// dead code in a non-test build, so it is test-only rather than
-    /// merely crate-scoped.
-    #[cfg(test)]
+    /// Promoted from `#[cfg(test)] pub(crate)` (fix round 1, audit
+    /// 2026-08-19, MINOR) now that `handle_subscriptions_listen` is a real
+    /// production caller.
     #[must_use]
-    pub(crate) fn schemes(&self) -> Vec<&'static str> {
+    pub fn schemes(&self) -> Vec<&'static str> {
         self.handlers.iter().map(|h| h.scheme()).collect()
     }
 

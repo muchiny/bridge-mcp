@@ -25,7 +25,8 @@ use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{IncomingMessage, JsonRpcMessage, RootsListResult};
 use super::request_meta::RequestMeta;
-use super::session_context::{NotificationFanout, SessionContext};
+use super::session_context::SessionContext;
+use super::subscriptions::{NotificationTopic, SubscriptionRegistry, SubscriptionsListenParams};
 use super::transport::{Session, Transport, stdio::StdioTransport};
 
 use super::history::CommandHistory;
@@ -59,6 +60,101 @@ struct DiscoveryPayload {
 }
 
 /// MCP Server that communicates over stdio
+/// How often the resource-update watch loop looks for changes.
+///
+/// `history://` is change-detected exactly, through the monotonic
+/// revision counter on `CommandHistory`. Every other published resource
+/// scheme is backed by the REMOTE host — `metrics://`, `services://` and
+/// `health://` shell out on each read, `file://` and `log://` read remote
+/// paths — so this process has no change feed for them and must not
+/// pretend to. For those, a tick means "poll again", not "it changed".
+/// That is deliberate: the alternative is either advertising
+/// `subscribe: true` with nothing behind it, or opening an inotify
+/// channel per subscribed path over SSH, which the bridge does not do.
+const RESOURCE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Decide which subscribed URIs get `notifications/resources/updated` on
+/// one tick of the watch loop.
+///
+/// Split out of the loop so the decision is unit-testable without waiting
+/// 30 s of wall clock.
+fn resource_update_tick(uris: &[String], history_changed: bool) -> Vec<String> {
+    uris.iter()
+        .filter(|uri| history_changed || !uri.starts_with("history://"))
+        .cloned()
+        .collect()
+}
+
+/// Run ONE tick of the resource-update watch loop: read the live
+/// subscriptions, decide what changed, publish, and advance
+/// `last_revision`.
+///
+/// Extracted out of the spawned loop in
+/// [`McpServer::spawn_resource_update_watch`] because that loop could not
+/// be driven from a test. With a 30 s `RESOURCE_WATCH_INTERVAL` the
+/// interval's first tick fires immediately but with zero subscriptions,
+/// so it takes the `continue`, and the second tick is a wall-clock
+/// interval away. The tick-to-publish wiring was therefore covered only
+/// by hand-composed calls: gutting `publish_resource_updated` inside the
+/// loop body left the whole suite green (measured at commit `3f7c2fa`,
+/// 9112 passed / 0 failed), so the call could have been deleted by a
+/// later refactor with nothing to notice.
+///
+/// Returns how many notifications were actually delivered, so a test can
+/// assert on the wiring itself rather than on the loop merely being
+/// alive.
+fn watch_once(
+    subscriptions: &SubscriptionRegistry,
+    history: &CommandHistory,
+    last_revision: &mut u64,
+) -> usize {
+    let uris = subscriptions.subscribed_resource_uris();
+    if uris.is_empty() {
+        return 0;
+    }
+    let revision = history.revision();
+    let history_changed = revision != *last_revision;
+    *last_revision = revision;
+    resource_update_tick(&uris, history_changed)
+        .iter()
+        .map(|uri| subscriptions.publish_resource_updated(uri))
+        .sum()
+}
+
+/// What `subscriptions/listen` decided, for the dispatch layer to act on.
+///
+/// MCP 2026-07-28 gives `subscriptions/listen` **no immediate result**.
+/// The server acknowledges with a notification, keeps the request `id`
+/// alive for the lifetime of the subscription, and answers it only at
+/// graceful teardown ("it SHOULD respond to the original
+/// `subscriptions/listen` request with an empty result before closing the
+/// stream"). Returning a result at registration time would do two wrong
+/// things at once: close a request that must stay open, and invent a
+/// `{"subscriptionId": N}` shape the spec does not define.
+///
+/// So the handler yields an intention and each transport honours it. This
+/// lives at the shared dispatch chokepoint deliberately — stdio and HTTP
+/// both go through it, so neither has to re-derive the rule, and neither
+/// can drift from the other.
+pub(crate) enum ListenOutcome {
+    /// Registered. The request `id` stays open and unanswered; the
+    /// teardown response belongs to the stream owner, not to this handler.
+    Streaming {
+        /// Byte-for-byte the JSON-RPC `id` of the listen request.
+        subscription_id: Value,
+    },
+    /// Refused before any subscription existed. The transport writes this
+    /// response immediately, exactly as for any other rejected request.
+    Rejected(Box<JsonRpcResponse>),
+}
+
+impl ListenOutcome {
+    /// Build a [`ListenOutcome::Rejected`] carrying `error` for `id`.
+    fn rejected(id: Option<Value>, error: JsonRpcError) -> Self {
+        Self::Rejected(Box::new(JsonRpcResponse::error(id, error)))
+    }
+}
+
 pub struct McpServer {
     config: Arc<RwLock<Config>>,
     validator: Arc<CommandValidator>,
@@ -76,19 +172,14 @@ pub struct McpServer {
     output_cache: Arc<OutputCache>,
     task_store: Arc<TaskStore>,
     concurrent_limit: Arc<Semaphore>,
-    /// Server-wide fanout registry of live session writer channels.
+    /// Live `subscriptions/listen` subscriptions (MCP 2026-07-28).
     ///
-    /// Used by the config watcher (and any other server-wide event
-    /// source) to broadcast `list_changed` notifications to ALL live
-    /// sessions. Per-session direct delivery (progress, elicitation,
-    /// sampling, logging) goes through [`SessionContext::notification_tx`]
-    /// instead — the per-session tx is the only correct routing for
-    /// messages addressed to one specific client.
-    ///
-    /// FIND-034 (audit 2026-05-09) replaced the previous single
-    /// last-writer-wins `notification_tx` slot with this fanout
-    /// registry plus per-session `SessionContext` senders.
-    notification_fanout: NotificationFanout,
+    /// A notification type is delivered only to the subscriptions that
+    /// named it; a session that never sent `subscriptions/listen`
+    /// receives nothing. Entries are dropped when the session ends
+    /// (`serve_session`) or when their channel closes (publish-time
+    /// pruning).
+    subscriptions: SubscriptionRegistry,
     /// Current minimum log level for MCP logging notifications.
     log_level: Arc<AtomicU8>,
     /// MCP logger for sending `notifications/message` to the client.
@@ -320,7 +411,7 @@ impl McpServer {
             output_cache,
             task_store,
             concurrent_limit,
-            notification_fanout: NotificationFanout::new(),
+            subscriptions: SubscriptionRegistry::new(),
             log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
             mcp_logger: Arc::new(RwLock::new(None)),
             completion_provider: DefaultCompletionProvider,
@@ -383,19 +474,6 @@ impl McpServer {
     #[must_use]
     pub fn allocate_session_runtime_max_output_for_test(&self) -> Arc<RwLock<Option<usize>>> {
         Arc::new(RwLock::new(None))
-    }
-
-    /// Allocate a fresh per-session resource-subscriptions map.
-    ///
-    /// Test helper used by `tests/per_session_state.rs` to verify
-    /// that two sessions on the same `McpServer` instance get independent
-    /// subscription maps (FIND-036 audit 2026-05-09).
-    #[doc(hidden)]
-    #[must_use]
-    pub fn allocate_session_resource_subs_for_test(
-        &self,
-    ) -> Arc<RwLock<HashMap<String, Vec<String>>>> {
-        Arc::new(RwLock::new(HashMap::new()))
     }
 
     /// Allocate a fresh per-session roots vec.
@@ -642,8 +720,10 @@ impl McpServer {
             tokio::spawn(task.run());
         }
 
-        // Spawn cleanup tasks (global, shared across sessions).
-        let cleanup_handles = self.spawn_cleanup_tasks();
+        // Spawn cleanup tasks (global, shared across sessions), plus the
+        // resource-update watch loop that feeds
+        // `notifications/resources/updated` to live subscriptions.
+        let cleanup_handles = self.spawn_global_tasks();
 
         // Start config watcher. The watcher holds a closure that reads
         // the *current* `notification_tx` from the server each time a
@@ -691,6 +771,41 @@ impl McpServer {
         Ok(())
     }
 
+    /// Assemble every process-global background task: the cleanup loops
+    /// plus the resource-update watch.
+    ///
+    /// Split out of [`Self::serve`] so the composition is drivable from a
+    /// test. `serve()` needs a transport and an accept loop, so nothing
+    /// could assert that the watch handle really joins the vec shutdown
+    /// aborts — deleting the `push` reddened nothing.
+    fn spawn_global_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut handles = self.spawn_cleanup_tasks();
+        handles.push(self.spawn_resource_update_watch());
+        handles
+    }
+
+    /// Spawn the resource-update watch loop.
+    ///
+    /// Deliberately NOT part of [`Self::spawn_cleanup_tasks`]: that
+    /// function's contract (and its test) is "one loop per expiring
+    /// resource", and this loop expires nothing. It is appended to the
+    /// same handle vec in `serve()` so shutdown aborts it too.
+    ///
+    /// The loop does no work at all while nobody is subscribed, and emits
+    /// nothing for `history://` while the bridge is idle.
+    fn spawn_resource_update_watch(&self) -> tokio::task::JoinHandle<()> {
+        let subscriptions = self.subscriptions.clone();
+        let history = Arc::clone(&self.history);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(RESOURCE_WATCH_INTERVAL);
+            let mut last_revision = history.revision();
+            loop {
+                interval.tick().await;
+                watch_once(&subscriptions, &history, &mut last_revision);
+            }
+        })
+    }
+
     /// Spawn the four per-server cleanup tasks (session manager, task
     /// store, output cache, connection pool) and return their join handles
     /// so the serve loop can abort them on shutdown.
@@ -734,23 +849,21 @@ impl McpServer {
         vec![sm_handle, ts_handle, oc_handle, cp_handle]
     }
 
-    /// Start a config file watcher that broadcasts `list_changed`
+    /// Start a config file watcher that publishes `list_changed`
     /// notifications on reload.
     ///
-    /// FIND-034 (audit 2026-05-09): the previous topology read a single
-    /// global `notification_tx` slot at callback time, so the broadcast
-    /// reached only the most recently registered session. The watcher
-    /// now uses [`NotificationFanout::broadcast`], which fans the
-    /// notifications out to every live session's per-session sender.
+    /// FIND-034 (audit 2026-05-09) replaced a single global sender with a
+    /// fanout, so the reload reached every live session. MCP 2026-07-28
+    /// narrows that again: a server MUST NOT deliver a notification type
+    /// nobody subscribed to. The reload therefore publishes through
+    /// [`SubscriptionRegistry`], which delivers only to the subscriptions
+    /// that named each topic in `subscriptions/listen` — a session that
+    /// never subscribed now receives nothing at all.
     fn spawn_config_watcher(&self, path: &Path) -> Option<ConfigWatcher> {
-        let fanout = self.notification_fanout.clone();
+        let subscriptions = self.subscriptions.clone();
         let on_reload: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            fanout.broadcast(&WriterMessage::Notification(
-                JsonRpcNotification::tools_list_changed(),
-            ));
-            fanout.broadcast(&WriterMessage::Notification(
-                JsonRpcNotification::resources_list_changed(),
-            ));
+            subscriptions.publish_topic(NotificationTopic::ToolsListChanged);
+            subscriptions.publish_topic(NotificationTopic::ResourcesListChanged);
         });
 
         ConfigWatcher::with_notifications(
@@ -811,12 +924,6 @@ impl McpServer {
         // field is Arc-wrapped so cloning the bundle into spawned tasks
         // is cheap.
         let session_ctx = SessionContext::new(tx.clone());
-
-        // Register this session's tx with the server-wide fanout so the
-        // config watcher (and any other broadcaster) reaches us. The
-        // returned guard removes the registration on drop — including
-        // panics — so dead senders never accumulate (FIND-034).
-        let fanout_guard = self.notification_fanout.register(tx.clone());
 
         // Create / refresh MCP logger (writes `notifications/message`
         // to the client) now that we have a tx for this session.
@@ -912,13 +1019,28 @@ impl McpServer {
                     );
                     tokio::spawn(
                         async move {
-                            let response = server
+                            let Some(response) = server
                                 .handle_request_with_cancel(
                                     request,
                                     cancel_token,
                                     Some(&session_ctx_for_task),
                                 )
-                                .await;
+                                .await
+                            else {
+                                // A live `subscriptions/listen`: MCP
+                                // 2026-07-28 requires the request `id` to
+                                // stay alive for the lifetime of the
+                                // subscription and to be answered only at
+                                // graceful teardown, so nothing is written
+                                // now. The id is deliberately left
+                                // registered in `active_requests` too —
+                                // unregistering it is exactly the "keep the
+                                // id alive" rule inverted, and keeping it
+                                // is what lets `notifications/cancelled`
+                                // close the subscription.
+                                drop(permit);
+                                return;
+                            };
                             let token_was_cancelled = cancel_token_for_suppression
                                 .as_ref()
                                 .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
@@ -1005,18 +1127,15 @@ impl McpServer {
 
         info!("Client disconnected, session ending");
 
-        // The fanout guard removes our tx from the broadcast registry on
-        // drop (end of this function), so the config watcher stops
-        // trying to send into a dead channel without us touching any
-        // shared state here.
+        // Drop every subscription this session opened. The spec's "never
+        // deliver an unrequested notification type" invariant is only
+        // maintainable if dead subscriptions cannot linger behind a
+        // reused channel.
+        self.subscriptions.remove_for_tx(&tx);
 
-        // Signal writer to stop and wait for it. Then explicitly drop
-        // the fanout guard so the session's tx is removed from the
-        // broadcast registry — the lexical drop at end-of-scope would
-        // do this too, but being explicit documents the contract.
+        // Signal writer to stop and wait for it.
         drop(tx);
         let _ = writer_handle.await;
-        drop(fanout_guard);
     }
 
     /// Whether a finished request's response should be written back.
@@ -1250,7 +1369,36 @@ impl McpServer {
         ["tasks/get", "tasks/update", "tasks/cancel"];
 
     pub async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
-        self.handle_request_with_cancel(request, None, None).await
+        let id = request.id.clone();
+        self.handle_request_with_cancel(request, None, None)
+            .await
+            .unwrap_or_else(|| {
+                // Only `subscriptions/listen` yields no response, and only
+                // once it has actually registered — which needs a session.
+                // This entry point passes `None`, so listen is refused with
+                // -32600 long before that point and this arm is dead TODAY.
+                //
+                // IT DOES NOT STAY DEAD. Task 66 gives the HTTP transport a
+                // real session precisely so `subscriptions/listen` works
+                // there; the moment it lands, this arm becomes live for any
+                // caller that reaches listen through this signature.
+                //
+                // So it MUST stay an error and MUST NOT become a fabricated
+                // success. Returning a synthesized `result` here would
+                // silently reintroduce the exact defect this refactor
+                // removed — an immediate answer to a request the spec says
+                // must stay open until graceful teardown. A caller that
+                // needs a live subscription has to go through a path that
+                // can honour `ListenOutcome::Streaming`, not through here.
+                // No `unreachable!()`: panicking a third-party transport is
+                // worse than answering it honestly.
+                JsonRpcResponse::error(
+                    id,
+                    JsonRpcError::invalid_request(
+                        "subscriptions/listen requires a session-aware transport",
+                    ),
+                )
+            })
     }
 
     /// Dispatch a JSON-RPC request with an optional cancellation token
@@ -1269,12 +1417,16 @@ impl McpServer {
     /// Other methods ignore the token either because they are fast
     /// (tools/list, prompts/get, resources/read) or because they have their
     /// own cancellation mechanism (tools/call async via `tasks/cancel`).
+    ///
+    /// Returns `None` for the one method that has no immediate response:
+    /// a successful `subscriptions/listen` keeps its request `id` open for
+    /// the lifetime of the subscription (see [`ListenOutcome`]).
     pub(crate) async fn handle_request_with_cancel(
         &self,
         request: JsonRpcRequest,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
         session: Option<&SessionContext>,
-    ) -> JsonRpcResponse {
+    ) -> Option<JsonRpcResponse> {
         let id = request.id.clone();
 
         // Per-request `_meta` envelope (MCP 2026-07-28). Parsed ONCE here,
@@ -1298,15 +1450,36 @@ impl McpServer {
         if Self::TASK_METHODS_REQUIRING_EXTENSION.contains(&request.method.as_str())
             && !Self::request_declares_tasks_extension(session)
         {
-            return JsonRpcResponse::error(
+            return Some(JsonRpcResponse::error(
                 id,
                 JsonRpcError::missing_required_client_capability(&json!({
                     "extensions": { super::protocol::extensions::TASKS: {} }
                 })),
-            );
+            ));
         }
 
-        match request.method.as_str() {
+        // `subscriptions/listen` is the only method with no immediate
+        // result, so it is dispatched before the response-returning match
+        // rather than inside it. Handling it here — at the shared
+        // chokepoint — fixes stdio and any future streaming transport at
+        // once, instead of leaving each transport to re-derive the rule.
+        if request.method == "subscriptions/listen" {
+            return match self
+                .handle_subscriptions_listen(id, request.params, session)
+                .await
+            {
+                ListenOutcome::Rejected(response) => Some(*response),
+                ListenOutcome::Streaming { subscription_id } => {
+                    debug!(
+                        subscription_id = %subscription_id,
+                        "subscriptions/listen registered; holding its request id open until teardown"
+                    );
+                    None
+                }
+            };
+        }
+
+        Some(match request.method.as_str() {
             "server/discover" => self.handle_discover(id).await,
             "initialize" => Self::handle_initialize(id, request.params.as_ref()),
             "tools/list" => self.handle_tools_list(id, request.params.as_ref()).await,
@@ -1336,16 +1509,12 @@ impl McpServer {
             }
             "logging/setLevel" => self.handle_logging_set_level(id, request.params, session),
             "resources/templates/list" => self.handle_resource_templates_list(id),
-            "resources/subscribe" => Self::handle_resource_subscribe(id, request.params, session),
-            "resources/unsubscribe" => {
-                Self::handle_resource_unsubscribe(id, request.params, session)
-            }
             "ping" => JsonRpcResponse::success(id, json!({})),
             _ => {
                 error!(method = %request.method, "Unknown method");
                 JsonRpcResponse::error(id, JsonRpcError::method_not_found(&request.method))
             }
-        }
+        })
     }
 
     /// Build the server extensions map based on current configuration.
@@ -1392,7 +1561,24 @@ impl McpServer {
                 tools: Some(ToolsCapability { list_changed: true }),
                 prompts: Some(PromptsCapability { list_changed: true }),
                 resources: Some(ResourcesCapability {
-                    subscribe: false,
+                    // G-6 (audit 2026-08-19) set this to `false` because
+                    // nothing in the crate emitted
+                    // `notifications/resources/updated`, and left a standing
+                    // instruction: "flip this back to `true` in the same
+                    // commit that adds the emitter". That emitter exists now
+                    // — `spawn_resource_update_watch` polls at
+                    // `RESOURCE_WATCH_INTERVAL` and publishes through
+                    // `SubscriptionRegistry` — so the flag is honest again.
+                    //
+                    // The per-URI `resources/subscribe` RPC is gone with it
+                    // (MCP 2026-07-28: "It replaces the former
+                    // `resources/subscribe` RPC"); a client now asks for
+                    // updates through `subscriptions/listen`'s
+                    // `resourceSubscriptions`. The capability flag survives
+                    // that folding: it says whether resource-update
+                    // notifications exist at all, not which method opens
+                    // them.
+                    subscribe: true,
                     list_changed: true,
                 }),
                 completions: Some(CompletionsCapability {}),
@@ -2271,55 +2457,103 @@ impl McpServer {
         JsonRpcResponse::success_or_serialize_error(id, &json!({ "resourceTemplates": templates }))
     }
 
-    /// Subscribe to resource notifications.
+    /// Handle `subscriptions/listen` (MCP 2026-07-28,
+    /// `basic/patterns/subscriptions`).
     ///
-    /// IMPORTANT (fix round 1 of the 2026-08-19 audit corrections, task 31
-    /// follow-up): `handle_initialize` advertises
-    /// `resources.subscribe: false` (G-6) because nothing in this crate
-    /// ever emits `notifications/resources/updated` — but this handler used
-    /// to hand out a `subscriptionId` regardless (writing it into the
-    /// per-session `resource_subs` map added for FIND-036, audit
-    /// 2026-05-09), promising a notification the handshake had just
-    /// disclaimed. Refuse the call outright: a client should get the same
-    /// response it would get for any method the server does not implement.
-    /// Takes no `&self` (clippy `unused_self`) while it is just a constant
-    /// refusal; restore the real body (uri parsing, per-session
-    /// `resource_subs` write) in the SAME commit that adds the notification
-    /// emitter, never before — see git history for the previous
-    /// implementation.
-    fn handle_resource_subscribe(
+    /// Registers this session's opt-in filter under the JSON-RPC `id` of
+    /// the request, and emits the
+    /// `notifications/subscriptions/acknowledged` notification carrying
+    /// the subset the server actually honours.
+    ///
+    /// Returns an intention, never an immediate `JsonRpcResponse`. An
+    /// earlier revision answered right away with `{"subscriptionId": N}`,
+    /// justified by "the spec leaves this open". It does not: §Graceful
+    /// Closure resolves it explicitly — the server SHOULD answer the
+    /// original request with an empty result *before closing the stream*,
+    /// and "a conformant server must keep the request `id` alive for the
+    /// lifetime of the subscription and answer it at teardown". The
+    /// teardown result has a defined shape (`resultType: "complete"` plus
+    /// `_meta["io.modelcontextprotocol/subscriptionId"]`) which
+    /// `{"subscriptionId": N}` was not.
+    ///
+    /// The G-1 long-poll worry does not apply either: nothing parks here.
+    /// The handler returns immediately; only the request `id` stays
+    /// unanswered, held by the transport rather than by a blocked task.
+    /// SPEC: verify against
+    /// <https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions>
+    async fn handle_subscriptions_listen(
+        &self,
         id: Option<Value>,
-        _params: Option<Value>,
-        _session: Option<&SessionContext>,
-    ) -> JsonRpcResponse {
-        JsonRpcResponse::error(id, JsonRpcError::method_not_found("resources/subscribe"))
-    }
+        params: Option<Value>,
+        session: Option<&SessionContext>,
+    ) -> ListenOutcome {
+        let Some(session) = session else {
+            return ListenOutcome::rejected(
+                id,
+                JsonRpcError::invalid_request(
+                    "subscriptions/listen requires an active MCP session",
+                ),
+            );
+        };
+        // The subscription id IS the request id, so a listen without one
+        // has nowhere to correlate its notifications and cannot be honoured.
+        let Some(subscription_id) = id.clone() else {
+            return ListenOutcome::rejected(
+                id,
+                JsonRpcError::invalid_request(
+                    "subscriptions/listen requires a JSON-RPC id: the subscription is identified by it",
+                ),
+            );
+        };
+        let Some(params) = params else {
+            return ListenOutcome::rejected(
+                id,
+                JsonRpcError::invalid_params("subscriptions/listen requires params.notifications"),
+            );
+        };
+        let listen: SubscriptionsListenParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return ListenOutcome::rejected(
+                    id,
+                    JsonRpcError::invalid_params(format!(
+                        "Invalid subscriptions/listen params: {e}"
+                    )),
+                );
+            }
+        };
 
-    /// Unsubscribe from resource notifications.
-    ///
-    /// IMPORTANT (F9 of the 2026-08-19 batch H re-review): this used to
-    /// return `{}` success while its sibling `handle_resource_subscribe`
-    /// returned -32601, so a client probing which half of the subscription
-    /// pair exists got two contradictory answers about ONE disclaimed
-    /// capability. `handle_initialize` advertises
-    /// `resources.subscribe: false`; reference MCP servers register neither
-    /// handler when `subscribe` is undeclared, so both answer
-    /// method-not-found. Succeeding at cancelling a subscription that can
-    /// never be created is the same honesty defect G-6 was raised about,
-    /// one method over.
-    ///
-    /// Takes no `&self` and is no longer `async` (clippy `unused_self`)
-    /// while it is just a constant refusal. Restore the real body — uri
-    /// parsing and the per-session `resource_subs` removal added for
-    /// FIND-036, audit 2026-05-09 — in the SAME commit that adds the
-    /// notification emitter and restores `handle_resource_subscribe`,
-    /// never before. See git history for the previous implementation.
-    fn handle_resource_unsubscribe(
-        id: Option<Value>,
-        _params: Option<Value>,
-        _session: Option<&SessionContext>,
-    ) -> JsonRpcResponse {
-        JsonRpcResponse::error(id, JsonRpcError::method_not_found("resources/unsubscribe"))
+        // Echo only what we can honour: a URI whose scheme no resource
+        // handler serves would never produce a single notification.
+        let schemes = self.resource_registry.schemes();
+        let filter = listen.notifications.restricted_to_schemes(&schemes);
+
+        let ack_filter = match serde_json::to_value(&filter) {
+            Ok(v) => v,
+            Err(e) => {
+                return ListenOutcome::rejected(
+                    id,
+                    JsonRpcError::internal_error(format!("Serialization error: {e}")),
+                );
+            }
+        };
+
+        self.subscriptions.register(
+            subscription_id.clone(),
+            filter.clone(),
+            session.notification_tx.clone(),
+        );
+
+        // MUST be the first message on the subscription, and MUST precede
+        // any notification delivered because of it.
+        let _ = session
+            .notification_tx
+            .send(WriterMessage::Notification(
+                JsonRpcNotification::subscriptions_acknowledged(&subscription_id, &ack_filter),
+            ))
+            .await;
+
+        ListenOutcome::Streaming { subscription_id }
     }
 
     // =========================================================================
@@ -3016,6 +3250,60 @@ mod tests {
         );
     }
 
+    /// G-6 (audit 2026-08-19) forced `resources.subscribe: false` because
+    /// nothing in the crate emitted `notifications/resources/updated`, and
+    /// left a standing instruction to flip it back in the same commit that
+    /// adds the emitter. `spawn_resource_update_watch` is that emitter.
+    ///
+    /// The flag on its own would be satisfied by a server that simply
+    /// started lying again, so this also pins the producer it advertises:
+    /// a subscribed URI really does get published.
+    ///
+    /// Re-pointed from `handle_initialize` to `server/discover` in the 3.0.0
+    /// integration merge. The handshake is gone; the JSON path is unchanged,
+    /// so the assertion survives the move verbatim.
+    #[tokio::test]
+    async fn test_resources_capability_advertises_subscribe() {
+        let server = create_test_server();
+        let response = server.handle_discover(Some(json!(1))).await;
+
+        assert!(response.error.is_none());
+        let result = response.result.expect("server/discover result");
+
+        assert_eq!(
+            result["capabilities"]["resources"]["subscribe"],
+            json!(true),
+            "a real emitter exists, so the flag is honest again"
+        );
+        assert_eq!(
+            result["capabilities"]["resources"]["listChanged"],
+            json!(true),
+            "listChanged IS honored (config reload broadcasts \
+             resources_list_changed) and must stay advertised"
+        );
+
+        // The producer the flag promises, exercised end to end.
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        server
+            .handle_subscriptions_listen(
+                Some(json!(2)),
+                Some(json!({
+                    "notifications": { "resourceSubscriptions": ["history://recent"] }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
+        let _ack = rx.try_recv().expect("ack notification");
+        server.history.record_success("host", "uptime", 0, 5);
+        let mut last_revision: u64 = 0;
+        assert_eq!(
+            watch_once(&server.subscriptions, &server.history, &mut last_revision),
+            1,
+            "resources.subscribe: true must be backed by a producer that fires"
+        );
+    }
+
     /// A Legacy client that still opens with `initialize` gets `-32022` with
     /// the supported-version list — not `-32601`, and not a fake handshake.
     ///
@@ -3133,7 +3421,8 @@ mod tests {
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session))
-            .await;
+            .await
+            .expect("only subscriptions/listen answers nothing");
 
         assert_eq!(response.error.expect("must error").code, -32022);
         assert!(
@@ -3196,7 +3485,7 @@ mod tests {
                 "capabilities": {
                     "tools": {"listChanged": true},
                     "prompts": {"listChanged": true},
-                    "resources": {"subscribe": false, "listChanged": true},
+                    "resources": {"subscribe": true, "listChanged": true},
                     "completions": {},
                     "logging": {},
                     "extensions": {
@@ -5500,7 +5789,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session))
-            .await;
+            .await
+            .expect("only subscriptions/listen answers nothing");
 
         let error = response.error.expect("unknown task is an error");
         assert_eq!(
@@ -5554,7 +5844,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session))
-            .await;
+            .await
+            .expect("only subscriptions/listen answers nothing");
 
         let error = response.error.expect("unknown task is an error");
         assert_eq!(error.code, -32602, "{error:?}");
@@ -5585,7 +5876,8 @@ rbac:
 
             let response = server
                 .handle_request_with_cancel(request, None, Some(&session))
-                .await;
+                .await
+                .expect("only subscriptions/listen answers nothing");
 
             let error = response
                 .error
@@ -5632,7 +5924,8 @@ rbac:
 
             let response = server
                 .handle_request_with_cancel(request, None, Some(&session))
-                .await;
+                .await
+                .expect("only subscriptions/listen answers nothing");
 
             assert_eq!(
                 response.error.expect("deleted method").code,
@@ -5665,7 +5958,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session))
-            .await;
+            .await
+            .expect("only subscriptions/listen answers nothing");
 
         assert!(response.error.is_none(), "{:?}", response.error);
         let result = response.result.expect("an ack");
@@ -5700,7 +5994,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session))
-            .await;
+            .await
+            .expect("only subscriptions/listen answers nothing");
 
         let error = response.error.expect("unknown taskId is an error");
         assert_eq!(error.code, -32602);
@@ -6075,114 +6370,742 @@ rbac:
         );
     }
 
-    // ============== Resource Subscribe/Unsubscribe Tests ==============
+    // ====== Legacy resources/subscribe retirement (2026-07-28) ======
 
-    /// IMPORTANT (fix round 1 of the 2026-08-19 audit corrections, task 31
-    /// follow-up): `handle_initialize` now advertises
-    /// `resources.subscribe: false` (G-6) because nothing in this crate
-    /// ever emits `notifications/resources/updated` — but this handler kept
-    /// handing out a `subscriptionId` anyway, promising a notification the
-    /// handshake had just disclaimed. `resources/subscribe` must refuse
-    /// every call with `-32601 Method not found`, matching what a client
-    /// should expect from a capability the server does not advertise, and
-    /// must write nothing into the per-session map (there is nothing left
-    /// to unsubscribe from later).
+    /// MCP 2026-07-28 on `subscriptions/listen`: "It replaces the former
+    /// `resources/subscribe` RPC and the HTTP GET endpoint." The pair must
+    /// be GONE from the dispatch table, not merely stubbed — 2.2.0 kept two
+    /// handlers answering `-32601` from live routing arms, which is a
+    /// different thing from a method the server does not know.
     ///
-    /// Before: pinned that a valid subscribe call succeeds and lands in the
-    /// per-session `resource_subs` map (FIND-036). Now: pins that it is
-    /// unconditionally refused and the map stays empty — real coverage of
-    /// the opposite behavior, not a relaxed version of the old assertion.
+    /// The `-32601` half is an ABSENCE assertion, and an absence is
+    /// satisfied by a server that deleted subscriptions outright exactly as
+    /// well as by one that migrated them. The rest of this test is its
+    /// positive twin: the replacement really does register and acknowledge.
     #[tokio::test]
-    async fn test_resource_subscribe_always_returns_method_not_found() {
-        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+    async fn test_legacy_resource_subscribe_pair_is_gone() {
+        let server = create_test_server();
+        for method in ["resources/subscribe", "resources/unsubscribe"] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: Some(json!({ "uri": "history://recent" })),
+            };
+            let error = server
+                .handle_request(request)
+                .await
+                .error
+                .unwrap_or_else(|| panic!("{method} must no longer be routed"));
+            assert_eq!(
+                error.code, -32601,
+                "{method} folded into subscriptions/listen"
+            );
+            assert!(
+                error.message.contains(method),
+                "the unknown-method refusal names the method: {}",
+                error.message
+            );
+        }
+
+        // Positive twin: the URI those two methods used to carry now
+        // reaches the registry through the replacement.
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-        let params = json!({ "uri": "health://server" });
-
-        let response =
-            McpServer::handle_resource_subscribe(Some(json!(1)), Some(params), Some(&session_ctx));
-
-        let error = response.error.expect("subscribe must be refused");
-        assert_eq!(error.code, -32601);
-        assert!(error.message.contains("resources/subscribe"));
-        let subs = session_ctx.resource_subs.read().await;
+        let outcome = server
+            .handle_subscriptions_listen(
+                Some(json!(7)),
+                Some(json!({
+                    "notifications": { "resourceSubscriptions": ["history://recent"] }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
         assert!(
-            subs.is_empty(),
-            "a refused subscribe must not write a subscription id anyone could later unsubscribe"
+            matches!(outcome, ListenOutcome::Streaming { .. }),
+            "subscriptions/listen must be a live replacement, not another hole"
+        );
+        match rx.try_recv().expect("acknowledgement notification") {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/subscriptions/acknowledged");
+            }
+            _ => panic!("expected a Notification"),
+        }
+        assert_eq!(
+            server.subscriptions.subscribed_resource_uris(),
+            vec!["history://recent".to_string()],
+            "the subscription the retired RPC used to create now lives here"
         );
     }
 
-    /// Before: pinned that a MISSING `uri` param specifically produces
-    /// `-32602 Invalid params`, i.e. that param validation ran. Now: the
-    /// capability gate fires before any param is even looked at, so a
-    /// missing `uri` gets the same `-32601` as a well-formed call — pinning
-    /// that the refusal is unconditional, not parameter-dependent.
+    // ============== subscriptions/listen Tests (2026-07-28) ==============
+
     #[tokio::test]
-    async fn test_resource_subscribe_missing_uri_still_refused_as_method_not_found() {
-        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+    async fn test_subscriptions_listen_registers_and_acknowledges() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-        let params = json!({});
+        let params = json!({
+            "notifications": {
+                "toolsListChanged": true,
+                "resourceSubscriptions": ["history://recent", "ssh://prod/etc/passwd"]
+            }
+        });
 
-        let response =
-            McpServer::handle_resource_subscribe(Some(json!(1)), Some(params), Some(&session_ctx));
+        let outcome = server
+            .handle_subscriptions_listen(Some(json!(1)), Some(params), Some(&session_ctx))
+            .await;
 
-        let error = response.error.expect("subscribe must be refused");
-        assert_eq!(error.code, -32601);
+        // MCP 2026-07-28: there is NO immediate result. The request id
+        // stays open until graceful teardown, and the subscription id is
+        // the request id itself — never a server-minted counter.
+        let sub_id = match outcome {
+            ListenOutcome::Streaming { subscription_id } => subscription_id,
+            ListenOutcome::Rejected(r) => {
+                panic!("listen must register, got rejection: {:?}", r.error)
+            }
+        };
+        assert_eq!(
+            sub_id,
+            json!(1),
+            "the subscription id MUST be the JSON-RPC id of the listen request"
+        );
+        assert_eq!(server.subscriptions.len(), 1);
+
+        // The ack is a NOTIFICATION on the session channel, and echoes
+        // only the URIs this server can actually serve (no ssh:// handler
+        // exists, so that URI must be dropped from the echo).
+        match rx.try_recv().expect("ack notification must be sent") {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/subscriptions/acknowledged");
+                let params = n.params.expect("params present");
+                assert_eq!(
+                    params["_meta"][crate::mcp::protocol::META_SUBSCRIPTION_ID],
+                    sub_id,
+                    "the ack must correlate on the request id"
+                );
+                assert_eq!(params["notifications"]["toolsListChanged"], json!(true));
+                assert_eq!(
+                    params["notifications"]["resourceSubscriptions"],
+                    json!(["history://recent"])
+                );
+            }
+            _ => panic!("expected a Notification"),
+        }
     }
 
-    /// `resources/unsubscribe` is refused with the same -32601 as
-    /// `resources/subscribe` (F9). The pair must agree: the handshake
-    /// disclaims `resources.subscribe`, so neither half of the
-    /// subscription protocol exists, and a client probing for one must not
-    /// be told that cancelling works while creating does not.
-    ///
-    /// The session is seeded with a subscription anyway, so this test also
-    /// proves the refusal is UNCONDITIONAL rather than an accident of the
-    /// map being empty — and that the entry is left untouched rather than
-    /// silently removed by a handler that claims not to exist.
+    /// `RequestId = string | number`. A string id must survive verbatim:
+    /// the old implementation minted its own `u64`, which could not have
+    /// represented this id at all, and no test caught it because the suite
+    /// only asserted "subscriptionId is *a* number".
     #[tokio::test]
-    async fn test_resource_unsubscribe_is_refused_like_subscribe() {
+    async fn test_subscription_id_is_the_request_id_even_when_a_string() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let outcome = server
+            .handle_subscriptions_listen(
+                Some(json!("listen-7f3a")),
+                Some(json!({ "notifications": { "toolsListChanged": true } })),
+                Some(&session_ctx),
+            )
+            .await;
+
+        let ListenOutcome::Streaming { subscription_id } = outcome else {
+            panic!("listen must register");
+        };
+        assert_eq!(subscription_id, json!("listen-7f3a"));
+
+        match rx.try_recv().expect("ack notification") {
+            WriterMessage::Notification(n) => {
+                let params = n.params.expect("params present");
+                assert_eq!(
+                    params["_meta"][crate::mcp::protocol::META_SUBSCRIPTION_ID],
+                    json!("listen-7f3a")
+                );
+            }
+            _ => panic!("expected a Notification"),
+        }
+    }
+
+    /// Two concurrent subscriptions keep their own request ids — proof the
+    /// registry stores what it was given rather than a counter of its own.
+    #[tokio::test]
+    async fn test_concurrent_listens_keep_their_own_request_ids() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(16);
+        let session_ctx = SessionContext::new(tx);
+
+        for id in [json!(41), json!("second")] {
+            let outcome = server
+                .handle_subscriptions_listen(
+                    Some(id.clone()),
+                    Some(json!({ "notifications": { "toolsListChanged": true } })),
+                    Some(&session_ctx),
+                )
+                .await;
+            let ListenOutcome::Streaming { subscription_id } = outcome else {
+                panic!("listen must register");
+            };
+            assert_eq!(subscription_id, id);
+            let _ack = rx.try_recv().expect("ack notification");
+        }
+
+        assert_eq!(server.subscriptions.len(), 2);
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_topic(NotificationTopic::ToolsListChanged),
+            2
+        );
+
+        let mut seen = Vec::new();
+        while let Ok(WriterMessage::Notification(n)) = rx.try_recv() {
+            let params = n.params.expect("params present");
+            seen.push(params["_meta"][crate::mcp::protocol::META_SUBSCRIPTION_ID].clone());
+        }
+        assert!(seen.contains(&json!(41)), "numeric id must be delivered");
+        assert!(
+            seen.contains(&json!("second")),
+            "string id must be delivered"
+        );
+    }
+
+    /// The subscription id IS the request id, so a listen carrying no id
+    /// has nothing to correlate on and must be refused rather than
+    /// silently given a fabricated one.
+    #[tokio::test]
+    async fn test_subscriptions_listen_without_an_id_is_refused() {
+        let server = create_test_server();
         let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
-        session_ctx
-            .resource_subs
-            .write()
+
+        let outcome = server
+            .handle_subscriptions_listen(
+                None,
+                Some(json!({ "notifications": { "toolsListChanged": true } })),
+                Some(&session_ctx),
+            )
+            .await;
+
+        let ListenOutcome::Rejected(response) = outcome else {
+            panic!("an id-less listen must be rejected");
+        };
+        assert_eq!(response.error.expect("error").code, -32600);
+        assert!(server.subscriptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions_listen_requires_notifications_member() {
+        let server = create_test_server();
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+
+        let outcome = server
+            .handle_subscriptions_listen(Some(json!(1)), Some(json!({})), Some(&session_ctx))
+            .await;
+
+        let ListenOutcome::Rejected(response) = outcome else {
+            panic!("malformed params must be rejected, not registered");
+        };
+        assert_eq!(response.error.expect("error").code, -32602);
+        assert!(server.subscriptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions_listen_without_session_is_refused() {
+        let server = create_test_server();
+        let outcome = server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({ "notifications": { "toolsListChanged": true } })),
+                None,
+            )
+            .await;
+        let ListenOutcome::Rejected(response) = outcome else {
+            panic!("a session-less listen must be rejected");
+        };
+        assert_eq!(response.error.expect("error").code, -32600);
+        assert!(server.subscriptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions_listen_is_routed_by_method_name() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "subscriptions/listen".to_string(),
+            params: Some(json!({ "notifications": { "toolsListChanged": true } })),
+        };
+
+        // The session-less public entry point refuses it — but with
+        // -32600, proving the method is routed rather than unknown.
+        let error = server
+            .handle_request(request)
             .await
-            .insert("health://server".to_string(), vec!["sub-1".to_string()]);
-
-        let unsub_params = json!({ "uri": "health://server" });
-        let response = McpServer::handle_resource_unsubscribe(
-            Some(json!(2)),
-            Some(unsub_params),
-            Some(&session_ctx),
-        );
-
-        let error = response
             .error
-            .expect("unsubscribe must be refused while the capability is disclaimed");
-        assert_eq!(error.code, -32601);
-        assert!(
-            error.message.contains("resources/unsubscribe"),
-            "the refusal must name the method the client called, not its sibling: {}",
-            error.message
-        );
+            .expect("session-less listen is refused");
+        assert_eq!(error.code, -32600, "method must be routed, not unknown");
+    }
 
-        // The seeded entry survives: a method that does not exist must not
-        // have had a side effect.
-        let subs = session_ctx.resource_subs.read().await;
-        assert!(
-            subs.contains_key("health://server"),
-            "a refused unsubscribe must not mutate the session map"
+    // ============== resources/updated Watch Tests ==============
+
+    #[test]
+    fn test_resource_update_tick_skips_history_when_unchanged() {
+        let uris = vec![
+            "history://recent".to_string(),
+            "health://server".to_string(),
+        ];
+        assert_eq!(
+            resource_update_tick(&uris, false),
+            vec!["health://server".to_string()],
+            "history:// is change-detected and must stay silent when idle"
+        );
+        assert_eq!(
+            resource_update_tick(&uris, true),
+            vec![
+                "history://recent".to_string(),
+                "health://server".to_string()
+            ]
         );
     }
 
+    #[test]
+    fn test_resource_update_tick_with_no_subscriptions_is_empty() {
+        assert!(resource_update_tick(&[], true).is_empty());
+    }
+
     #[tokio::test]
-    async fn test_resource_subscribe_without_session_rejected() {
-        // Still refused without a session -- now unconditionally, via the
-        // same -32601 capability gate rather than a session-specific check.
-        let params = json!({ "uri": "health://server" });
-        let response = McpServer::handle_resource_subscribe(Some(json!(1)), Some(params), None);
-        let error = response.error.expect("subscribe must be refused");
-        assert_eq!(error.code, -32601);
+    async fn test_resource_update_emits_only_to_subscribers_of_that_uri() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({
+                    "notifications": { "resourceSubscriptions": ["history://recent"] }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
+        let _ack = rx.try_recv().expect("ack notification");
+
+        let uris = server.subscriptions.subscribed_resource_uris();
+        assert_eq!(uris, vec!["history://recent".to_string()]);
+
+        // Idle bridge: the tick emits nothing at all.
+        assert!(resource_update_tick(&uris, false).is_empty());
+        assert!(rx.try_recv().is_err());
+
+        // A recorded command bumps the revision, so the tick emits.
+        server.history.record_success("host", "uptime", 0, 5);
+        for uri in resource_update_tick(&uris, true) {
+            server.subscriptions.publish_resource_updated(&uri);
+        }
+        match rx
+            .try_recv()
+            .expect("subscriber receives resources/updated")
+        {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/resources/updated");
+                assert_eq!(n.params.expect("params")["uri"], "history://recent");
+            }
+            _ => panic!("expected a Notification"),
+        }
+
+        // A URI nobody subscribed to reaches nobody.
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_resource_updated("health://server"),
+            0
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_resource_update_watch_keeps_ticking() {
+        let server = create_test_server();
+        let handle = server.spawn_resource_update_watch();
+        tokio::task::yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "the watch loop exited immediately instead of ticking forever"
+        );
+        handle.abort();
+    }
+
+    /// `RESOURCE_WATCH_INTERVAL` is a published contract — the CHANGELOG
+    /// and the `subscribe: true` capability both promise a 30 s poll for
+    /// the remote-backed schemes — and nothing asserted it at `3f7c2fa`:
+    /// changing the constant reddened nothing.
+    #[test]
+    fn test_resource_watch_interval_is_thirty_seconds() {
+        assert_eq!(
+            RESOURCE_WATCH_INTERVAL,
+            std::time::Duration::from_secs(30),
+            "the documented poll interval for remote-backed schemes"
+        );
+    }
+
+    /// The tick-to-publish wiring, driven directly.
+    ///
+    /// `test_spawn_resource_update_watch_keeps_ticking` cannot cover it:
+    /// it only asserts the task is alive after one `yield_now`, and the
+    /// loop's first tick runs with zero subscriptions. Gutting
+    /// `publish_resource_updated` inside the loop left the whole suite
+    /// green at `3f7c2fa` (9112 passed / 0 failed). This is the test that
+    /// reddens now.
+    #[tokio::test]
+    async fn test_watch_once_publishes_to_a_live_subscription() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({
+                    "notifications": { "resourceSubscriptions": ["history://recent"] }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
+        // Drain the acknowledgement so anything after it can only be an
+        // update produced by the tick.
+        let _ack = rx.try_recv().expect("ack notification");
+
+        let mut last_revision = server.history.revision();
+
+        // Idle bridge: `history://` is change-detected, so a tick is silent.
+        assert_eq!(
+            watch_once(&server.subscriptions, &server.history, &mut last_revision),
+            0,
+            "an idle tick must publish nothing"
+        );
+        assert!(rx.try_recv().is_err());
+
+        // A recorded command bumps the revision; the next tick publishes.
+        server.history.record_success("host", "uptime", 0, 5);
+        assert_eq!(
+            watch_once(&server.subscriptions, &server.history, &mut last_revision),
+            1,
+            "the tick must reach the subscriber via publish_resource_updated"
+        );
+        match rx
+            .try_recv()
+            .expect("subscriber receives resources/updated")
+        {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/resources/updated");
+                assert_eq!(n.params.expect("params")["uri"], "history://recent");
+            }
+            _ => panic!("expected a Notification"),
+        }
+
+        // The revision is consumed: with no new command the tick is silent
+        // again, which is what keeps an idle bridge quiet.
+        assert_eq!(
+            watch_once(&server.subscriptions, &server.history, &mut last_revision),
+            0,
+            "last_revision must be advanced by the tick that published"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The SPAWNED task really calls the wiring, not just `watch_once` in
+    /// isolation. Paused time is what makes a 30 s interval observable:
+    /// once every task is idle the runtime advances the clock to the next
+    /// timer, so the second tick happens without 30 s of wall clock.
+    #[tokio::test(start_paused = true)]
+    async fn test_spawn_resource_update_watch_publishes_on_its_interval() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({
+                    "notifications": { "resourceSubscriptions": ["history://recent"] }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
+        let _ack = rx.try_recv().expect("ack notification");
+
+        let handle = server.spawn_resource_update_watch();
+
+        // The interval's first tick fires immediately, against the revision
+        // the task captured at spawn: nothing changed, so it is silent.
+        tokio::task::yield_now().await;
+        assert!(
+            rx.try_recv().is_err(),
+            "an idle bridge must not emit on the first tick"
+        );
+
+        // Now change history. The next tick must publish.
+        server.history.record_success("host", "uptime", 0, 5);
+        let msg = tokio::time::timeout(RESOURCE_WATCH_INTERVAL * 4, rx.recv())
+            .await
+            .expect("the watch loop must publish within a few intervals")
+            .expect("the writer channel stays open");
+        match msg {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/resources/updated");
+                assert_eq!(n.params.expect("params")["uri"], "history://recent");
+            }
+            _ => panic!("expected a Notification"),
+        }
+        handle.abort();
+    }
+
+    /// Shutdown in `serve()` is `for h in cleanup_handles { h.abort(); }`,
+    /// so the watch loop is both STARTED and STOPPED only if it sits in
+    /// that vec. Neither half was asserted at `3f7c2fa` — deleting the
+    /// `push` left the suite green. A length assertion alone would be
+    /// satisfied by any fifth task, so this drives a real notification out
+    /// of the vec and then proves aborting it silences the bridge.
+    ///
+    /// Subscribes to `health://server` rather than `history://recent` on
+    /// purpose: remote-backed schemes are published on EVERY tick, so this
+    /// test does not depend on whether the spawned task happened to sample
+    /// the history revision before or after a `record_success` call. The
+    /// change-detection path has its own tests.
+    #[tokio::test(start_paused = true)]
+    async fn test_spawn_global_tasks_starts_and_stops_the_resource_watch() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({
+                    "notifications": { "resourceSubscriptions": ["health://server"] }
+                })),
+                Some(&session_ctx),
+            )
+            .await;
+        let _ack = rx.try_recv().expect("ack notification");
+        assert_eq!(
+            server.subscriptions.subscribed_resource_uris(),
+            vec!["health://server".to_string()],
+            "the scheme must survive the servable-scheme filter"
+        );
+
+        let handles = server.spawn_global_tasks();
+        assert_eq!(
+            handles.len(),
+            5,
+            "four cleanup loops plus the resource-update watch"
+        );
+
+        let msg = tokio::time::timeout(RESOURCE_WATCH_INTERVAL * 4, rx.recv())
+            .await
+            .expect("the watch loop must be one of the spawned handles")
+            .expect("the writer channel stays open");
+        match msg {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/resources/updated");
+                assert_eq!(n.params.expect("params")["uri"], "health://server");
+            }
+            _ => panic!("expected a Notification"),
+        }
+
+        // Exactly what `serve()` does to this vec on shutdown.
+        for h in handles {
+            h.abort();
+        }
+        while rx.try_recv().is_ok() {}
+        assert!(
+            tokio::time::timeout(RESOURCE_WATCH_INTERVAL * 4, rx.recv())
+                .await
+                .is_err(),
+            "an aborted watch must stop publishing"
+        );
+    }
+
+    /// The dispatch chokepoint must produce NO response for an accepted
+    /// `subscriptions/listen` — this is the decision point, and `None` is
+    /// what tells every transport to keep the request `id` open.
+    #[tokio::test]
+    async fn test_dispatch_yields_no_response_for_an_accepted_listen() {
+        let server = create_test_server();
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "subscriptions/listen".to_string(),
+            params: Some(json!({ "notifications": { "toolsListChanged": true } })),
+        };
+
+        let response = server
+            .handle_request_with_cancel(request, None, Some(&session_ctx))
+            .await;
+
+        assert!(
+            response.is_none(),
+            "an accepted listen must yield no response; a Some(..) here is an \
+             immediate answer to a request that must stay open"
+        );
+        // The acknowledgement is a NOTIFICATION and still goes out.
+        match rx.try_recv().expect("ack notification") {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/subscriptions/acknowledged");
+            }
+            _ => panic!("expected a Notification, not a Response"),
+        }
+    }
+
+    /// End-to-end over a real `serve_session`: not one byte of JSON-RPC
+    /// *response* may be written back for an accepted `subscriptions/listen`.
+    ///
+    /// Driven through the in-memory transport rather than asserted on the
+    /// handler's return value, because the guarantee is about what reaches
+    /// the wire. A later `ping` is the sequencing device: once its response
+    /// has come back, the session has demonstrably processed past the
+    /// listen, so a missing listen response is a real absence, not a race.
+    #[tokio::test]
+    async fn test_accepted_listen_writes_no_response_to_the_transport() {
+        let server = Arc::new(create_test_server());
+        let (session, client_tx, mut server_rx) = in_memory_session();
+        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+
+        client_tx
+            .send(client_request(
+                1,
+                "subscriptions/listen",
+                Some(json!({ "notifications": { "toolsListChanged": true } })),
+            ))
+            .unwrap();
+        client_tx.send(client_request(2, "ping", None)).unwrap();
+
+        // Every read is bounded. An unbounded `recv().await` would hang
+        // forever here rather than fail: `serve_session` keeps the reader
+        // alive while `client_tx` lives, so "no more messages" never
+        // arrives as a channel close.
+        let mut saw_ack = false;
+        let mut saw_ping_response = false;
+        while !saw_ping_response {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
+                .await
+                .expect("session went silent before answering the ping")
+                .expect("session writer channel closed");
+            match msg {
+                WriterMessage::Response(r) => {
+                    // Both representations: the raw JSON-RPC id is a
+                    // number, but this codebase also carries a normalized
+                    // `String` form of it (`rid_cleanup`), and a response
+                    // leaking through either one is the same violation.
+                    assert!(
+                        r.id != Some(json!(1)) && r.id != Some(json!("1")),
+                        "a response was written for the listen request; its id \
+                         must stay open until graceful teardown"
+                    );
+                    if r.id == Some(json!(2)) {
+                        saw_ping_response = true;
+                    }
+                }
+                WriterMessage::Notification(n) => {
+                    if n.method == "notifications/subscriptions/acknowledged" {
+                        saw_ack = true;
+                    }
+                }
+                WriterMessage::BatchResponse(_) => panic!("unexpected batch response"),
+                // Server-initiated requests (elicitation, sampling) are
+                // unrelated to this assertion; skip rather than panic so an
+                // unrelated feature cannot fail this test spuriously.
+                WriterMessage::Request(_) => {}
+            }
+        }
+
+        assert!(
+            saw_ack,
+            "the acknowledgement notification must still be sent"
+        );
+        assert_eq!(server.subscriptions.len(), 1, "the listen must be live");
+
+        // `abort()`, never `drop(client_tx)` + `serve.await`. Session
+        // teardown awaits the writer task, and that task only ends on a
+        // send ERROR -- `drop(tx)` cannot close the channel because
+        // `session_ctx.notification_tx` and the `mcp_logger` tx outlive
+        // it. `ChannelWriter::send` is infallible, so the writer would
+        // never exit and the await would hang. Same pattern as the G-1
+        // harness above, and the reason is the pre-existing teardown
+        // defect recorded in the task 35 commit.
+        serve.abort();
+    }
+
+    /// MCP 2026-07-28: a server MUST NOT deliver a notification type that
+    /// no live subscription requested. Before this, `spawn_config_watcher`
+    /// fanned `tools/list_changed` + `resources/list_changed` out to every
+    /// live session regardless of what (if anything) it had subscribed to.
+    #[tokio::test]
+    async fn test_list_changed_reaches_only_subscribers() {
+        let server = create_test_server();
+        let (tx_sub, mut rx_sub) = mpsc::channel::<WriterMessage>(8);
+        let (tx_silent, mut rx_silent) = mpsc::channel::<WriterMessage>(8);
+        let session_sub = SessionContext::new(tx_sub);
+        // A live session that never sent subscriptions/listen.
+        let _session_silent = SessionContext::new(tx_silent);
+
+        server
+            .handle_subscriptions_listen(
+                Some(json!(1)),
+                Some(json!({ "notifications": { "toolsListChanged": true } })),
+                Some(&session_sub),
+            )
+            .await;
+        // Drain the acknowledgement so the next recv is the broadcast.
+        let _ack = rx_sub.try_recv().expect("ack notification");
+
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_topic(NotificationTopic::ToolsListChanged),
+            1
+        );
+
+        match rx_sub.try_recv().expect("subscriber receives its topic") {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/tools/list_changed");
+            }
+            _ => panic!("expected a Notification"),
+        }
+        assert!(
+            rx_silent.try_recv().is_err(),
+            "a session that never sent subscriptions/listen MUST receive nothing"
+        );
+
+        // A topic nobody subscribed to reaches nobody at all.
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_topic(NotificationTopic::ResourcesListChanged),
+            0
+        );
+        assert!(
+            rx_sub.try_recv().is_err(),
+            "a tools-only subscriber MUST NOT receive resources/list_changed"
+        );
+    }
+
+    /// The config watcher is the only server-wide `list_changed` producer.
+    /// It must build without touching a fanout, and must be a no-op when
+    /// nothing is subscribed.
+    #[tokio::test]
+    async fn test_config_reload_publishes_through_the_subscription_registry() {
+        let server = create_test_server();
+        assert!(server.subscriptions.is_empty());
+        assert_eq!(
+            server
+                .subscriptions
+                .publish_topic(NotificationTopic::ToolsListChanged),
+            0,
+            "a reload with zero subscriptions delivers zero notifications"
+        );
     }
 
     // ============== Completions Tests ==============
@@ -6542,52 +7465,6 @@ rbac:
     }
 
     #[tokio::test]
-    async fn test_handle_request_resources_subscribe_dispatch() {
-        // FIND-036 (audit 2026-05-09): `resources/subscribe` is a
-        // per-session operation. Calling it through the legacy
-        // session-less `handle_request` path now produces an error
-        // rather than silently writing to a non-existent shared map.
-        let server = create_test_server();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: "resources/subscribe".to_string(),
-            params: Some(json!({ "uri": "health://server" })),
-        };
-
-        let response = server.handle_request(request).await;
-
-        assert!(
-            response.error.is_some(),
-            "session-less subscribe must be refused (FIND-036)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_resources_unsubscribe_dispatch() {
-        // F9 (2026-08-19 batch H re-review): the dispatch arm must carry the
-        // refusal too, not just the handler. `resources.subscribe` is
-        // disclaimed at the handshake, so BOTH halves of the subscription
-        // pair answer method-not-found — this used to assert success while
-        // its `resources/subscribe` sibling immediately above asserted an
-        // error, which is exactly the contradiction F9 removes.
-        let server = create_test_server();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: "resources/unsubscribe".to_string(),
-            params: Some(json!({ "uri": "health://server" })),
-        };
-
-        let response = server.handle_request(request).await;
-
-        let error = response
-            .error
-            .expect("unsubscribe must be refused while the capability is disclaimed");
-        assert_eq!(error.code, -32601);
-    }
-
-    #[tokio::test]
     async fn test_handle_request_resources_read_dispatch() {
         let server = create_test_server();
         let request = JsonRpcRequest {
@@ -6751,7 +7628,8 @@ rbac:
         // added in commit 6.
         let response = server
             .handle_request_with_cancel(request, Some(token), None)
-            .await;
+            .await
+            .expect("only subscriptions/listen yields no response");
         assert!(response.result.is_some() || response.error.is_some());
     }
 
@@ -6870,7 +7748,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session_ctx))
-            .await;
+            .await
+            .expect("only subscriptions/listen yields no response");
         assert!(response.error.is_none());
 
         // The session-level bundle is untouched by the request-level parse.
@@ -6959,7 +7838,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session_ctx))
-            .await;
+            .await
+            .expect("only subscriptions/listen yields no response");
 
         let elicited = tokio::time::timeout(std::time::Duration::from_secs(5), fake_client)
             .await
@@ -7009,7 +7889,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session_ctx))
-            .await;
+            .await
+            .expect("only subscriptions/listen yields no response");
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
@@ -7073,7 +7954,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session_ctx))
-            .await;
+            .await
+            .expect("only subscriptions/listen yields no response");
 
         let elicited = tokio::time::timeout(std::time::Duration::from_secs(5), fake_client)
             .await
@@ -7119,7 +8001,8 @@ rbac:
 
         let response = server
             .handle_request_with_cancel(request, None, Some(&session_ctx))
-            .await;
+            .await
+            .expect("only subscriptions/listen yields no response");
 
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
