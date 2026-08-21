@@ -172,7 +172,10 @@ Key sections: `hosts`, `security`, `limits`, `audit`, `sessions`, `tool_groups`,
 tool-driven (`ssh_recording_*` + `MCP_RECORDING_KEY`). `rbac` still parses (it is
 a real `Config` field) but `rbac.enabled: true` is rejected at load time —
 nothing in the request path enforces it yet (`src/config/loader.rs`,
-`src/security/rbac.rs`).
+`src/security/rbac.rs`). `security.require_elicitation_on_destructive` reads
+the elicitation flag from the calling request's
+`_meta["io.modelcontextprotocol/clientCapabilities"]` and is **MCP-only** —
+`bridge-mcp tool …` on the CLI has no elicitation channel and never prompts.
 
 ## Known Advisories
 
@@ -213,6 +216,25 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 - Rust 2024 edition, MSRV 1.94 + winrm-rs 1.1, psrp-rs 1.0, russh 0.62, tokio, serde, clap 4
 
 ## Recent Changes
+
+- **v3.0.0 (2026-08-20, not yet tagged)** — **Modern-only.** `PROTOCOL_VERSION = "2026-07-28"`,
+  `SUPPORTED_PROTOCOL_VERSIONS = ["2026-07-28"]` (`src/mcp/protocol.rs:894-895`).
+  `server/discover` replaces the `initialize` handshake; the only remaining
+  `initialize` arm answers `-32022` with the supported-version list, because a
+  legacy client cannot fall forward on its own. Protocol revision, client
+  identity and client capabilities now arrive in a per-request `_meta`
+  envelope (`io.modelcontextprotocol/protocolVersion` / `…/clientInfo` /
+  `…/clientCapabilities`) — that is what feeds the fail-closed
+  destructive-elicitation gate, so `SessionCapabilities` is gone. Notifications
+  are opt-in through `subscriptions/listen` and carry
+  `_meta["io.modelcontextprotocol/subscriptionId"]`. Removed: `ping`,
+  `logging/setLevel`, `notifications/roots/list_changed`,
+  `resources/subscribe`/`unsubscribe`, `notifications/initialized`, the HTTP
+  `Mcp-Session-Id` session lifecycle, the `GET /mcp` SSE handler (405 now) and
+  `Last-Event-ID` resumption. Tasks moved out of core into the
+  `io.modelcontextprotocol/tasks` extension under `capabilities.extensions`.
+  Four 2.2.0 fixes are superseded — see the "2.2.0 fixes that 3.0.0
+  supersedes" section in CHANGELOG.md before re-applying anything from them.
 
 - **v2.2.0 (2026-08-19)** — major bump for **21 breaking changes, ten in the
   public lib API**. (Two earlier drafts of this line were wrong: "seven, four"

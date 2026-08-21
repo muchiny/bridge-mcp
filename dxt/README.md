@@ -21,8 +21,8 @@ The `manifest.json` file describes the extension to Claude Desktop:
   "dxt_version": "0.1",
   "name": "bridge-mcp",
   "display_name": "Bridge MCP",
-  "version": "2.2.0",
-  "description": "Execute commands securely on remote servers via SSH. 476 tools for Linux, Windows, Docker, Kubernetes, and more.",
+  "version": "3.0.0",
+  "description": "Execute commands securely on remote servers via SSH. 476 tools for Linux, Windows, Docker, Kubernetes, and more. MCP 2026-07-28 (Modern) only — requires a host that opens with server/discover; older hosts receive -32022.",
   "author": {
     "name": "muchiny"
   },
@@ -53,6 +53,13 @@ The `manifest.json` file describes the extension to Claude Desktop:
 | `mcp.transport` | MCP transport protocol (`"stdio"` for stdin/stdout JSON-RPC) |
 | `platforms` | List of supported platform targets |
 | `icon` | Path to the extension icon (SVG format) |
+
+> **Claude Desktop compatibility.** This package ships an MCP **2026-07-28
+> (Modern)** server. Claude Desktop opens the connection with
+> `server/discover`; a Desktop build old enough to send `initialize` gets
+> `-32022 Unsupported protocol version` and the extension will appear to
+> install but never connect. The `version` field above is kept in sync with
+> `Cargo.toml` by `make sync-server-json` — do not hand-edit it here.
 
 ---
 

@@ -2,8 +2,8 @@
   "dxt_version": "0.1",
   "name": "bridge-mcp",
   "display_name": "Bridge MCP",
-  "version": "2.2.0",
-  "description": "Execute commands securely on remote servers via SSH. 476 tools for Linux, Windows, Docker, Kubernetes, and more, with progress / elicitation / sampling / logger MCP integration.",
+  "version": "3.0.0",
+  "description": "Execute commands securely on remote servers via SSH. 476 tools for Linux, Windows, Docker, Kubernetes, and more. MCP 2026-07-28 (Modern) only — requires a host that opens with server/discover; older hosts receive -32022.",
   "author": {
     "name": "muchiny"
   },

@@ -9,7 +9,7 @@
 [![Release](https://img.shields.io/github/v/release/muchiny/bridge-mcp?style=flat-square&logo=rust)](https://github.com/muchiny/bridge-mcp/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/muchiny/bridge-mcp/total?style=flat-square)](https://github.com/muchiny/bridge-mcp/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-2025--11--25-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP-2026--07--28-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
 
 **A Rust MCP server for secure remote infrastructure management — 476 tools, 9 protocols.**
 
@@ -32,6 +32,7 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 - [MCP Prompts & Resources](#mcp-prompts--resources)
 - [CLI Usage](#cli-usage)
 - [Daemon Mode](#daemon-mode)
+- [Protocol Support](#protocol-support)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [License](#license)
@@ -46,7 +47,8 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 - **Auto-discovery** — reads `~/.ssh/config` automatically, merges with YAML config
 - **Smart output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV mode (60-80% token savings), pagination via `ssh_output_fetch`, per-client size limits (see [Token-efficient output](#token-efficient-output))
 - **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 476 schemas up front
-- **MCP Tasks support** — every registry tool advertises `taskSupport: "optional"`, enabling async cancellation and progress notifications for long-running operations. The three discovery meta-tools declare `"forbidden"`: they are answered locally, ahead of the task branch, so a task on one returns `-32601` whether it is called directly or wrapped in `mcp_call_tool`
+- **MCP 2026-07-28 (Modern) only** — `server/discover` opens the connection, per-request `_meta` carries the revision and client capabilities, notifications are opt-in via `subscriptions/listen`. A pre-Modern client sending `initialize` gets `-32022` and cannot fall forward — see [Protocol Support](#protocol-support)
+- **MCP Tasks extension** — every tool advertises `taskSupport: "optional"` under the `io.modelcontextprotocol/tasks` extension, enabling polled async execution, cancellation and progress notifications for long-running operations
 - **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
 - **Daemon mode** — Unix-socket transport for multi-client local usage; built-in `WinRmPool` (120 s TTL) and `K8sExecPool` (300 s TTL) amortize TLS handshakes across calls
 - **8700+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
@@ -221,6 +223,13 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+> **Your MCP host must speak MCP 2026-07-28.** bridge-mcp 3.x removed the
+> `initialize` handshake; a host that opens with `initialize` receives
+> `-32022 Unsupported protocol version` and the connection is dead. If your
+> host is not there yet, pin `bridge-mcp = "2"` — the CLI-as-tool mode
+> (`bridge-mcp tool …`) is unaffected either way, because it never speaks
+> JSON-RPC at all.
 
 ### 4. Verify
 
@@ -411,7 +420,7 @@ security:
         replacement: "[INTERNAL_REDACTED]"
 ```
 
-**Destructive-op confirmation** — opt-in gate that asks the user to confirm via MCP `elicitation/create` before any tool annotated `destructive_hint: true` (`ssh_terraform_apply`, `ssh_k8s_delete`, `ssh_cron_remove`, `ssh_win_update_reboot`, …) executes. Requires a client that advertises the elicitation capability (Claude Desktop, Claude Code):
+**Destructive-op confirmation** — opt-in gate that asks the user to confirm via MCP `elicitation/create` before any tool annotated `destructive_hint: true` (`ssh_terraform_apply`, `ssh_k8s_delete`, `ssh_cron_remove`, `ssh_win_update_reboot`, …) executes. The gate reads `_meta["io.modelcontextprotocol/clientCapabilities"].elicitation` **on the request that calls the tool**, and is fail-closed: a request that does not advertise elicitation is refused rather than executed unconfirmed. **This gate applies to MCP mode only** — `bridge-mcp tool …` on the CLI has no elicitation channel and never prompts, so do not treat the CLI as covered by this control:
 
 ```yaml
 security:
@@ -752,6 +761,41 @@ bridge-mcp daemon stop            # SIGTERM a running daemon
 | `K8sExecPool` (`--features k8s-exec`) | 300 s | Caches the `kube::Client` (kubeconfig walk + auth-plugin refresh) across `ssh_k8s_*` calls. |
 
 Both pools clean up idle entries automatically; nothing is required to enable them beyond compiling the relevant feature.
+
+---
+
+## Protocol Support
+
+bridge-mcp 3.x implements **MCP revision `2026-07-28`** and only that revision.
+
+| | |
+|---|---|
+| Opens the connection | `server/discover` (there is no `initialize`, no `notifications/initialized`) |
+| Revision + client identity + client capabilities | per-request `_meta`, keys `io.modelcontextprotocol/protocolVersion`, `…/clientInfo`, `…/clientCapabilities` |
+| Notifications | opt-in via `subscriptions/listen`; every notification carries `_meta["io.modelcontextprotocol/subscriptionId"]` |
+| Async execution | the `io.modelcontextprotocol/tasks` extension, declared under `capabilities.extensions` |
+| Older client sends `initialize` | `-32022`, with `data.supported = ["2026-07-28"]` |
+
+### Transports
+
+**stdio** (default, `bridge-mcp serve`) — one JSON-RPC message per line on
+stdin/stdout. The `_meta` envelope is the only place the protocol revision
+appears; there are no headers here.
+
+**Streamable HTTP** (`bridge-mcp serve-http`, requires the `http` feature) —
+`POST /mcp` only. Requests carry `MCP-Protocol-Version`, `Mcp-Method` and
+`Mcp-Name` headers so gateways and WAFs can route without parsing the body;
+the body is always authoritative and a mismatch is rejected. `GET /mcp` and
+`DELETE /mcp` return **405** — the standalone SSE stream and the session
+lifecycle are gone. There is no `Mcp-Session-Id`, no `Last-Event-ID`, and no
+redelivery: a broken stream means the client re-issues with a new request id.
+Server-to-client notifications arrive on the response stream of a
+`subscriptions/listen` POST.
+
+Anything that used to be keyed off the HTTP session is now an explicit handle
+in tool arguments — `ssh_session_create` returns a `session_id` you pass to
+`ssh_session_exec`, and a truncated response returns an `output_id` you pass
+to `ssh_output_fetch`.
 
 ---
 
