@@ -910,11 +910,32 @@ impl McpServer {
         // the session's writer half. The writer is moved in here; it
         // cannot be shared (SessionWriter is Send but not Sync).
         let mut session_writer = session.writer;
+        // The writer had exactly two exits: `rx.recv()` yielding `None`, and a
+        // send error. Neither is under the server's control. A sink that never
+        // fails a send — which is every long-lived stream whose peer has
+        // stopped reading without closing, and both test writers — leaves the
+        // task alive for as long as any `Sender` clone survives, and the
+        // teardown below could only DETACH it.
+        //
+        // The token is a third exit, used only as a backstop: teardown still
+        // waits for the natural drain first, because cancelling immediately
+        // would discard messages already queued for a client that is still
+        // reading them.
+        let writer_shutdown = tokio_util::sync::CancellationToken::new();
+        let writer_token = writer_shutdown.clone();
         let writer_handle = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if let Err(e) = session_writer.send(msg).await {
-                    error!(error = %e, "Session writer failed, closing");
-                    break;
+            loop {
+                tokio::select! {
+                    () = writer_token.cancelled() => break,
+                    msg = rx.recv() => match msg {
+                        Some(msg) => {
+                            if let Err(e) = session_writer.send(msg).await {
+                                error!(error = %e, "Session writer failed, closing");
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
                 }
             }
         });
@@ -1110,21 +1131,45 @@ impl McpServer {
         // the clone inside `session_ctx`, and the clone owned by
         // `FanoutGuard`. The fanout was deleted with the subscriptions work,
         // so two remain here, plus any the registry held until the sweep
-        // above. Dropping `tx` alone (or merely reordering the existing
-        // drops) leaves the channel open and `writer_handle.await` blocks
-        // forever.
+        // above.
+        //
+        // The census is larger than "three clones", and the difference
+        // matters: `SessionContext::notification_tx` is a bare `Sender`, not
+        // an `Arc`, and `SessionContext` derives `Clone` — so EVERY clone of
+        // the bundle mints another sender. Per-request scoping
+        // (`with_request_meta`), each dispatched request's
+        // `session_ctx_for_task`, each batch task, `spawn_fetch_roots`, and
+        // the detached task worker in `handle_tools_call_async` all hold one.
+        // The last of those is the longest-lived by far — it parks on
+        // `concurrent_limit.acquire_owned()` BEFORE running the tool, so it
+        // can outlive the client by the length of the queue ahead of it. It
+        // is the concrete reason the bounded wait below exists.
         drop(tx);
         drop(session_ctx);
 
-        // Per-request tasks spawned from the reader loop hold their own
-        // `session_ctx` clone and can outlive it, so the drops above are
-        // necessary but not sufficient. Bound the wait: a straggler must
-        // not keep the process alive after the client has gone.
-        if tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle)
+        // Wait for the natural drain first: the writer should see `None` once
+        // the last straggler drops its clone, and flush whatever is queued on
+        // the way out.
+        let mut writer_handle = writer_handle;
+        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer_handle)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+
+        // It did not. Previously this branch just logged and ABANDONED the
+        // task, which is how a writer whose sink never fails outlives its
+        // session indefinitely. Tell it to stop, then bound that too — a
+        // wedged sink must not be able to hang teardown either.
+        warn!("Session writer did not drain within 2s, cancelling it");
+        writer_shutdown.cancel();
+        if tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer_handle)
             .await
             .is_err()
         {
-            warn!("Session writer did not finish within 2s, abandoning it");
+            warn!("Session writer ignored cancellation, aborting");
+            writer_handle.abort();
         }
     }
 
@@ -8547,6 +8592,75 @@ rbac:
 
         assert!(response.result.is_none());
         assert_eq!(response.error.expect("must error").code, -32601);
+    }
+
+    /// THE TEARDOWN ORDER, which the migration notes carried as "covered by
+    /// no test".
+    ///
+    /// `serve_session` sweeps the subscription registry BEFORE dropping its
+    /// own sender clones. That order is load-bearing, not tidiness: a live
+    /// subscription holds its own `Sender` clone of the writer channel, so if
+    /// the sweep ran after the wait — or not at all — `rx.recv()` would never
+    /// yield `None`, the natural drain would never complete, and teardown
+    /// would fall through to the cancellation backstop.
+    ///
+    /// The in-memory harness is what makes this measurable at all.
+    /// `ChannelWriter::send` returns `Ok(())` unconditionally, so the writer's
+    /// other exit — a failed send — is unreachable here. That is usually a
+    /// weakness of in-process tests; here it is the point, because it leaves
+    /// `recv() -> None` as the ONLY way out and so puts the whole weight of
+    /// the test on the sweep.
+    ///
+    /// Measured on TIME because the order has no other observable: both the
+    /// fast path and the backstop end with the session returning, and only
+    /// the latency separates them. 500 ms sits far below the 2 s drain budget,
+    /// so a slow machine cannot drift into the backstop and still pass.
+    #[tokio::test]
+    async fn test_serve_session_sweeps_subscriptions_before_awaiting_the_writer() {
+        let server = Arc::new(create_test_server());
+        let (session, client_tx, mut server_rx) = in_memory_session();
+        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+
+        client_tx
+            .send(client_request(
+                1,
+                "subscriptions/listen",
+                Some(params_declaring_nothing(
+                    json!({ "notifications": { "toolsListChanged": true } }),
+                )),
+            ))
+            .unwrap();
+
+        // The acknowledgement is the sequencing device AND the premise: it
+        // proves the registry is actually holding a sender clone at the
+        // moment EOF arrives. Without it the test could pass because nothing
+        // was ever registered.
+        let ack = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
+            .await
+            .expect("no acknowledgement within 3s — the subscription never registered")
+            .expect("session writer channel closed");
+        match ack {
+            WriterMessage::Notification(n) => {
+                assert_eq!(n.method, "notifications/subscriptions/acknowledged");
+            }
+            _ => panic!("expected the listen acknowledgement, not a response or batch"),
+        }
+
+        // EOF: the reader's senders are gone, so the loop ends.
+        drop(client_tx);
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(std::time::Duration::from_secs(5), serve)
+            .await
+            .expect("serve_session must return after EOF")
+            .expect("serve_session panicked");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "teardown took {elapsed:?}: the subscription's sender clone outlived \\
+             the drain, so the registry sweep did not run before the wait"
+        );
     }
 
     /// G-15: a stdio session whose reader hits EOF must return promptly.
