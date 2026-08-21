@@ -36,11 +36,11 @@ use super::protocol::{
     CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, DISCOVER_TTL_MS,
     DetailedTask, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon, JsonRpcError,
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel, LoggingCapability,
-    LoggingSetLevelParams, PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult,
-    PromptsListResult, ResourcesCapability, ResourcesListResult, ResourcesReadParams,
-    ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
-    ServerCapabilities, ServerInfo, TaskCancelParams, TaskGetParams, TaskNotificationParams,
-    TaskStatus, TaskUpdateParams, ToolCallParams, ToolCallResult, ToolContent, ToolsCapability,
+    PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult,
+    ResourcesCapability, ResourcesListResult, ResourcesReadParams, ResourcesReadResult,
+    SERVER_ICON_URL, SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities,
+    ServerInfo, TaskCancelParams, TaskGetParams, TaskNotificationParams, TaskStatus,
+    TaskUpdateParams, ToolCallParams, ToolCallResult, ToolContent, ToolsCapability,
     ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
@@ -180,11 +180,6 @@ pub struct McpServer {
     /// (`serve_session`) or when their channel closes (publish-time
     /// pruning).
     subscriptions: SubscriptionRegistry,
-    /// Current minimum log level for MCP logging notifications.
-    log_level: Arc<AtomicU8>,
-    /// MCP logger for sending `notifications/message` to the client.
-    /// Initialized in `run()` once the writer channel is ready.
-    mcp_logger: Arc<RwLock<Option<Arc<McpLogger>>>>,
     /// Completion provider for argument auto-completion.
     completion_provider: DefaultCompletionProvider,
     /// Application metrics for token consumption analytics.
@@ -412,8 +407,6 @@ impl McpServer {
             task_store,
             concurrent_limit,
             subscriptions: SubscriptionRegistry::new(),
-            log_level: Arc::new(AtomicU8::new(LogLevel::Warning.severity())),
-            mcp_logger: Arc::new(RwLock::new(None)),
             completion_provider: DefaultCompletionProvider,
             metrics: Arc::new(crate::metrics::Metrics::new()),
         };
@@ -660,7 +653,6 @@ impl McpServer {
         // when no session handle is available (legacy non-MCP code paths).
         ctx.client_supports_elicitation = session.is_some_and(SessionContext::supports_elicitation);
         ctx.client_supports_sampling = session.is_some_and(SessionContext::supports_sampling);
-        ctx.mcp_logger = self.mcp_logger.read().await.as_ref().map(Arc::clone);
         ctx
     }
 
@@ -887,9 +879,12 @@ impl McpServer {
     /// froze whole sessions, because the reader loop acquires the permit
     /// BEFORE it spawns the handler — so N parked `tasks/result` long polls
     /// (N = the limit, 5 by default) meant the client's next message was
-    /// never read at all. Measured: N=4 still answered `ping`; N=5 answered
-    /// neither `ping` nor `tasks/cancel` — the one request that could have
-    /// released the parked polls — and was still dead after 208 s.
+    /// never read at all. Measured: N=4 still answered a control-plane
+    /// probe; N=5 answered neither the probe nor `tasks/cancel` — the one
+    /// request that could have released the parked polls — and was still
+    /// dead after 208 s. (The audit's probe was `ping`; 2026-07-28 deleted
+    /// that method, so the exemption is now `tasks/*` only. The freeze it
+    /// prevents is unchanged.)
     ///
     /// `tasks/result` was deleted in 3.0.0, so that exact scenario is no
     /// longer reachable; the measurement is recorded as the historical
@@ -898,12 +893,12 @@ impl McpServer {
     /// keep: task WORKERS legitimately hold all N permits during normal
     /// operation, and the control plane must stay answerable through it.
     ///
-    /// Neither `ping` nor any `tasks/*` method does remote work, so
-    /// exempting them costs no concurrency budget. Task-augmented
-    /// `tools/call` work is governed instead by the permit the task worker
-    /// itself takes in `handle_tools_call_async`.
+    /// No `tasks/*` method does remote work, so exempting them costs no
+    /// concurrency budget. Task-augmented `tools/call` work is governed
+    /// instead by the permit the task worker itself takes in
+    /// `handle_tools_call_async`.
     fn is_concurrency_exempt(method: &str) -> bool {
-        method == "ping" || method.starts_with("tasks/")
+        method.starts_with("tasks/")
     }
 
     /// Drive one full client session: spawn a per-session writer task,
@@ -919,22 +914,11 @@ impl McpServer {
 
         // Allocate the per-session bundle: pending-requests map (Vuln 8),
         // capability flags (Vuln 9), active-requests map (FIND-038),
-        // notification tx, runtime override slot (FIND-033), resource
-        // subscriptions map (FIND-036), and roots vec (FIND-037). Every
+        // notification tx, runtime override slot (FIND-033), and roots vec
+        // (FIND-037). Every
         // field is Arc-wrapped so cloning the bundle into spawned tasks
         // is cheap.
         let session_ctx = SessionContext::new(tx.clone());
-
-        // Create / refresh MCP logger (writes `notifications/message`
-        // to the client) now that we have a tx for this session.
-        // FIND-035: McpLogger is gated by the SESSION's log_level so
-        // `notifications/setLevel` from this client cannot mute another
-        // client's notifications.
-        let mcp_logger = Arc::new(McpLogger::new(
-            Arc::clone(&session_ctx.log_level),
-            tx.clone(),
-        ));
-        *self.mcp_logger.write().await = Some(Arc::clone(&mcp_logger));
 
         // Writer task: consume the channel, forward every message to
         // the session's writer half. The writer is moved in here; it
@@ -1127,15 +1111,35 @@ impl McpServer {
 
         info!("Client disconnected, session ending");
 
-        // Drop every subscription this session opened. The spec's "never
-        // deliver an unrequested notification type" invariant is only
-        // maintainable if dead subscriptions cannot linger behind a
-        // reused channel.
+        // Drop every subscription this session opened. This is also the
+        // first step of the G-15 teardown below: a live subscription holds
+        // its own clone of `tx`, so the channel cannot close while any
+        // remain. The spec's "never deliver an unrequested notification
+        // type" invariant is only maintainable if dead subscriptions cannot
+        // linger behind a reused channel.
         self.subscriptions.remove_for_tx(&tx);
 
-        // Signal writer to stop and wait for it.
+        // G-15: the writer task's `rx.recv()` yields `None` only when EVERY
+        // sender clone is gone. The audit counted three — the local `tx`,
+        // the clone inside `session_ctx`, and the clone owned by
+        // `FanoutGuard`. The fanout was deleted with the subscriptions work,
+        // so two remain here, plus any the registry held until the sweep
+        // above. Dropping `tx` alone (or merely reordering the existing
+        // drops) leaves the channel open and `writer_handle.await` blocks
+        // forever.
         drop(tx);
-        let _ = writer_handle.await;
+        drop(session_ctx);
+
+        // Per-request tasks spawned from the reader loop hold their own
+        // `session_ctx` clone and can outlive it, so the drops above are
+        // necessary but not sufficient. Bound the wait: a straggler must
+        // not keep the process alive after the client has gone.
+        if tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle)
+            .await
+            .is_err()
+        {
+            warn!("Session writer did not finish within 2s, abandoning it");
+        }
     }
 
     /// Whether a finished request's response should be written back.
@@ -1228,25 +1232,11 @@ impl McpServer {
         }
 
         // Handle client notifications (no response needed per JSON-RPC 2.0)
-        if message.method.as_deref() == Some("notifications/roots/list_changed") {
-            // This branch bypasses `handle_request_with_cancel`, so attach
-            // the notification's own `_meta` envelope here — otherwise a
-            // Modern client that declares `roots` per-request would be
-            // ignored by the `supports_roots()` gate in `spawn_fetch_roots`.
-            let scoped =
-                session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
-            Self::handle_roots_changed(&scoped);
-            return None;
-        }
         if message.method.as_deref() == Some("notifications/cancelled") {
             Self::handle_cancellation_notification(
                 &session.active_requests,
                 message.params.as_ref(),
             );
-            return None;
-        }
-        if message.method.as_deref() == Some("notifications/initialized") {
-            Self::handle_initialized_notification(session);
             return None;
         }
 
@@ -1261,6 +1251,24 @@ impl McpServer {
                 "Ignoring unhandled JSON-RPC notification (no id, no response sent)"
             );
             return None;
+        }
+
+        // Modern (2026-07-28) removed `notifications/initialized`, which
+        // used to trigger the one-shot `roots/list` fetch. Fire it lazily
+        // on the first client request of the session instead. `swap` makes
+        // this exactly-once even under a burst of concurrent requests, and
+        // the fetch itself is spawned, so the reader loop is never blocked
+        // (audit 2026-08-02).
+        //
+        // The request's own `_meta` envelope is attached first: a Modern
+        // client declares `roots` per-request, and without the scope the
+        // `supports_roots()` gate inside `spawn_fetch_roots` would read the
+        // session-level flags — always `false` with no handshake — and
+        // never fetch anything.
+        if !session.roots_fetched.swap(true, Ordering::Relaxed) {
+            let scoped =
+                session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
+            Self::spawn_fetch_roots(&scoped);
         }
 
         // It's a client request — convert to JsonRpcRequest
@@ -1328,19 +1336,6 @@ impl McpServer {
                 debug!(error = %e, "Failed to fetch roots from client");
             }
         }
-    }
-
-    /// Handle `notifications/roots/list_changed` — re-fetch roots.
-    fn handle_roots_changed(session: &SessionContext) {
-        info!("Client roots changed, re-fetching");
-        Self::spawn_fetch_roots(session);
-    }
-
-    /// Handle `notifications/initialized` — fetch client roots if supported.
-    /// No response is emitted (per JSON-RPC 2.0 notification semantics).
-    fn handle_initialized_notification(session: &SessionContext) {
-        info!("Client sent notifications/initialized; fetching roots");
-        Self::spawn_fetch_roots(session);
     }
 
     /// Handle a single JSON-RPC request and return the response.
@@ -1500,16 +1495,12 @@ impl McpServer {
             "tasks/get" => self.handle_tasks_get(id, request.params).await,
             "tasks/update" => self.handle_tasks_update(id, request.params).await,
             "tasks/cancel" => self.handle_tasks_cancel(id, request.params).await,
-            // The 2025-06-18 schema names this method `completion/complete`
-            // (SINGULAR) and that is the ONLY spelling the installed client
-            // sends. The plural was carried over from an earlier draft; keep
-            // both so neither client generation gets -32601.
-            "completion/complete" | "completions/complete" => {
-                self.handle_completions_complete(id, request.params)
-            }
-            "logging/setLevel" => self.handle_logging_set_level(id, request.params, session),
+            // The 2025-06-18 schema (and Modern after it) names this
+            // method `completion/complete`, singular. The plural spelling
+            // was a 2.2.0 compatibility alias for one release; 3.0.0 is
+            // Modern-only, so it is gone.
+            "completion/complete" => self.handle_completions_complete(id, request.params),
             "resources/templates/list" => self.handle_resource_templates_list(id),
-            "ping" => JsonRpcResponse::success(id, json!({})),
             _ => {
                 error!(method = %request.method, "Unknown method");
                 JsonRpcResponse::error(id, JsonRpcError::method_not_found(&request.method))
@@ -1926,7 +1917,25 @@ impl McpServer {
             reporter.report(1, Some("Preparing execution..."));
         }
 
-        let ctx = self
+        // Modern (2026-07-28) per-request logging: the level arrives in
+        // THIS call's `_meta`, not from a connection-scoped
+        // `logging/setLevel`. `Warning` is the default when the client
+        // sends none. The task-augmented path deliberately gets no
+        // logger: its enclosing request has already returned, so its
+        // progress is reported through `notifications/tasks/status`.
+        let request_logger: Option<Arc<McpLogger>> = session.map(|s| {
+            let level = call_params
+                .meta
+                .as_ref()
+                .and_then(|m| m.logging_level)
+                .unwrap_or(LogLevel::Warning);
+            Arc::new(McpLogger::new(
+                Arc::new(AtomicU8::new(level.severity())),
+                s.notification_tx.clone(),
+            ))
+        });
+
+        let mut ctx = self
             .create_tool_context(
                 cancel_token,
                 call_params
@@ -1936,6 +1945,7 @@ impl McpServer {
                 session,
             )
             .await;
+        ctx.mcp_logger = request_logger.clone();
 
         if let Some(ref reporter) = progress_reporter {
             reporter.report(2, Some(&format!("Executing {}...", call_params.name)));
@@ -1983,7 +1993,7 @@ impl McpServer {
                     .record_tool_output(&tool_name, output_chars as u64);
 
                 // Contextual log: give Claude structured info about the execution
-                if let Some(logger) = self.mcp_logger.read().await.as_ref() {
+                if let Some(logger) = request_logger.as_ref() {
                     logger.log(
                         super::protocol::LogLevel::Debug,
                         "bridge-mcp",
@@ -2009,7 +2019,7 @@ impl McpServer {
                 self.metrics.record_tool_call(&tool_name, "unknown");
                 self.metrics.record_tool_error();
 
-                if let Some(logger) = self.mcp_logger.read().await.as_ref() {
+                if let Some(logger) = request_logger.as_ref() {
                     logger.log(
                         super::protocol::LogLevel::Error,
                         "bridge-mcp",
@@ -2121,8 +2131,8 @@ impl McpServer {
         // an sshd whose MaxStartups is 10:30:100. The worker takes its own
         // permit instead.
         //
-        // This is only safe because `ping` and every `tasks/*` method are
-        // exempt from that same semaphore (see `is_concurrency_exempt`):
+        // This is only safe because every `tasks/*` method is exempt from
+        // that same semaphore (see `is_concurrency_exempt`):
         // workers legitimately holding all five permits is now the normal
         // busy state, and the control plane must stay answerable through it.
         let concurrent_limit = Arc::clone(&self.concurrent_limit);
@@ -2877,45 +2887,6 @@ impl McpServer {
             },
         )
     }
-
-    // ========================================================================
-    // Logging
-    // ========================================================================
-
-    fn handle_logging_set_level(
-        &self,
-        id: Option<Value>,
-        params: Option<Value>,
-        session: Option<&SessionContext>,
-    ) -> JsonRpcResponse {
-        let Some(params) = params else {
-            return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Missing params"));
-        };
-
-        let level_params: LoggingSetLevelParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => {
-                return JsonRpcResponse::error(
-                    id,
-                    JsonRpcError::invalid_params(format!("Invalid params: {e}")),
-                );
-            }
-        };
-
-        // FIND-035: write to the SESSION's log_level so that
-        // `notifications/setLevel` from this client cannot mute another
-        // session's `notifications/message` stream. Falls back to the
-        // server-wide field for legacy non-session call paths (tests).
-        let target = if let Some(s) = session {
-            Arc::clone(&s.log_level)
-        } else {
-            Arc::clone(&self.log_level)
-        };
-        target.store(level_params.level.severity(), Ordering::Relaxed);
-        info!(level = ?level_params.level, "MCP log level updated");
-
-        JsonRpcResponse::success(id, json!({}))
-    }
 }
 
 /// Vendor-namespaced build provenance for `serverInfo._meta`.
@@ -3091,7 +3062,7 @@ mod tests {
     /// so N parked polls froze the entire session: the loop blocks on
     /// `acquire_owned()` before it spawns the handler, so the client's next
     /// message is never read. The audit measured the boundary exactly —
-    /// N=4 still answered `ping`, N=5 answered neither `ping` nor
+    /// N=4 still answered the probe, N=5 answered neither the probe nor
     /// `tasks/cancel` (the one call that could have released the polls),
     /// and it was still dead 208 s later.
     ///
@@ -3102,13 +3073,26 @@ mod tests {
     ///
     /// The exemption this guards, `is_concurrency_exempt`, survives both
     /// changes and is still load-bearing — it keys on the method PREFIX, so
-    /// what needs proving is that `ping` and `tasks/*` never reach
-    /// `acquire_owned()` at all. That matters more now, not less: task
-    /// workers legitimately hold every permit during normal operation, so a
-    /// full semaphore is the busy state, not a fault. This re-anchors the
-    /// original shape onto the surviving method — N `tasks/get` polls at and
-    /// past the concurrency limit (5), with every permit held by an entirely
-    /// separate mechanism, plus a `ping`. All must still answer.
+    /// what needs proving is that `tasks/*` never reaches `acquire_owned()`
+    /// at all. That matters more now, not less: task workers legitimately
+    /// hold every permit during normal operation, so a full semaphore is
+    /// the busy state, not a fault. This re-anchors the original shape onto
+    /// the surviving methods — N `tasks/get` polls at and past the
+    /// concurrency limit (5), with every permit held by an entirely separate
+    /// mechanism, plus a `tasks/cancel`. All must still answer.
+    ///
+    /// The probe is `tasks/cancel` rather than `ping` because 2026-07-28
+    /// deleted `ping`, and `is_concurrency_exempt` no longer matches it —
+    /// a deleted method would be answered `-32601` and would prove the
+    /// reader loop is alive but say nothing about the exemption. It is also
+    /// the audit's own named victim: `tasks/cancel` was the one request
+    /// that could have released the parked polls, and could not be read.
+    ///
+    /// The other cluster's re-anchoring of this same test (a walk over
+    /// N = 1..6 parked polls) could not be carried across: it parks on
+    /// `tasks/result`, calls `create_task(Some(600_000))` and probes with
+    /// `tasks/list`, and 3.0.0 deleted all three. Holding the semaphore
+    /// directly reproduces the same full-semaphore state without them.
     ///
     /// This is the ONLY execution coverage of `is_concurrency_exempt`;
     /// deleting it would leave the exemption pinned by nothing.
@@ -3162,7 +3146,24 @@ mod tests {
                 .unwrap();
             expected_ids.insert(Some(json!(id)));
         }
-        client_tx.send(client_request(9999, "ping", None)).unwrap();
+        // The probe: a DIFFERENT exempt method, sent after the polls, so
+        // this proves the exemption is prefix-wide and the reader loop is
+        // still consuming new messages -- not merely that six identical
+        // requests queued before the semaphore filled.
+        client_tx
+            .send(client_request(
+                9999,
+                "tasks/cancel",
+                Some(json!({
+                    "taskId": task_ids[0],
+                    "_meta": {
+                        "io.modelcontextprotocol/clientCapabilities": {
+                            "extensions": { "io.modelcontextprotocol/tasks": {} }
+                        }
+                    }
+                })),
+            ))
+            .unwrap();
         expected_ids.insert(Some(json!(9999)));
 
         let mut answered = std::collections::HashSet::new();
@@ -3188,8 +3189,8 @@ mod tests {
 
         assert_eq!(
             answered, expected_ids,
-            "every tasks/get poll and the ping must all be answered despite every \
-             concurrency permit being held"
+            "every tasks/get poll and the tasks/cancel probe must all be answered \
+             despite every concurrency permit being held"
         );
 
         drop(permits);
@@ -4204,8 +4205,10 @@ rbac:
         assert!(error.message.contains("unknown/method"));
     }
 
+    /// Modern (2026-07-28) removed `ping`. It must now be an ordinary
+    /// unknown method, not a silent success.
     #[tokio::test]
-    async fn test_handle_request_ping() {
+    async fn test_ping_is_method_not_found() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -4216,44 +4219,96 @@ rbac:
 
         let response = server.handle_request(request).await;
 
-        assert!(response.error.is_none());
+        assert!(response.result.is_none(), "ping must not succeed");
+        let error = response.error.expect("ping must return an error");
+        assert_eq!(error.code, -32601);
+        assert!(error.message.contains("ping"), "got: {}", error.message);
         assert_eq!(response.id, Some(json!(42)));
     }
 
+    /// Modern (2026-07-28) removed root list-change notifications. The
+    /// method is now an unrecognised notification: dropped, no response,
+    /// and — critically — no `roots/list` round-trip, because the latch
+    /// from the first-request fetch is the only trigger left.
     #[tokio::test]
-    async fn test_route_initialized_notification_emits_no_response() {
-        // Per JSON-RPC 2.0 / MCP spec, notifications carry no `id` and MUST NOT
-        // receive a response. `route_incoming_message` must short-circuit
-        // `notifications/initialized` so it never reaches the dispatcher.
+    async fn test_roots_list_changed_notification_is_inert() {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+        // Pretend the one-shot fetch already happened.
+        session_ctx
+            .roots_fetched
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: None,
-            method: Some("notifications/initialized".to_string()),
+            method: Some("notifications/roots/list_changed".to_string()),
             params: None,
             result: None,
             error: None,
         };
 
-        let session_ctx = SessionContext::new(tx);
         let routed = McpServer::route_incoming_message(message, &session_ctx);
+        assert!(routed.is_none(), "a notification is never dispatched");
 
-        assert!(routed.is_none(), "notification must not be dispatched");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(
             rx.try_recv().is_err(),
-            "no JSON-RPC response must be emitted for a notification"
+            "roots/list_changed must not trigger a re-fetch in Modern"
         );
     }
 
+    /// Modern (2026-07-28) removed `notifications/initialized`. The
+    /// one-shot `roots/list` fetch it used to trigger now fires on the
+    /// FIRST client request of the session, exactly once.
     #[tokio::test]
-    async fn test_route_initialized_notification_fetches_roots_when_supported() {
-        // When the client advertised roots support during initialize,
-        // receiving `notifications/initialized` must trigger a server-initiated
-        // `roots/list` request on the writer channel.
-        //
-        // The fetch is spawned (audit 2026-08-02), so routing returns at
-        // once and the `roots/list` request lands on tx from the detached
-        // task.
+    async fn test_first_request_triggers_roots_fetch_once() {
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+
+        let make = || super::super::protocol::JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: Some("tools/list".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        assert!(
+            McpServer::route_incoming_message(make(), &session_ctx).is_some(),
+            "a request must still be dispatched"
+        );
+        assert!(McpServer::route_incoming_message(make(), &session_ctx).is_some());
+        assert!(McpServer::route_incoming_message(make(), &session_ctx).is_some());
+
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a roots/list request within 2s")
+            .expect("channel closed unexpectedly");
+        match sent {
+            WriterMessage::Request(req) => assert_eq!(req.method, "roots/list"),
+            _ => panic!("expected WriterMessage::Request(roots/list)"),
+        }
+
+        // Exactly once: three requests, one fetch.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "roots/list must be fetched once per session, not once per request"
+        );
+    }
+
+    /// `notifications/initialized` is no longer a special case: it is an
+    /// unknown notification, dropped without a response and without side
+    /// effects. This also carries the JSON-RPC 2.0 §4.1 guarantee that the
+    /// deleted `test_route_initialized_notification_emits_no_response`
+    /// used to hold — a notification never draws a response — because the
+    /// method now falls through to the generic no-`id` arm.
+    #[tokio::test]
+    async fn test_initialized_notification_is_no_longer_special_cased() {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         session_ctx.caps.set_supports_roots(true);
@@ -4266,9 +4321,41 @@ rbac:
             error: None,
         };
 
+        let routed = McpServer::route_incoming_message(message, &session_ctx);
+        assert!(routed.is_none(), "a notification is never dispatched");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(
-            McpServer::route_incoming_message(message, &session_ctx).is_none(),
-            "a notification is never dispatched"
+            rx.try_recv().is_err(),
+            "notifications/initialized must have no side effect in Modern"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_first_request_fetches_roots_when_supported() {
+        // When the client supports roots, the session's FIRST client
+        // request must trigger a server-initiated `roots/list` request on
+        // the writer channel. Modern (2026-07-28) has no
+        // `notifications/initialized` to hang this off.
+        //
+        // The fetch is spawned (audit 2026-08-02), so routing returns at
+        // once and the `roots/list` request lands on tx from the detached
+        // task.
+        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let session_ctx = SessionContext::new(tx);
+        session_ctx.caps.set_supports_roots(true);
+        let message = super::super::protocol::JsonRpcMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: Some("tools/list".to_string()),
+            params: None,
+            result: None,
+            error: None,
+        };
+
+        assert!(
+            McpServer::route_incoming_message(message, &session_ctx).is_some(),
+            "a request is dispatched"
         );
 
         let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -4283,9 +4370,12 @@ rbac:
         }
     }
 
-    /// Regression (audit 2026-08-02): `notifications/initialized` must NOT
-    /// block the session reader loop while the `roots/list` round-trip is
-    /// in flight.
+    /// Regression (audit 2026-08-02): the first-request roots fetch must
+    /// NOT block the session reader loop while the `roots/list` round-trip
+    /// is in flight. (The trigger used to be `notifications/initialized`;
+    /// Modern deleted it, but the deadlock it could cause is a property of
+    /// the fetch, not of the trigger, so the guarantee outlived the
+    /// method.)
     ///
     /// `route_incoming_message` runs *inside* `serve_session`'s reader loop.
     /// When `fetch_roots` was awaited inline, the loop could not read the
@@ -4298,14 +4388,14 @@ rbac:
     /// The fetch is fire-and-forget: routing returns immediately and the
     /// roots land on the session slot whenever the client answers.
     #[tokio::test]
-    async fn test_route_initialized_notification_does_not_block_reader_loop() {
+    async fn test_first_request_does_not_block_reader_loop() {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         session_ctx.caps.set_supports_roots(true);
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
-            id: None,
-            method: Some("notifications/initialized".to_string()),
+            id: Some(json!(1)),
+            method: Some("tools/list".to_string()),
             params: None,
             result: None,
             error: None,
@@ -4324,9 +4414,9 @@ rbac:
 
         assert!(
             elapsed < std::time::Duration::from_millis(500),
-            "initialized notification blocked the reader loop for {elapsed:?}"
+            "the first-request roots fetch blocked the reader loop for {elapsed:?}"
         );
-        assert!(routed.is_none(), "a notification is never dispatched");
+        assert!(routed.is_some(), "a request is dispatched");
 
         // The fetch still happened — just off the reader loop.
         let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -4624,7 +4714,7 @@ rbac:
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: None,
-            method: "ping".to_string(),
+            method: "tools/list".to_string(),
             params: None,
         };
 
@@ -4699,6 +4789,10 @@ rbac:
             error: None,
         };
 
+        // `ping` is deliberately a method Modern (2026-07-28) deleted:
+        // routing is method-agnostic, so an unknown method must still be
+        // dispatched — it is the DISPATCHER that answers -32601, not the
+        // router. See `test_ping_is_method_not_found` for the other half.
         let routed =
             McpServer::route_incoming_message(message, &session_ctx).expect("request must route");
         assert_eq!(routed.method, "ping");
@@ -7175,47 +7269,6 @@ rbac:
         assert!(result["completion"]["values"].is_array());
     }
 
-    // ============== Logging Tests ==============
-
-    #[test]
-    fn test_logging_set_level_missing_params() {
-        let server = create_test_server();
-        let response = server.handle_logging_set_level(Some(json!(1)), None, None);
-
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602);
-    }
-
-    #[test]
-    fn test_logging_set_level_invalid_params() {
-        let server = create_test_server();
-        let params = json!({ "level": "nonexistent" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
-
-        assert!(response.error.is_some());
-        assert_eq!(response.error.unwrap().code, -32602);
-    }
-
-    #[test]
-    fn test_logging_set_level_debug() {
-        let server = create_test_server();
-        let params = json!({ "level": "debug" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
-
-        assert!(response.error.is_none());
-        assert_eq!(server.log_level.load(Ordering::Relaxed), 0); // debug = 0
-    }
-
-    #[test]
-    fn test_logging_set_level_error() {
-        let server = create_test_server();
-        let params = json!({ "level": "error" });
-        let response = server.handle_logging_set_level(Some(json!(1)), Some(params), None);
-
-        assert!(response.error.is_none());
-        assert_eq!(server.log_level.load(Ordering::Relaxed), 4); // error = 4
-    }
-
     // ============== Tools List Pagination Tests ==============
 
     #[tokio::test]
@@ -7351,13 +7404,54 @@ rbac:
 
     // ============== Request Routing Coverage ==============
 
+    /// The plural spelling was a 2.2.0 compatibility alias only. Modern
+    /// (and the 2025-06-18 schema before it) names the method
+    /// `completion/complete`, singular.
+    #[tokio::test]
+    async fn test_plural_completions_complete_is_method_not_found() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completions/complete".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert_eq!(
+            response
+                .error
+                .expect("plural spelling must be rejected")
+                .code,
+            -32601
+        );
+    }
+
+    /// ...and the singular spelling still dispatches.
+    #[tokio::test]
+    async fn test_singular_completion_complete_dispatches() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completion/complete".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(request).await;
+
+        // Missing params -> invalid_params, not method_not_found.
+        assert_eq!(response.error.expect("must error").code, -32602);
+    }
+
     #[tokio::test]
     async fn test_handle_request_completions_complete_dispatch() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
-            method: "completions/complete".to_string(),
+            method: "completion/complete".to_string(),
             params: None,
         };
 
@@ -7430,21 +7524,6 @@ rbac:
             "completion/complete must return DefaultCompletionProvider's real \
              values, not an empty/fallback array; got: {result}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_handle_request_logging_set_level_dispatch() {
-        let server = create_test_server();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: "logging/setLevel".to_string(),
-            params: Some(json!({ "level": "info" })),
-        };
-
-        let response = server.handle_request(request).await;
-
-        assert!(response.error.is_none());
     }
 
     #[tokio::test]
@@ -8096,5 +8175,86 @@ rbac:
             .create_tool_context(None, None, Some(&session_ctx))
             .await;
         assert_eq!(ctx.config.limits.max_output_chars, 40_000);
+    }
+
+    /// Modern (2026-07-28) removed `logging/setLevel`; the level rides on
+    /// each request's `_meta` instead.
+    #[tokio::test]
+    async fn test_logging_set_level_is_method_not_found() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "logging/setLevel".to_string(),
+            params: Some(json!({ "level": "info" })),
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert!(response.result.is_none());
+        assert_eq!(response.error.expect("must error").code, -32601);
+    }
+
+    /// G-15: a stdio session whose reader hits EOF must return promptly.
+    /// `Sender` clones of the writer channel are live at teardown — the
+    /// local `tx` and `session_ctx.notification_tx` — so
+    /// `writer_handle.await` blocks forever unless both are dropped first.
+    /// 500 ms is well under the 2 s belt-and-braces timeout, so a version
+    /// that only has the timeout still fails.
+    ///
+    /// The audit counted a third clone, owned by `FanoutGuard`. The fanout
+    /// was deleted in 3.0.0 and `SubscriptionRegistry` took its place, so
+    /// this test lost its closing assertion that the registry held no
+    /// leaked sender. That gap is DECLARED rather than papered over: this
+    /// session never sends `subscriptions/listen`, so asserting the
+    /// subscription registry is empty afterwards would be satisfied by a
+    /// server that never registers anything and by one that never cleans
+    /// up — it would read as coverage while proving nothing. A real
+    /// subscription-leak test needs a session that actually subscribes,
+    /// and belongs with the `serve_session` teardown work.
+    #[tokio::test]
+    async fn test_serve_session_returns_promptly_on_eof() {
+        use crate::mcp::transport::{Session, SessionReader, SessionWriter};
+
+        struct EofReader;
+
+        #[async_trait::async_trait]
+        impl SessionReader for EofReader {
+            async fn recv(
+                &mut self,
+            ) -> Option<std::result::Result<crate::mcp::protocol::IncomingMessage, String>>
+            {
+                None
+            }
+        }
+
+        struct NullWriter;
+
+        #[async_trait::async_trait]
+        impl SessionWriter for NullWriter {
+            async fn send(&mut self, _msg: WriterMessage) -> crate::error::Result<()> {
+                Ok(())
+            }
+        }
+
+        let server = Arc::new(create_test_server());
+        let session = Session {
+            reader: Box::new(EofReader),
+            writer: Box::new(NullWriter),
+        };
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Arc::clone(&server).serve_session(session),
+        )
+        .await
+        .expect("serve_session must return on EOF, not hang");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "serve_session took {elapsed:?} to return after EOF"
+        );
     }
 }

@@ -396,6 +396,15 @@ pub struct ToolCallMeta {
     /// Token for sending progress notifications back to the client.
     #[serde(rename = "progressToken")]
     pub progress_token: Option<Value>,
+    /// Per-request minimum log level for `notifications/message`
+    /// (MCP 2026-07-28). Replaces the connection-scoped
+    /// `logging/setLevel` method, which Modern deleted. Absent means
+    /// `LogLevel::Warning`.
+    // SPEC: verify the exact key against
+    // https://modelcontextprotocol.io/specification/2026-07-28/basic/index
+    // — this literal is the single place the spelling appears.
+    #[serde(rename = "io.modelcontextprotocol/loggingLevel", default)]
+    pub logging_level: Option<LogLevel>,
 }
 
 // Contract types re-exported from ports (canonical location: crate::ports::protocol)
@@ -738,12 +747,6 @@ impl LogLevel {
     pub fn severity(self) -> u8 {
         self as u8
     }
-}
-
-/// Parameters for `logging/setLevel`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct LoggingSetLevelParams {
-    pub level: LogLevel,
 }
 
 // ============================================================================
@@ -2249,6 +2252,29 @@ mod tests {
         let params: ToolCallParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.name, "ssh_exec");
         assert_eq!(params.arguments.unwrap()["host"], "web1");
+    }
+
+    #[test]
+    fn tool_call_meta_parses_per_request_logging_level() {
+        let json = r#"{
+            "name": "ssh_exec",
+            "arguments": {"host": "web1", "command": "uptime"},
+            "_meta": {
+                "progressToken": "tok-1",
+                "io.modelcontextprotocol/loggingLevel": "debug"
+            }
+        }"#;
+        let params: ToolCallParams = serde_json::from_str(json).unwrap();
+        let meta = params.meta.expect("_meta must parse");
+        assert_eq!(meta.progress_token, Some(serde_json::json!("tok-1")));
+        assert_eq!(meta.logging_level, Some(LogLevel::Debug));
+    }
+
+    #[test]
+    fn tool_call_meta_logging_level_is_optional() {
+        let json = r#"{"name":"ssh_exec","_meta":{"progressToken":1}}"#;
+        let params: ToolCallParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.meta.unwrap().logging_level, None);
     }
 
     #[test]
