@@ -109,6 +109,13 @@ fn exec_request() -> Request<Body> {
         .header("origin", "http://localhost:5173")
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
+        // MCP 2026-07-28 Server Validation: three REQUIRED request headers,
+        // and `Mcp-Name` mirrors `params.name` for `tools/call`. Without them
+        // the POST is refused 400 + -32020 before the tool runs, so no audit
+        // event is written and this file's subject is never reached.
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "tools/call")
+        .header("mcp-name", "ssh_exec")
         .body(Body::from(body.to_string()))
         .unwrap()
 }

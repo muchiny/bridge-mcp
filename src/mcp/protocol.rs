@@ -72,6 +72,34 @@ impl JsonRpcResponse {
 /// Borrowed from LSP's `RequestCancelled`; see [`JsonRpcError::cancelled`].
 pub const CANCELLED_ERROR_CODE: i32 = -32800;
 
+/// Error code for an HTTP request whose headers do not match its body, or
+/// whose required headers are missing or malformed (MCP 2026-07-28).
+///
+/// PROVENANCE, recorded to the same standard as its neighbour below, because
+/// this code carried an uncited assertion in this codebase for one release
+/// cycle and that is exactly how invented protocol ships. The published
+/// schema defines `export const HEADER_MISMATCH = -32020;` and
+/// `HeaderMismatchError`, whose own doc comment makes the status normative at
+/// the schema level: *"Returned when a server rejects a request because the
+/// values in the HTTP headers do not match the corresponding values in the
+/// request body, or because required headers are missing or malformed. For
+/// HTTP, the response status code MUST be `400 Bad Request`."*
+///
+/// It was `-32001` in the draft and was RENUMBERED before GA, together with
+/// its two neighbours (`-32003` -> `-32021`, `-32004` -> `-32022`), when the
+/// error-code allocation policy partitioned the server-error range. Any SDK
+/// or blog post showing `-32001` for this is stale.
+///
+/// THE SUB-RANGE IS CLOSED WORLD: *"`-32020` to `-32099` — reserved for the
+/// MCP specification. Implementations **MUST NOT** emit any code from this
+/// sub-range that is not defined by this specification."* For 2026-07-28 the
+/// defined set is exactly three — this, [`MISSING_REQUIRED_CLIENT_CAPABILITY`]
+/// and `-32022` — and `error_codes_stay_inside_the_defined_set` pins that.
+/// Two further codes are BURNED and must never be re-used: `-32002`
+/// (resource not found, replaced by `-32602`) and `-32042` (URL elicitation,
+/// 2025-11-25 only).
+pub const HEADER_MISMATCH: i32 = -32020;
+
 /// Error code for a request needing a client capability the request did not
 /// declare (MCP 2026-07-28).
 ///
@@ -220,6 +248,33 @@ impl JsonRpcError {
             code: MISSING_REQUIRED_CLIENT_CAPABILITY,
             message: "Missing required client capability".to_string(),
             data: Some(serde_json::json!({ "requiredCapabilities": required })),
+        }
+    }
+
+    /// `-32020` — HTTP header validation failed.
+    ///
+    /// Two distinct conditions share this code, and the caller says which in
+    /// `message`: a REQUIRED standard header is missing (`MCP-Protocol-Version`,
+    /// `Mcp-Method`, or `Mcp-Name` where it applies), or a present header does
+    /// not match the corresponding value in the body.
+    ///
+    /// The spec enumerates both. Its Server Validation opening sentence covers
+    /// only mismatch — *"Servers that process the request body **MUST** reject
+    /// requests where the values specified in the headers do not match the
+    /// corresponding values in the request body"* — and it is the
+    /// failure-conditions list that extends it to absence: *"A required
+    /// standard header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is
+    /// missing."* Reading only the first sentence would leave a missing header
+    /// unhandled, which is the whole Legacy-`initialize` case.
+    ///
+    /// HTTP-only by construction: stdio has no headers, so this code must
+    /// never appear on that transport.
+    #[must_use]
+    pub fn header_mismatch(message: impl Into<String>) -> Self {
+        Self {
+            code: HEADER_MISMATCH,
+            message: message.into(),
+            data: None,
         }
     }
 }

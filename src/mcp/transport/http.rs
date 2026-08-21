@@ -167,8 +167,8 @@ async fn origin_guard(
 /// Contrast `validate_protocol_version`'s 400, which answers a bare string a
 /// JSON-RPC client cannot parse. That is inherited and is Task 66's to
 /// reconcile.
-fn bad_request(id: Option<Value>, message: &str) -> Response {
-    let resp = JsonRpcResponse::error(id, JsonRpcError::invalid_params(message));
+fn bad_request(id: Option<Value>, error: JsonRpcError) -> Response {
+    let resp = JsonRpcResponse::error(id, error);
     (StatusCode::BAD_REQUEST, Json(resp)).into_response()
 }
 
@@ -270,6 +270,11 @@ pub fn build_router_with_store(
             axum::http::header::AUTHORIZATION,
             axum::http::HeaderName::from_static("mcp-session-id"),
             axum::http::HeaderName::from_static("mcp-protocol-version"),
+            // Required by Server Validation, so they must survive
+            // preflight — a header the browser strips is a header the
+            // server then refuses the request for.
+            axum::http::HeaderName::from_static("mcp-method"),
+            axum::http::HeaderName::from_static("mcp-name"),
         ]);
     for origin in &state.config.allowed_origins {
         if let Ok(value) = origin.parse::<axum::http::HeaderValue>() {
@@ -425,36 +430,120 @@ fn new_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Protocol version assumed when the client sends no `MCP-Protocol-Version`
-/// header. The Streamable HTTP spec pins this fallback to `2025-03-26`.
-const ASSUMED_PROTOCOL_VERSION: &str = "2025-03-26";
+/// Methods that must also carry `Mcp-Name`, and where its value comes from.
+///
+/// The spec's table is exact: `Mcp-Name` mirrors `params.name` or
+/// `params.uri`, and is required for these three methods only. Anything else
+/// carrying an `Mcp-Name` is not an error — the table says which methods
+/// REQUIRE it, not which may send it.
+const MCP_NAME_METHODS: &[(&str, &str)] = &[
+    ("tools/call", "name"),
+    ("resources/read", "uri"),
+    ("prompts/get", "name"),
+];
 
-/// Validate the `MCP-Protocol-Version` request header.
+/// Server Validation for MCP 2026-07-28 Streamable HTTP.
 ///
-/// Absent header -> accepted, the client is assumed to speak
-/// [`ASSUMED_PROTOCOL_VERSION`]. Present header -> must name a version this
-/// build implements, otherwise the request is rejected with HTTP 400.
+/// The spec makes three request headers REQUIRED on a POST — *"Every POST
+/// request to the MCP endpoint **MUST** include an `MCP-Protocol-Version`
+/// header"*, and for the other two, *"These headers are **REQUIRED** for
+/// compliance"*:
 ///
-/// SCOPE: this checks the header in isolation. Detecting *drift* — a header
-/// that contradicts the version negotiated by this session's `initialize` —
-/// is deliberately not done here: `negotiated_version` is a local of
-/// `McpServer::handle_initialize` and is never persisted per session, so
-/// there is nothing to compare against without new session state.
-fn validate_protocol_version(headers: &HeaderMap) -> Result<(), String> {
-    let Some(raw) = headers.get("mcp-protocol-version") else {
-        return Ok(());
+/// | Header | Source field | Required for |
+/// |---|---|---|
+/// | `MCP-Protocol-Version` | — | every POST |
+/// | `Mcp-Method` | `method` | all requests |
+/// | `Mcp-Name` | `params.name` or `params.uri` | `tools/call`, `resources/read`, `prompts/get` |
+///
+/// and pins the refusal: *"When rejecting a request due to header validation
+/// failure, servers **MUST** return HTTP status `400 Bad Request` and
+/// **MUST** include a JSON-RPC error response"* carrying `-32020`.
+///
+/// BOTH failure kinds are covered, and reading only the first sentence of the
+/// spec's section would miss one. Its opening line covers mismatch only —
+/// *"reject requests where the values specified in the headers do not match
+/// the corresponding values in the request body"* — and it is the
+/// failure-conditions list that adds *"A required standard header
+/// (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is missing"*. Absence is
+/// the entire Legacy-`initialize` case, so missing that clause would leave
+/// the case this function exists for unhandled.
+///
+/// WHAT REPLACED WHAT: this supersedes a `validate_protocol_version` that
+/// ACCEPTED an absent header, assuming `2025-03-26` for backwards
+/// compatibility, and answered failures with a bare string body no JSON-RPC
+/// client could parse. Both behaviours were correct for 2025-11-25 and are
+/// non-conformant for 2026-07-28 — the assumption in particular let a Legacy
+/// client through the door it is now refused at.
+///
+/// ORDERING: header validation runs BEFORE version-support checking. The two
+/// MUSTs can fire on the same request — a Legacy client at 2025-06-18 or
+/// later DOES send `MCP-Protocol-Version`, so its `initialize` POST is both
+/// missing `Mcp-Method` and naming an unsupported version — and the spec
+/// states no precedence between them. The Compatibility Matrix resolves this
+/// exact row in favour of server validation: *"HTTP: the request is missing
+/// the required headers and is rejected per server validation with `400 Bad
+/// Request`"*.
+fn check_modern_headers(headers: &HeaderMap, body: &Value) -> Result<(), JsonRpcError> {
+    let header = |name: &str| -> Option<&str> { headers.get(name).and_then(|v| v.to_str().ok()) };
+
+    let Some(version) = header("mcp-protocol-version") else {
+        return Err(JsonRpcError::header_mismatch(
+            "missing required header `MCP-Protocol-Version`",
+        ));
     };
-    let Ok(value) = raw.to_str() else {
-        return Err("MCP-Protocol-Version header is not valid ASCII".to_string());
-    };
-    if value == ASSUMED_PROTOCOL_VERSION || SUPPORTED_PROTOCOL_VERSIONS.contains(&value) {
-        Ok(())
-    } else {
-        Err(format!(
-            "Unsupported MCP-Protocol-Version: {value} (supported: {}, {ASSUMED_PROTOCOL_VERSION})",
-            SUPPORTED_PROTOCOL_VERSIONS.join(", ")
-        ))
+
+    // An array body is refused before this function is reached — 2026-07-28
+    // has no JSON-RPC batching and the POST body MUST be a single request or
+    // notification. The guard stays so the function is TOTAL: it is called
+    // directly by unit tests, and a header check that panicked or silently
+    // passed on a shape its caller happens to filter would be a trap for the
+    // next caller.
+    if !body.is_array() {
+        let Some(method) = header("mcp-method") else {
+            return Err(JsonRpcError::header_mismatch(
+                "missing required header `Mcp-Method`",
+            ));
+        };
+        let body_method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if method != body_method {
+            return Err(JsonRpcError::header_mismatch(format!(
+                "`Mcp-Method: {method}` does not match the body's method `{body_method}`"
+            )));
+        }
+
+        if let Some((_, field)) = MCP_NAME_METHODS.iter().find(|(m, _)| *m == body_method) {
+            let Some(name) = header("mcp-name") else {
+                return Err(JsonRpcError::header_mismatch(format!(
+                    "missing required header `Mcp-Name` for `{body_method}`"
+                )));
+            };
+            let body_name = body
+                .get("params")
+                .and_then(|p| p.get(field))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if name != body_name {
+                return Err(JsonRpcError::header_mismatch(format!(
+                    "`Mcp-Name: {name}` does not match the body's `params.{field}` \
+                     `{body_name}`"
+                )));
+            }
+        }
     }
+
+    // Version support is checked LAST, per the ordering note above. Over HTTP
+    // the spec pins this one too: *"If the server does not implement the
+    // requested protocol version ... it **MUST** respond with `400 Bad
+    // Request` and an `UnsupportedProtocolVersionError` listing its supported
+    // versions."*
+    if !SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
+        return Err(JsonRpcError::unsupported_protocol_version(version));
+    }
+
+    Ok(())
 }
 
 /// POST /mcp — Handle JSON-RPC requests.
@@ -464,12 +553,45 @@ async fn handle_post(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    // Reject a protocol version this build cannot speak before doing any
-    // work. Previously the header was only listed in the CORS allowlist and
-    // never read, so garbage versions got a 200.
-    if let Err(msg) = validate_protocol_version(&headers) {
-        warn!(error = %msg, "Rejecting request with unsupported MCP-Protocol-Version");
-        return (StatusCode::BAD_REQUEST, msg).into_response();
+    // JSON-RPC batching was removed in 2025-06-18 and 2026-07-28 does not
+    // bring it back: `JSONRPCMessage` is `JSONRPCRequest | JSONRPCNotification
+    // | JSONRPCResponse`, three object types and no array form, and the word
+    // "batch" does not occur anywhere in the published schema. Streamable HTTP
+    // then says it outright: *"The body of the HTTP POST **MUST** be a single
+    // JSON-RPC _request_ or _notification_."*
+    //
+    // The CODE is our choice, and this says so rather than implying the spec
+    // settled it: the spec states the client-side MUST but enumerates no
+    // server-side rejection procedure for an array body. `-32600 Invalid
+    // Request` is the JSON-RPC answer for a body that is not a valid Request,
+    // and `400` follows the same reasoning as every other malformed-request
+    // refusal on this transport.
+    //
+    // SCOPE, and it is a real divergence rather than an oversight: this
+    // refuses arrays on HTTP only. `serve_session`'s batch arm still accepts
+    // them, because the quoted MUST is written for the HTTP POST body and the
+    // daemon's Unix socket is a bridge-mcp transport rather than MCP stdio.
+    // The schema's lack of an array form makes stdio batching non-conformant
+    // too; retiring it is a separate breaking change with its own users, and
+    // it is recorded rather than smuggled in here.
+    if body.is_array() {
+        warn!("Rejecting a JSON array body: 2026-07-28 has no JSON-RPC batching");
+        return bad_request(
+            None,
+            JsonRpcError::invalid_request(
+                "the body of an MCP POST must be a single JSON-RPC request or \
+                 notification; JSON-RPC batching was removed in revision 2025-06-18",
+            ),
+        );
+    }
+
+    // Server Validation, before anything else touches the request. The body
+    // is needed to compare headers against it, so this cannot be a
+    // header-only middleware — but it IS still before dispatch, and before
+    // the body is deserialised into typed messages.
+    if let Err(e) = check_modern_headers(&headers, &body) {
+        warn!(code = e.code, message = %e.message, "Header validation failed");
+        return bad_request(body.get("id").cloned(), e);
     }
 
     // Parse the request
@@ -571,7 +693,10 @@ async fn handle_post(
                 msg.id.is_some(),
                 msg.params.as_ref(),
             ) {
-                return bad_request(msg.id.clone(), MISSING_CLIENT_CAPABILITIES_MSG);
+                return bad_request(
+                    msg.id.clone(),
+                    JsonRpcError::invalid_params(MISSING_CLIENT_CAPABILITIES_MSG),
+                );
             }
 
             let request = crate::mcp::protocol::JsonRpcRequest {
@@ -984,20 +1109,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_origin_guard_allows_localhost() {
-        use axum::body::Body;
-        use axum::http::Request;
         use tower::ServiceExt;
 
         let response = build_test_router()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header("origin", "http://localhost:5173")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
-                    .unwrap(),
-            )
+            .oneshot(modern_post(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
             .await
             .unwrap();
 
@@ -1079,7 +1194,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_accepts_supported_protocol_version_header() {
+    /// THE POSITIVE TWIN for both refusals above: a POST carrying all three
+    /// required headers, correctly mirroring its body, is served.
+    ///
+    /// Without it, "header validation refuses X" is equally satisfied by a
+    /// transport that refuses everything — and with three independent
+    /// required headers there are three ways to build exactly that.
+    async fn test_post_with_complete_modern_headers_is_served() {
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(modern_post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    /// INVERTED. This asserted HTTP 200 for a POST with no
+    /// `MCP-Protocol-Version`, on the 2025-11-25 rule that an absent header
+    /// means "assume 2025-03-26 for backwards compatibility".
+    ///
+    /// 2026-07-28 replaces that rule: *"Every POST request to the MCP endpoint
+    /// **MUST** include an `MCP-Protocol-Version` header"*, and a missing
+    /// required standard header is a Server Validation failure — *"A required
+    /// standard header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is
+    /// missing"* — which **MUST** be answered `400` plus `-32020`.
+    ///
+    /// The old behaviour was not merely obsolete, it was the door a Legacy
+    /// client walked through: assuming a Legacy revision for a header-less
+    /// POST is precisely how a pre-Modern client got served by a Modern-only
+    /// server.
+    async fn test_post_without_a_protocol_version_header_is_400_and_32020() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -1091,51 +1238,44 @@ mod tests {
                     .uri("/mcp")
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
-                    // Was "2025-11-25" until SUPPORTED_PROTOCOL_VERSIONS
-                    // was narrowed to one element. The test name says
-                    // "supported", so it follows the constant.
-                    .header("mcp-protocol-version", "2026-07-28")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
+                    .header("mcp-method", "tools/list")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn test_post_accepts_absent_protocol_version_header() {
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        // Spec: when the header is absent the server SHOULD assume
-        // 2025-03-26 for backwards compatibility. Absent must NOT be a 400.
-        let response = build_test_router()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header("origin", "http://localhost:5173")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
-                    .unwrap(),
-            )
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
+        let json: Value = serde_json::from_slice(&body).expect(
+            "the 400 must carry a JSON-RPC body, not the bare string the \
+                     2025-11-25 check returned",
+        );
+        assert_eq!(json["error"]["code"], serde_json::json!(-32020));
     }
 
     #[tokio::test]
-    async fn test_post_accepts_assumed_legacy_protocol_version_header() {
+    /// INVERTED, and it is the other half of the same rule change. This
+    /// asserted that an explicit `2025-03-26` — the version 2025-11-25 told
+    /// servers to assume — was treated exactly like an absent header, i.e.
+    /// accepted.
+    ///
+    /// A Modern-only server speaks one revision. A client naming any other
+    /// gets `-32022`, and over HTTP the spec pins the status too: *"If the
+    /// server does not implement the requested protocol version ... it
+    /// **MUST** respond with `400 Bad Request` and an
+    /// `UnsupportedProtocolVersionError` listing its supported versions."*
+    ///
+    /// Note which code fires. The headers here are complete, so Server
+    /// Validation passes and the request reaches the version check — this is
+    /// the ordering (`-32020` before `-32022`) observed from the outside.
+    async fn test_post_naming_a_legacy_protocol_version_is_400_and_32022() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
 
-        // A client that explicitly sends the assumed default must be treated
-        // exactly like one that sends nothing.
         let response = build_test_router()
             .oneshot(
                 Request::builder()
@@ -1144,13 +1284,25 @@ mod tests {
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
                     .header("mcp-protocol-version", "2025-03-26")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
+                    .header("mcp-method", "tools/list")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], serde_json::json!(-32022));
+        assert_eq!(
+            json["error"]["data"]["supported"],
+            serde_json::json!(["2026-07-28"]),
+            "the refusal must list what the server does speak, or the client \
+             cannot recover"
+        );
     }
 
     /// The guard the release notes said already existed.
@@ -1196,16 +1348,60 @@ mod tests {
         );
     }
 
-    // ============== C3: mandatory clientCapabilities over HTTP ==============
+    /// A POST carrying the three headers 2026-07-28 requires, DERIVED from the
+    /// body rather than hardcoded.
+    ///
+    /// Deriving them is the point. A helper that stamped fixed header values
+    /// would make every test that uses it silently exercise a MISMATCH the
+    /// moment its body changed method — and a mismatch is a refusal, so the
+    /// test would fail for a reason unrelated to what it asserts. Deriving
+    /// keeps the request conformant by construction; a test that wants a
+    /// mismatch builds it by hand, which is what makes that intent visible.
+    fn modern_post(body: &str) -> axum::http::Request<axum::body::Body> {
+        let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("origin", "http://localhost:5173")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", PROTOCOL_VERSION);
 
-    /// The stdio dispatcher answers this `-32602` on its own; what it cannot
-    /// do is set an HTTP status, because it has no idea which transport is
-    /// calling it. So the status is asserted here, and the BODY is asserted
-    /// too — a bare 400 with an unparseable string body (which is what
-    /// `validate_protocol_version` still returns) leaves a JSON-RPC client
-    /// with nothing to act on.
+        if let Some(method) = parsed.get("method").and_then(Value::as_str) {
+            builder = builder.header("mcp-method", method);
+            if let Some((_, field)) = MCP_NAME_METHODS.iter().find(|(m, _)| *m == method)
+                && let Some(name) = parsed
+                    .get("params")
+                    .and_then(|params| params.get(field))
+                    .and_then(Value::as_str)
+            {
+                builder = builder.header("mcp-name", name);
+            }
+        }
+
+        builder
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    // ============== Server Validation: the three required headers ==============
+
+    /// THE test obligation 2 exists for.
+    ///
+    /// A Legacy client opens with `initialize` and, from 2025-06-18 onward,
+    /// DOES send `MCP-Protocol-Version` — so its POST trips two MUSTs at once:
+    /// `Mcp-Method` is missing (header validation) and the version is
+    /// unsupported. The spec states no precedence between them, but the
+    /// Compatibility Matrix resolves this exact row: *"HTTP: the request is
+    /// missing the required headers and is rejected per server validation with
+    /// `400 Bad Request`"*.
+    ///
+    /// So the assertion is `-32020`, and asserting it is what makes the
+    /// ORDERING observable from outside: with the checks the other way round
+    /// this same request answers `-32022` and the test reds. Until this
+    /// landed, the HTTP path answered `-32022` and was non-conformant, which
+    /// `handle_initialize`'s doc comment said in as many words.
     #[tokio::test]
-    async fn test_post_without_client_capabilities_is_400_with_a_jsonrpc_body() {
+    async fn test_legacy_initialize_over_http_is_400_and_32020_not_32022() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -1217,11 +1413,178 @@ mod tests {
                     .uri("/mcp")
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
+                    // A Legacy client sends this, and nothing else.
+                    .header("mcp-protocol-version", "2025-11-25")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"legacy","version":"1.0.0"}}}"#,
                     ))
                     .unwrap(),
             )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"]["code"],
+            serde_json::json!(-32020),
+            "header validation must run BEFORE version support: a -32022 here \\
+             means the two checks are the wrong way round, which the \\
+             compatibility matrix resolves against: {json}"
+        );
+    }
+
+    /// A missing `Mcp-Method` on an otherwise well-formed Modern request.
+    ///
+    /// Separate from the `initialize` test above even though both refuse for
+    /// the same reason: that one is a Legacy client and could pass for the
+    /// wrong reason if the server refused `initialize` by name rather than by
+    /// header. This one uses a method the server serves happily.
+    #[tokio::test]
+    async fn test_post_without_mcp_method_header_is_400_and_32020() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2026-07-28")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], serde_json::json!(-32020));
+    }
+
+    /// A PRESENT but CONTRADICTING `Mcp-Method`.
+    ///
+    /// The other half of the code's definition, and the half the spec's
+    /// opening sentence is actually about: *"reject requests where the values
+    /// specified in the headers do not match the corresponding values in the
+    /// request body"*. Absence and mismatch are different failures behind one
+    /// code, so each needs its own test — a gate that only checked presence
+    /// would pass the test above and let a gateway route on a header that
+    /// lies about the body, which is the attack the header exists to prevent.
+    #[tokio::test]
+    async fn test_post_with_a_lying_mcp_method_header_is_400_and_32020() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2026-07-28")
+                    // Says `tools/list`; the body says `tools/call`.
+                    .header("mcp-method", "tools/list")
+                    .header("mcp-name", "ssh_exec")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ssh_exec","_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], serde_json::json!(-32020));
+    }
+
+    /// `Mcp-Name` is required for exactly three methods, and `tools/call` is
+    /// one of them. Its absence is a validation failure even when
+    /// `Mcp-Method` is present and correct.
+    #[tokio::test]
+    async fn test_tools_call_without_mcp_name_header_is_400_and_32020() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2026-07-28")
+                    .header("mcp-method", "tools/call")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ssh_status","_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], serde_json::json!(-32020));
+    }
+
+    /// `Mcp-Name` is NOT required for a method outside the table of three, and
+    /// this is the boundary rather than a formality.
+    ///
+    /// The table says which methods REQUIRE the header, not which may carry
+    /// it. A gate that demanded `Mcp-Name` everywhere would refuse every
+    /// `tools/list` in existence while passing all four tests above.
+    #[tokio::test]
+    async fn test_a_method_outside_the_table_needs_no_mcp_name() {
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ============== C3: mandatory clientCapabilities over HTTP ==============
+
+    /// The stdio dispatcher answers this `-32602` on its own; what it cannot
+    /// do is set an HTTP status, because it has no idea which transport is
+    /// calling it. So the status is asserted here, and the BODY is asserted
+    /// too — a bare 400 with an unparseable string body (which is what
+    /// `validate_protocol_version` still returns) leaves a JSON-RPC client
+    /// with nothing to act on.
+    #[tokio::test]
+    async fn test_post_without_client_capabilities_is_400_with_a_jsonrpc_body() {
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            ))
             .await
             .unwrap();
 
@@ -1244,21 +1607,11 @@ mod tests {
     /// satisfied by a transport that 400s everything.
     #[tokio::test]
     async fn test_post_with_empty_client_capabilities_is_200() {
-        use axum::body::Body;
-        use axum::http::Request;
         use tower::ServiceExt;
 
         let response = build_test_router()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header("origin", "http://localhost:5173")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
-                    ))
-                    .unwrap(),
+                modern_post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#),
             )
             .await
             .unwrap();
@@ -1277,57 +1630,6 @@ mod tests {
     ///
     /// This is the test that would catch someone "making the batch arm
     /// consistent" with the single arm later.
-    #[tokio::test]
-    async fn test_post_batch_answers_each_member_on_its_own_merits() {
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let response = build_test_router()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header("origin", "http://localhost:5173")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "one malformed member must not void the conforming one"
-        );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        let arr = json.as_array().expect("a batch answers with an array");
-        assert_eq!(arr.len(), 2);
-
-        let conforming = arr
-            .iter()
-            .find(|r| r["id"] == serde_json::json!(1))
-            .unwrap();
-        assert!(
-            conforming.get("result").is_some(),
-            "the conforming member must be served: {conforming}"
-        );
-        let malformed = arr
-            .iter()
-            .find(|r| r["id"] == serde_json::json!(2))
-            .unwrap();
-        assert_eq!(
-            malformed["error"]["code"],
-            serde_json::json!(-32602),
-            "the malformed member must be refused on its own: {malformed}"
-        );
-    }
 
     // ============== Single-message notification suppression (G-18) ==============
     //
@@ -1346,23 +1648,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_single_notification_gets_no_response_body() {
-        use axum::body::Body;
-        use axum::http::Request;
         use tower::ServiceExt;
 
         // "ping" is an ordinary request method with no "notifications/"
         // prefix — omitting `id` is what makes this a notification, not the
         // method name. Proves the gate is id-based, not prefix-based.
         let response = build_test_router()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header("origin", "http://localhost:5173")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","method":"ping"}"#))
-                    .unwrap(),
-            )
+            .oneshot(modern_post(r#"{"jsonrpc":"2.0","method":"ping"}"#))
             .await
             .unwrap();
 
@@ -1378,8 +1670,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_request_named_like_notification_still_answered() {
-        use axum::body::Body;
-        use axum::http::Request;
         use tower::ServiceExt;
 
         // Method name suggests a notification, but `id` is present — this
@@ -1387,15 +1677,7 @@ mod tests {
         // the gate does not special-case by method name in either direction.
         let response = build_test_router()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header("origin", "http://localhost:5173")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
-                    ))
-                    .unwrap(),
+                modern_post(r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#),
             )
             .await
             .unwrap();
@@ -1409,14 +1691,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_batch_all_notifications_gets_202_no_body() {
+    /// REPLACES the three batch tests, which asserted per-member answers, a
+    /// 202 for an all-notification batch, and a 200 for a mixed one.
+    ///
+    /// JSON-RPC batching was removed in revision 2025-06-18 ("Remove support
+    /// for JSON-RPC batching", Major changes #1) and 2026-07-28 does not
+    /// bring it back: `JSONRPCMessage` is `JSONRPCRequest | JSONRPCNotification
+    /// | JSONRPCResponse`, and the string "batch" does not occur anywhere in
+    /// the published schema. Streamable HTTP states it directly: *"The body of
+    /// the HTTP POST **MUST** be a single JSON-RPC _request_ or
+    /// _notification_."*
+    ///
+    /// The CODE is this server's choice and the test says so: the spec states
+    /// the client-side MUST but enumerates no server-side procedure for an
+    /// array body, so `-32600 Invalid Request` is reasoned from JSON-RPC
+    /// rather than quoted from MCP.
+    async fn test_post_refuses_a_json_array_body() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
 
-        // A batch where every message is id-less must get the same
-        // treatment as a single notification: 202, no body — not the old
-        // `200` with an empty `[]`.
         let response = build_test_router()
             .oneshot(
                 Request::builder()
@@ -1424,62 +1718,27 @@ mod tests {
                     .uri("/mcp")
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","method":"ping"}]"#,
-                    ))
+                    .header("mcp-protocol-version", "2026-07-28")
+                    .body(Body::from(r#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(
-            body.is_empty(),
-            "an all-notifications batch must get no JSON-RPC response body, got: {body:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_post_batch_mixed_still_returns_200_with_responses() {
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        // A batch with at least one real request is unaffected by the
-        // notification-suppression change: normal 200 with a JSON array
-        // carrying only the answered request's response.
-        let response = build_test_router()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/mcp")
-                    .header("origin", "http://localhost:5173")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"[{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","id":1,"method":"ping"}]"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        let arr = json
-            .as_array()
-            .expect("batch response must be a JSON array");
-        assert_eq!(
-            arr.len(),
-            1,
-            "the notification must not appear in the batch response"
+        assert_eq!(json["error"]["code"], serde_json::json!(-32600));
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("batching"),
+            "the refusal must name the reason, or a client sees only \
+             `Invalid Request`: {json}"
         );
-        assert_eq!(arr[0]["id"], serde_json::json!(1));
     }
 
     // ========================================================================

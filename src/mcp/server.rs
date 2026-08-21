@@ -1771,16 +1771,33 @@ impl McpServer {
     /// in machine-readable form.
     ///
     /// **Which code is transport-dependent, and this function is only correct
-    /// for stdio.** The compatibility matrix leaves the stdio code
-    /// implementation-defined (a Legacy `initialize` is both an unknown method
-    /// and missing its `_meta` fields, i.e. `-32601` and `-32602` both apply),
-    /// so `-32022` is a free and strictly more informative choice. Over
-    /// Streamable HTTP the code is *pinned* elsewhere: a Legacy `initialize`
-    /// POST carries no `Mcp-Method` header, so Server Validation makes
-    /// `400` + `-32020 HeaderMismatch` a MUST, and answering `-32022` there
-    /// would violate it. That check is Task 66's `check_modern_headers`, which
-    /// rejects the request before dispatch ever reaches this arm — until it
-    /// lands, the HTTP path answers `-32022` and is non-conformant.
+    /// for stdio.** The Compatibility Matrix addresses this exact row —
+    /// Legacy client, Modern server — and splits it by transport: *"stdio: the
+    /// server rejects `initialize` with a JSON-RPC error; the exact code is
+    /// implementation-defined (`initialize` is an unknown method and the
+    /// request also lacks the required `_meta` fields). HTTP: the request is
+    /// missing the required headers and is rejected per server validation with
+    /// `400 Bad Request`."*
+    ///
+    /// So on stdio the code is unconstrained and `-32022` is a free, strictly
+    /// more informative choice. Over HTTP the matrix resolves it to Server
+    /// Validation, i.e. `-32020 HeaderMismatch` — a Legacy `initialize` POST
+    /// carries no `Mcp-Method`, and a missing required standard header is a
+    /// validation failure that **MUST** be answered `400` plus that code.
+    ///
+    /// Not because `-32022` would VIOLATE something: that clause used to stand
+    /// here and it overshot. A Legacy client at 2025-06-18 or later does send
+    /// `MCP-Protocol-Version`, so its POST trips both MUSTs at once — missing
+    /// header AND unsupported version — and the spec states no precedence
+    /// between them. The matrix is what settles it, not a prohibition.
+    ///
+    /// `check_modern_headers` in `transport::http` implements that, rejecting
+    /// before dispatch reaches this arm.
+    ///
+    /// This paragraph carried the `-32020` claim UNCITED for a release cycle,
+    /// which is how invented protocol ships. The code is
+    /// `HEADER_MISMATCH = -32020` in the published schema, and its provenance
+    /// now lives with the constant.
     ///
     /// The requested version is read straight off the raw `Value` rather than
     /// through `InitializeParams`, so a payload that fails deserialization —
