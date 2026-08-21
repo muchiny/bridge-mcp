@@ -47,6 +47,19 @@ use super::protocol::{
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
 
+/// The parts of the opening-handshake payload that are identical for the
+/// Legacy `initialize` response and the Modern `server/discover` response.
+///
+/// `server/discover` wraps these three values and adds `resultType`,
+/// `supportedVersions`, `ttlMs` and `cacheScope` on top; `initialize` wraps
+/// them with a negotiated `protocolVersion`. Keeping the assembly in one place
+/// means a capability added here reaches both without a second edit.
+struct DiscoveryPayload {
+    capabilities: ServerCapabilities,
+    server_info: ServerInfo,
+    instructions: String,
+}
+
 /// MCP Server that communicates over stdio
 pub struct McpServer {
     config: Arc<RwLock<Config>>,
@@ -1319,6 +1332,60 @@ impl McpServer {
         Some(exts)
     }
 
+    /// Assemble the shared handshake payload: capabilities, server identity,
+    /// and the dynamic instructions string.
+    ///
+    /// Every field here is a verbatim move out of `handle_initialize`,
+    /// including `server_info.meta` (build provenance via
+    /// `build_provenance_meta()`) — the plan this was written against
+    /// omitted that field from its literal, but `handle_initialize` has
+    /// unconditionally populated it since before this cluster started, and
+    /// `test_handshake_payload_is_byte_identical` pins it. Callers:
+    /// `handle_initialize` (Legacy) and `handle_discover` (Modern).
+    async fn build_discovery_payload(&self) -> DiscoveryPayload {
+        let instructions = {
+            let config = self.config.read().await;
+            instructions::build_instructions(&config, self.registry.len())
+        };
+
+        DiscoveryPayload {
+            capabilities: ServerCapabilities {
+                tools: Some(ToolsCapability { list_changed: true }),
+                prompts: Some(PromptsCapability { list_changed: true }),
+                resources: Some(ResourcesCapability {
+                    subscribe: false,
+                    list_changed: true,
+                }),
+                tasks: Some(TasksCapability {
+                    list: json!({}),
+                    cancel: json!({}),
+                    requests: TaskRequestsCapability {
+                        tools: Some(TaskToolsCapability { call: json!({}) }),
+                    },
+                }),
+                completions: Some(CompletionsCapability {}),
+                logging: Some(LoggingCapability {}),
+                extensions: self.build_server_extensions().await,
+            },
+            server_info: ServerInfo {
+                name: SERVER_NAME.to_string(),
+                version: SERVER_VERSION.to_string(),
+                description: Some(
+                    "Secure SSH bridge for remote server management via MCP".to_string(),
+                ),
+                website_url: Some("https://github.com/muchiny/bridge-mcp".to_string()),
+                icons: Some(vec![Icon {
+                    src: SERVER_ICON_URL.to_string(),
+                    mime_type: Some("image/svg+xml".to_string()),
+                    sizes: Some(vec!["any".to_string()]),
+                    theme: None,
+                }]),
+                meta: Some(build_provenance_meta()),
+            },
+            instructions,
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn handle_initialize(
         &self,
@@ -1429,58 +1496,13 @@ impl McpServer {
 
         self.initialized.store(true, Ordering::SeqCst);
 
-        let instructions = {
-            let config = self.config.read().await;
-            instructions::build_instructions(&config, self.registry.len())
-        };
+        let payload = self.build_discovery_payload().await;
 
         let result = InitializeResult {
             protocol_version: negotiated_version,
-            capabilities: ServerCapabilities {
-                tools: Some(ToolsCapability { list_changed: true }),
-                prompts: Some(PromptsCapability { list_changed: true }),
-                resources: Some(ResourcesCapability {
-                    // G-6 (audit 2026-08-19): NOT `true`. Nothing in this
-                    // crate ever sends `notifications/resources/updated`, and
-                    // since both `resources/subscribe` and
-                    // `resources/unsubscribe` now refuse with -32601,
-                    // `resource_subs` is neither written nor read by any
-                    // request path — it survives only for the handlers that
-                    // will restore it alongside an emitter. `listChanged`
-                    // stays true because `spawn_config_watcher` really does
-                    // broadcast `resources_list_changed` on reload.
-                    // Flip this back to `true` in the same commit that adds
-                    // the emitter, never before.
-                    subscribe: false,
-                    list_changed: true,
-                }),
-                tasks: Some(TasksCapability {
-                    list: json!({}),
-                    cancel: json!({}),
-                    requests: TaskRequestsCapability {
-                        tools: Some(TaskToolsCapability { call: json!({}) }),
-                    },
-                }),
-                completions: Some(CompletionsCapability {}),
-                logging: Some(LoggingCapability {}),
-                extensions: self.build_server_extensions().await,
-            },
-            server_info: ServerInfo {
-                name: SERVER_NAME.to_string(),
-                version: SERVER_VERSION.to_string(),
-                description: Some(
-                    "Secure SSH bridge for remote server management via MCP".to_string(),
-                ),
-                website_url: Some("https://github.com/muchiny/bridge-mcp".to_string()),
-                icons: Some(vec![Icon {
-                    src: SERVER_ICON_URL.to_string(),
-                    mime_type: Some("image/svg+xml".to_string()),
-                    sizes: Some(vec!["any".to_string()]),
-                    theme: None,
-                }]),
-                meta: Some(build_provenance_meta()),
-            },
-            instructions: Some(instructions),
+            capabilities: payload.capabilities,
+            server_info: payload.server_info,
+            instructions: Some(payload.instructions),
         };
 
         JsonRpcResponse::success_or_serialize_error(id, &result)
@@ -2977,6 +2999,89 @@ mod tests {
         assert!(
             exts["com.bridge-mcp/output-pagination"].is_object(),
             "output-pagination extension should be present"
+        );
+    }
+
+    /// Characterization test for the handshake payload.
+    ///
+    /// Pins the exact JSON of the three pieces that `handle_initialize`
+    /// assembles today — capabilities, serverInfo, instructions — so that
+    /// hoisting them into `build_discovery_payload` can be proven
+    /// behavior-preserving. This test passes BEFORE the extraction and must
+    /// pass byte-for-byte AFTER it.
+    ///
+    /// `create_test_server()` uses `hosts: HashMap::new()`, so
+    /// `build_server_extensions` emits exactly two entries — the multi-host
+    /// extension is gated on `host_count > 1`.
+    ///
+    /// `serverInfo._meta` carries build provenance
+    /// (`build_provenance_meta()`, keyed by `BUILD_META_KEY`) — a field the
+    /// plan's own golden literal omitted; `BUILD_REV` and `SERVER_VERSION`
+    /// are read live rather than hardcoded so this test does not need
+    /// updating on every build or release.
+    #[tokio::test]
+    async fn test_handshake_payload_is_byte_identical() {
+        let server = create_test_server();
+        let response = server.handle_initialize(Some(json!(1)), None, None).await;
+        let result = response.result.expect("initialize must succeed");
+
+        assert_eq!(
+            result["capabilities"],
+            json!({
+                "tools": {"listChanged": true},
+                "prompts": {"listChanged": true},
+                "resources": {"subscribe": false, "listChanged": true},
+                "tasks": {
+                    "list": {},
+                    "cancel": {},
+                    "requests": {"tools": {"call": {}}}
+                },
+                "completions": {},
+                "logging": {},
+                "extensions": {
+                    "io.modelcontextprotocol/tasks": {},
+                    "com.bridge-mcp/output-pagination": {}
+                }
+            }),
+            "capabilities changed shape; the extraction was not behavior-preserving"
+        );
+
+        // This literal pins the CURRENT serialized shape, including fields
+        // that are absent because they are `None` under
+        // `skip_serializing_if` (e.g. `Icon.theme`, always `None` here). If
+        // a future change starts populating one of those, this literal must
+        // grow to match — it is not a hidden gap today, but it does not
+        // defend against one appearing tomorrow.
+        assert_eq!(
+            result["serverInfo"],
+            json!({
+                "name": SERVER_NAME,
+                "version": SERVER_VERSION,
+                "description": "Secure SSH bridge for remote server management via MCP",
+                "websiteUrl": "https://github.com/muchiny/bridge-mcp",
+                "icons": [{
+                    "src": SERVER_ICON_URL,
+                    "mimeType": "image/svg+xml",
+                    "sizes": ["any"]
+                }],
+                "_meta": {
+                    "io.github.muchiny/build": {
+                        "rev": BUILD_REV,
+                        "version": SERVER_VERSION
+                    }
+                }
+            }),
+            "serverInfo changed shape; the extraction was not behavior-preserving"
+        );
+
+        let expected_instructions = {
+            let config = server.config.read().await;
+            instructions::build_instructions(&config, server.registry.len())
+        };
+        assert_eq!(
+            result["instructions"],
+            json!(expected_instructions),
+            "instructions no longer come from build_instructions(config, registry.len())"
         );
     }
 
