@@ -35,16 +35,16 @@ use super::transport::{Session, Transport, stdio::StdioTransport};
 use super::history::CommandHistory;
 use super::prompt_registry::{PromptRegistry, create_default_prompt_registry};
 use super::protocol::{
-    BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, CacheScope, CompletionRef, CompletionResult,
-    CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult, DISCOVER_TTL_MS,
-    DetailedTask, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon, JsonRpcError,
-    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel, LoggingCapability,
-    PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult, PromptsListResult,
-    ResourcesCapability, ResourcesListResult, ResourcesReadParams, ResourcesReadResult,
-    SERVER_ICON_URL, SERVER_NAME, SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities,
-    ServerInfo, TaskCancelParams, TaskGetParams, TaskNotificationParams, TaskStatus,
-    TaskUpdateParams, ToolCallParams, ToolCallResult, ToolContent, ToolsCapability,
-    ToolsListResult, WriterMessage,
+    BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, CacheHints, CacheScope, CompletionRef,
+    CompletionResult, CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult,
+    DISCOVER_TTL_MS, DetailedTask, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon,
+    JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
+    LoggingCapability, PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult,
+    PromptsListResult, ResourceTemplatesListResult, ResourcesCapability, ResourcesListResult,
+    ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME, SERVER_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams, TaskGetParams,
+    TaskNotificationParams, TaskStatus, TaskUpdateParams, ToolCallParams, ToolCallResult,
+    ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -1976,6 +1976,7 @@ impl McpServer {
         };
 
         let result = ToolsListResult {
+            cache: CacheHints::CONFIG_DERIVED,
             tools: page,
             next_cursor,
         };
@@ -2489,6 +2490,7 @@ impl McpServer {
 
     fn handle_prompts_list(&self, id: Option<Value>) -> JsonRpcResponse {
         let result = PromptsListResult {
+            cache: CacheHints::CONFIG_DERIVED,
             prompts: self.prompt_registry.list(),
         };
 
@@ -2539,7 +2541,10 @@ impl McpServer {
 
         match self.resource_registry.list(&ctx).await {
             Ok(resources) => {
-                let result = ResourcesListResult { resources };
+                let result = ResourcesListResult {
+                    cache: CacheHints::CONFIG_DERIVED,
+                    resources,
+                };
                 JsonRpcResponse::success_or_serialize_error(id, &result)
             }
             Err(e) => {
@@ -2574,7 +2579,10 @@ impl McpServer {
 
         match self.resource_registry.read(&read_params.uri, &ctx).await {
             Ok(contents) => {
-                let result = ResourcesReadResult { contents };
+                let result = ResourcesReadResult {
+                    cache: CacheHints::LIVE_REMOTE,
+                    contents,
+                };
                 JsonRpcResponse::success_or_serialize_error(id, &result)
             }
             Err(e) => {
@@ -2627,7 +2635,13 @@ impl McpServer {
         use super::protocol::ResourceTemplate;
 
         let Ok(config) = self.config.try_read() else {
-            return JsonRpcResponse::success(id, json!({ "resourceTemplates": [] }));
+            return JsonRpcResponse::success_or_serialize_error(
+                id,
+                &ResourceTemplatesListResult {
+                    cache: CacheHints::CONFIG_DERIVED,
+                    resource_templates: Vec::new(),
+                },
+            );
         };
 
         let mut hosts: Vec<&String> = config.hosts.keys().collect();
@@ -2649,7 +2663,13 @@ impl McpServer {
             }
         }
 
-        JsonRpcResponse::success_or_serialize_error(id, &json!({ "resourceTemplates": templates }))
+        JsonRpcResponse::success_or_serialize_error(
+            id,
+            &ResourceTemplatesListResult {
+                cache: CacheHints::CONFIG_DERIVED,
+                resource_templates: templates,
+            },
+        )
     }
 
     /// Handle `subscriptions/listen` (MCP 2026-07-28,
@@ -4196,10 +4216,11 @@ rbac:
             .handle_tools_call(Some(json!(2)), Some(plain), None, Some(&session))
             .await;
         let result = response.result.expect("synchronous result");
-        assert!(
-            result.get("resultType").is_none(),
+        assert_eq!(
+            result["resultType"], "complete",
             "an unlisted inner tool must not be promoted: {result}"
         );
+        assert!(result.get("taskId").is_none(), "{result}");
         assert!(result["content"].is_array());
     }
 
@@ -5343,10 +5364,11 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         assert!(result["content"].is_array());
-        assert!(
-            result.get("resultType").is_none(),
-            "a synchronous answer carries no task discriminator: {result}"
+        assert_eq!(
+            result["resultType"], "complete",
+            "a synchronous answer is `complete`, never a task handle: {result}"
         );
+        assert!(result.get("taskId").is_none(), "{result}");
     }
 
     /// Supersedes `test_tools_call_with_task_field_returns_create_task_result`.
@@ -5408,8 +5430,8 @@ rbac:
 
         assert!(response.error.is_none());
         let result = response.result.unwrap();
-        assert!(
-            result.get("resultType").is_none(),
+        assert_eq!(
+            result["resultType"], "complete",
             "a non-declaring client must never receive a task handle: {result}"
         );
         assert!(result.get("taskId").is_none(), "{result}");

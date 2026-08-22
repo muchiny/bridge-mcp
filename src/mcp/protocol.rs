@@ -29,14 +29,62 @@ pub struct JsonRpcResponse {
 }
 
 impl JsonRpcResponse {
+    /// The `result` member that discriminates a result shape.
+    ///
+    /// 2026-07-28 makes it a MUST on every result: *"Result responses must
+    /// include a `result` field and a `resultType` field to indicate the nature
+    /// of the outcome"*, and the changelog states it without qualification —
+    /// *"All results must now include a `resultType` field"*.
+    ///
+    /// The companion sentence, *"Clients MUST treat an absent `resultType` as
+    /// `complete` for backward compatibility"*, is a CLIENT-side bridge for
+    /// PRE-2026-07-28 servers. A server that declares `2026-07-28` and then
+    /// leans on it is asking to be handled by the compatibility path for a
+    /// revision it claims not to speak. The reference client refuses exactly
+    /// that, and names the reasoning in its own error text: *"missing required
+    /// resultType — servers implementing protocol revision 2026-07-28 MUST
+    /// include it (the absent-means-complete bridge applies only to
+    /// earlier-revision servers)"*.
+    const RESULT_TYPE_KEY: &'static str = "resultType";
+
+    /// The `resultType` value stamped on any result that does not set its own.
+    ///
+    /// Kept as a literal rather than `to_value(ResultType::Complete)` so this
+    /// path cannot fail or allocate a `Result` on every response;
+    /// `test_stamped_result_type_matches_the_enum` pins the two together.
+    const RESULT_TYPE_COMPLETE: &'static str = "complete";
+
+    /// Build a success response, stamping `resultType: "complete"` unless the
+    /// result already discriminates itself.
+    ///
+    /// Centralised here, not at the call sites, because the MUST is universal:
+    /// every result-producing path would otherwise have to remember it, and the
+    /// one that forgot would stay invisible until a conforming client rejected
+    /// it — which is how this was found. The shapes that set their own
+    /// discriminator ([`DetailedTask`], the `server/discover` result, the
+    /// `subscriptions/listen` teardown) already carry the key and are left
+    /// untouched, so this never overwrites a deliberate value.
+    ///
+    /// A non-object `result` passes through unchanged: it cannot carry a member,
+    /// and wrapping it would change a shape the handler chose. No such call site
+    /// exists; if one appears, the bug is in that handler.
     #[must_use]
     pub fn success(id: Option<Value>, result: Value) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
-            result: Some(result),
+            result: Some(Self::stamp_result_type(result)),
             error: None,
         }
+    }
+
+    /// Insert the default discriminator into an object result that lacks one.
+    fn stamp_result_type(mut result: Value) -> Value {
+        if let Value::Object(map) = &mut result {
+            map.entry(Self::RESULT_TYPE_KEY)
+                .or_insert_with(|| Value::String(Self::RESULT_TYPE_COMPLETE.to_string()));
+        }
+        result
     }
 
     #[must_use]
@@ -429,6 +477,9 @@ pub struct Tool {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolsListResult {
+    /// `ttlMs` + `cacheScope`, REQUIRED on this result by 2026-07-28.
+    #[serde(flatten)]
+    pub cache: CacheHints,
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -486,6 +537,9 @@ pub struct PromptDefinition {
 /// MCP Prompts List Response
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptsListResult {
+    /// `ttlMs` + `cacheScope`, REQUIRED on this result by 2026-07-28.
+    #[serde(flatten)]
+    pub cache: CacheHints,
     pub prompts: Vec<PromptDefinition>,
 }
 
@@ -514,6 +568,9 @@ pub use crate::ports::protocol::{ResourceContent, ResourceDefinition};
 /// MCP Resources List Response
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourcesListResult {
+    /// `ttlMs` + `cacheScope`, REQUIRED on this result by 2026-07-28.
+    #[serde(flatten)]
+    pub cache: CacheHints,
     pub resources: Vec<ResourceDefinition>,
 }
 
@@ -526,6 +583,11 @@ pub struct ResourcesReadParams {
 /// MCP Resources Read Response
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourcesReadResult {
+    /// `ttlMs` + `cacheScope`, REQUIRED on this result by 2026-07-28.
+    /// [`CacheHints::LIVE_REMOTE`]: this is host payload, not capability
+    /// metadata.
+    #[serde(flatten)]
+    pub cache: CacheHints,
     pub contents: Vec<ResourceContent>,
 }
 
@@ -547,6 +609,19 @@ pub struct ResourceTemplate {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+}
+
+/// MCP Resource Templates List Response
+///
+/// Typed rather than a bare `json!` so the cache hints 2026-07-28 REQUIRES on
+/// this result cannot be forgotten on one of the two return paths.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTemplatesListResult {
+    /// `ttlMs` + `cacheScope`, REQUIRED on this result by 2026-07-28.
+    #[serde(flatten)]
+    pub cache: CacheHints,
+    pub resource_templates: Vec<ResourceTemplate>,
 }
 
 // ============================================================================
@@ -1304,13 +1379,20 @@ pub enum DiscoverResultType {
 /// - `"private"` — the response contains data not meant to be shared between
 ///   callers. Caches MUST NOT be shared across authorization contexts.
 ///
-/// Only `Public` is modelled because it is the only value this server can
-/// honestly emit, and it is honest for exactly one reason: bridge-mcp has no
-/// per-caller authorization. Tool-group enablement is process-wide
-/// (`config.tool_groups`), and `rbac.enabled: true` is rejected at config load
-/// (`src/config/loader.rs:226`) because nothing in the request path enforces
-/// it. 2026-07-28 also requires list endpoints not to vary per connection, so a
-/// uniform answer is the conformant shape, not a shortcut.
+/// `Public` is honest for the CAPABILITY surface for exactly one reason:
+/// bridge-mcp has no per-caller authorization. Tool-group enablement is
+/// process-wide (`config.tool_groups`), and `rbac.enabled: true` is rejected at
+/// config load (`src/config/loader.rs:226`) because nothing in the request path
+/// enforces it. 2026-07-28 also requires list endpoints not to vary per
+/// connection, so a uniform answer is the conformant shape, not a shortcut.
+///
+/// `Private` exists for a SECOND, independent reason that has nothing to do with
+/// RBAC: `resources/read` does not return capability metadata, it returns
+/// payload — `log://` file contents, `history://recent` command history,
+/// `file://` reads off the remote host. Whether or not two callers are
+/// authorized identically, announcing to every intermediary that a shell history
+/// "may be cached and served to any user" is a claim this server has no business
+/// making. Capability lists are `Public`; read payloads are `Private`.
 ///
 /// The caching page is explicit that this flag is not itself a control:
 /// *"Servers MUST be aware that responses with a `"public"` `cacheScope` may be
@@ -1327,6 +1409,63 @@ pub enum DiscoverResultType {
 #[serde(rename_all = "camelCase")]
 pub enum CacheScope {
     Public,
+    Private,
+}
+
+/// The caching hints 2026-07-28 REQUIRES on every cacheable result.
+///
+/// Six methods declare them, and the published result schemas make both fields
+/// mandatory — not `optional` — on each: `server/discover`, `tools/list`,
+/// `prompts/list`, `resources/list`, `resources/templates/list` and
+/// `resources/read`. `tools/call`, `prompts/get` and `completion/complete` do
+/// NOT declare them, so they must not carry them.
+///
+/// Until this type existed only `server/discover` sent the pair, and the other
+/// five were rejected outright by a conforming client. That is not a soft
+/// failure: the reference client answers `tools/list` with a schema error and
+/// the session ends up connected with zero tools.
+///
+/// Flattened into each result struct so the two fields sit at the root of
+/// `result`, where the schema puts them.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheHints {
+    pub ttl_ms: u64,
+    pub cache_scope: CacheScope,
+}
+
+impl CacheHints {
+    /// Hints for a list derived from process-wide config.
+    ///
+    /// The tool, prompt, resource and template lists change only when the
+    /// config is reloaded, which is the same lifetime as the `server/discover`
+    /// payload built from that config — hence the shared TTL.
+    ///
+    /// One hour is defensible even though notifications are opt-in in this
+    /// revision: a client that never sent `subscriptions/listen` gets no
+    /// `listChanged` invalidation, so the TTL is its ONLY bound on staleness.
+    /// An hour is the spec's own example value and the ceiling this server is
+    /// willing to assert for a config that a human edits.
+    pub const CONFIG_DERIVED: Self = Self {
+        ttl_ms: DISCOVER_TTL_MS,
+        cache_scope: CacheScope::Public,
+    };
+
+    /// Hints for a payload read live off a remote host.
+    ///
+    /// `ttl_ms: 0` — *"`0` means immediately stale"*. This is the honest value
+    /// and not a placeholder: bridge-mcp has no change feed for the remote host
+    /// (which is why `notifications/resources/updated` polls remote-backed
+    /// schemes on a 30 s timer and emits a "poll again" hint rather than a real
+    /// change event). Any positive TTL would assert a freshness window this
+    /// server cannot observe.
+    ///
+    /// [`CacheScope::Private`] because the payload is host data — logs, command
+    /// history, file contents — not capability metadata. See the enum docs.
+    pub const LIVE_REMOTE: Self = Self {
+        ttl_ms: 0,
+        cache_scope: CacheScope::Private,
+    };
 }
 
 /// `result._meta` of a `server/discover` response.
@@ -1382,6 +1521,88 @@ pub const SERVER_ICON_URL: &str =
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ============== resultType discriminator (2026-07-28) ==============
+
+    /// The literal `success` stamps and the enum the rest of the server emits
+    /// must be the same string. They are declared separately — a `const` on
+    /// [`JsonRpcResponse`] and a serde rename on [`ResultType`] — so nothing but
+    /// this test stops them drifting apart.
+    #[test]
+    fn test_stamped_result_type_matches_the_enum() {
+        assert_eq!(
+            serde_json::to_value(ResultType::Complete).unwrap(),
+            json!(JsonRpcResponse::RESULT_TYPE_COMPLETE),
+        );
+    }
+
+    /// *"All results must now include a `resultType` field"* — 2026-07-28.
+    #[test]
+    fn test_success_stamps_result_type_complete() {
+        let r = JsonRpcResponse::success(Some(json!(1)), json!({"tools": []}));
+        let result = r.result.expect("a success carries a result");
+        assert_eq!(result["resultType"], "complete");
+        assert!(result["tools"].is_array(), "the payload survives: {result}");
+    }
+
+    /// A result that discriminates itself keeps its own value. Overwriting a
+    /// task handle with `"complete"` would erase the one field that tells a
+    /// client it received a handle and not an answer.
+    #[test]
+    fn test_success_never_overwrites_an_explicit_result_type() {
+        let r = JsonRpcResponse::success(
+            Some(json!(1)),
+            json!({"resultType": "task", "taskId": "t-1", "status": "working"}),
+        );
+        assert_eq!(r.result.unwrap()["resultType"], "task");
+    }
+
+    /// The stamp is idempotent: re-wrapping an already-stamped result is a
+    /// no-op rather than a duplicate key or an overwrite.
+    #[test]
+    fn test_success_stamp_is_idempotent() {
+        let once = JsonRpcResponse::success(Some(json!(1)), json!({}))
+            .result
+            .unwrap();
+        let twice = JsonRpcResponse::success(Some(json!(1)), once.clone())
+            .result
+            .unwrap();
+        assert_eq!(once, twice);
+        assert_eq!(twice["resultType"], "complete");
+    }
+
+    /// A non-object result cannot carry a member. It passes through untouched
+    /// rather than being silently reshaped.
+    #[test]
+    fn test_success_leaves_a_non_object_result_alone() {
+        let r = JsonRpcResponse::success(Some(json!(1)), json!([1, 2, 3]));
+        assert_eq!(r.result.unwrap(), json!([1, 2, 3]));
+    }
+
+    /// An error response has no `result` member at all, so there is nothing to
+    /// discriminate — `resultType` must not appear on it.
+    #[test]
+    fn test_error_response_carries_no_result_type() {
+        let r = JsonRpcResponse::error(Some(json!(1)), JsonRpcError::internal_error("boom"));
+        assert!(r.result.is_none());
+        let wire = serde_json::to_value(&r).unwrap();
+        assert!(wire.get("result").is_none(), "{wire}");
+        assert!(wire.get("resultType").is_none(), "{wire}");
+    }
+
+    /// `success_or_serialize_error` routes through `success`, so a serialised
+    /// struct is stamped exactly like a hand-built `json!` object.
+    #[test]
+    fn test_success_or_serialize_error_is_stamped_too() {
+        #[derive(Serialize)]
+        struct Payload {
+            ok: bool,
+        }
+        let r = JsonRpcResponse::success_or_serialize_error(Some(json!(1)), &Payload { ok: true });
+        let result = r.result.expect("a serialisable payload succeeds");
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["ok"], true);
+    }
 
     // ============== JsonRpcRequest Tests ==============
 
