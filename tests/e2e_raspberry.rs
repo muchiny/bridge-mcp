@@ -645,6 +645,47 @@ mod rpi {
 
     #[tokio::test]
     #[ignore = "requires Raspberry Pi"]
+    async fn test_session_exec_leaves_a_history_trace() {
+        let config = load_test_config().expect("Need tests/ssh_test_config.yaml");
+        let ctx = build_ctx(to_host_config(&config.ssh_test));
+
+        let text = exec_tool(&SshSessionCreateHandler, json!({"host": "raspberry"}), &ctx).await;
+        let session_id = {
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or_else(|_| panic!("Session create output not JSON: {text}"));
+            v["id"].as_str().expect("no 'id' field").to_string()
+        };
+
+        let before = ctx.history.recent(200).len();
+
+        let _ = exec_tool(
+            &SshSessionExecHandler,
+            json!({"session_id": &session_id, "command": "echo trace-me"}),
+            &ctx,
+        )
+        .await;
+
+        let after = ctx.history.recent(200);
+        assert_eq!(
+            after.len(),
+            before + 1,
+            "a successful session command must leave a trace, exactly as ssh_exec does"
+        );
+        assert!(
+            after.iter().any(|e| e.command.contains("trace-me")),
+            "the command itself must appear in the trace, got {after:?}"
+        );
+
+        let _ = exec_tool(
+            &SshSessionCloseHandler,
+            json!({"session_id": &session_id}),
+            &ctx,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Raspberry Pi"]
     async fn test_session_close_invalid() {
         let config = load_test_config().expect("Need tests/ssh_test_config.yaml");
         let ctx = build_ctx(to_host_config(&config.ssh_test));

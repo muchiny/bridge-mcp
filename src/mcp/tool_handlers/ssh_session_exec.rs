@@ -107,6 +107,13 @@ impl ToolHandler for SshSessionExecHandler {
         let args: SshSessionExecArgs =
             serde_json::from_value(v).map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 
+        // Resolve the session's host FIRST: both the denial trail and the
+        // success trail name it. `log_denied` used to pass the literal
+        // "session", which made the audit unusable for "what ran on this
+        // host" — the one question it exists to answer.
+        let session_host_name = ctx.session_manager.get_session_host(&args.session_id).await;
+        let audit_host = session_host_name.as_deref().unwrap_or("session");
+
         // Validate command against whitelist/blacklist
         if let Err(e) = ctx.execute_use_case.validate(&args.command) {
             let reason = match &e {
@@ -114,7 +121,7 @@ impl ToolHandler for SshSessionExecHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied("session", &args.command, &reason);
+                .log_denied(audit_host, &args.command, &reason);
             return Err(e);
         }
 
@@ -123,7 +130,6 @@ impl ToolHandler for SshSessionExecHandler {
             .unwrap_or(ctx.config.limits.command_timeout_seconds);
 
         // Resolve host config for this session (needed for sudo and shell type)
-        let session_host_name = ctx.session_manager.get_session_host(&args.session_id).await;
         let session_host_config = session_host_name
             .as_ref()
             .and_then(|name| ctx.config.hosts.get(name));
@@ -160,10 +166,19 @@ impl ToolHandler for SshSessionExecHandler {
             "Executing command in session"
         );
 
+        let started = std::time::Instant::now();
         let result = ctx
             .session_manager
             .exec(&args.session_id, &command, timeout_secs)
             .await?;
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // `ssh_exec` gets this from `process_success`; a session formats its
+        // own response, so it must record the trace itself. `args.command` —
+        // not `command` — because the latter carries the shell wrapper the
+        // handler added, and the audit answers "what did the caller ask for".
+        ctx.execute_use_case
+            .log_success(audit_host, &args.command, result.exit_code, duration_ms);
 
         if result.exit_code != 0 {
             warn!(

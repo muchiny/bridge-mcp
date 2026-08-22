@@ -186,19 +186,7 @@ impl ExecuteCommandUseCase {
         // sanitized (audit 2026-08-13, B5/B6).
         let redacted = self.sanitizer.sanitize(command);
 
-        // Log successful execution
-        self.audit_logger.log(AuditEvent::new(
-            host,
-            &redacted,
-            CommandResult::Success {
-                exit_code: output.exit_code,
-                duration_ms: output.duration_ms,
-            },
-        ));
-
-        // Record in history
-        self.history
-            .record_success(host, &redacted, output.exit_code, output.duration_ms);
+        self.record_success_redacted(host, &redacted, output.exit_code, output.duration_ms);
 
         // Format and sanitize the result. Pass the already-redacted command so
         // the raw value never appears in `result` even transiently — the
@@ -221,6 +209,42 @@ impl ExecuteCommandUseCase {
             host: host.to_string(),
             command: redacted.into_owned(),
         }
+    }
+
+    /// Record a successful command whose output the caller formats itself.
+    ///
+    /// `process_success` also formats, sanitizes and returns a response. A
+    /// persistent session already does all three, so it needs only the
+    /// audit-and-history half — without it a session command that succeeds
+    /// leaves no trace anywhere, while the same command denied does.
+    pub fn log_success(&self, host: &str, command: &str, exit_code: u32, duration_ms: u64) {
+        let redacted = self.sanitizer.sanitize(command);
+        self.record_success_redacted(host, &redacted, exit_code, duration_ms);
+    }
+
+    /// Audit + history for a command whose text is ALREADY redacted.
+    ///
+    /// Both callers redact first — `process_success` because it reuses the
+    /// redacted text for formatting, `log_success` because it has nothing
+    /// else to do with it. Taking the redacted form as a parameter keeps the
+    /// "no raw command past this point" invariant on one line each.
+    fn record_success_redacted(
+        &self,
+        host: &str,
+        redacted: &str,
+        exit_code: u32,
+        duration_ms: u64,
+    ) {
+        self.audit_logger.log(AuditEvent::new(
+            host,
+            redacted,
+            CommandResult::Success {
+                exit_code,
+                duration_ms,
+            },
+        ));
+        self.history
+            .record_success(host, redacted, exit_code, duration_ms);
     }
 
     /// Log a failed command execution
@@ -264,7 +288,7 @@ impl ExecuteCommandUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SecurityMode;
+    use crate::config::{SecurityConfig, SecurityMode};
     use crate::domain::HistoryConfig;
     use crate::security::CommandValidator;
 
@@ -574,6 +598,33 @@ mod tests {
         assert!(response.output.contains("[REDACTED]"));
         assert_eq!(response.exit_code, 0);
         assert_eq!(response.duration_ms, 50);
+    }
+
+    #[test]
+    fn log_success_records_audit_and_history_without_formatting() {
+        let security = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            ..SecurityConfig::default()
+        };
+        let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
+        let use_case = ExecuteCommandUseCase::new(
+            Arc::new(CommandValidator::new(&security)),
+            Arc::new(Sanitizer::with_defaults()),
+            Arc::new(AuditLogger::disabled()),
+            Arc::clone(&history),
+        );
+
+        use_case.log_success("raspberry", "uptime", 0, 12);
+
+        let entries = history.recent(10);
+        assert_eq!(
+            entries.len(),
+            1,
+            "un succès de session doit laisser une entrée"
+        );
+        assert_eq!(entries[0].host, "raspberry");
+        assert_eq!(entries[0].command, "uptime");
+        assert_eq!(entries[0].exit_code, 0);
     }
 
     #[test]
