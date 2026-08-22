@@ -217,6 +217,29 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 
 ## Recent Changes
 
+- **Conformance sweep (2026-08-22, on top of 3.0.0)** — found by probing the
+  reference client (Claude Code 2.1.239 with `MCP_PROTOCOL_NEGOTIATION=auto`,
+  which negotiates Modern over stdio), not by reading. Before it, that client
+  connected and then refused `tools/list`, so a Modern client saw ZERO tools.
+  Emitted the result members that were missing (`resultType` everywhere,
+  `ttlMs`/`cacheScope` on five of six cacheable methods, `serverInfo` on every
+  result); made `_meta.protocolVersion` required (`-32602` when absent);
+  decoded the `Mcp-Name` Base64 sentinel; served RFC 9728 and put
+  `WWW-Authenticate` on the 401 plus a 403 for insufficient scope.
+  **The destructive-confirmation gate is now MRTR** — `resultType:
+  "input_required"` plus an HMAC-signed `requestState` binding the request
+  digest, a 5-minute TTL and the principal (`src/mcp/request_state.rs`; set
+  `MCP_REQUEST_STATE_KEY` if more than one process serves one address).
+  `inputResponses` count only alongside a state this server signed for that
+  exact call. Nineteen handlers that confirmed a SECOND time are gone, so
+  `security.require_elicitation_on_destructive` is now the whole confirmation
+  policy — **turn it on if you had it off**. `client_requester`, `sampling`,
+  `pending_requests`, `ElicitationService` and `WriterMessage::Request` are
+  deleted. Still non-conformant, deliberately and documented: `ctx.sample()`
+  returns `Ok(None)` (no `summarize=true` LLM output) and the `roots/list`
+  fetch is gone (no file-path scoping) — both need work with real trade-offs.
+  See CHANGELOG.md "Conformance sweep".
+
 - **v3.0.0 (2026-08-20, not yet tagged)** — **Modern-only.** `PROTOCOL_VERSION = "2026-07-28"`,
   `SUPPORTED_PROTOCOL_VERSIONS = ["2026-07-28"]`
   (`src/mcp/protocol.rs`, `PROTOCOL_VERSION` and `SUPPORTED_PROTOCOL_VERSIONS`).

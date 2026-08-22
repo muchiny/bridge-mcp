@@ -29,23 +29,25 @@
 //! mechanism for server-to-client requests, nothing more. No spec rule ties
 //! `destructiveHint` to task eligibility. The blocker was a guess.
 //!
-//! The REAL blocker is one this repository owns. MRTR opens with a breaking
-//! change: *"Servers **MUST** send server-to-client requests (such as
-//! `roots/list`, `sampling/createMessage`, or `elicitation/create`) using the
-//! MRTR pattern. The previous pattern of server-initiated requests is no
-//! longer supported."* This server's destructive-confirmation gate
-//! (`check_destructive_elicitation`) still uses that deleted pattern: it
-//! sends `elicitation/create` as a server-initiated JSON-RPC request through
-//! `ClientRequester` and blocks on the reply. Promoting a destructive tool to
-//! a task would therefore build confirmation-then-task on top of a flow the
-//! revision removed. Rule 2 holds until the gate itself is MRTR-shaped —
+//! The blocker this repository owned is now GONE. An earlier revision of this
+//! paragraph said rule 2 "holds until the gate itself is MRTR-shaped —
 //! `resultType: "input_required"` plus an integrity-protected `requestState`,
-//! answered by a client retry under a NEW request id.
+//! answered by a client retry under a NEW request id". That is exactly what
+//! `check_destructive_elicitation` now does, and the ordering works out: the
+//! gate runs BEFORE the task branch in `handle_tools_call`, so a promoted call
+//! is one that was already confirmed. There is no longer a flow to build
+//! confirmation-then-task on top of, because the confirmation completes first.
 //!
-//! `ssh_runbook_execute` and `ssh_ansible_playbook` are the best functional
+//! Rule 2 is therefore a DELIBERATE HOLD, not a technical one. Handing a
+//! client a task handle for an operation it just approved is a product
+//! decision — the approval was for running the thing, not for losing sight of
+//! it behind a poll loop — and it is not one to make as a side effect of
+//! converting a transport.
+//!
+//! `ssh_runbook_execute` and `ssh_ansible_playbook` remain the best functional
 //! candidates in the repository — a multi-step runbook and a multi-task play
-//! are both long with certainty — and both are held out by rule 2 alone. They
-//! are the first names to reconsider once the elicitation gate moves to MRTR.
+//! are both long with certainty — and both are held out by rule 2 alone.
+//! Nothing technical stands in the way any more.
 
 /// Tools this server runs asynchronously, returning a task handle instead of
 /// a result.

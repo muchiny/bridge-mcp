@@ -7,14 +7,14 @@
 //! - Password/passphrase input (encrypted SSH key)
 //! - Confirmation of destructive operations
 //!
-//! **NON-CONFORMANT AS WRITTEN, and the destructive-confirmation case is the
-//! one that matters.** 2026-07-28 requires `elicitation/create` to be carried
-//! by Multi Round-Trip Requests — returned inside an `InputRequiredResult` and
-//! answered by a client retry — and says the server-initiated request this
-//! service sends "is no longer supported". So an operator who turns on
-//! `security.require_elicitation_on_destructive` is relying on a confirmation
-//! no conforming client is obliged to answer. Full quote, scope and the reason
-//! it is not converted here: see [`crate::mcp::client_requester`].
+//! This module SENDS NOTHING. 2026-07-28 requires `elicitation/create` to be
+//! carried by Multi Round-Trip Requests — returned inside an
+//! `InputRequiredResult` and answered by a client retry — so what is left here
+//! is the pure half: build the request ([`confirm_destructive_request`]), read
+//! the answer ([`destructive_confirmation_granted`]), and the [`schema`]
+//! builders both use. The transmission belongs to
+//! `McpServer::check_destructive_elicitation`, which returns the request
+//! rather than sending it.
 
 use std::fmt::Write as _;
 

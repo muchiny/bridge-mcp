@@ -321,45 +321,144 @@ corrections, and the five command-injection sites.
   `logging/setLevel`, `notifications/roots/list_changed`,
   `resources/subscribe`, `resources/unsubscribe`.
 
-### Known non-conformance
+### Conformance sweep (2026-08-22)
 
-- **Server-to-client requests still use the pattern 2026-07-28 deleted.**
-  This is the largest known gap in the release and it is not fixed here.
+Everything below was found by probing the reference client — Claude Code
+2.1.239 with `MCP_PROTOCOL_NEGOTIATION=auto`, which negotiates Modern over
+stdio — rather than by reading. Before it, that client connected and then
+refused `tools/list` outright, so a Modern client saw ZERO tools.
 
-  Multi Round-Trip Requests opens by removing it outright: *"Servers MUST send
-  server-to-client requests (such as `roots/list`, `sampling/createMessage`,
-  or `elicitation/create`) using the MRTR pattern. The previous pattern of
-  server-initiated requests is no longer supported. This is a breaking
-  change."* Streamable HTTP repeats it from the transport side: *"The server
-  MUST NOT send independent JSON-RPC requests on this stream."*
+**Result members this server did not emit.**
 
-  bridge-mcp sends both `elicitation/create` and `roots/list` as
-  server-initiated JSON-RPC requests through `ClientRequester` and blocks on
-  the reply. MRTR inverts the direction — the server RETURNS `resultType:
-  "input_required"` with an `inputRequests` map and an opaque `requestState`,
-  and the client re-sends the original call under a NEW id with
-  `inputResponses` attached.
+- `resultType`, missing from every result. *"All results must now include a
+  `resultType` field."* The companion rule, *"Clients MUST treat an absent
+  `resultType` as `complete`"*, is a CLIENT-side bridge for pre-2026-07-28
+  servers; a server that declares this revision and leans on it is asking for
+  the compatibility path for a revision it claims not to speak. Now stamped
+  centrally in `JsonRpcResponse::success`.
+- `ttlMs` + `cacheScope`, missing from five of the six cacheable operations.
+  The published schemas make both mandatory on `server/discover`, `tools/list`,
+  `prompts/list`, `resources/list`, `resources/templates/list` and
+  `resources/read`; only discovery sent them. `resources/read` gets
+  `ttlMs: 0` and `cacheScope: "private"` — it returns log contents and shell
+  history off a host this server has no change feed for, so any positive TTL
+  would assert freshness it cannot observe.
+- `io.modelcontextprotocol/serverInfo` in every result's `_meta`, not only on
+  discovery. The protocol is stateless and a client may interleave unrelated
+  requests on one transport, so nothing else on the wire says which server
+  answered.
 
-  What this costs you today: `security.require_elicitation_on_destructive` is
-  a security control that asks for confirmation over a flow no conforming
-  2026-07-28 client is obliged to answer. If you rely on it, verify your
-  client still honours server-initiated `elicitation/create` before upgrading.
-  Client roots are fetched the same way and will simply come back empty
-  against a strictly conforming client.
+**`_meta.protocolVersion` is now REQUIRED.** The per-request protocol fields
+table marks it `Required: Yes` alongside `clientCapabilities`, and *"A request
+missing any required field is malformed; the server MUST reject it with
+JSON-RPC error code `-32602`."* It used to be served. `server/discover` and
+`initialize` stay exempt, for the reason already documented for the capability
+gate and one more: a client that does not yet know which revisions this server
+speaks cannot honestly declare one.
 
-  It is not fixed in 3.0.0 because converting it is not a rename.
-  `requestState` MUST be treated as attacker-controlled and
-  integrity-protected where it influences authorization, and SHOULD carry the
-  authenticated principal, a short TTL and a digest of the originating
-  request — key management and state encoding, changing the client contract of
-  every destructive tool. Shipping that unreviewed at the end of a fix sweep
-  would be worse than naming it.
+**HTTP: `Mcp-Name` Base64 sentinel decoding.** *"servers MUST decode an encoded
+`Mcp-Name` or `Mcp-Param-{Name}` value before comparing it to the corresponding
+request body value."* Nothing decoded anything, so the `=?base64?…?=` wrapper
+was compared against the raw body value and never matched. The failure mode ran
+backwards: a client is REQUIRED to encode when the value is not
+plain-ASCII-safe, so the better it conformed the more reliably it was refused —
+and `Mcp-Name` mirrors `params.uri` on `resources/read`, where this server
+serves `file://` and `log://` paths off remote hosts.
 
-  Consequence recorded elsewhere in this release: `task_policy`'s rule 2
-  (no `destructive_hint: true` tool may be promoted to a task) holds for this
-  reason, not for the one earlier revisions of that file claimed. The MRTR
-  page says nothing about tasks or destructive operations; the blocker is
-  local, and it is this.
+**OAuth: the refusals were not discoverable.**
+
+- `GET /.well-known/oauth-protected-resource` did not exist. *"MCP servers MUST
+  implement OAuth 2.0 Protected Resource Metadata (RFC9728)."*
+- The 401 carried no `WWW-Authenticate` header, so a client had no way to find
+  the authorization server the flow tells it to extract from there.
+- An insufficient scope answered 401 instead of 403, so a client re-authorized
+  with the same scope set and looped. It also reported only the FIRST missing
+  scope, which is the incremental challenge the spec forbids by name.
+
+Not changed, because it was already correct: token audience IS validated, by
+`Validation::set_audience` inside `jsonwebtoken`.
+
+**Two latent bugs, both invisible until a third case existed.**
+
+- `ResultType` carried `rename_all = "camelCase"`. `Complete` and `Task` are
+  identical under either convention, so nothing caught it; `InputRequired`
+  would have gone out as `"inputRequired"`, which a client MUST treat as
+  invalid.
+- `ElicitationCreateParams` had no `mode`, so every elicitation request this
+  server built was missing the discriminator of the union it belongs to.
+
+### Multi Round-Trip Requests
+
+**The destructive-confirmation gate is MRTR-shaped.** What the previous
+revision of this file called "the largest known gap in the release" is closed
+for the caller that mattered.
+
+`security.require_elicitation_on_destructive` no longer rests on a
+server-initiated `elicitation/create` no conforming client is obliged to
+answer. The server returns an `InputRequiredResult` and the client retries the
+same call under a new id with the answer attached. The gate runs before
+execution, before task promotion and before any audit write, so replaying the
+call has no side effects to repeat — a property of this gate, not of the
+pattern.
+
+`requestState` is HMAC-SHA256 over base64url JSON, constant-time compared, and
+binds all three replay defences the spec asks for: the request identity (method
+plus a digest of the tool name AND its arguments, so a confirmation for
+`ssh_exec rm /tmp/x` cannot authorise `ssh_exec rm /`), a 5-minute TTL, and the
+authenticated principal. The principal is empty on every transport that reaches
+the gate today and structurally so — stdio authenticates nobody, and HTTP
+dispatches ordinary POSTs with no session, so the gate refuses destructive
+tools there before any state is issued.
+
+Deliberately NOT the `Sha256(key || data)` construction in
+`security::recording`: that is a length-extendable prefix-MAC. It is not
+exploitable there and is not being changed, but it must not be copied into a
+path where the attacker chooses the payload.
+
+Key from `MCP_REQUEST_STATE_KEY`, else per-process random. **Set it on any
+deployment running more than one bridge-mcp behind one address**, or a retry
+landing on another instance fails its signature and the user confirms forever.
+
+`inputResponses` are honoured ONLY alongside a `requestState` this server
+signed for this principal and this exact call. Without that binding a client
+posts an acceptance on its first call and runs any destructive tool with nobody
+asked.
+
+**One confirmation, not two.** Nineteen handlers ran their own
+`elicitation/create` on top of the global gate — a second server-to-client path
+that `ClientRequester`'s own doc did not count. All nineteen are annotated
+destructive, so with the flag on (the default) every one of them asked twice.
+The handler-level path is removed and the flag is now the whole of the
+confirmation policy. **If you turned the flag OFF while relying on the
+per-handler prompt, turn it back on.**
+
+**The machinery is gone.** `mcp::client_requester`, `mcp::sampling`,
+`mcp::pending_requests`, `ElicitationService`, `WriterMessage::Request`,
+`JsonRpcOutboundRequest`, `SessionContext::pending` and
+`ToolContext::pending_requests` are deleted. An inbound JSON-RPC response is
+dropped with a log line: JSON-RPC 2.0 has no reply to a Response.
+
+### Still not conformant, and what it costs
+
+- **`ToolContext::sample` returns `Ok(None)` unconditionally**, so
+  `summarize=true` yields no LLM summary. This is the "sampling unavailable"
+  path all thirteen handlers already took for any client that did not declare
+  the capability. It is not converted because the difference from the gate is
+  structural: `sample()` is called from the middle of `execute`, on output that
+  does not exist until the remote command has run. Converting it needs
+  `ToolHandler::execute` to be able to express "I need input" in a return type
+  that is `Result<ToolCallResult>`, and every retry would re-run the command.
+- **The one-shot `roots/list` fetch is removed**, so file operations are no
+  longer scoped to client-declared roots. `validate_root_scope` returns `Ok(())`
+  when no roots are known, so this is inert rather than newly permissive.
+  Restoring it means an MRTR round trip on the first path-touching tool of
+  EVERY request — a Modern server may not carry roots forward, since
+  *"Servers MUST NOT rely on prior requests over the same connection to
+  establish context"* — which is a real cost for an advisory, fail-open check.
+- **`notifications/progress` is unreachable over HTTP.** `handle_post`
+  dispatches with no session, so a tool has no channel to emit on. The spec
+  makes the progress stream a MAY, so this is a gap rather than a violation,
+  but a client sending `progressToken` over HTTP gets nothing and no error.
 
 ## [2.2.0] - 2026-08-19
 

@@ -3075,21 +3075,22 @@ impl McpServer {
     /// server that needs client input _before_ returning a `CreateTaskResult`
     /// uses the multi round-trip request flow on the original request").
     ///
-    /// **The ORDERING is right and the MECHANISM is not, and an earlier
-    /// version of this comment claimed both.** It said the gate resolves
-    /// "through core multi-round-trip". It does not:
-    /// `check_destructive_elicitation` sends `elicitation/create` as a
-    /// server-initiated JSON-RPC request via `ClientRequester` and blocks on
-    /// the reply. MRTR is the opposite shape — the server RETURNS
-    /// `resultType: "input_required"` and the client retries under a new id —
-    /// and the MRTR page opens by deleting the pattern still in use here:
+    /// **Both the ordering and the mechanism are right now.** Two earlier
+    /// revisions of this comment were each half wrong, and the history is
+    /// worth keeping because the halves were wrong in opposite directions.
+    /// The first said the gate resolves "through core multi-round-trip" when
+    /// it did not; the second corrected that to "the MECHANISM is not" and was
+    /// accurate until the gate was converted.
+    /// `check_destructive_elicitation` now returns `resultType:
+    /// "input_required"` with an integrity-protected `requestState`, and the
+    /// client retries under a new id — which is what the MRTR page requires:
     /// "Servers MUST send server-to-client requests (such as `roots/list`,
     /// `sampling/createMessage`, or `elicitation/create`) using the MRTR
     /// pattern. The previous pattern of server-initiated requests is no longer
     /// supported. This is a breaking change."
     ///
-    /// That is an open conformance gap, tracked as its own item. It does not
-    /// change what THIS method should do, because the gap is upstream of any
+    /// It does not change what THIS method should do, because the gate is
+    /// upstream of any
     /// task: whichever way the confirmation is carried, it is finished before
     /// a `CreateTaskResult` exists, so no task of this server's ever waits on
     /// input.
