@@ -42,7 +42,7 @@ use tracing::{info, warn};
 /// from holding connections open indefinitely. Returns HTTP 408 on expiry.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator};
+use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator, ProtectedResourceMetadata};
 
 use crate::mcp::protocol::{
     JsonRpcError, JsonRpcMessage, JsonRpcResponse, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
@@ -220,7 +220,17 @@ fn build_router_inner(
     config: HttpTransportConfig,
     validator: Option<&Arc<OAuthValidator>>,
 ) -> Router {
-    let oauth_config = Arc::new(config.oauth.clone());
+    // The 401 challenge has to name an absolute URL, and only this function
+    // knows the address this process is bound to. Runtime-populated rather
+    // than a YAML key, for the same reason `static_keys` is.
+    let mut oauth_runtime = config.oauth.clone();
+    if oauth_runtime.resource_metadata_url.is_empty() {
+        oauth_runtime.resource_metadata_url = format!(
+            "http://{}/.well-known/oauth-protected-resource",
+            config.bind
+        );
+    }
+    let oauth_config = Arc::new(oauth_runtime);
 
     let state = Arc::new(HttpTransportState {
         config,
@@ -247,6 +257,10 @@ fn build_router_inner(
     // cannot enumerate them).
     let discovery_router = Router::new()
         .route("/.well-known/mcp.json", get(handle_mcp_discovery))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(handle_protected_resource_metadata),
+        )
         .route(
             "/.well-known/oauth-authorization-server",
             get(handle_oauth_discovery),
@@ -969,6 +983,26 @@ async fn handle_mcp_discovery(State(state): State<Arc<HttpTransportState>>) -> R
             },
         }
     }))
+    .into_response()
+}
+
+/// GET /.well-known/oauth-protected-resource — Protected Resource Metadata
+/// (RFC 9728).
+///
+/// "MCP servers MUST implement OAuth 2.0 Protected Resource Metadata
+/// (RFC9728)." Served unconditionally rather than 404-ing when OAuth is off:
+/// the document describes what this resource IS and which authorization
+/// servers (possibly none) can issue tokens for it, and a client probing an
+/// unprotected server learns more from an empty `authorization_servers` list
+/// than from a 404 it cannot distinguish from a wrong URL.
+async fn handle_protected_resource_metadata(
+    State(state): State<Arc<HttpTransportState>>,
+) -> Response {
+    let base_url = format!("http://{}", state.config.bind);
+    Json(ProtectedResourceMetadata::from_config(
+        &state.oauth,
+        &base_url,
+    ))
     .into_response()
 }
 
@@ -1934,6 +1968,49 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// RFC 9728 is a MUST for an MCP server: "MCP servers MUST implement OAuth
+    /// 2.0 Protected Resource Metadata (RFC9728). MCP clients MUST use OAuth
+    /// 2.0 Protected Resource Metadata for authorization server discovery."
+    /// The route did not exist at all.
+    ///
+    /// Served even with OAuth disabled: a client probing an unprotected server
+    /// learns more from an empty `authorization_servers` list than from a 404
+    /// it cannot distinguish from a wrong URL.
+    #[tokio::test]
+    async fn the_protected_resource_metadata_endpoint_exists() {
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/.well-known/oauth-protected-resource")
+                    .header("origin", "http://localhost:5173")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["resource"].is_string(),
+            "`resource` is the one REQUIRED field: {json}"
+        );
+        // snake_case, not camelCase: RFC 9728 field names are snake_case like
+        // every other OAuth metadata document, and unlike the MCP wire types in
+        // this crate. Getting it wrong makes the document unreadable to an
+        // RFC-9728 client while still looking plausible in a test.
+        assert_eq!(
+            json["bearer_methods_supported"],
+            serde_json::json!(["header"])
+        );
     }
 
     // ============== Mcp-Name Base64 sentinel ==============

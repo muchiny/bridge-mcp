@@ -75,6 +75,10 @@ async fn main() -> Result<()> {
             let server = Arc::new(server);
 
             let oauth = TransportOAuthConfig {
+                // Left empty on purpose: the HTTP transport fills it at boot
+                // from the address it actually binds, which is the only place
+                // that knows it. It is not a YAML key.
+                resource_metadata_url: String::new(),
                 enabled: config.http.oauth.enabled,
                 issuer: config.http.oauth.issuer.clone(),
                 audience: config.http.oauth.audience.clone(),
