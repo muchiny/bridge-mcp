@@ -215,14 +215,34 @@ fn validate_config(config: &Config) -> Result<()> {
         })?;
     }
 
-    // `rbac` is parsed into a fully-formed `RbacConfig` and `RbacEnforcer`
-    // implements deny-over-allow — but nothing in the request path ever calls
-    // `is_allowed`. There is no principal to check against: neither
-    // `ToolContext`, `SessionContext` nor `Session` carries a subject, and the
-    // one transport that authenticates discards its claims
-    // (src/mcp/transport/oauth.rs). Accepting `enabled: true` therefore hands
-    // the operator a security control that does nothing, which is worse than
-    // having none: it stops them looking for a real one.
+    reject_settings_that_govern_nothing(config)?;
+
+    Ok(())
+}
+
+/// Refuse settings the operator would believe are in force when they are not.
+///
+/// One rule, three keys, and the rule is what holds them together: each of
+/// these parses, validates, and then governs NOTHING. The failure mode is
+/// never the wasted field — it is the operator who reads their own config,
+/// sees a limit or an access control, and stops looking for a real one.
+/// Refusing to start says so once; ignoring the key says nothing, forever.
+///
+/// `rbac.enabled` is the security case. `RbacConfig` parses into a fully-formed
+/// `RbacEnforcer` implementing deny-over-allow — and nothing in the request
+/// path ever calls `is_allowed`. There is no principal to check against:
+/// neither `ToolContext`, `SessionContext` nor `Session` carries a subject, and
+/// the one transport that authenticates discards its claims
+/// (`src/mcp/transport/oauth.rs`). Accepting `true` hands over an access
+/// control that grants everything.
+///
+/// `http.session_timeout_seconds` and `http.max_sessions` governed the
+/// `Mcp-Session-Id` lifecycle that 3.0.0 deleted along with the rest of the
+/// HTTP session machinery: the transport is stateless now. They were still
+/// parsed, still plumbed into `mcp::transport::http::HttpTransportConfig`, and
+/// read by nothing. This is the exact shape 2.2.0's CHANGELOG called out for
+/// `audit.retain_days` — documented in every release and executed in none.
+fn reject_settings_that_govern_nothing(config: &Config) -> Result<()> {
     if config.rbac.enabled {
         return Err(BridgeError::ConfigInvalid {
             field: "rbac.enabled".to_string(),
@@ -234,16 +254,6 @@ fn validate_config(config: &Config) -> Result<()> {
         });
     }
 
-    // Both keys governed the `Mcp-Session-Id` lifecycle, which 3.0.0 deleted
-    // along with the rest of the HTTP session machinery: the transport is
-    // stateless now. They were still parsed, still plumbed into
-    // `mcp::transport::http::HttpTransportConfig`, and read by nothing.
-    //
-    // This is the exact shape 2.2.0's CHANGELOG called out for
-    // `audit.retain_days` — documented in every release and executed in none.
-    // The lesson from that one is that the failure mode is not the wasted
-    // field, it is the operator who believes a limit is in force. Refusing to
-    // start says so once; ignoring the key says nothing, forever.
     if config.http.session_timeout_seconds.is_some() {
         return Err(BridgeError::ConfigInvalid {
             field: "http.session_timeout_seconds".to_string(),
