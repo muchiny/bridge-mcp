@@ -167,6 +167,7 @@ pub async fn save_output_to_file(path: &str, content: &str) -> Result<String> {
 }
 
 /// Parsed columnar CLI output (docker ps, docker stats, kubectl top, etc.).
+#[derive(Clone)]
 pub struct ParsedTable {
     /// Column headers, lowercased (e.g., `["container id", "image", "status", "names"]`).
     pub headers: Vec<String>,
@@ -195,11 +196,15 @@ impl ParsedTable {
             .map(|(i, _)| i)
             .collect();
 
+        // Not one requested name matched a header. Both documented contracts
+        // — "unknown columns are silently ignored" (registry.rs) and "header
+        // is always preserved" (output_kind.rs) — resolve the same way: every
+        // requested column was unknown, so every one is ignored and no
+        // filtering happens. Emptying the table instead reported "no data on
+        // this host" about data that was there, and the caller could not tell
+        // that from a genuine empty result.
         if indices.is_empty() {
-            return Self {
-                headers: Vec::new(),
-                rows: Vec::new(),
-            };
+            return self.clone();
         }
 
         let headers = indices.iter().map(|&i| self.headers[i].clone()).collect();
@@ -1184,14 +1189,35 @@ node-1   250m";
     }
 
     #[test]
-    fn test_select_columns_all_unknown() {
+    fn select_columns_all_unknown_is_a_no_op() {
         let table = ParsedTable {
-            headers: vec!["name".into()],
-            rows: vec![vec!["web".into()]],
+            headers: vec!["name".into(), "cpu".into()],
+            rows: vec![vec!["web".into(), "45%".into()]],
         };
-        let filtered = table.select_columns(&["NOPE".into()]);
-        assert!(filtered.headers.is_empty());
-        assert!(filtered.rows.is_empty());
+        let filtered = table.select_columns(&["NOPE".into(), "ALSO_NOPE".into()]);
+
+        // Both documented contracts point the same way: unknown columns are
+        // silently ignored, and the header is always preserved. If EVERY
+        // requested column is unknown, every one is ignored — so nothing is
+        // filtered. Returning an empty table instead told the caller "there
+        // is no data here", which is a different and false claim.
+        assert_eq!(filtered.headers, vec!["name", "cpu"]);
+        assert_eq!(filtered.rows, vec![vec!["web", "45%"]]);
+    }
+
+    #[test]
+    fn select_columns_partial_match_still_filters() {
+        let table = ParsedTable {
+            headers: vec!["name".into(), "cpu".into()],
+            rows: vec![vec!["web".into(), "45%".into()]],
+        };
+        let filtered = table.select_columns(&["NAME".into(), "NOPE".into()]);
+
+        // A partial match is unchanged: the known column is kept, the unknown
+        // one ignored. Without this the no-op above would also pass if the
+        // filter stopped working entirely.
+        assert_eq!(filtered.headers, vec!["name"]);
+        assert_eq!(filtered.rows, vec![vec!["web"]]);
     }
 
     #[test]
