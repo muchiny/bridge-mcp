@@ -1438,14 +1438,21 @@ impl McpServer {
                 // Only `subscriptions/listen` yields no response, and only
                 // once it has actually registered — which needs a session.
                 // This entry point passes `None`, so listen is refused with
-                // -32600 long before that point and this arm is dead TODAY.
+                // -32600 long before that point and this arm is dead.
                 //
-                // IT DOES NOT STAY DEAD. Task 66 gives the HTTP transport a
-                // real session precisely so `subscriptions/listen` works
-                // there; the moment it lands, this arm becomes live for any
-                // caller that reaches listen through this signature.
+                // AN EARLIER VERSION OF THIS COMMENT PREDICTED OTHERWISE, and
+                // the prediction is worth keeping because it was wrong in an
+                // instructive way. It said the HTTP transport would be given a
+                // session and that this arm would go live "the moment it
+                // lands". It landed. The arm is still dead — because HTTP does
+                // not reach listen through THIS signature at all. It calls
+                // `handle_request_with_cancel` directly, honours
+                // `ListenOutcome::Streaming` itself, and answers with an SSE
+                // body. Giving a transport a session was never what would
+                // revive this arm; only `handle_request` itself starting to
+                // supply one would.
                 //
-                // So it MUST stay an error and MUST NOT become a fabricated
+                // It MUST stay an error and MUST NOT become a fabricated
                 // success. Returning a synthesized `result` here would
                 // silently reintroduce the exact defect this refactor
                 // removed — an immediate answer to a request the spec says
@@ -8281,6 +8288,52 @@ rbac:
             response.result.is_none(),
             "a refused request must carry no result: {:?}",
             response.result
+        );
+    }
+
+    /// `handle_request` — the session-less entry point — must never answer a
+    /// `subscriptions/listen` with a RESULT.
+    ///
+    /// The guarantee is "an error, whichever error", not a particular code,
+    /// and that is deliberate. Two different arms can answer here: the session
+    /// guard inside `handle_subscriptions_listen`, which is what fires today,
+    /// and the `unwrap_or_else` fallback in `handle_request`, which is
+    /// currently unreachable. Pinning one code would make this test a map of
+    /// which arm happens to run rather than a statement about what a caller
+    /// may receive.
+    ///
+    /// What must never happen is a synthesized success. An immediate `result`
+    /// for a listen is an answer to a request the spec keeps open until
+    /// graceful teardown — the client would believe its subscription was
+    /// closed the instant it opened, and stop reading.
+    #[tokio::test]
+    async fn session_less_listen_is_always_an_error_never_a_result() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(7)),
+            method: "subscriptions/listen".to_string(),
+            params: Some(params_declaring_nothing(json!({
+                "notifications": { "toolsListChanged": true }
+            }))),
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert!(
+            response.result.is_none(),
+            "a transport that cannot stream must be refused, not handed a \
+             fabricated result: {:?}",
+            response.result
+        );
+        assert!(
+            response.error.is_some(),
+            "and the refusal must be an error rather than an empty success"
+        );
+        assert_eq!(
+            response.id,
+            Some(json!(7)),
+            "addressed to the request it refuses"
         );
     }
 
