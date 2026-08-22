@@ -53,10 +53,10 @@ use super::resource_registry::{ResourceRegistry, create_default_resource_registr
 /// `supportedVersions`, `ttlMs` and `cacheScope` on top; `initialize` wraps
 /// them with a negotiated `protocolVersion`. Keeping the assembly in one place
 /// means a capability added here reaches both without a second edit.
-struct DiscoveryPayload {
-    capabilities: ServerCapabilities,
-    server_info: ServerInfo,
-    instructions: String,
+pub(crate) struct DiscoveryPayload {
+    pub(crate) capabilities: ServerCapabilities,
+    pub(crate) server_info: ServerInfo,
+    pub(crate) instructions: String,
 }
 
 /// MCP Server that communicates over stdio
@@ -1796,7 +1796,7 @@ impl McpServer {
     /// `test_server_discover_full_wire_shape` pins it. Sole caller:
     /// `handle_discover`. It was shared with `handle_initialize` until that
     /// arm stopped building a payload at all and became a bare `-32022`.
-    async fn build_discovery_payload(&self) -> DiscoveryPayload {
+    pub(crate) async fn build_discovery_payload(&self) -> DiscoveryPayload {
         let instructions = {
             let config = self.config.read().await;
             instructions::build_instructions(&config, self.registry.len())

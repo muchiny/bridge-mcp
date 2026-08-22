@@ -54,9 +54,15 @@ use crate::mcp::session_context::SessionContext;
 
 /// Default allowlist for the `Origin` header — localhost variants only.
 ///
-/// Per MCP 2025-11-25 the server **MUST** reject requests carrying an
-/// invalid `Origin` to prevent DNS-rebinding. Production deployments should
-/// override this list to include their public origin.
+/// 2026-07-28, Streamable HTTP "Security & Endpoint": *"Servers **MUST**
+/// validate the `Origin` header on all incoming connections to prevent DNS
+/// rebinding attacks."* Production deployments should override this list to
+/// include their public origin.
+///
+/// The requirement was previously cited here as "MCP 2025-11-25". It is
+/// current, not inherited: the text above is on the 2026-07-28 transport page.
+/// A correct rule under a stale citation reads like leftover Legacy support,
+/// which is the one thing this branch must not look like.
 fn default_allowed_origins() -> Vec<String> {
     vec![
         "http://localhost".to_string(),
@@ -121,7 +127,7 @@ pub struct HttpTransportState {
     oauth: Arc<OAuthConfig>,
 }
 
-/// Anti-DNS-rebinding gate (MCP 2025-11-25 §"Streamable HTTP / Security Warning").
+/// Anti-DNS-rebinding gate (2026-07-28 §"Streamable HTTP / Security & Endpoint").
 ///
 /// Requests with no `Origin` are rejected with HTTP 403 — non-browser MCP
 /// clients on a network attacker's path could otherwise impersonate
@@ -263,6 +269,14 @@ fn build_router_inner(
             axum::http::header::CONTENT_TYPE,
             axum::http::header::ACCEPT,
             axum::http::header::AUTHORIZATION,
+            // KEPT although this revision has no sessions, and kept
+            // deliberately. The spec's instruction for a header from an older
+            // client is *"An `Mcp-Session-Id` header on a request: ignore it,
+            // and do not mint or echo session IDs"* — ignore, not refuse. CORS
+            // `allow_headers` gates whether a browser may SEND a header at
+            // all, so dropping it here would turn "ignore it" into "block the
+            // whole request at preflight" for exactly the legacy browser
+            // clients the instruction is about.
             axum::http::HeaderName::from_static("mcp-session-id"),
             axum::http::HeaderName::from_static("mcp-protocol-version"),
             // Required by Server Validation, so they must survive
@@ -927,6 +941,17 @@ async fn handle_mcp_discovery(State(state): State<Arc<HttpTransportState>>) -> R
     let bind = &state.config.bind;
     let base_url = format!("http://{bind}");
 
+    // The SERVER's own capabilities, not a hand-written summary of them.
+    //
+    // This block used to be three hardcoded booleans (`"tools": true`, ...).
+    // A capability is an OBJECT in this revision — `{"listChanged": true}`,
+    // `{"subscribe": true, "listChanged": true}` — so the shape here did not
+    // match `server/discover`, and a client that read this endpoint learned
+    // something the server never said. It is the same drift the hardcoded
+    // protocol version on this endpoint already caused once; the fix was not
+    // extended to the field next to it.
+    let capabilities = state.server.build_discovery_payload().await.capabilities;
+
     Json(serde_json::json!({
         "mcp": {
             "version": PROTOCOL_VERSION,
@@ -934,11 +959,7 @@ async fn handle_mcp_discovery(State(state): State<Arc<HttpTransportState>>) -> R
                 "type": "streamable-http",
                 "url": format!("{base_url}/mcp"),
             },
-            "capabilities": {
-                "tools": true,
-                "resources": true,
-                "prompts": true,
-            },
+            "capabilities": capabilities,
             "oauth": if state.oauth.enabled {
                 serde_json::json!({
                     "authorization_server": format!("{base_url}/.well-known/oauth-authorization-server"),
@@ -1005,7 +1026,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Origin validation (MCP 2025-11-25: anti-DNS-rebinding)
+    // Origin validation (2026-07-28 §Security & Endpoint: anti-DNS-rebinding)
     // ========================================================================
 
     #[test]
@@ -1090,7 +1111,7 @@ mod tests {
     }
 
     // ========================================================================
-    // End-to-end Origin guard (full router) — MCP 2025-11-25 §Security Warning
+    // End-to-end Origin guard (full router) — 2026-07-28 §Security & Endpoint
     // ========================================================================
 
     fn build_test_router() -> Router {

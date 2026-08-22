@@ -392,7 +392,13 @@ pub struct ServerCapabilities {
     /// Completions capability (argument auto-completion).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completions: Option<CompletionsCapability>,
-    /// Logging capability (`logging/setLevel` + `notifications/message`).
+    /// Logging capability: `notifications/message`, and nothing else.
+    ///
+    /// It did mean "`logging/setLevel` + `notifications/message`". 2026-07-28
+    /// deleted `logging/setLevel` — the minimum level rides on each request's
+    /// `_meta["io.modelcontextprotocol/logLevel"]` instead of being latched
+    /// onto a connection — and this server answers that method `-32601`. The
+    /// doc described a method the code refuses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingCapability>,
     /// MCP Extensions (2025-11-25+). Map of extension URI to settings.

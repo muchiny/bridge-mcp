@@ -7,10 +7,19 @@
 //!
 //! Parsing is deliberately total: a missing `_meta`, a `_meta` that is not an
 //! object, a key with the wrong JSON type, or a `clientInfo` missing its
-//! `version` all yield `None` for the affected field and never an error. A
-//! Legacy client sends none of these keys and therefore gets an all-`None`
-//! `RequestMeta`, which is exactly the signal the capability lookup needs in
-//! order to fall back to the session handshake flags.
+//! `version` all yield `None` for the affected field and never an error.
+//!
+//! Total parsing is not permissive dispatch. The two required keys are
+//! enforced by [`missing_required_envelope_field`], which refuses `-32602`
+//! before a handler runs; and a capability that parses to `None` answers
+//! `false` — see `SessionContext::supports_*`, which is fail-closed.
+//!
+//! An earlier version of this paragraph said an all-`None` `RequestMeta` was
+//! "exactly the signal the capability lookup needs in order to fall back to
+//! the session handshake flags". There is no such fallback and there are no
+//! such flags: `SessionCapabilities` and the `initialize` handshake that wrote
+//! it were both deleted in 3.0.0. The sentence described the 2025-11-25
+//! server.
 
 use serde_json::{Map, Value};
 

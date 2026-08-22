@@ -44,15 +44,38 @@ fn supported_versions_includes_current() {
     );
 }
 
+/// The supported list is Modern-only, most-preferred first.
+///
+/// The ordering half of this test was written for a multi-entry list and is
+/// VACUOUS on the current one-element list: `windows(2)` yields nothing, so
+/// the loop cannot fail. It is kept because it becomes live again the moment a
+/// second revision is added, and deleting it would mean re-deriving the rule
+/// then.
+///
+/// What is NOT vacuous, and is the assertion that matters on a Modern-only
+/// server, is the floor: no entry may predate 2026-07-28. That is this
+/// project's owner rule — "No earlier revision may be advertised, negotiated,
+/// or implemented" — and it fails the day someone re-adds a Legacy revision to
+/// the list, which is the regression the vacuous loop cannot catch.
 #[test]
-fn supported_versions_are_chronologically_ordered() {
-    // Latest version should be first
+fn supported_versions_are_modern_only_and_ordered() {
+    assert!(
+        !SUPPORTED_PROTOCOL_VERSIONS.is_empty(),
+        "a server that advertises no revision cannot be spoken to"
+    );
     assert_eq!(
         SUPPORTED_PROTOCOL_VERSIONS[0], PROTOCOL_VERSION,
         "Latest version must be first in supported versions"
     );
 
-    // All versions should be valid dates and in descending order
+    for v in SUPPORTED_PROTOCOL_VERSIONS {
+        assert!(
+            *v >= "2026-07-28",
+            "Modern-only: {v} predates 2026-07-28 and must not be advertised"
+        );
+    }
+
+    // Live again as soon as the list grows past one entry.
     for window in SUPPORTED_PROTOCOL_VERSIONS.windows(2) {
         assert!(
             window[0] > window[1],
