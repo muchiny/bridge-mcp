@@ -16,7 +16,7 @@ use bridge_mcp::config::{
 use bridge_mcp::domain::history::HistoryConfig;
 use bridge_mcp::domain::{ExecuteCommandUseCase, TunnelManager};
 use bridge_mcp::mcp::registry::create_filtered_registry;
-use bridge_mcp::ports::ToolContext;
+use bridge_mcp::ports::{MrtrSlot, ToolContext};
 use bridge_mcp::security::{AuditLogger, CommandValidator, RateLimiter, Sanitizer};
 use bridge_mcp::ssh::SessionManager;
 
@@ -104,6 +104,7 @@ fn create_tool_context(config: &Config) -> ToolContext {
     ));
 
     ToolContext {
+        mrtr: MrtrSlot::default(),
         config: Arc::new(config.clone()),
         validator,
         sanitizer,

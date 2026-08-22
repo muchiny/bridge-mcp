@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
 use crate::ports::ToolContext;
-use crate::ports::protocol::{ToolCallResult, ToolContent};
+use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
 pub struct SshIncidentCorrelateArgs {
@@ -117,24 +117,11 @@ impl StandardTool for IncidentCorrelateTool {
         }
         let max_tokens = args.summary_max_tokens.unwrap_or(512);
         let prompt = "You are an SRE. Identify the top 3 most likely root causes from the correlated log events. Bullet points only, one line each, no preamble.";
-        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
-            return Ok(result);
-        };
-        let mut text = String::new();
-        for content in &result.content {
-            if let ToolContent::Text { text: t } = content {
-                text.push_str(t);
-            }
-        }
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str("\n=== LLM SUMMARY ===\n");
-        text.push_str(&summary);
-        let mut enriched = ToolCallResult::text(text);
-        enriched.structured_content = result.structured_content;
-        enriched.is_error = result.is_error;
-        Ok(enriched)
+        // Recorded, not sent: the summary is attached by the dispatcher on
+        // the client's retry, so the remote command runs exactly once and
+        // the summary describes the output the caller is actually shown.
+        ctx.request_summary(prompt, output, max_tokens);
+        Ok(result)
     }
 }
 
@@ -148,6 +135,7 @@ mod tests {
     use crate::error::BridgeError;
     use crate::ports::ToolHandler;
     use crate::ports::mock::create_test_context;
+    use crate::ports::protocol::ToolContent;
     use serde_json::json;
 
     #[tokio::test]

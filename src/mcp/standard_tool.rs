@@ -174,7 +174,7 @@ pub trait StandardTool: Send + Sync + 'static {
     /// (pre-truncation) output and the full [`ToolContext`].
     ///
     /// Designed for tools that opt into LLM-side analysis via
-    /// `ctx.sample(...)` (e.g. `ssh_diagnose summarize=true`). The
+    /// `ctx.request_summary(...)` (e.g. `ssh_diagnose summarize=true`). The
     /// handler should always return the raw data alongside any summary
     /// — never replace the source content with the LLM output, since
     /// downstream automation must be able to verify the bridge's own
@@ -549,7 +549,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 
         // Step 18b: Optional async enrichment hook with `ToolContext` access.
         // Used by diagnostic tools that opt into LLM-side analysis via
-        // `ctx.sample()` (e.g. `ssh_diagnose summarize=true`).
+        // `ctx.request_summary()` (e.g. `ssh_diagnose summarize=true`).
         let mut result = T::enrich(result, &args, &raw_output, ctx).await?;
 
         // Record telemetry fields for this successful execution.

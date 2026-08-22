@@ -619,6 +619,7 @@ mod tests {
         assert!(rate_limiter.check("server1").is_ok());
 
         let ctx = ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,

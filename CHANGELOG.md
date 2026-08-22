@@ -438,27 +438,68 @@ per-handler prompt, turn it back on.**
 `ToolContext::pending_requests` are deleted. An inbound JSON-RPC response is
 dropped with a log line: JSON-RPC 2.0 has no reply to a Response.
 
-### Still not conformant, and what it costs
+### Everything MRTR, and what each caller cost
 
-- **`ToolContext::sample` returns `Ok(None)` unconditionally**, so
-  `summarize=true` yields no LLM summary. This is the "sampling unavailable"
-  path all thirteen handlers already took for any client that did not declare
-  the capability. It is not converted because the difference from the gate is
-  structural: `sample()` is called from the middle of `execute`, on output that
-  does not exist until the remote command has run. Converting it needs
-  `ToolHandler::execute` to be able to express "I need input" in a return type
-  that is `Result<ToolCallResult>`, and every retry would re-run the command.
-- **The one-shot `roots/list` fetch is removed**, so file operations are no
-  longer scoped to client-declared roots. `validate_root_scope` returns `Ok(())`
-  when no roots are known, so this is inert rather than newly permissive.
-  Restoring it means an MRTR round trip on the first path-touching tool of
-  EVERY request — a Modern server may not carry roots forward, since
-  *"Servers MUST NOT rely on prior requests over the same connection to
-  establish context"* — which is a real cost for an advisory, fail-open check.
+All three callers of the deleted server-initiated pattern are converted. They
+needed three different shapes, and the differences are the interesting part.
+
+**The destructive-confirmation gate** — replay is free. It runs before
+execution, before task promotion and before any audit write, so answering
+`input_required` and re-running the whole call on the retry repeats nothing.
+
+**Client roots** — replay is free too, and the cost is a round trip per
+request rather than per session. Roots are asked for at the GATE, because
+`validate_root_scope` runs inside `execute` and a question asked from there
+would arrive after the write it guards. `ROOT_SCOPED_TOOLS` names the seven
+tools that need them, and a test reads the handler sources so the two cannot
+drift. A Modern server may not carry a previous request's answer forward —
+"Servers MUST NOT rely on prior requests over the same connection to establish
+context" — so this is per-call, and caching it is exactly what that sentence
+forbids.
+
+**`summarize=true` sampling** — replay is NOT free, and the naive conversion
+is wrong rather than merely slow. `ToolContext::sample` was called from the
+middle of `execute`, on output that does not exist until the remote command has
+run. Answering `input_required` and re-running would summarise the FIRST run's
+output while showing the SECOND run's, and every caller is a diagnostic that
+changes between runs: process tables, journal tails, uptime, scan timestamps.
+A summary of data the user is not looking at is worse than no summary.
+
+So the finished result travels INSIDE the `requestState` instead, and the
+remote command runs exactly once. `ToolContext::request_summary` records the
+request and returns; the dispatcher seals the result, asks, and appends the
+model's reply on the retry without dispatching the tool again. Above 48 KiB of
+serialized result the round trip is skipped and the raw output returned, which
+is what a client that declares no `sampling` already receives.
+
+Sealed as three fields — the concatenated text, `structuredContent`, `isError` —
+and not as a serialized `ToolCallResult`: deriving `Deserialize` on that type
+drags it through every content variant it can hold, for a payload enrichment
+throws away. The thirteen identical copies of the enrichment collapse into one
+`append_summary`, marker byte-for-byte unchanged.
+
+Asking is batched. A destructive path-scoped tool asks for the confirmation AND
+the roots in one result, because `inputRequests` is a map and challenging
+piecemeal "forces multiple authorization round-trips for a single operation and
+degrades user experience".
+
+**`inputResponses` are honoured only alongside a `requestState` this server
+signed for that exact call** — for all three. Forging a confirmation runs a
+destructive tool with nobody asked; forging a root set widens the client's own
+scope; forging a sealed result answers a call with output the server never
+produced. Each has its own bypass test.
+
+### Known non-conformance
+
 - **`notifications/progress` is unreachable over HTTP.** `handle_post`
   dispatches with no session, so a tool has no channel to emit on. The spec
   makes the progress stream a MAY, so this is a gap rather than a violation,
   but a client sending `progressToken` over HTTP gets nothing and no error.
+- **`Mcp-Param-{Name}` headers are not validated.** This server publishes no
+  `x-mcp-header` annotations, so no conforming client sends one, and the
+  MUST that would apply ("Servers MUST reject requests with a recognized
+  `Mcp-Param-{Name}` header that ... does not match") has no recognized header
+  to act on. It becomes real the day a tool schema carries the annotation.
 
 ## [2.2.0] - 2026-08-19
 

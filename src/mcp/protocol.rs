@@ -1040,6 +1040,48 @@ pub struct SamplingMessage {
     pub content: SamplingContent,
 }
 
+/// Build a `CreateMessageRequest` for an `inputRequests` entry.
+///
+/// Shaped as the `{method, params}` pair MRTR puts in the map, not sent: *"the
+/// server ... does not send its own JSON-RPC request. It returns an
+/// `InputRequiredResult` containing `inputRequests`."*
+///
+/// The instruction goes in `systemPrompt` and the data in a single user
+/// message, which is the split the thirteen `summarize=true` handlers already
+/// used when this was a blocking call.
+///
+/// Returns a `Value` rather than a typed request because `inputRequests` values
+/// are a union of three request types and the map holds them side by side.
+#[must_use]
+pub fn sampling_request(prompt: &str, content: &str, max_tokens: u32) -> Value {
+    let params = SamplingCreateMessageParams {
+        messages: vec![SamplingMessage {
+            role: "user".to_string(),
+            content: SamplingContent::Text {
+                text: content.to_string(),
+            },
+        }],
+        model_preferences: None,
+        system_prompt: Some(prompt.to_string()),
+        include_context: None,
+        max_tokens,
+        tools: None,
+    };
+    serde_json::json!({
+        "method": "sampling/createMessage",
+        "params": serde_json::to_value(&params).unwrap_or_else(|_| serde_json::json!({})),
+    })
+}
+
+/// The text of a `CreateMessageResult` the client returned.
+///
+/// `None` when the answer is not a text result — a client may legitimately
+/// return other content types, and there is nothing to append then.
+#[must_use]
+pub fn sampling_answer_text(answer: &Value) -> Option<&str> {
+    answer.get("content")?.get("text")?.as_str()
+}
+
 /// Content of a sampling message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]

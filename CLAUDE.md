@@ -235,9 +235,14 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
   `security.require_elicitation_on_destructive` is now the whole confirmation
   policy — **turn it on if you had it off**. `client_requester`, `sampling`,
   `pending_requests`, `ElicitationService` and `WriterMessage::Request` are
-  deleted. Still non-conformant, deliberately and documented: `ctx.sample()`
-  returns `Ok(None)` (no `summarize=true` LLM output) and the `roots/list`
-  fetch is gone (no file-path scoping) — both need work with real trade-offs.
+  deleted. **All three callers are MRTR now**: the gate, client roots
+  (`ROOT_SCOPED_TOOLS`, asked at the gate because `validate_root_scope` runs
+  too late to ask from), and `summarize=true` sampling — the last carries the
+  finished result inside the `requestState` so the remote command runs once and
+  the summary describes the output actually shown (`ToolContext::
+  request_summary`, cap `MAX_SEALED_RESULT_BYTES`). Remaining gaps, both
+  documented: `notifications/progress` is unreachable over HTTP, and
+  `Mcp-Param-*` headers are unvalidated (nothing emits the annotation yet).
   See CHANGELOG.md "Conformance sweep".
 
 - **v3.0.0 (2026-08-20, not yet tagged)** — **Modern-only.** `PROTOCOL_VERSION = "2026-07-28"`,

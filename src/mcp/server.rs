@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -15,7 +16,7 @@ use crate::domain::{ExecuteCommandUseCase, OutputCache, TaskStore, TunnelManager
 use crate::error::Result;
 use crate::mcp::instructions;
 use crate::ports::ExecutorRouter;
-use crate::ports::ToolContext;
+use crate::ports::{MrtrSlot, ToolContext};
 use crate::security::{AuditLogger, AuditWriterTask, CommandValidator, RateLimiter, Sanitizer};
 use crate::ssh::SessionManager;
 
@@ -179,6 +180,57 @@ enum ConfirmGate {
     /// Separate from [`Self::Refuse`] because it is a malformed PARAMETER, not
     /// a tool that ran and failed — the same distinction `-32602` draws for an
     /// unknown tool name.
+    BadState(&'static str),
+}
+
+/// The parts of a finished result that survive an MRTR round trip.
+///
+/// NOT a serialized [`ToolCallResult`]. Deriving `Deserialize` on that type
+/// drags it through every content variant it can hold — embedded resources, app
+/// content, actions — for a payload that would then be thrown away: enrichment
+/// keeps the concatenated text, `structuredContent` and `isError`, and nothing
+/// else. Sealing exactly those three is lossless with respect to what the
+/// enriched result contains, and keeps the state small.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SealedResult {
+    text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    structured: Option<Value>,
+    #[serde(default)]
+    is_error: bool,
+}
+
+impl SealedResult {
+    fn of(result: &ToolCallResult) -> Self {
+        let mut text = String::new();
+        for content in &result.content {
+            if let ToolContent::Text { text: t } = content {
+                text.push_str(t);
+            }
+        }
+        Self {
+            text,
+            structured: result.structured_content.clone(),
+            is_error: result.is_error.unwrap_or(false),
+        }
+    }
+
+    fn into_result(self) -> ToolCallResult {
+        let mut result = ToolCallResult::text(self.text);
+        result.structured_content = self.structured;
+        result.is_error = Some(self.is_error);
+        result
+    }
+}
+
+/// Whether a `tools/call` is a retry that can be answered from its own state.
+#[derive(Debug)]
+enum SealedResume {
+    /// Not a sealed-result retry. Dispatch normally.
+    None,
+    /// Answer with this; the tool already ran.
+    Done(Box<ToolCallResult>),
+    /// A `requestState` that failed verification.
     BadState(&'static str),
 }
 
@@ -570,6 +622,152 @@ impl McpServer {
         "ssh_sync",
         "ssh_upload",
     ];
+
+    /// Largest result this server will seal into a `requestState`.
+    ///
+    /// The state round-trips through the client, so a result bigger than this
+    /// buys a summary at the price of shipping the whole output there and back.
+    /// Above the cap the summary is simply skipped and the raw result returned
+    /// — the same outcome a client that declares no `sampling` already gets.
+    ///
+    /// 48 KiB of serialized JSON: comfortably above the 40000-char default
+    /// output cap, and well under any plausible message limit.
+    const MAX_SEALED_RESULT_BYTES: usize = 48 * 1024;
+
+    /// `requestState` context key holding a finished result.
+    const SEALED_RESULT: &'static str = "result";
+
+    /// Answer a retry from the result sealed into its own `requestState`.
+    ///
+    /// This is the half of the MRTR round trip that makes `ToolContext::
+    /// request_summary` correct rather than merely conformant. Re-running the
+    /// tool would summarise one run and display another; carrying the finished
+    /// result means the remote command runs exactly once.
+    fn resume_sealed_result(
+        &self,
+        call_params: &ToolCallParams,
+        session: Option<&SessionContext>,
+    ) -> SealedResume {
+        let Some(state) = call_params.request_state.as_deref() else {
+            return SealedResume::None;
+        };
+        let Some(answers) = call_params.input_responses.as_ref() else {
+            return SealedResume::None;
+        };
+        // Only a state that actually carries a result is ours to answer. Every
+        // other retry — a confirmation, a roots answer — falls through to the
+        // gate, which verifies the same state itself.
+        if !answers
+            .keys()
+            .any(|k| k.starts_with(MrtrSlot::SAMPLE_KEY_PREFIX))
+        {
+            return SealedResume::None;
+        }
+
+        let principal = request_principal(session);
+        let digest = params_digest(&json!({
+            "name": call_params.name,
+            "arguments": call_params.arguments,
+        }));
+        let context = match self
+            .request_state
+            .verify(state, principal, "tools/call", &digest)
+        {
+            Ok(context) => context,
+            Err(err) => {
+                warn!(reason = ?err, "Rejected a requestState carrying a sealed result");
+                return SealedResume::BadState(err.client_message());
+            }
+        };
+        let Some(sealed) = context.get(Self::SEALED_RESULT) else {
+            return SealedResume::None;
+        };
+        let Ok(sealed) = serde_json::from_value::<SealedResult>(sealed.clone()) else {
+            // The state verified, so this is our own encoding failing to
+            // round-trip rather than tampering. Fall through and let the call
+            // run again: a duplicate run of a read-only diagnostic beats
+            // refusing a request whose signature was good.
+            error!("A sealed result failed to decode; falling through to a fresh run");
+            return SealedResume::None;
+        };
+
+        let mut result = sealed.into_result();
+        for (key, answer) in answers {
+            if !key.starts_with(MrtrSlot::SAMPLE_KEY_PREFIX) {
+                continue;
+            }
+            if let Some(text) = super::protocol::sampling_answer_text(answer) {
+                result = Self::append_summary(result, text);
+            }
+        }
+        SealedResume::Done(Box::new(result))
+    }
+
+    /// Append an LLM summary to a finished result.
+    ///
+    /// One implementation, where thirteen identical copies used to live in the
+    /// handlers. They all built the same thing — the text content concatenated,
+    /// a `=== LLM SUMMARY ===` marker, the summary — and preserved
+    /// `structuredContent` and `isError`. The marker is kept byte-for-byte so
+    /// anything downstream that greps for it still matches.
+    fn append_summary(result: ToolCallResult, summary: &str) -> ToolCallResult {
+        let mut text = String::new();
+        for content in &result.content {
+            if let ToolContent::Text { text: t } = content {
+                text.push_str(t);
+            }
+        }
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("\n=== LLM SUMMARY ===\n");
+        text.push_str(summary);
+
+        let mut enriched = ToolCallResult::text(text);
+        enriched.structured_content = result.structured_content;
+        enriched.is_error = result.is_error;
+        enriched
+    }
+
+    /// Turn a recorded request into an `InputRequiredResult`, sealing the
+    /// finished result so the retry need not re-run the tool.
+    ///
+    /// `None` when nothing was recorded, or when the result is too large to
+    /// seal — in which case the caller returns it unenriched, which is what a
+    /// client that cannot sample already receives.
+    fn seal_for_input(
+        &self,
+        ctx: &ToolContext,
+        tool_name: &str,
+        digest: &str,
+        session: Option<&SessionContext>,
+        result: &ToolCallResult,
+    ) -> Option<InputRequiredResult> {
+        if ctx.mrtr.is_empty() {
+            return None;
+        }
+        let pending = ctx.mrtr.take();
+        let sealed = serde_json::to_value(SealedResult::of(result)).ok()?;
+        if serde_json::to_vec(&sealed)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX)
+            > Self::MAX_SEALED_RESULT_BYTES
+        {
+            debug!(
+                tool = tool_name,
+                "Result too large to seal into a requestState; returning it without a summary"
+            );
+            return None;
+        }
+
+        let state = self.request_state.issue(
+            request_principal(session),
+            "tools/call",
+            digest,
+            json!({ Self::SEALED_RESULT: sealed }),
+        );
+        Some(InputRequiredResult::with_requests(pending, state))
+    }
 
     /// Decide whether a `tools/call` may proceed, needs input, or is refused.
     ///
@@ -2289,6 +2487,25 @@ impl McpServer {
         // is set, ask the client to confirm via `elicitation/create` before
         // executing any tool annotated `destructive_hint: true`. Runs before the
         // task branch so async task creation itself is gated.
+        // A retry carrying a sealed result: the tool already ran on the first
+        // pass and only the summary was missing. Answered from the state, so
+        // the remote command is not repeated and the summary describes the
+        // output the caller is shown.
+        //
+        // Ahead of the gate on purpose: the sealed result exists only because
+        // the call already got past that gate once, and the state binds this
+        // exact call. Re-asking for a confirmation already given would be a
+        // second prompt for one operation.
+        match self.resume_sealed_result(&call_params, session) {
+            SealedResume::None => {}
+            SealedResume::Done(result) => {
+                return JsonRpcResponse::success_or_serialize_error(id, &result);
+            }
+            SealedResume::BadState(detail) => {
+                return JsonRpcResponse::error(id, JsonRpcError::invalid_params(detail));
+            }
+        }
+
         // Client roots for THIS request, empty unless the retry supplied them.
         let request_roots: Vec<RootEntry> = match self
             .check_destructive_elicitation(&call_params, session)
@@ -2391,6 +2608,13 @@ impl McpServer {
             .unwrap_or("local")
             .to_string();
 
+        // Computed BEFORE `execute` consumes `arguments`, and it is the same
+        // digest the gate bound into any state it issued — the retry must match
+        // the original on tool name AND arguments.
+        let call_digest = params_digest(&json!({
+            "name": call_params.name,
+            "arguments": call_params.arguments,
+        }));
         match self
             .registry
             .execute(&call_params.name, call_params.arguments, &ctx)
@@ -2440,6 +2664,17 @@ impl McpServer {
                 // Strip non-standard App content items — clients that don't
                 // advertise MCP Apps support reject unknown content types.
                 let result = result.without_apps();
+
+                // The handler asked the client for something mid-execution and
+                // could not return an `InputRequiredResult` from there, so it
+                // recorded the request instead. Lift it now, sealing the
+                // finished result into the state so the retry does not re-run
+                // the remote command.
+                if let Some(asking) =
+                    self.seal_for_input(&ctx, &tool_name, &call_digest, session, &result)
+                {
+                    return JsonRpcResponse::success_or_serialize_error(id, &asking);
+                }
 
                 JsonRpcResponse::success_or_serialize_error(id, &result)
             }
@@ -4646,6 +4881,194 @@ rbac:
             )
             .await;
         }
+    }
+
+    // ============== MRTR: sealed result + sampling ==============
+
+    fn summarising_call() -> ToolCallParams {
+        serde_json::from_value(json!({
+            "name": "ssh_diagnose",
+            "arguments": { "host": "prod", "summarize": true }
+        }))
+        .expect("valid params")
+    }
+
+    fn finished_result() -> ToolCallResult {
+        let mut result = ToolCallResult::text("disk 91% full\nnginx failed");
+        result.structured_content = Some(json!({ "disk_pct": 91 }));
+        result
+    }
+
+    /// A recorded request is lifted into an `input_required` carrying the
+    /// finished result sealed in its state.
+    #[tokio::test]
+    async fn a_recorded_summary_request_is_lifted_with_the_result_sealed() {
+        let server = create_test_server();
+        let mut ctx = server.create_tool_context_for_test(None).await;
+        ctx.client_supports_sampling = true;
+        ctx.request_summary("Summarise", "disk 91% full", 128);
+
+        let call = summarising_call();
+        let digest = params_digest(&json!({
+            "name": call.name, "arguments": call.arguments
+        }));
+        let asking = server
+            .seal_for_input(&ctx, &call.name, &digest, None, &finished_result())
+            .expect("a recorded request must be lifted");
+
+        assert_eq!(
+            asking.result_type,
+            super::super::protocol::ResultType::InputRequired
+        );
+        let requests = asking.input_requests.expect("the recorded request");
+        assert_eq!(requests["sample_0"]["method"], "sampling/createMessage");
+        assert!(asking.request_state.is_some());
+    }
+
+    /// Nothing recorded, nothing lifted: the ordinary result goes out.
+    #[tokio::test]
+    async fn nothing_recorded_lifts_nothing() {
+        let server = create_test_server();
+        let ctx = server.create_tool_context_for_test(None).await;
+        let call = summarising_call();
+        assert!(
+            server
+                .seal_for_input(&ctx, &call.name, "d", None, &finished_result())
+                .is_none()
+        );
+    }
+
+    /// A result too large to seal is returned WITHOUT a summary rather than
+    /// shipped through the client and back. The state round-trips, so the cap
+    /// is the difference between a summary and doubling the payload twice.
+    #[tokio::test]
+    async fn an_oversized_result_is_not_sealed() {
+        let server = create_test_server();
+        let mut ctx = server.create_tool_context_for_test(None).await;
+        ctx.client_supports_sampling = true;
+        ctx.request_summary("Summarise", "x", 128);
+
+        let huge = ToolCallResult::text("y".repeat(McpServer::MAX_SEALED_RESULT_BYTES + 1));
+        let call = summarising_call();
+        assert!(
+            server
+                .seal_for_input(&ctx, &call.name, "d", None, &huge)
+                .is_none(),
+            "a result over the cap must fall back to no summary"
+        );
+    }
+
+    /// THE ROUND TRIP. A retry carrying the sealed result and the model's reply
+    /// is answered from the state — the tool is never dispatched, so the remote
+    /// command runs once and the summary describes the output being shown.
+    #[tokio::test]
+    async fn a_sealed_retry_is_answered_without_running_the_tool() {
+        let server = create_test_server();
+        let mut call = summarising_call();
+        let digest = params_digest(&json!({
+            "name": call.name, "arguments": call.arguments
+        }));
+        let state = server.request_state.issue(
+            "",
+            "tools/call",
+            &digest,
+            json!({ "result": SealedResult::of(&finished_result()) }),
+        );
+        call.request_state = Some(state);
+        call.input_responses = Some(
+            json!({ "sample_0": { "content": { "type": "text", "text": "Disk is nearly full." } } })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+
+        let SealedResume::Done(result) = server.resume_sealed_result(&call, None) else {
+            panic!("a sealed retry must be answered from its state");
+        };
+        let ToolContent::Text { text } = &result.content[0] else {
+            panic!("expected text content");
+        };
+        assert!(
+            text.contains("disk 91% full"),
+            "the sealed output survives: {text}"
+        );
+        assert!(text.contains("=== LLM SUMMARY ==="), "{text}");
+        assert!(text.contains("Disk is nearly full."), "{text}");
+        // The parts enrichment is supposed to preserve.
+        assert_eq!(result.structured_content, Some(json!({ "disk_pct": 91 })));
+    }
+
+    /// THE BYPASS TEST, sampling edition. An answer with no `requestState` is
+    /// not a retry: there is no sealed result to trust, so the call falls
+    /// through and runs normally rather than being answered from data the
+    /// client supplied.
+    #[tokio::test]
+    async fn an_unsigned_sampling_answer_seals_nothing() {
+        let server = create_test_server();
+        let mut call = summarising_call();
+        call.input_responses = Some(
+            json!({ "sample_0": { "content": { "type": "text", "text": "trust me" } } })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        assert!(matches!(
+            server.resume_sealed_result(&call, None),
+            SealedResume::None
+        ));
+    }
+
+    /// A sealed result cannot be moved to a different call: the state binds the
+    /// tool name and arguments, so presenting it elsewhere is refused rather
+    /// than answering one call with another's output.
+    #[tokio::test]
+    async fn a_sealed_result_does_not_transfer_to_another_call() {
+        let server = create_test_server();
+        let origin = summarising_call();
+        let digest = params_digest(&json!({
+            "name": origin.name, "arguments": origin.arguments
+        }));
+        let state = server.request_state.issue(
+            "",
+            "tools/call",
+            &digest,
+            json!({ "result": SealedResult::of(&finished_result()) }),
+        );
+
+        let mut elsewhere: ToolCallParams = serde_json::from_value(json!({
+            "name": "ssh_diagnose",
+            "arguments": { "host": "OTHER-HOST", "summarize": true }
+        }))
+        .unwrap();
+        elsewhere.request_state = Some(state);
+        elsewhere.input_responses = Some(
+            json!({ "sample_0": { "content": { "type": "text", "text": "x" } } })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+
+        assert!(matches!(
+            server.resume_sealed_result(&elsewhere, None),
+            SealedResume::BadState(_)
+        ));
+    }
+
+    /// Enrichment keeps what the thirteen handler copies kept: the text
+    /// concatenated under the marker, plus `structuredContent` and `isError`.
+    #[test]
+    fn append_summary_preserves_the_structured_fields() {
+        let mut base = ToolCallResult::text("raw");
+        base.structured_content = Some(json!({ "k": 1 }));
+        base.is_error = Some(true);
+
+        let enriched = McpServer::append_summary(base, "the summary");
+        assert_eq!(enriched.structured_content, Some(json!({ "k": 1 })));
+        assert_eq!(enriched.is_error, Some(true));
+        let ToolContent::Text { text } = &enriched.content[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text, "raw\n\n=== LLM SUMMARY ===\nthe summary");
     }
 
     // ============== MRTR: client roots ==============

@@ -51,6 +51,69 @@ pub struct ToolSchema {
     pub input_schema: &'static str,
 }
 
+/// Server-to-client requests an execution asked for but did not send.
+///
+/// MRTR inverts the direction: a server that needs something from the client
+/// returns an `InputRequiredResult` instead of sending a request. A tool
+/// handler is in the middle of `execute` and cannot return one, so it records
+/// here and the dispatcher lifts the recording into the result.
+///
+/// Keys are `sample_0`, `sample_1`, … by call order rather than derived from
+/// the content. *"`inputRequests` keys are server assigned identifiers and MUST
+/// be unique within the scope of the request"*, and a content-derived key would
+/// not survive the round trip — the answer comes back against the key issued on
+/// the way out.
+#[derive(Clone, Default)]
+pub struct MrtrSlot {
+    pending: Arc<std::sync::Mutex<serde_json::Map<String, Value>>>,
+}
+
+impl std::fmt::Debug for MrtrSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MrtrSlot")
+            .field("pending", &self.len())
+            .finish()
+    }
+}
+
+impl MrtrSlot {
+    /// Prefix of the keys this slot assigns.
+    pub const SAMPLE_KEY_PREFIX: &'static str = "sample_";
+
+    /// Record one server-to-client request, returning the key assigned to it.
+    ///
+    /// A poisoned lock is treated as "record nothing": the only cost is a
+    /// missing summary, and panicking on the request path to preserve an
+    /// optional enrichment would be the wrong trade.
+    pub fn record(&self, request: Value) {
+        if let Ok(mut pending) = self.pending.lock() {
+            let key = format!("{}{}", Self::SAMPLE_KEY_PREFIX, pending.len());
+            pending.insert(key, request);
+        }
+    }
+
+    /// How many requests were recorded.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pending.lock().map(|p| p.len()).unwrap_or_default()
+    }
+
+    /// Whether nothing was recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Take the recorded requests, leaving the slot empty.
+    #[must_use]
+    pub fn take(&self) -> serde_json::Map<String, Value> {
+        self.pending
+            .lock()
+            .map(|mut p| std::mem::take(&mut *p))
+            .unwrap_or_default()
+    }
+}
+
 /// Context provided to tool handlers during execution
 ///
 /// This struct contains all the dependencies that tools might need
@@ -70,6 +133,12 @@ pub struct ToolContext {
     /// Runtime override for `max_output_chars`, shared with `McpServer`.
     /// Written by `ssh_config_set` or auto-detected from MCP client info.
     pub runtime_max_output_chars: Option<Arc<RwLock<Option<usize>>>>,
+    /// Multi Round-Trip Requests recorded during this execution.
+    ///
+    /// Written by [`Self::request_summary`], read by `handle_tools_call` after
+    /// the handler returns. Shared by `Arc` so a `ToolContext` cloned into a
+    /// sub-task still records into the same slot.
+    pub mrtr: MrtrSlot,
     /// Client-declared workspace roots for path scoping.
     pub roots: Vec<crate::mcp::protocol::RootEntry>,
     /// Optional session recorder for compliance auditing.
@@ -154,6 +223,7 @@ impl ToolContext {
         session_manager: Arc<SessionManager>,
     ) -> Self {
         Self {
+            mrtr: MrtrSlot::default(),
             config,
             validator,
             sanitizer,
@@ -207,53 +277,48 @@ impl ToolContext {
         ))
     }
 
-    /// Ask the MCP client's LLM to analyze the given content.
+    /// Ask the client's LLM to summarize `content`, through Multi Round-Trip
+    /// Requests.
     ///
-    /// **Always returns `Ok(None)`.** This is the "sampling is unavailable"
-    /// path every caller already handles — it is what happened for any client
-    /// that did not declare the `sampling` capability — so the thirteen
-    /// handlers behind `summarize=true` return their raw data with no
-    /// LLM-side summary, exactly as they already did for most clients.
+    /// RECORDS the request and returns. It does not send anything and it does
+    /// not return the summary: 2026-07-28 removed the server-initiated
+    /// `sampling/createMessage` this used to block on — *"Servers MUST send
+    /// server-to-client requests ... using the MRTR pattern. The previous
+    /// pattern of server-initiated requests is no longer supported."*
     ///
-    /// # Why it is not a Multi Round-Trip Request
+    /// What happens to the recorded request: the handler finishes normally and
+    /// returns its result WITHOUT a summary; `handle_tools_call` then sees the
+    /// recording, seals that finished result inside the `requestState`, and
+    /// answers `input_required` carrying this `sampling/createMessage`. When
+    /// the client retries with the model's reply, the server unseals the result
+    /// and appends the summary to it.
     ///
-    /// It used to send `sampling/createMessage` as a server-initiated JSON-RPC
-    /// request and block on the reply, which 2026-07-28 removed: *"Servers MUST
-    /// send server-to-client requests ... using the MRTR pattern. The previous
-    /// pattern of server-initiated requests is no longer supported."* So the
-    /// old shape had to go regardless.
+    /// # Why the result is carried rather than the call replayed
     ///
-    /// Converting it is a different job from converting the confirmation gate,
-    /// and the difference is structural rather than a matter of effort. The
-    /// gate runs BEFORE the tool does, so answering `input_required` and
-    /// replaying the whole call on the retry costs nothing. `sample()` is
-    /// called from the MIDDLE of `execute`, after the remote command has
-    /// already run, on output that does not exist until it has. To return
-    /// `input_required` from there, `ToolHandler::execute` would have to be
-    /// able to express "I need input" in its return type — it returns
-    /// `Result<ToolCallResult>` — and every retry would re-run the remote
-    /// command, since the server keeps no state between round trips.
+    /// The obvious MRTR shape — answer `input_required`, then re-run the tool
+    /// on the retry — is wrong here in a way that is easy to miss. The summary
+    /// would describe the FIRST run's output while the client is shown the
+    /// SECOND run's, and every caller of this method is a diagnostic that
+    /// changes between runs: process tables, journal tails, uptime, scan
+    /// timestamps. A summary of data the user is not looking at is worse than
+    /// no summary.
     ///
-    /// That refactor is a deliberate piece of work with its own trade-off to
-    /// weigh (a second remote execution per summary, or the command output
-    /// carried inside `requestState`). Leaving a non-conformant request on the
-    /// wire until it is done was not an option; leaving the seam documented is.
+    /// So the finished result travels in the state instead, and the remote
+    /// command runs exactly once. The state is signed, not encrypted — which is
+    /// fine, because its payload is a result this same client is about to be
+    /// handed anyway.
     ///
-    /// # Errors
-    ///
-    /// Never. The signature keeps its `Result` so the callers do not change
-    /// shape, and so restoring the round trip does not touch them again.
-    #[expect(
-        clippy::unused_async,
-        reason = "signature preserved for the MRTR conversion; see the doc above"
-    )]
-    pub async fn sample(
-        &self,
-        _prompt: &str,
-        _content: &str,
-        _max_tokens: u32,
-    ) -> Result<Option<String>> {
-        Ok(None)
+    /// Nothing is recorded when the client did not declare `sampling`: the
+    /// server MUST NOT put a request in `inputRequests` for a capability the
+    /// client has not declared, and a client that cannot answer would be asked
+    /// forever.
+    pub fn request_summary(&self, prompt: &str, content: &str, max_tokens: u32) {
+        if !self.client_supports_sampling {
+            return;
+        }
+        self.mrtr.record(crate::mcp::protocol::sampling_request(
+            prompt, content, max_tokens,
+        ));
     }
 
     /// Check if a path is within the declared client roots.
@@ -502,6 +567,7 @@ pub mod mock {
         ));
 
         ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,
@@ -556,6 +622,7 @@ pub mod mock {
         ));
 
         ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,
@@ -609,6 +676,7 @@ pub mod mock {
         ));
 
         ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,
@@ -653,6 +721,7 @@ pub mod mock {
         ));
 
         ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,
@@ -701,6 +770,59 @@ mod tests {
         assert!(ctx.progress_reporter(Some(5)).is_none());
     }
 
+    /// A client that did not declare `sampling` gets no request recorded.
+    ///
+    /// "Servers MUST NOT send an `inputRequests` that the client has not
+    /// declared support for in its capabilities" — and a client that cannot
+    /// answer would otherwise be asked on every retry, forever.
+    #[test]
+    fn no_summary_is_recorded_for_a_client_that_cannot_sample() {
+        let ctx = mock::create_test_context();
+        assert!(!ctx.client_supports_sampling, "fixture premise");
+        ctx.request_summary("p", "c", 100);
+        assert!(ctx.mrtr.is_empty());
+    }
+
+    /// A declaring client gets one `sampling/createMessage` recorded, shaped as
+    /// the `{method, params}` pair `inputRequests` holds.
+    #[test]
+    fn a_declaring_client_records_one_sampling_request() {
+        let mut ctx = mock::create_test_context();
+        ctx.client_supports_sampling = true;
+        ctx.request_summary("Summarise this", "the output", 256);
+
+        let pending = ctx.mrtr.take();
+        assert_eq!(pending.len(), 1);
+        let request = &pending["sample_0"];
+        assert_eq!(request["method"], "sampling/createMessage");
+        assert_eq!(request["params"]["systemPrompt"], "Summarise this");
+        assert_eq!(request["params"]["maxTokens"], 256);
+        assert_eq!(
+            request["params"]["messages"][0]["content"]["text"],
+            "the output"
+        );
+        // Taking empties the slot: the dispatcher lifts once.
+        assert!(ctx.mrtr.is_empty());
+    }
+
+    /// Keys are assigned by call ORDER, not derived from the content.
+    ///
+    /// A content-derived key would not survive the round trip: the answer comes
+    /// back against the key issued on the way out, and these tools summarise
+    /// output that differs between runs.
+    #[test]
+    fn recorded_keys_are_ordinal_and_unique() {
+        let mut ctx = mock::create_test_context();
+        ctx.client_supports_sampling = true;
+        ctx.request_summary("a", "1", 10);
+        ctx.request_summary("b", "2", 10);
+
+        let pending = ctx.mrtr.take();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.contains_key("sample_0"));
+        assert!(pending.contains_key("sample_1"));
+    }
+
     #[tokio::test]
     async fn test_mcp_logger_is_none_in_test_context() {
         let ctx = mock::create_test_context();
@@ -734,13 +856,6 @@ mod tests {
                 panic!("expected Notification")
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_sample_returns_none_without_tx() {
-        let ctx = mock::create_test_context();
-        let result = ctx.sample("p", "c", 100).await.unwrap();
-        assert_eq!(result, None);
     }
 
     #[test]
@@ -823,24 +938,6 @@ mod tests {
         let mut ctx = mock::create_test_context();
         ctx.roots = vec![root("file:///home/user/project", None)];
         assert!(ctx.validate_root_scope("/home/user/project").is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_sample_returns_quickly_when_unsupported() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let mut ctx = mock::create_test_context();
-        ctx.notification_tx = Some(tx);
-        // `sample()` no longer contacts the client at all — see its docs. The
-        // short-circuit this test guards is now unconditional rather than
-        // conditional on the capability, and the timeout is still the
-        // assertion that matters: it must not wait on anything.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            ctx.sample("p", "c", 100),
-        )
-        .await
-        .expect("must short-circuit and return without contacting the client");
-        assert_eq!(result.unwrap(), None);
     }
 
     #[test]

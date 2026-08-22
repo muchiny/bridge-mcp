@@ -19,6 +19,7 @@
 //! docker compose -f docker-compose.test.yml down -v
 //! ```
 
+use bridge_mcp::ports::MrtrSlot;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -135,6 +136,7 @@ fn build_docker_ctx() -> ToolContext {
     ));
 
     ToolContext {
+        mrtr: MrtrSlot::default(),
         config: Arc::new(config),
         validator,
         sanitizer,

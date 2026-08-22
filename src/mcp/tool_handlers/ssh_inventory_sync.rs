@@ -310,6 +310,7 @@ mod tests {
             Arc::clone(&history),
         ));
         crate::ports::ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,

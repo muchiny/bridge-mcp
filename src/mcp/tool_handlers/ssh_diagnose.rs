@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
 use crate::ports::ToolContext;
-use crate::ports::protocol::{ToolCallResult, ToolContent};
+use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
 pub struct SshDiagnoseArgs {
@@ -114,31 +114,11 @@ impl StandardTool for DiagnoseTool {
                       only, one line each, no preamble. Focus on disk \
                       pressure, failed services, OOM kills, and unexpected \
                       listeners.";
-        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
-            // Sampling unavailable — return raw result unchanged so the
-            // user still gets the full diagnostic.
-            return Ok(result);
-        };
-
-        // Concatenate the raw text content with the summary so both are
-        // visible in the response. App content / structured fields on
-        // the existing result are preserved by reusing the input as a
-        // base and only mutating the text body.
-        let mut text = String::new();
-        for content in &result.content {
-            if let ToolContent::Text { text: t } = content {
-                text.push_str(t);
-            }
-        }
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str("\n=== LLM SUMMARY ===\n");
-        text.push_str(&summary);
-        let mut enriched = ToolCallResult::text(text);
-        enriched.structured_content = result.structured_content;
-        enriched.is_error = result.is_error;
-        Ok(enriched)
+        // Recorded, not sent: the summary is attached by the dispatcher on
+        // the client's retry, so the remote command runs exactly once and
+        // the summary describes the output the caller is actually shown.
+        ctx.request_summary(prompt, output, max_tokens);
+        Ok(result)
     }
 }
 

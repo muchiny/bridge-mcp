@@ -13,6 +13,7 @@
 //! cargo test --test e2e_mock
 //! ```
 
+use bridge_mcp::ports::MrtrSlot;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -182,6 +183,7 @@ fn build_ctx_with_mode(
     ));
 
     ToolContext {
+        mrtr: MrtrSlot::default(),
         config: Arc::new(config),
         validator,
         sanitizer,

@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
 use crate::ports::ToolContext;
-use crate::ports::protocol::{ToolCallResult, ToolContent};
+use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
 pub struct SshComplianceCheckArgs {
@@ -123,24 +123,11 @@ impl StandardTool for ComplianceCheckTool {
                       controls from this report in bullet points, one line \
                       each, no preamble. Mention the CIS/STIG benchmark id \
                       when present and a 1-line remediation summary.";
-        let Some(summary) = ctx.sample(prompt, output, max_tokens).await? else {
-            return Ok(result);
-        };
-        let mut text = String::new();
-        for content in &result.content {
-            if let ToolContent::Text { text: t } = content {
-                text.push_str(t);
-            }
-        }
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str("\n=== LLM SUMMARY ===\n");
-        text.push_str(&summary);
-        let mut enriched = ToolCallResult::text(text);
-        enriched.structured_content = result.structured_content;
-        enriched.is_error = result.is_error;
-        Ok(enriched)
+        // Recorded, not sent: the summary is attached by the dispatcher on
+        // the client's retry, so the remote command runs exactly once and
+        // the summary describes the output the caller is actually shown.
+        ctx.request_summary(prompt, output, max_tokens);
+        Ok(result)
     }
 }
 

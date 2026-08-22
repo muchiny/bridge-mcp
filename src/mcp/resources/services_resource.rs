@@ -185,6 +185,7 @@ mod tests {
         ));
 
         ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,

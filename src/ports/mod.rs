@@ -24,7 +24,7 @@ pub use protocol::{
 };
 pub use resources::ResourceHandler;
 pub use ssh::{CommandOutput, SshExecutor};
-pub use tools::{ToolContext, ToolHandler, ToolSchema};
+pub use tools::{MrtrSlot, ToolContext, ToolHandler, ToolSchema};
 
 #[cfg(test)]
 pub use connector::mock::{MockSshClient, MockSshConnector};

@@ -12,6 +12,7 @@
 //! cargo test --test e2e_raspberry -- --ignored --test-threads=1
 //! ```
 
+use bridge_mcp::ports::MrtrSlot;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -198,6 +199,7 @@ mod rpi {
         ));
 
         ToolContext {
+            mrtr: MrtrSlot::default(),
             config: Arc::new(config),
             validator,
             sanitizer,
@@ -1062,6 +1064,7 @@ mod rpi {
         ));
 
         let ctx = ToolContext {
+            mrtr: MrtrSlot::default(),
             config: Arc::new(mcp_config),
             validator,
             sanitizer,
