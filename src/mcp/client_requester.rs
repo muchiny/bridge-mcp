@@ -3,6 +3,48 @@
 //! Service for sending JSON-RPC requests to the client and awaiting responses.
 //! Used by `ElicitationService` and `SamplingService` to implement
 //! server-to-client request/response patterns.
+//!
+//! # THIS ENTIRE MECHANISM IS THE PATTERN 2026-07-28 DELETED
+//!
+//! It is the largest known non-conformance left in this server, and it is
+//! recorded here rather than in a tracker because this file is where someone
+//! will look.
+//!
+//! Multi Round-Trip Requests opens by removing what this module does, in as
+//! many words: *"Servers **MUST** send server-to-client requests (such as
+//! `roots/list`, `sampling/createMessage`, or `elicitation/create`) using the
+//! MRTR pattern. The previous pattern of server-initiated requests is no
+//! longer supported. This is a breaking change."*
+//! (`/specification/2026-07-28/basic/patterns/mrtr`.) Streamable HTTP says the
+//! same from the transport side: *"The server **MUST NOT** send independent
+//! JSON-RPC requests on this stream."*
+//!
+//! MRTR inverts the direction. Instead of the server sending a request and
+//! blocking on the reply, it RETURNS `resultType: "input_required"` carrying
+//! an `inputRequests` map, and the client re-sends the original call — under a
+//! NEW JSON-RPC id, which the spec requires — with `inputResponses` and the
+//! opaque `requestState` the server handed back. Nothing is held open, which
+//! is the point: it works on a stateless transport with no sticky routing.
+//!
+//! Two callers are affected, and both are live:
+//!
+//! - `ElicitationService`, behind `security.require_elicitation_on_destructive`.
+//!   This one is a security control, so it is the one that matters: an
+//!   operator relying on destructive-op confirmation is relying on a flow no
+//!   conforming 2026-07-28 client is obliged to answer.
+//! - `McpServer::fetch_roots`, which sends `roots/list` unprompted.
+//!
+//! Converting is not a rename. `requestState` MUST be treated as
+//! attacker-controlled and integrity-protected when it influences
+//! authorization (HMAC or AEAD), and SHOULD carry the authenticated principal,
+//! a short TTL, and a digest of the originating request, each verified on
+//! receipt. That is key management and state encoding, and it changes the
+//! client contract of every destructive tool — a piece of work in its own
+//! right, not a fix to fold into one.
+//!
+//! Until then, `task_policy`'s rule 2 holds for this reason: promoting a
+//! destructive tool to a task would build confirmation-then-task on top of the
+//! deleted flow.
 
 use std::sync::Arc;
 use std::time::Duration;

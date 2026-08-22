@@ -1406,6 +1406,12 @@ impl McpServer {
     ///
     /// Always call via [`Self::spawn_fetch_roots`] from the reader loop —
     /// awaiting this inline deadlocks the session (audit 2026-08-02).
+    ///
+    /// NON-CONFORMANT AS WRITTEN: 2026-07-28 requires `roots/list` to be
+    /// carried by Multi Round-Trip Requests rather than sent as a
+    /// server-initiated request, which is what this does. Against a strictly
+    /// conforming client the roots simply come back empty. See
+    /// [`crate::mcp::client_requester`] for the quote and the scope.
     async fn fetch_roots(session: &SessionContext) {
         if !session.supports_roots() {
             return;

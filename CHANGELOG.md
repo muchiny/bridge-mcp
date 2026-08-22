@@ -321,6 +321,46 @@ corrections, and the five command-injection sites.
   `logging/setLevel`, `notifications/roots/list_changed`,
   `resources/subscribe`, `resources/unsubscribe`.
 
+### Known non-conformance
+
+- **Server-to-client requests still use the pattern 2026-07-28 deleted.**
+  This is the largest known gap in the release and it is not fixed here.
+
+  Multi Round-Trip Requests opens by removing it outright: *"Servers MUST send
+  server-to-client requests (such as `roots/list`, `sampling/createMessage`,
+  or `elicitation/create`) using the MRTR pattern. The previous pattern of
+  server-initiated requests is no longer supported. This is a breaking
+  change."* Streamable HTTP repeats it from the transport side: *"The server
+  MUST NOT send independent JSON-RPC requests on this stream."*
+
+  bridge-mcp sends both `elicitation/create` and `roots/list` as
+  server-initiated JSON-RPC requests through `ClientRequester` and blocks on
+  the reply. MRTR inverts the direction — the server RETURNS `resultType:
+  "input_required"` with an `inputRequests` map and an opaque `requestState`,
+  and the client re-sends the original call under a NEW id with
+  `inputResponses` attached.
+
+  What this costs you today: `security.require_elicitation_on_destructive` is
+  a security control that asks for confirmation over a flow no conforming
+  2026-07-28 client is obliged to answer. If you rely on it, verify your
+  client still honours server-initiated `elicitation/create` before upgrading.
+  Client roots are fetched the same way and will simply come back empty
+  against a strictly conforming client.
+
+  It is not fixed in 3.0.0 because converting it is not a rename.
+  `requestState` MUST be treated as attacker-controlled and
+  integrity-protected where it influences authorization, and SHOULD carry the
+  authenticated principal, a short TTL and a digest of the originating
+  request — key management and state encoding, changing the client contract of
+  every destructive tool. Shipping that unreviewed at the end of a fix sweep
+  would be worse than naming it.
+
+  Consequence recorded elsewhere in this release: `task_policy`'s rule 2
+  (no `destructive_hint: true` tool may be promoted to a task) holds for this
+  reason, not for the one earlier revisions of that file claimed. The MRTR
+  page says nothing about tasks or destructive operations; the blocker is
+  local, and it is this.
+
 ## [2.2.0] - 2026-08-19
 
 Major version because this release breaks compatibility in **21 places, ten
