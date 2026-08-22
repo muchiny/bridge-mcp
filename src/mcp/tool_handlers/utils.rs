@@ -245,6 +245,68 @@ impl ParsedTable {
     }
 }
 
+/// Keep only the app-table columns whose source survived the parse.
+///
+/// Handlers declare `(key, label, index)`, where `index` is the position of the
+/// source header in the parsed table. A `None` index is dropped from BOTH the
+/// column list and every row.
+///
+/// # Why dropping is right and blanking is not
+///
+/// The app table used to be declared with a fixed column list and the rows
+/// built from a table that [`maybe_reduce_table`] may have narrowed. A column
+/// the caller filtered out with `columns=` was still announced, and every row
+/// carried `""` for it — so the structured view said "this field exists and is
+/// empty" about data the caller had asked not to receive. A client rendering it
+/// shows blank cells; one reading it cannot tell an absent column from a
+/// genuinely empty value.
+#[must_use]
+pub fn present_columns<'a>(
+    spec: &[(&'a str, &'a str, Option<usize>)],
+) -> Vec<(&'a str, &'a str, usize)> {
+    spec.iter()
+        .filter_map(|(key, label, index)| index.map(|i| (*key, *label, i)))
+        .collect()
+}
+
+/// Build one app-table row object from the columns that survived.
+#[must_use]
+pub fn row_from(
+    live: &[(&str, &str, usize)],
+    row: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    live.iter()
+        .map(|(key, _, index)| {
+            let cell = row.get(*index).map_or("", String::as_str);
+            (
+                (*key).to_string(),
+                serde_json::Value::String(cell.to_string()),
+            )
+        })
+        .collect()
+}
+
+/// Whether a header is absent because the CALLER filtered it out.
+///
+/// Several handlers recover an identity column positionally when the header
+/// lookup misses — `docker ps` always emits NAMES last, `docker stats` emits
+/// NAME second. That recovery is correct for a PARSER miss (a wide value merges
+/// two columns) and actively wrong after a `columns=` reduction: the cell at
+/// that fixed position now belongs to a different column, so the fallback would
+/// report a container named `Up 3 hours`.
+///
+/// Returns `true` only when a reduction was requested AND `header` is not in
+/// it — the one case where the absence is deliberate.
+#[must_use]
+pub fn filtered_out_by_caller(
+    header: &str,
+    dr: &crate::domain::data_reduction::DataReductionArgs,
+) -> bool {
+    dr.columns
+        .as_ref()
+        .is_some_and(|cols| !cols.iter().any(|c| c.eq_ignore_ascii_case(header)))
+}
+
 /// Apply column filter and row limit to a `ParsedTable` from data reduction args.
 #[must_use]
 pub fn maybe_reduce_table(
@@ -497,6 +559,69 @@ pub fn parse_fixed_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============== app-table column selection ==============
+
+    #[test]
+    fn present_columns_drops_the_ones_with_no_source() {
+        let live = present_columns(&[
+            ("user", "User", Some(0)),
+            ("pid", "PID", None),
+            ("command", "Command", Some(2)),
+        ]);
+        assert_eq!(live, vec![("user", "User", 0), ("command", "Command", 2)]);
+    }
+
+    #[test]
+    fn row_from_emits_only_the_surviving_keys() {
+        let live = vec![("user", "User", 0), ("command", "Command", 2)];
+        let row = vec![
+            "root".to_string(),
+            "1".to_string(),
+            "/sbin/init".to_string(),
+        ];
+        let obj = row_from(&live, &row);
+        assert_eq!(obj.len(), 2, "{obj:?}");
+        assert_eq!(obj["user"], "root");
+        assert_eq!(obj["command"], "/sbin/init");
+        assert!(!obj.contains_key("pid"), "a dropped column must be ABSENT");
+    }
+
+    /// A short row does not panic; the missing cell reads empty.
+    #[test]
+    fn row_from_tolerates_a_row_shorter_than_the_header() {
+        let live = vec![("a", "A", 0), ("b", "B", 5)];
+        let obj = row_from(&live, &["x".to_string()]);
+        assert_eq!(obj["a"], "x");
+        assert_eq!(obj["b"], "");
+    }
+
+    /// THE GUARD for the positional fallbacks. `docker ps` recovers NAMES from
+    /// the last cell when the parser merges columns — correct for a parse miss,
+    /// and wrong after a reduction, where the last cell is a different column.
+    #[test]
+    fn filtered_out_is_true_only_when_the_caller_asked_for_a_subset() {
+        let none = crate::domain::data_reduction::DataReductionArgs::default();
+        assert!(
+            !filtered_out_by_caller("names", &none),
+            "no reduction requested: absence is a parser miss, recovery is allowed"
+        );
+
+        let subset = crate::domain::data_reduction::DataReductionArgs {
+            columns: Some(vec!["STATUS".to_string()]),
+            ..Default::default()
+        };
+        assert!(
+            filtered_out_by_caller("names", &subset),
+            "the caller excluded it: recovery must not fire"
+        );
+        assert!(
+            !filtered_out_by_caller("status", &subset),
+            "the caller kept it"
+        );
+        // Header matching is case-insensitive on both sides.
+        assert!(!filtered_out_by_caller("STATUS", &subset));
+    }
 
     #[test]
     fn test_parse_transfer_mode_rejects_verify_checksum_with_resume() {

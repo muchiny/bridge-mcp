@@ -107,46 +107,67 @@ impl StandardTool for DockerStatsTool {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
-        let mut tbl = table("Docker Stats")
-            .column("name", "Name")
-            .column("cpu", "CPU %")
-            .column("mem_usage", "Mem Usage")
-            .column("mem_pct", "Mem %")
-            .column("net_io", "Net I/O")
-            .column("block_io", "Block I/O")
-            .column("pids", "PIDs");
-
         let name_idx = parsed.headers.iter().position(|h| h == "name");
-        let cpu_idx = parsed.headers.iter().position(|h| h == "cpu %");
-        let mem_usage_idx = parsed
-            .headers
-            .iter()
-            .position(|h| h.starts_with("mem usage"));
-        let mem_pct_idx = parsed.headers.iter().position(|h| h == "mem %");
-        let net_idx = parsed.headers.iter().position(|h| h == "net i/o");
-        let block_idx = parsed.headers.iter().position(|h| h == "block i/o");
-        let pids_idx = parsed.headers.iter().position(|h| h == "pids");
+        // `docker stats` emits NAME second (after CONTAINER ID), so a missed
+        // header lookup is recoverable by position. NOT once the caller filtered
+        // `name` out — cell 1 then belongs to a different column.
+        let recover_name = name_idx.is_none() && !super::utils::filtered_out_by_caller("name", dr);
+
+        let live = super::utils::present_columns(&[
+            (
+                "cpu",
+                "CPU %",
+                parsed.headers.iter().position(|h| h == "cpu %"),
+            ),
+            (
+                "mem_usage",
+                "Mem Usage",
+                parsed
+                    .headers
+                    .iter()
+                    .position(|h| h.starts_with("mem usage")),
+            ),
+            (
+                "mem_pct",
+                "Mem %",
+                parsed.headers.iter().position(|h| h == "mem %"),
+            ),
+            (
+                "net_io",
+                "Net I/O",
+                parsed.headers.iter().position(|h| h == "net i/o"),
+            ),
+            (
+                "block_io",
+                "Block I/O",
+                parsed.headers.iter().position(|h| h == "block i/o"),
+            ),
+            (
+                "pids",
+                "PIDs",
+                parsed.headers.iter().position(|h| h == "pids"),
+            ),
+        ]);
+
+        let mut tbl = table("Docker Stats");
+        if name_idx.is_some() || recover_name {
+            tbl = tbl.column("name", "Name");
+        }
+        for (key, label, _) in &live {
+            tbl = tbl.column(*key, *label);
+        }
 
         for row in &parsed.rows {
-            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            // `docker stats` emits NAME as the second column (after CONTAINER
-            // ID). Recover it positionally if the header lookup missed, rather
-            // than dropping every row.
             let name = match name_idx {
                 Some(i) => row.get(i).map_or("", String::as_str),
-                None => row.get(1).map_or("", String::as_str),
+                None if recover_name => row.get(1).map_or("", String::as_str),
+                None => "",
             };
             if !name.is_empty() {
+                let mut fields = super::utils::row_from(&live, row);
+                fields.insert("name".to_string(), json!(name));
                 tbl = tbl
-                    .row(json!({
-                        "name": name,
-                        "cpu": get(cpu_idx),
-                        "mem_usage": get(mem_usage_idx),
-                        "mem_pct": get(mem_pct_idx),
-                        "net_io": get(net_idx),
-                        "block_io": get(block_idx),
-                        "pids": get(pids_idx),
-                    }))
+                    .row(serde_json::Value::Object(fields))
                     .action(
                         format!("logs-{name}"),
                         format!("Logs {name}"),

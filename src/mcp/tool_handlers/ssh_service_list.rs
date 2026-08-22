@@ -105,28 +105,37 @@ impl StandardTool for ServiceListTool {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
-        let mut tbl = table("Systemd Services")
-            .column("unit", "Unit")
-            .column("load", "Load")
-            .column("active", "Active")
-            .column("sub", "Sub");
+        let live = super::utils::present_columns(&[
+            (
+                "unit",
+                "Unit",
+                parsed.headers.iter().position(|h| h == "unit"),
+            ),
+            (
+                "load",
+                "Load",
+                parsed.headers.iter().position(|h| h == "load"),
+            ),
+            (
+                "active",
+                "Active",
+                parsed.headers.iter().position(|h| h == "active"),
+            ),
+            ("sub", "Sub", parsed.headers.iter().position(|h| h == "sub")),
+        ]);
 
-        let unit_idx = parsed.headers.iter().position(|h| h == "unit");
-        let load_idx = parsed.headers.iter().position(|h| h == "load");
-        let active_idx = parsed.headers.iter().position(|h| h == "active");
-        let sub_idx = parsed.headers.iter().position(|h| h == "sub");
+        let mut tbl = table("Systemd Services");
+        for (key, label, _) in &live {
+            tbl = tbl.column(*key, *label);
+        }
 
         for row in &parsed.rows {
             if row.iter().all(String::is_empty) {
                 continue;
             }
-            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            tbl = tbl.row(json!({
-                "unit": get(unit_idx),
-                "load": get(load_idx),
-                "active": get(active_idx),
-                "sub": get(sub_idx),
-            }));
+            tbl = tbl.row(serde_json::Value::Object(super::utils::row_from(
+                &live, row,
+            )));
         }
         tbl = tbl.action(
             "refresh",

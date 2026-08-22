@@ -121,37 +121,57 @@ impl StandardTool for ProcessListTool {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
-        let mut tbl = table("Processes")
-            .column("user", "User")
-            .column("pid", "PID")
-            .column("cpu", "%CPU")
-            .column("mem", "%MEM")
-            .column("command", "Command");
-
         let user_idx = parsed.headers.iter().position(|h| h == "user");
-        let pid_idx = parsed.headers.iter().position(|h| h == "pid");
-        let cpu_idx = parsed.headers.iter().position(|h| h == "%cpu");
-        let mem_idx = parsed.headers.iter().position(|h| h == "%mem");
-        let cmd_idx = parsed.headers.iter().position(|h| h == "command");
+        // The user-filter schema (`ps -u U -o ...`) omits the USER column, and
+        // every returned process belongs to the requested user — so the column
+        // is still meaningful, with a constant value. Not synthesised when the
+        // CALLER filtered `user` out: they asked not to receive it.
+        let implied_user = (user_idx.is_none()
+            && !super::utils::filtered_out_by_caller("user", dr))
+        .then(|| args.user.clone())
+        .flatten();
+
+        let live = super::utils::present_columns(&[
+            ("pid", "PID", parsed.headers.iter().position(|h| h == "pid")),
+            (
+                "cpu",
+                "%CPU",
+                parsed.headers.iter().position(|h| h == "%cpu"),
+            ),
+            (
+                "mem",
+                "%MEM",
+                parsed.headers.iter().position(|h| h == "%mem"),
+            ),
+            (
+                "command",
+                "Command",
+                parsed.headers.iter().position(|h| h == "command"),
+            ),
+        ]);
+
+        let mut tbl = table("Processes");
+        if user_idx.is_some() || implied_user.is_some() {
+            tbl = tbl.column("user", "User");
+        }
+        for (key, label, _) in &live {
+            tbl = tbl.column(*key, *label);
+        }
 
         for row in &parsed.rows {
             if row.iter().all(String::is_empty) {
                 continue;
             }
-            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            // The user-filter schema (`ps -u U -o ...`) omits the USER column;
-            // fall back to the requested user, who owns every returned process.
-            let user = match user_idx {
-                Some(i) => row.get(i).map_or("", String::as_str),
-                None => args.user.as_deref().unwrap_or(""),
-            };
-            tbl = tbl.row(json!({
-                "user": user,
-                "pid": get(pid_idx),
-                "cpu": get(cpu_idx),
-                "mem": get(mem_idx),
-                "command": get(cmd_idx),
-            }));
+            let mut fields = super::utils::row_from(&live, row);
+            if let Some(i) = user_idx {
+                fields.insert(
+                    "user".to_string(),
+                    json!(row.get(i).map_or("", String::as_str)),
+                );
+            } else if let Some(ref user) = implied_user {
+                fields.insert("user".to_string(), json!(user));
+            }
+            tbl = tbl.row(serde_json::Value::Object(fields));
         }
         tbl = tbl.action(
             "refresh",
@@ -393,6 +413,86 @@ muchini  2411977  0.0  0.0   2772  1664 ?        S    22:06   0:00 sshd-session\
         );
         assert!(serialized.contains("2411977"), "7-digit PID row missing");
         assert!(serialized.contains("/usr/lib/systemd/systemd --system"));
+    }
+
+    /// The app table's `data`, found by CONTENT TYPE rather than by index —
+    /// the text item's position is not part of any contract.
+    fn app_table(result: &crate::ports::protocol::ToolCallResult) -> serde_json::Value {
+        let serialized = serde_json::to_value(result).expect("serialisable");
+        serialized["content"]
+            .as_array()
+            .expect("content array")
+            .iter()
+            .find(|item| item["type"] == "app")
+            .expect("an app content item")["app"]["data"]
+            .clone()
+    }
+
+    /// REGRESSION. A `columns=` reduction used to leave the app table
+    /// announcing every column and filling the removed ones with `""`, so the
+    /// structured view said "this field exists and is empty" about data the
+    /// caller had asked not to receive.
+    #[test]
+    fn a_column_reduction_drops_the_columns_it_removed() {
+        let output = "USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\n\
+root           1  0.0  0.1  26336 16336 ?        Ss   May25  15:49 /sbin/init\n";
+        let args: SshProcessListArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
+        let dr = crate::domain::data_reduction::DataReductionArgs {
+            columns: Some(vec!["USER".to_string(), "COMMAND".to_string()]),
+            ..Default::default()
+        };
+        let result = ProcessListTool::post_process(
+            crate::ports::protocol::ToolCallResult::text("raw"),
+            &args,
+            output,
+            &dr,
+        );
+        let table = app_table(&result);
+        let table = &table;
+
+        let keys: Vec<&str> = table["columns"]
+            .as_array()
+            .expect("columns")
+            .iter()
+            .filter_map(|c| c["key"].as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            ["user", "command"],
+            "only the kept columns may be announced: {table}"
+        );
+
+        let row = &table["rows"][0];
+        assert_eq!(row["user"], "root");
+        assert_eq!(row["command"], "/sbin/init");
+        for gone in ["pid", "cpu", "mem"] {
+            assert!(
+                row.get(gone).is_none(),
+                "`{gone}` was filtered out and must be absent, not empty: {row}"
+            );
+        }
+    }
+
+    /// The positive twin: with no reduction, every column is still there.
+    /// Without this, dropping all columns unconditionally would pass the test
+    /// above.
+    #[test]
+    fn no_reduction_keeps_every_column() {
+        let output = "USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\n\
+root           1  0.0  0.1  26336 16336 ?        Ss   May25  15:49 /sbin/init\n";
+        let args: SshProcessListArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
+        let result = ProcessListTool::post_process(
+            crate::ports::protocol::ToolCallResult::text("raw"),
+            &args,
+            output,
+            &crate::domain::data_reduction::DataReductionArgs::default(),
+        );
+        let table = app_table(&result);
+        let row = &table["rows"][0];
+        assert_eq!(row["user"], "root");
+        assert_eq!(row["pid"], "1");
+        assert_eq!(row["mem"], "0.1");
+        assert_eq!(row["command"], "/sbin/init");
     }
 
     // ============== Full Pipeline Test ==============

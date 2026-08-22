@@ -113,34 +113,53 @@ impl StandardTool for DockerPsTool {
             return result;
         };
         let parsed = super::utils::maybe_reduce_table(parsed, dr);
-        let mut tbl = table("Docker Containers")
-            .column("name", "Name")
-            .column("image", "Image")
-            .column("status", "Status")
-            .column("ports", "Ports");
-
         let name_idx = parsed.headers.iter().position(|h| h == "names");
-        let image_idx = parsed.headers.iter().position(|h| h == "image");
-        let status_idx = parsed.headers.iter().position(|h| h == "status");
-        let ports_idx = parsed.headers.iter().position(|h| h == "ports");
+        // `docker ps` always emits NAMES as the final column, so a missing
+        // header lookup is recoverable positionally — a wide image or name
+        // merges two columns in the space-gutter parser, and dropping every row
+        // over it would be worse. NOT recoverable once the caller filtered
+        // `names` out with `columns=`: the last cell then belongs to another
+        // column, and the table would report a container named `Up 3 hours`.
+        let recover_name = name_idx.is_none() && !super::utils::filtered_out_by_caller("names", dr);
+
+        let live = super::utils::present_columns(&[
+            (
+                "image",
+                "Image",
+                parsed.headers.iter().position(|h| h == "image"),
+            ),
+            (
+                "status",
+                "Status",
+                parsed.headers.iter().position(|h| h == "status"),
+            ),
+            (
+                "ports",
+                "Ports",
+                parsed.headers.iter().position(|h| h == "ports"),
+            ),
+        ]);
+
+        let mut tbl = table("Docker Containers");
+        if name_idx.is_some() || recover_name {
+            tbl = tbl.column("name", "Name");
+        }
+        for (key, label, _) in &live {
+            tbl = tbl.column(*key, *label);
+        }
 
         for row in &parsed.rows {
-            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map_or("", String::as_str);
-            // `docker ps` always emits NAMES as the final column. If the header
-            // lookup missed (e.g. a wide image/name merged columns in the
-            // space-gutter parser), recover the name positionally rather than
-            // dropping every row.
             let name = match name_idx {
                 Some(i) => row.get(i).map_or("", String::as_str),
-                None => row.last().map_or("", String::as_str),
+                None if recover_name => row.last().map_or("", String::as_str),
+                None => "",
             };
-            let image = get(image_idx);
-            let status = get(status_idx);
-            let ports = get(ports_idx);
 
             if !name.is_empty() {
+                let mut fields = super::utils::row_from(&live, row);
+                fields.insert("name".to_string(), json!(name));
                 tbl = tbl
-                    .row(json!({"name": name, "image": image, "status": status, "ports": ports}))
+                    .row(serde_json::Value::Object(fields))
                     .action(
                         format!("logs-{name}"),
                         format!("Logs {name}"),
