@@ -1174,6 +1174,29 @@ impl McpServer {
         }
     }
 
+    /// How many subscriptions are live, across all sessions.
+    ///
+    /// Exists so an HTTP test can prove the STREAM GUARD actually fires. That
+    /// guarantee has no other observable: the guard runs on `Drop`, and
+    /// without a count the only way to "test" it would be to assert the guard
+    /// exists, which asserts nothing about whether it runs.
+    #[cfg(test)]
+    pub(crate) fn live_subscription_count(&self) -> usize {
+        self.subscriptions.len()
+    }
+
+    /// Drop every subscription registered against `tx`.
+    ///
+    /// `serve_session` reaches the registry directly, because it owns the
+    /// session and the teardown. The HTTP transport does not: an accepted
+    /// `subscriptions/listen` there lives for exactly as long as its SSE
+    /// response body, so the cleanup belongs to a guard owned by the STREAM.
+    /// This is the seam that lets the guard do it without exposing the
+    /// registry itself.
+    pub(crate) fn remove_subscriptions_for_tx(&self, tx: &mpsc::Sender<WriterMessage>) -> usize {
+        self.subscriptions.remove_for_tx(tx)
+    }
+
     /// Whether a finished request's response should be written back.
     ///
     /// MCP: after a `notifications/cancelled`, the receiver SHOULD NOT send

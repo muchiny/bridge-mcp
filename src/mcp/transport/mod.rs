@@ -34,8 +34,6 @@ pub mod http;
 pub mod oauth;
 
 #[cfg(feature = "http")]
-pub mod session_store;
-
 use async_trait::async_trait;
 
 use super::protocol::{IncomingMessage, WriterMessage};

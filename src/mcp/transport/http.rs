@@ -1,11 +1,19 @@
-//! Streamable HTTP Transport (MCP 2025-11-25)
+//! Streamable HTTP Transport (MCP 2026-07-28)
 //!
-//! Implements the MCP Streamable HTTP transport:
-//! - `POST /mcp` — Receive JSON-RPC requests, return responses
-//! - `GET /mcp` — SSE stream for server-to-client notifications
-//! - `DELETE /mcp` — Close a session
+//! `POST /mcp` is the whole transport. A request answers with
+//! `application/json`, except `subscriptions/listen`, which answers with a
+//! long-lived `text/event-stream` on its own response body.
 //!
-//! Sessions are identified by the `Mcp-Session-Id` header.
+//! THERE IS NO SESSION. 2026-07-28 made MCP stateless: every request carries
+//! its protocol version, client identity and client capabilities in `_meta`,
+//! and the spec forbids inferring them from earlier requests. So there is
+//! nothing for an `Mcp-Session-Id` to key, and `GET`/`DELETE` on `/mcp`
+//! answer `405`.
+//!
+//! What the GET endpoint used to do — carry server-to-client notifications —
+//! is now `subscriptions/listen`'s job, per the changelog: *"Replace the HTTP
+//! GET endpoint and `resources/subscribe`/`resources/unsubscribe` with
+//! `subscriptions/listen`."*
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -35,7 +43,6 @@ use tracing::{info, warn};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator};
-use super::session_store::{InMemorySessionStore, SessionData, SessionStore};
 
 use crate::mcp::protocol::{
     IncomingMessage, JsonRpcError, JsonRpcMessage, JsonRpcResponse, PROTOCOL_VERSION,
@@ -45,6 +52,7 @@ use crate::mcp::request_meta::{
     MISSING_CLIENT_CAPABILITIES_MSG, lacks_required_client_capabilities,
 };
 use crate::mcp::server::McpServer;
+use crate::mcp::session_context::SessionContext;
 
 /// Default allowlist for the `Origin` header — localhost variants only.
 ///
@@ -114,9 +122,6 @@ impl Default for HttpTransportConfig {
 
 /// Shared state for the HTTP transport.
 pub struct HttpTransportState {
-    /// Pluggable session backing store (in-memory today, Redis/Valkey
-    /// once the June 2026 stateless-transport proposal lands).
-    sessions: Arc<dyn SessionStore>,
     config: HttpTransportConfig,
     /// The MCP server processes requests from any session.
     server: Arc<McpServer>,
@@ -190,7 +195,7 @@ fn forbidden(message: &str) -> Response {
 /// misconfiguration loudly instead of silently rejecting tokens with
 /// "Unknown JWT signing key" (FIND-006).
 pub fn build_router(server: Arc<McpServer>, config: HttpTransportConfig) -> Router {
-    build_router_with_store(server, config, Arc::new(InMemorySessionStore::new()), None)
+    build_router_inner(server, config, None)
 }
 
 /// Build the axum Router with a pre-built [`OAuthValidator`] installed
@@ -201,27 +206,25 @@ pub fn build_router_with_validator(
     config: HttpTransportConfig,
     validator: &Arc<OAuthValidator>,
 ) -> Router {
-    build_router_with_store(
-        server,
-        config,
-        Arc::new(InMemorySessionStore::new()),
-        Some(validator),
-    )
+    build_router_inner(server, config, Some(validator))
 }
 
-/// Variant of [`build_router`] that accepts a caller-provided session
-/// store. Useful for tests and for future shared-store deployments
-/// (Redis, Valkey, …) once the stateless-transport spec lands.
-pub fn build_router_with_store(
+/// RETIRES `build_router_with_store`, whose whole reason for existing was a
+/// caller-provided session store.
+///
+/// Its doc comment said it was there "for future shared-store deployments
+/// (Redis, Valkey, …) once the stateless-transport spec lands". That spec has
+/// landed, and it did the opposite of what the comment anticipated: it removed
+/// sessions rather than distributing them, so the abstraction has nothing left
+/// to abstract.
+fn build_router_inner(
     server: Arc<McpServer>,
     config: HttpTransportConfig,
-    sessions: Arc<dyn SessionStore>,
     validator: Option<&Arc<OAuthValidator>>,
 ) -> Router {
     let oauth_config = Arc::new(config.oauth.clone());
 
     let state = Arc::new(HttpTransportState {
-        sessions,
         config,
         server,
         oauth: Arc::clone(&oauth_config),
@@ -229,8 +232,8 @@ pub fn build_router_with_store(
 
     let mut router = Router::new()
         .route("/mcp", post(handle_post))
-        .route("/mcp", get(handle_sse))
-        .route("/mcp", delete(handle_delete));
+        .route("/mcp", get(mcp_method_not_allowed))
+        .route("/mcp", delete(mcp_method_not_allowed));
 
     // Add OAuth middleware if enabled
     if oauth_config.enabled {
@@ -417,19 +420,6 @@ fn refuse_unsafe_bind(config: &HttpTransportConfig) -> crate::error::Result<()> 
     Ok(())
 }
 
-/// Extract or create session ID from headers.
-fn get_session_id(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-}
-
-/// Generate a new session ID.
-fn new_session_id() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
-
 /// Methods that must also carry `Mcp-Name`, and where its value comes from.
 ///
 /// The spec's table is exact: `Mcp-Name` mirrors `params.name` or
@@ -546,6 +536,33 @@ fn check_modern_headers(headers: &HeaderMap, body: &Value) -> Result<(), JsonRpc
     Ok(())
 }
 
+/// `GET` and `DELETE` on `/mcp` — gone, and answered as gone.
+///
+/// `GET` used to serve the SSE notification stream and `DELETE` used to close
+/// a session. 2026-07-28 removed both: notifications moved onto
+/// `subscriptions/listen`'s own POST response, and there is no session to
+/// close.
+///
+/// `405` with an `Allow` header rather than `404`, because the path exists and
+/// the METHOD does not — a `404` would tell a client the endpoint is absent
+/// and send it looking for another one.
+async fn mcp_method_not_allowed() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(axum::http::header::ALLOW, "POST")],
+        Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32600,
+                "message": "MCP 2026-07-28 has no GET or DELETE on /mcp: \
+                            notifications arrive on the subscriptions/listen \
+                            POST response, and there is no session to close"
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// POST /mcp — Handle JSON-RPC requests.
 #[allow(clippy::too_many_lines)]
 async fn handle_post(
@@ -619,42 +636,6 @@ async fn handle_post(
         }
     };
 
-    // Get or create session
-    let session_id = get_session_id(&headers).unwrap_or_else(new_session_id);
-
-    // Check if this is the opening request — create session.
-    // 2026-07-28 replaced `initialize` with `server/discover` as the first
-    // message on the wire; keying off the old name here meant every Modern
-    // client got a session id header for a session that was never created.
-    let is_initialize = match &incoming {
-        IncomingMessage::Single(msg) => msg.method.as_deref() == Some("server/discover"),
-        IncomingMessage::Batch(_) => false,
-    };
-
-    if is_initialize {
-        if state.sessions.count().await >= state.config.max_sessions {
-            let resp = JsonRpcResponse::error(
-                None,
-                JsonRpcError::internal_error("Maximum sessions reached"),
-            );
-            return Json(resp).into_response();
-        }
-
-        // Create session channels
-        let (notif_tx, _notif_rx) = mpsc::channel::<WriterMessage>(100);
-
-        state
-            .sessions
-            .insert(
-                session_id.clone(),
-                SessionData {
-                    notification_tx: notif_tx,
-                    created_at: std::time::Instant::now(),
-                },
-            )
-            .await;
-    }
-
     // Process the request through the MCP server
     match incoming {
         IncomingMessage::Single(msg) => {
@@ -705,6 +686,14 @@ async fn handle_post(
                 method: msg.method.unwrap_or_default(),
                 params: msg.params,
             };
+
+            // The one method whose answer is a STREAM rather than a value.
+            // Routed before the generic dispatch because everything below
+            // assumes a single completed response.
+            if request.method == "subscriptions/listen" {
+                return serve_listen_stream(&state, request).await;
+            }
+
             let resp = state.server.handle_request(request).await;
             if is_notification {
                 // §5: "the receiver must not send a response to a
@@ -715,14 +704,7 @@ async fn handle_post(
                 // all-notifications batch.
                 return StatusCode::ACCEPTED.into_response();
             }
-            let mut response = Json(resp).into_response();
-            response.headers_mut().insert(
-                "mcp-session-id",
-                session_id
-                    .parse()
-                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("")),
-            );
-            response
+            Json(resp).into_response()
         }
         IncomingMessage::Batch(msgs) => {
             let mut responses = Vec::new();
@@ -749,36 +731,89 @@ async fn handle_post(
                 // no body, not `200` with an empty `[]`.
                 return StatusCode::ACCEPTED.into_response();
             }
-            let mut response = Json(responses).into_response();
-            response.headers_mut().insert(
-                "mcp-session-id",
-                session_id
-                    .parse()
-                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("")),
-            );
-            response
+            Json(responses).into_response()
         }
     }
 }
 
-/// GET /mcp — SSE stream for server-to-client notifications.
-async fn handle_sse(State(state): State<Arc<HttpTransportState>>, headers: HeaderMap) -> Response {
-    let Some(session_id) = get_session_id(&headers) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
+/// Removes this stream's subscriptions when the stream is dropped.
+///
+/// It MUST be owned by the stream, not by the handler that builds it. A guard
+/// held in a local would run its `Drop` the moment the handler returns —
+/// which is immediately, since the handler returns the stream — and the
+/// subscription would be gone before the first notification.
+///
+/// Dropping happens on every way out: the client closing the connection,
+/// hyper dropping the body, or the response being cancelled. That is the
+/// whole reason this is RAII rather than an explicit teardown call.
+struct SubscriptionStreamGuard {
+    server: Arc<McpServer>,
+    tx: mpsc::Sender<WriterMessage>,
+}
 
-    // Create a notification channel for this SSE connection
-    let (notif_tx, notif_rx) = mpsc::channel::<WriterMessage>(100);
+impl Drop for SubscriptionStreamGuard {
+    fn drop(&mut self) {
+        let removed = self.server.remove_subscriptions_for_tx(&self.tx);
+        if removed > 0 {
+            info!(
+                removed,
+                "subscriptions/listen stream closed, subscriptions dropped"
+            );
+        }
+    }
+}
 
-    // Swap the session's notification channel. 404 if the client
-    // connects to SSE before `initialize` (or after `DELETE`).
-    if !state.sessions.update_tx(&session_id, notif_tx).await {
-        return StatusCode::NOT_FOUND.into_response();
+/// Serve an accepted `subscriptions/listen` as the POST's own response body.
+///
+/// 2026-07-28 replaced the standalone `GET` endpoint with this: *"Replace the
+/// HTTP GET endpoint and `resources/subscribe`/`resources/unsubscribe` with
+/// `subscriptions/listen`: a single long-lived POST-response stream for
+/// opted-in server-to-client change notifications."*
+///
+/// The content type is forced rather than quoted. The normative rule is a
+/// disjunction for any request — the server *"**MUST** return either
+/// `Content-Type: application/json` ... or `Content-Type: text/event-stream`"*
+/// — and the listen-specific text then states as fact that *"The server's
+/// response is itself an SSE stream that stays open"*. A single JSON object
+/// cannot stay open, so SSE is the only member of that disjunction which can
+/// satisfy it; there is no sentence saying "MUST be text/event-stream", and
+/// this comment does not invent one.
+///
+/// A REJECTED listen answers normally, as JSON. It has no stream to hold open
+/// and pretending otherwise would leave the client waiting on a body that
+/// will never carry anything.
+///
+/// The request id is deliberately NOT answered on acceptance: it is the
+/// subscription id, and it stays open for the life of the stream. The first
+/// thing the client sees is the acknowledgement NOTIFICATION, which the
+/// dispatcher has already written into the channel by the time this returns.
+async fn serve_listen_stream(
+    state: &Arc<HttpTransportState>,
+    request: crate::mcp::protocol::JsonRpcRequest,
+) -> Response {
+    let (tx, rx) = mpsc::channel::<WriterMessage>(100);
+    let session = SessionContext::new(tx.clone());
+
+    let outcome = state
+        .server
+        .handle_request_with_cancel(request, None, Some(&session))
+        .await;
+
+    if let Some(response) = outcome {
+        // Refused — answer it and let the channel die with this scope.
+        return Json(response).into_response();
     }
 
-    // Convert channel to SSE stream of Result<Event, Infallible>
-    let stream = ReceiverStream::new(notif_rx);
-    let sse_stream = tokio_stream::StreamExt::filter_map(stream, |msg| {
+    let guard = SubscriptionStreamGuard {
+        server: Arc::clone(&state.server),
+        tx,
+    };
+
+    let stream = tokio_stream::StreamExt::filter_map(ReceiverStream::new(rx), move |msg| {
+        // The guard is captured by the closure, so it lives exactly as long as
+        // the stream does. Touching it here is what stops it being optimised
+        // into a value dropped at construction.
+        let _guard = &guard;
         let json_str = match &msg {
             WriterMessage::Response(r) => serde_json::to_string(&**r).ok(),
             WriterMessage::Notification(n) => serde_json::to_string(n).ok(),
@@ -788,26 +823,9 @@ async fn handle_sse(State(state): State<Arc<HttpTransportState>>, headers: Heade
         json_str.map(|data| Ok::<_, Infallible>(Event::default().event("message").data(data)))
     });
 
-    Sse::new(sse_stream)
+    Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
-}
-
-/// DELETE /mcp — Close a session.
-async fn handle_delete(
-    State(state): State<Arc<HttpTransportState>>,
-    headers: HeaderMap,
-) -> StatusCode {
-    let Some(session_id) = get_session_id(&headers) else {
-        return StatusCode::BAD_REQUEST;
-    };
-
-    if state.sessions.remove(&session_id).await {
-        info!(session = %session_id, "Session closed");
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::NOT_FOUND
-    }
 }
 
 /// GET /.well-known/mcp.json — MCP server discovery metadata.
@@ -867,13 +885,14 @@ async fn handle_oauth_discovery(State(state): State<Arc<HttpTransportState>>) ->
 }
 
 /// GET /health — Simple health check endpoint.
+///
+/// It used to report a live session count and the configured maximum. A
+/// stateless transport has neither, and reporting a hardcoded zero would be
+/// worse than reporting nothing: an operator watching that gauge would read
+/// "no clients" rather than "this number no longer means anything".
 async fn handle_health(State(state): State<Arc<HttpTransportState>>) -> Response {
-    Json(serde_json::json!({
-        "status": "ok",
-        "sessions": state.sessions.count().await,
-        "max_sessions": state.config.max_sessions,
-    }))
-    .into_response()
+    let _ = &state;
+    Json(serde_json::json!({ "status": "ok" })).into_response()
 }
 
 #[cfg(test)]
@@ -890,29 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn test_new_session_id_is_uuid() {
-        let id = new_session_id();
-        assert_eq!(id.len(), 36); // UUID v4 format
-        assert!(id.contains('-'));
-    }
-
-    #[test]
-    fn test_get_session_id_from_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert("mcp-session-id", "test-session-123".parse().unwrap());
-        assert_eq!(
-            get_session_id(&headers),
-            Some("test-session-123".to_string())
-        );
-    }
-
-    #[test]
-    fn test_get_session_id_missing() {
-        let headers = HeaderMap::new();
-        assert_eq!(get_session_id(&headers), None);
-    }
-
-    #[test]
     fn test_default_config_session_timeout() {
         let config = HttpTransportConfig::default();
         assert_eq!(config.session_timeout, Duration::from_mins(30));
@@ -922,44 +918,6 @@ mod tests {
     fn test_default_config_oauth_disabled() {
         let config = HttpTransportConfig::default();
         assert!(!config.oauth.enabled);
-    }
-
-    #[test]
-    fn test_new_session_id_uniqueness() {
-        let id1 = new_session_id();
-        let id2 = new_session_id();
-        assert_ne!(id1, id2, "Session IDs must be unique");
-    }
-
-    #[test]
-    fn test_new_session_id_valid_uuid_v4() {
-        let id = new_session_id();
-        // UUID v4 has format: 8-4-4-4-12
-        let parts: Vec<&str> = id.split('-').collect();
-        assert_eq!(parts.len(), 5);
-        assert_eq!(parts[0].len(), 8);
-        assert_eq!(parts[1].len(), 4);
-        assert_eq!(parts[2].len(), 4);
-        assert_eq!(parts[3].len(), 4);
-        assert_eq!(parts[4].len(), 12);
-    }
-
-    #[test]
-    fn test_get_session_id_case_sensitive() {
-        let mut headers = HeaderMap::new();
-        headers.insert("mcp-session-id", "CaSe-SenSiTiVe-123".parse().unwrap());
-        assert_eq!(
-            get_session_id(&headers),
-            Some("CaSe-SenSiTiVe-123".to_string())
-        );
-    }
-
-    #[test]
-    fn test_get_session_id_uuid_value() {
-        let uuid = new_session_id();
-        let mut headers = HeaderMap::new();
-        headers.insert("mcp-session-id", uuid.parse().unwrap());
-        assert_eq!(get_session_id(&headers), Some(uuid));
     }
 
     #[test]
@@ -1083,6 +1041,30 @@ mod tests {
         };
         let (server, _audit_task) = McpServer::new(mcp_config);
         build_router(Arc::new(server), HttpTransportConfig::default())
+    }
+
+    /// The same fixture, but handing back the `McpServer` too.
+    ///
+    /// `build_test_router` swallows it inside an `Arc`, which is fine until a
+    /// test needs to observe server state — the subscription count, for
+    /// instance — from outside the router.
+    fn test_server_and_router() -> (Arc<McpServer>, Router) {
+        let mcp_config = crate::config::Config {
+            hosts: std::collections::HashMap::new(),
+            security: crate::config::SecurityConfig::default(),
+            limits: crate::config::LimitsConfig::default(),
+            audit: crate::config::AuditConfig::default(),
+            sessions: crate::config::SessionConfig::default(),
+            tool_groups: crate::config::ToolGroupsConfig::default(),
+            ssh_config: crate::config::SshConfigDiscovery::default(),
+            http: crate::config::HttpTransportConfig::default(),
+            rbac: crate::security::rbac::RbacConfig::default(),
+            awx: None,
+        };
+        let (server, _audit_task) = McpServer::new(mcp_config);
+        let server = Arc::new(server);
+        let router = build_router(Arc::clone(&server), HttpTransportConfig::default());
+        (server, router)
     }
 
     #[tokio::test]
@@ -1381,6 +1363,234 @@ mod tests {
         builder
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    // ============== Stateless transport: no session, no GET, no DELETE ==============
+
+    /// `GET /mcp` is gone, and answers `405` rather than `404`.
+    ///
+    /// The path exists and the METHOD does not. A `404` would tell a client
+    /// the endpoint is absent and send it looking for another one; a `405`
+    /// with `Allow` tells it exactly what to do instead.
+    #[tokio::test]
+    async fn test_get_on_mcp_is_405_with_allow_post() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response
+                .headers()
+                .get("allow")
+                .and_then(|v| v.to_str().ok()),
+            Some("POST"),
+            "a 405 without `Allow` leaves the client guessing"
+        );
+    }
+
+    /// `DELETE /mcp` closed a session. There is no session.
+    #[tokio::test]
+    async fn test_delete_on_mcp_is_405() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// No response carries `Mcp-Session-Id` any more.
+    ///
+    /// Asserted on a SERVED request rather than a refused one: a refusal
+    /// might plausibly skip the header for unrelated reasons, so proving its
+    /// absence on the happy path is what shows the lifecycle is gone rather
+    /// than merely bypassed.
+    #[tokio::test]
+    async fn test_no_response_carries_a_session_id_header() {
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().get("mcp-session-id").is_none(),
+            "the session lifecycle is gone; handing out an id for a session \
+             that does not exist is what the old code did"
+        );
+    }
+
+    // ============== subscriptions/listen as the POST response body ==============
+
+    /// The replacement for the GET endpoint: an accepted `subscriptions/listen`
+    /// answers on ITS OWN POST body, as a stream that stays open.
+    ///
+    /// Two things are asserted and both are needed. The content type shows the
+    /// server chose the streaming half of the spec's disjunction; the first
+    /// frame shows the stream is LIVE and carries the acknowledgement, which a
+    /// content-type check alone would not — a handler returning an
+    /// `text/event-stream` header over an empty, immediately-closed body would
+    /// pass the first assertion and fail every client.
+    #[tokio::test]
+    async fn test_subscriptions_listen_answers_with_a_live_sse_stream() {
+        use tokio_stream::StreamExt as _;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "listen must answer with the streaming half of the disjunction, \
+             got {content_type}"
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), body.next())
+            .await
+            .expect("no SSE frame within 3s — the stream is open but silent")
+            .expect("the stream ended without a frame")
+            .expect("body error");
+        let text = String::from_utf8_lossy(&frame);
+        assert!(
+            text.contains("notifications/subscriptions/acknowledged"),
+            "the first message on the stream must be the acknowledgement: {text}"
+        );
+    }
+
+    /// A REFUSED listen answers as JSON, not as a stream.
+    ///
+    /// It has no stream to hold open, and answering `text/event-stream`
+    /// anyway would leave the client waiting on a body that will never carry
+    /// anything — a hang instead of an error.
+    ///
+    /// The refusal here is C3's: the request declares no capabilities.
+    #[tokio::test]
+    async fn test_a_refused_listen_answers_json_not_a_stream() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2026-07-28")
+                    .header("mcp-method", "subscriptions/listen")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !content_type.starts_with("text/event-stream"),
+            "a refusal must not be dressed as a stream: {content_type}"
+        );
+    }
+
+    /// THE STREAM GUARD FIRES. Dropping the response body drops the
+    /// subscription.
+    ///
+    /// This is the guarantee the migration notes said had to be owned by the
+    /// stream rather than by the handler, and it has no observable other than
+    /// the registry count — the guard runs on `Drop`, so asserting that the
+    /// guard EXISTS asserts nothing about whether it RUNS.
+    ///
+    /// Three measurement points, because fewer would not separate the
+    /// failure modes: zero before (the fixture is clean), one while the
+    /// stream is live (registration happened at all), zero after the drop
+    /// (the guard fired). Asserting only the last is satisfied by a server
+    /// that never registered anything.
+    #[tokio::test]
+    async fn test_dropping_the_listen_stream_drops_the_subscription() {
+        use tokio_stream::StreamExt as _;
+        use tower::ServiceExt;
+
+        let (server, router) = test_server_and_router();
+        assert_eq!(server.live_subscription_count(), 0);
+
+        let response = router
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ))
+            .await
+            .unwrap();
+
+        let mut body = response.into_body().into_data_stream();
+        let _ack = tokio::time::timeout(std::time::Duration::from_secs(3), body.next())
+            .await
+            .expect("no acknowledgement within 3s")
+            .expect("stream ended")
+            .expect("body error");
+        assert_eq!(
+            server.live_subscription_count(),
+            1,
+            "the subscription must be live while the stream is"
+        );
+
+        drop(body);
+        // The guard runs on drop of the stream the closure captured it into;
+        // yield so the drop is observed before the assertion.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            server.live_subscription_count(),
+            0,
+            "dropping the stream must drop the subscription, or a disconnected \
+             client's filter keeps matching forever"
+        );
     }
 
     // ============== Server Validation: the three required headers ==============
