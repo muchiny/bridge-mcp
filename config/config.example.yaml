@@ -303,7 +303,7 @@ limits:
   # Max cached outputs in memory
   # output_cache_max_entries: 100
 
-  # --- Async Tasks (MCP 2025-11-25+) ---
+  # --- Async Tasks (MCP 2026-07-28, `io.modelcontextprotocol/tasks` extension) ---
   # Maximum number of concurrent async tasks
   # max_tasks: 50
 
@@ -664,7 +664,7 @@ tool_groups:
 #   # → open http://localhost:16686 and search service "bridge-mcp"
 
 # =============================================================================
-# HTTP TRANSPORT (Streamable HTTP, MCP 2025-11-25)
+# HTTP TRANSPORT (Streamable HTTP, MCP 2026-07-28)
 # =============================================================================
 # Optional. Enables `bridge-mcp serve-http`. Required only when running
 # the bridge as a remote MCP server; stdio mode does not need this section.
