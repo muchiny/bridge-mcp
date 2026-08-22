@@ -1518,7 +1518,10 @@ impl McpServer {
     /// Returns `None` for the one method that has no immediate response:
     /// a successful `subscriptions/listen` keeps its request `id` open for
     /// the lifetime of the subscription (see [`ListenOutcome`]).
-    pub(crate) async fn handle_request_with_cancel(
+    /// The dispatch itself. Wrapped by [`Self::handle_request_with_cancel`],
+    /// which stamps `serverInfo` on whatever this returns — do not call this
+    /// directly, or the result goes out unidentified.
+    async fn dispatch_request(
         &self,
         request: JsonRpcRequest,
         cancel_token: Option<tokio_util::sync::CancellationToken>,
@@ -1680,6 +1683,83 @@ impl McpServer {
                 error!(method = %request.method, "Unknown method");
                 JsonRpcResponse::error(id, JsonRpcError::method_not_found(&request.method))
             }
+        })
+    }
+
+    /// Dispatch a request and stamp server identity on the result.
+    ///
+    /// 2026-07-28: *"Servers **SHOULD** include the following
+    /// `io.modelcontextprotocol/*` field in every result's `_meta`, unless
+    /// specifically configured not to do so, to identify themselves without
+    /// relying on any prior connection state"* — the field being
+    /// `io.modelcontextprotocol/serverInfo`.
+    ///
+    /// "Every result" is the whole point, and is why this wraps the dispatch
+    /// instead of living inside it: the protocol is stateless, a client may
+    /// interleave unrelated requests on one transport, and nothing else on the
+    /// wire says which server answered. Before this, only `server/discover`
+    /// identified itself — so a client that cached discovery and then only
+    /// called tools had no per-response evidence of who it was talking to.
+    ///
+    /// Stamped here, at the single chokepoint both transports funnel through,
+    /// rather than at the ~43 result sites, for the same reason `resultType`
+    /// is stamped in `JsonRpcResponse::success`: a universal rule enforced
+    /// per-site is a rule one site will miss silently.
+    pub(crate) async fn handle_request_with_cancel(
+        &self,
+        request: JsonRpcRequest,
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
+        session: Option<&SessionContext>,
+    ) -> Option<JsonRpcResponse> {
+        self.dispatch_request(request, cancel_token, session)
+            .await
+            .map(Self::stamp_server_info)
+    }
+
+    /// Insert `_meta["io.modelcontextprotocol/serverInfo"]` into a result that
+    /// does not already carry it.
+    ///
+    /// Three deliberate non-actions:
+    ///
+    /// - An ERROR response is untouched. The rule says "every result's
+    ///   `_meta`", and an error carries no `result` member to hold one.
+    /// - `server/discover` is untouched, because its result already sets the
+    ///   key — with the rich form (description, icons, website). `or_insert`
+    ///   never overwrites, so discovery keeps the identity it built.
+    /// - A non-object `result`, or an `_meta` that is somehow not an object,
+    ///   is left alone rather than reshaped.
+    fn stamp_server_info(mut response: JsonRpcResponse) -> JsonRpcResponse {
+        let Some(Value::Object(result)) = response.result.as_mut() else {
+            return response;
+        };
+        let meta = result
+            .entry("_meta")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(meta) = meta {
+            meta.entry(super::request_meta::keys::SERVER_INFO)
+                .or_insert_with(Self::result_server_info);
+        }
+        response
+    }
+
+    /// The identity stamped on an ordinary result.
+    ///
+    /// Deliberately the MINIMAL `Implementation`: name, version, and the build
+    /// provenance that distinguishes two binaries of the same version. The
+    /// description, `websiteUrl` and icons that `server/discover` carries are
+    /// display material for a client deciding whether to connect at all —
+    /// repeating them on every `tools/call` result would add a few hundred
+    /// bytes per response to say nothing new.
+    ///
+    /// Built with `json!` rather than by serialising a [`ServerInfo`] so it
+    /// cannot fail and needs no fallback arm;
+    /// `an_ordinary_result_identifies_the_same_server_as_discovery` pins that
+    /// the two agree on name and version.
+    fn result_server_info() -> Value {
+        json!({
+            "name": SERVER_NAME,
+            "version": SERVER_VERSION,
+            "_meta": build_provenance_meta(),
         })
     }
 
@@ -6354,9 +6434,22 @@ rbac:
         assert!(response.error.is_none(), "{:?}", response.error);
         let result = response.result.expect("an ack");
         assert_eq!(result["resultType"], "complete");
+        // An empty acknowledgement carries no PAYLOAD. `resultType` and
+        // `_meta` are not payload: the published result schema puts both on
+        // every result shape, and `_meta` is where server identity is stamped.
+        // Naming the allowed keys rather than counting them, because a count
+        // has to be edited every time the envelope grows and says nothing
+        // about which key appeared.
+        let mut keys: Vec<&str> = result
+            .as_object()
+            .expect("an object result")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
         assert_eq!(
-            result.as_object().map(serde_json::Map::len),
-            Some(1),
+            keys,
+            ["_meta", "resultType"],
             "UpdateTaskResult is an empty acknowledgement: {result}"
         );
 
@@ -8876,6 +8969,118 @@ rbac:
         let response = server.handle_request(request).await;
         assert!(response.error.is_none(), "{:?}", response.error);
         assert!(response.result.expect("a tools/list result")["tools"].is_array());
+    }
+
+    // ============== serverInfo on every result ==============
+
+    /// The SHOULD, on an ordinary method: *"Servers SHOULD include ...
+    /// `io.modelcontextprotocol/serverInfo` ... in every result's `_meta`"*.
+    #[tokio::test]
+    async fn an_ordinary_result_carries_server_info() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(params_declaring_nothing(json!({}))),
+        };
+
+        let result = server
+            .handle_request(request)
+            .await
+            .result
+            .expect("a tools/list result");
+        let info = &result["_meta"]["io.modelcontextprotocol/serverInfo"];
+        assert_eq!(info["name"], SERVER_NAME, "{result}");
+        assert_eq!(info["version"], SERVER_VERSION, "{result}");
+    }
+
+    /// The stamp must not contradict the rich identity `server/discover`
+    /// publishes. They are built in two different places by two different
+    /// expressions, and a client that cached discovery and then reads a tool
+    /// result has to see the same server.
+    #[tokio::test]
+    async fn an_ordinary_result_identifies_the_same_server_as_discovery() {
+        let server = create_test_server();
+
+        let discover = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: "server/discover".to_string(),
+                params: None,
+            })
+            .await
+            .result
+            .expect("a discovery result");
+        let ordinary = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(2)),
+                method: "prompts/list".to_string(),
+                params: Some(params_declaring_nothing(json!({}))),
+            })
+            .await
+            .result
+            .expect("a prompts/list result");
+
+        let key = "io.modelcontextprotocol/serverInfo";
+        assert_eq!(
+            discover["_meta"][key]["name"],
+            ordinary["_meta"][key]["name"]
+        );
+        assert_eq!(
+            discover["_meta"][key]["version"],
+            ordinary["_meta"][key]["version"]
+        );
+    }
+
+    /// Discovery keeps the RICH identity it builds — the stamp inserts, it
+    /// never overwrites. Without this, a one-character change from
+    /// `or_insert_with` to an unconditional insert would silently strip the
+    /// icons and description a client uses to render this server, and every
+    /// other test here would stay green.
+    #[tokio::test]
+    async fn the_stamp_does_not_flatten_the_discovery_identity() {
+        let server = create_test_server();
+        let result = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: "server/discover".to_string(),
+                params: None,
+            })
+            .await
+            .result
+            .expect("a discovery result");
+
+        let info = &result["_meta"]["io.modelcontextprotocol/serverInfo"];
+        assert!(
+            info["icons"].is_array(),
+            "discovery keeps its icons: {info}"
+        );
+        assert!(
+            info["description"].is_string(),
+            "discovery keeps its description: {info}"
+        );
+    }
+
+    /// An ERROR carries no `result`, so there is no `_meta` to stamp and the
+    /// response must not grow one.
+    #[tokio::test]
+    async fn an_error_response_is_not_stamped() {
+        let server = create_test_server();
+        let response = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: "nope/nope".to_string(),
+                params: Some(params_declaring_nothing(json!({}))),
+            })
+            .await;
+
+        assert!(response.error.is_some());
+        assert!(response.result.is_none(), "{response:?}");
     }
 
     /// An ABSENT `protocolVersion` is `-32602`, and this test is the deliberate
