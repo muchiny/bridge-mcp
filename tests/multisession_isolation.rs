@@ -93,7 +93,7 @@ async fn a_declared_capability_does_not_leak_beyond_its_own_request() {
     // 3. Not into a sibling request of the same session. This is the case
     //    Vuln 9 could not have had: two requests, one bundle, concurrent.
     let sibling = session_a.with_request_meta(RequestMeta::from_params(Some(
-        &serde_json::json!({ "_meta": { "io.modelcontextprotocol/clientCapabilities": {} } }),
+        &serde_json::json!({ "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } }),
     )));
     assert!(
         !sibling.supports_elicitation(),

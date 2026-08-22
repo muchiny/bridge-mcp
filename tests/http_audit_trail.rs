@@ -98,6 +98,7 @@ fn exec_request() -> Request<Body> {
             // and the tool never runs, so no audit event is written and this
             // file's subject is never reached.
             "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": {}
             }
         }

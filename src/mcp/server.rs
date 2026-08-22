@@ -24,10 +24,7 @@ use super::logger::McpLogger;
 use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{JsonRpcMessage, RootsListResult};
-use super::request_meta::{
-    CAPABILITY_EXEMPT_METHODS, MISSING_CLIENT_CAPABILITIES_MSG, RequestMeta,
-    lacks_required_client_capabilities,
-};
+use super::request_meta::{ENVELOPE_EXEMPT_METHODS, RequestMeta, missing_required_envelope_field};
 use super::session_context::SessionContext;
 use super::subscriptions::{NotificationTopic, SubscriptionRegistry, SubscriptionsListenParams};
 use super::transport::{Session, Transport, stdio::StdioTransport};
@@ -1537,9 +1534,15 @@ impl McpServer {
         // consumes `params` by value into `ToolCallParams`.
         let request_meta = RequestMeta::from_params(request.params.as_ref());
 
-        // C3: 2026-07-28 makes `_meta.clientCapabilities` mandatory on every
-        // client-to-server request, so its absence makes the request
-        // MALFORMED — `-32602`, not a capability-specific refusal.
+        // C3: 2026-07-28 marks TWO `_meta` keys `Required: Yes` on every
+        // client-to-server request — `protocolVersion` and
+        // `clientCapabilities` — and the absence of either makes the request
+        // MALFORMED: "A request missing any required field is malformed; the
+        // server MUST reject it with JSON-RPC error code `-32602` (Invalid
+        // params). On HTTP, the response status MUST be `400 Bad Request`."
+        // So this is a malformed-request refusal, not a capability-specific
+        // one. `clientInfo` and `logLevel` are `Required: No` and are not
+        // gated here.
         //
         // The predicate reads `request.params` rather than the scoped session
         // below, and that is load-bearing rather than stylistic: the scoped
@@ -1553,14 +1556,12 @@ impl McpServer {
         // did not declare capability X" and presumes a well-formed envelope;
         // when the envelope itself is absent, "add the envelope" is the
         // actionable first step, and the message names the key.
-        if lacks_required_client_capabilities(
-            &request.method,
-            id.is_some(),
-            request.params.as_ref(),
-        ) {
+        if let Some(msg) =
+            missing_required_envelope_field(&request.method, id.is_some(), request.params.as_ref())
+        {
             return Some(JsonRpcResponse::error(
                 id,
-                JsonRpcError::invalid_params(MISSING_CLIENT_CAPABILITIES_MSG),
+                JsonRpcError::invalid_params(msg),
             ));
         }
 
@@ -1572,13 +1573,19 @@ impl McpServer {
         // transports, and the release notes claiming otherwise were false on
         // both.
         //
-        // Refused only when DECLARED and unsupported. An absent
-        // `protocolVersion` is left permissive on purpose: unlike
-        // `clientCapabilities`, nothing in this tree establishes it as
-        // mandatory, and inventing a refusal for an absent field would break
-        // clients on a rule no source states. If that turns out to be
-        // required, this is the line to change and the exemptions below still
-        // apply.
+        // This arm answers DECLARED-and-unsupported only. The ABSENT case is
+        // no longer its problem: it is a malformed envelope and C3 above
+        // already refused it `-32602`, per the per-request protocol fields
+        // table that marks `protocolVersion` `Required: Yes`. An earlier
+        // revision of this comment left absence permissive on the reasoning
+        // that "nothing in this tree establishes it as mandatory" — the table
+        // does, and it was simply not read.
+        //
+        // The two errors stay distinct because they tell a client different
+        // things. `-32602` says "you sent no version"; `-32022` says "you sent
+        // one I do not speak" and carries `data.supported` so the client can
+        // pick another. Collapsing them would hand a recoverable client the
+        // unrecoverable message.
         //
         // The same two methods are exempt, for the same reason and one extra.
         // `server/discover` must answer a DISCOVERY RESULT even to a client
@@ -1589,7 +1596,7 @@ impl McpServer {
         // Refusing it would deny the client the very list it needs to
         // recover. `initialize` already answers -32022 from its own arm,
         // carrying the Legacy-shaped `requested`.
-        if !CAPABILITY_EXEMPT_METHODS.contains(&request.method.as_str())
+        if !ENVELOPE_EXEMPT_METHODS.contains(&request.method.as_str())
             && let Some(declared) = request_meta.protocol_version.as_deref()
             && !SUPPORTED_PROTOCOL_VERSIONS.contains(&declared)
         {
@@ -3197,8 +3204,13 @@ mod tests {
     ///
     /// Deliberately not a bare constant: `params["_meta"] = ..` lets a test
     /// keep whatever real params it needs and add only the envelope.
+    /// Params carrying a complete, minimal `_meta` envelope: both keys the
+    /// per-request protocol fields table marks `Required: Yes`, and nothing
+    /// else. `clientCapabilities: {}` declares no capabilities — an
+    /// authoritative declaration, not an omission.
     fn params_declaring_nothing(mut params: Value) -> Value {
         params["_meta"] = json!({
+            "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
             "io.modelcontextprotocol/clientCapabilities": {}
         });
         params
@@ -3206,6 +3218,7 @@ mod tests {
 
     fn params_declaring_tasks(mut params: Value) -> Value {
         params["_meta"] = json!({
+            "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
             "io.modelcontextprotocol/clientCapabilities": {
                 "extensions": { "io.modelcontextprotocol/tasks": {} }
             }
@@ -3235,7 +3248,10 @@ mod tests {
     /// declares anything.
     fn params_declaring_roots() -> Value {
         json!({
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "roots": {} } }
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": { "roots": {} }
+            }
         })
     }
 
@@ -3413,6 +3429,7 @@ mod tests {
                     Some(json!({
                         "taskId": task_id,
                         "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
                             "io.modelcontextprotocol/clientCapabilities": {
                                 "extensions": { "io.modelcontextprotocol/tasks": {} }
                             }
@@ -3433,6 +3450,7 @@ mod tests {
                 Some(json!({
                     "taskId": task_ids[0],
                     "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
                         "io.modelcontextprotocol/clientCapabilities": {
                             "extensions": { "io.modelcontextprotocol/tasks": {} }
                         }
@@ -8592,8 +8610,20 @@ rbac:
     /// The refusal itself. `-32602`, because an absent envelope makes the
     /// request MALFORMED — it is not a capability negotiation failure, which
     /// is what `-32021` means and which presumes a well-formed envelope.
+    ///
+    /// `params: None` is a DIFFERENT input from `params: Some({})`, which
+    /// `an_empty_envelope_is_refused_by_naming_the_revision_first` covers:
+    /// absent params versus a params object with no `_meta`. Both must refuse,
+    /// and a guard that dereferenced params could pass one while panicking on
+    /// the other.
+    ///
+    /// It names `protocolVersion` rather than `clientCapabilities` because
+    /// both required keys are missing and the version is reported first — see
+    /// `missing_required_envelope_field`. This test used to assert
+    /// `clientCapabilities` here, which was only ever true because the version
+    /// was not checked at all.
     #[tokio::test]
-    async fn a_request_without_client_capabilities_is_invalid_params() {
+    async fn a_request_with_no_params_at_all_is_invalid_params() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -8606,7 +8636,7 @@ rbac:
             .handle_request(request)
             .await
             .error
-            .expect("a capability-less request must be refused");
+            .expect("an envelope-less request must be refused");
 
         assert_eq!(error.code, -32602, "{error:?}");
         // The message is asserted, not merely the code. A client that gets
@@ -8614,7 +8644,7 @@ rbac:
         // naming the key is the whole difference between an actionable
         // refusal and a dead end.
         assert!(
-            error.message.contains("clientCapabilities"),
+            error.message.contains("protocolVersion"),
             "the refusal must name the missing key: {}",
             error.message
         );
@@ -8652,6 +8682,15 @@ rbac:
             .error
             .expect("an envelope missing only clientCapabilities is still malformed");
         assert_eq!(error.code, -32602, "{error:?}");
+        // Naming the key, not just the code. Both required-field refusals are
+        // `-32602`, so a code-only assertion stays green if the two arms are
+        // swapped — and a client told "protocolVersion" when it sent one has
+        // been handed a dead end.
+        assert!(
+            error.message.contains("clientCapabilities"),
+            "this arm must name clientCapabilities, not the version: {}",
+            error.message
+        );
     }
 
     /// THE POSITIVE TWIN of the two above. An empty `{}` is an authoritative
@@ -8839,26 +8878,74 @@ rbac:
         assert!(response.result.expect("a tools/list result")["tools"].is_array());
     }
 
-    /// An ABSENT `protocolVersion` is served, and this test exists to pin that
-    /// as a DECISION rather than an oversight.
+    /// An ABSENT `protocolVersion` is `-32602`, and this test is the deliberate
+    /// inversion of the one that used to pin the opposite.
     ///
-    /// Unlike `clientCapabilities`, nothing in this tree establishes the
-    /// revision field as mandatory, so refusing its absence would break
-    /// clients on a rule no source states. If a source turns up saying
-    /// otherwise, this is the test that has to be deliberately deleted —
-    /// which is the point of writing it.
+    /// That test said: "nothing in this tree establishes the revision field as
+    /// mandatory... If a source turns up saying otherwise, this is the test
+    /// that has to be deliberately deleted." The source is the per-request
+    /// protocol fields table, which marks `protocolVersion` `Required: Yes`
+    /// alongside `clientCapabilities`, and then states the consequence without
+    /// qualification: *"A request missing any required field is malformed; the
+    /// server MUST reject it with JSON-RPC error code `-32602` (Invalid
+    /// params)."*
+    ///
+    /// Asserting the CODE and not just the presence of an error, because
+    /// `-32022` is the neighbouring refusal and the two are not
+    /// interchangeable: this one says "you sent no version", that one says "you
+    /// sent one I do not speak" and carries the list to recover with.
     #[tokio::test]
-    async fn an_absent_revision_declaration_is_served() {
+    async fn an_absent_revision_declaration_is_invalid_params() {
         let server = create_test_server();
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
             method: "tools/list".to_string(),
-            params: Some(params_declaring_nothing(json!({}))),
+            // Deliberately NOT `params_declaring_nothing`: that helper now
+            // sends a complete envelope, which is the whole point of it.
+            params: Some(json!({
+                "_meta": { "io.modelcontextprotocol/clientCapabilities": {} }
+            })),
         };
 
         let response = server.handle_request(request).await;
-        assert!(response.error.is_none(), "{:?}", response.error);
+        let error = response.error.expect("an absent revision is refused");
+        assert_eq!(error.code, -32602, "{error:?}");
+        assert!(
+            error.message.contains("protocolVersion"),
+            "the message must name the missing key: {}",
+            error.message
+        );
+        assert!(response.result.is_none());
+    }
+
+    /// Both required keys absent names the VERSION, not the capabilities.
+    ///
+    /// A client sending no envelope at all gets one refusal, and it should be
+    /// the one that tells it which era it got wrong. Naming
+    /// `clientCapabilities` first would invite it to add that key and be
+    /// refused again for the other.
+    #[tokio::test]
+    async fn an_empty_envelope_is_refused_by_naming_the_revision_first() {
+        let server = create_test_server();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({})),
+        };
+
+        let error = server
+            .handle_request(request)
+            .await
+            .error
+            .expect("an empty envelope is refused");
+        assert_eq!(error.code, -32602, "{error:?}");
+        assert!(
+            error.message.contains("protocolVersion"),
+            "{}",
+            error.message
+        );
     }
 
     /// `server/discover` answers a DISCOVERY RESULT even to a client declaring

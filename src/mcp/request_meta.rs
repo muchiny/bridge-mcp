@@ -35,7 +35,13 @@ pub mod keys {
     pub const TRACEPARENT: &str = "traceparent";
 }
 
-/// Methods exempt from the mandatory `_meta.clientCapabilities` envelope.
+/// Methods exempt from the mandatory `_meta` envelope fields.
+///
+/// Covers BOTH required keys — `clientCapabilities` and `protocolVersion` —
+/// because the exemption argument is about what the client does with the
+/// ANSWER, not about which key is missing. A refusal is a refusal: whichever
+/// field triggered it, the client sees a `-32602` on the one method it was
+/// using to classify this server.
 ///
 /// Both entries are exempt because gating them would DESTROY A DIAGNOSTIC the
 /// spec requires, not because the envelope is inconvenient there. Neither
@@ -68,7 +74,14 @@ pub mod keys {
 /// `server/discover` makes a Modern client think the server is Legacy, and
 /// gating `initialize` makes a Legacy client unable to learn the server is
 /// Modern. Together they are the whole of the era-crossing surface.
-pub const CAPABILITY_EXEMPT_METHODS: &[&str] = &["server/discover", "initialize"];
+///
+/// For `protocolVersion` specifically, `server/discover` has a SECOND and
+/// independent justification: a client that does not yet know which revisions
+/// this server speaks cannot honestly declare one, and discovery is where it
+/// reads `supportedVersions`. The spec already exempts discover from
+/// version-SUPPORT checking for that reason; requiring the field to be present
+/// there would close the same door from the other side.
+pub const ENVELOPE_EXEMPT_METHODS: &[&str] = &["server/discover", "initialize"];
 
 /// The one wording both transports use when the envelope is missing.
 ///
@@ -80,8 +93,15 @@ pub const MISSING_CLIENT_CAPABILITIES_MSG: &str = concat!(
     "capabilities; omitting the key entirely is a malformed request."
 );
 
-/// Whether this client-to-server message is a REQUEST that must carry
-/// `_meta.clientCapabilities` and does not.
+/// The one wording both transports use when `protocolVersion` is missing.
+pub const MISSING_PROTOCOL_VERSION_MSG: &str = concat!(
+    "missing `_meta[\"io.modelcontextprotocol/protocolVersion\"]`: MCP 2026-07-28 ",
+    "requires it on every client-to-server request. Declare the revision this ",
+    "request speaks; Modern MCP deleted the connection-scoped handshake, so there ",
+    "is no earlier negotiation for the server to fall back on."
+);
+
+/// Which required `_meta` field this REQUEST is missing, if any.
 ///
 /// ONE definition, called from both the dispatch chokepoint (which turns it
 /// into a `-32602` body) and the HTTP transport (which turns it into a `400`
@@ -99,17 +119,34 @@ pub const MISSING_CLIENT_CAPABILITIES_MSG: &str = concat!(
 /// An EMPTY `{}` passes. It is an authoritative declaration of no
 /// capabilities, not an omission; `empty_capabilities_object_is_declared_
 /// false_not_absent` pins that distinction on the parser side.
+///
+/// Returns the message naming the first missing field, or `None` when the
+/// envelope is complete enough to dispatch. Exactly two keys are marked
+/// `Required: Yes` in the per-request protocol fields table —
+/// `protocolVersion` and `clientCapabilities` — and `clientInfo` and `logLevel`
+/// are explicitly `No`, so this checks two things and not four.
+///
+/// `protocolVersion` is reported first. When both are absent the client is
+/// sending no envelope at all, and naming the version is what tells it which
+/// era it got wrong; "add `clientCapabilities`" invites it to add one key and
+/// be refused again for the other.
 #[must_use]
-pub fn lacks_required_client_capabilities(
+pub fn missing_required_envelope_field(
     method: &str,
     has_id: bool,
     params: Option<&Value>,
-) -> bool {
-    has_id
-        && !CAPABILITY_EXEMPT_METHODS.contains(&method)
-        && RequestMeta::from_params(params)
-            .client_capabilities
-            .is_none()
+) -> Option<&'static str> {
+    if !has_id || ENVELOPE_EXEMPT_METHODS.contains(&method) {
+        return None;
+    }
+    let meta = RequestMeta::from_params(params);
+    if meta.protocol_version.is_none() {
+        return Some(MISSING_PROTOCOL_VERSION_MSG);
+    }
+    if meta.client_capabilities.is_none() {
+        return Some(MISSING_CLIENT_CAPABILITIES_MSG);
+    }
+    None
 }
 
 /// The parsed per-request `_meta` envelope.

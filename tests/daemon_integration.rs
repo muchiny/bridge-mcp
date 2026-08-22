@@ -100,7 +100,7 @@ async fn test_daemon_lifecycle_start_call_stop() {
     // requires `_meta.clientCapabilities` on every one, so the daemon now
     // answers -32602 without it and this stage would measure the refusal
     // rather than the tool list.
-    let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n";
+    let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n";
     client.write_all(request).await.expect("write");
     client.flush().await.expect("flush");
 
@@ -215,7 +215,7 @@ async fn a_json_array_is_refused_on_the_daemon_socket() {
 
     // The exact frame the superseded test asserted was dispatched.
     let mut client = UnixStream::connect(&socket).await.expect("connect");
-    let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}]
+    let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}]
 "#;
     client.write_all(batch).await.expect("write");
     client.flush().await.expect("flush");
@@ -253,7 +253,7 @@ async fn a_json_array_is_refused_on_the_daemon_socket() {
     // reader loop answers a bad line and keeps reading, so one refused frame
     // must not end the session — and a daemon that had simply stopped
     // answering would fail here rather than passing the assertions above.
-    let single = br#"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}
+    let single = br#"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 "#;
     w.write_all(single).await.expect("write single");
     w.flush().await.expect("flush single");
@@ -326,7 +326,7 @@ async fn test_daemon_parse_error_response_sent_for_bad_json() {
     // still replies. `tools/list` is the smallest method that does both,
     // and it carries the capability envelope every request now needs.
     client
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n")
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n")
         .await
         .expect("write");
     client.flush().await.expect("flush");

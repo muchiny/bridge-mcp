@@ -48,9 +48,7 @@ use crate::mcp::protocol::{
     JsonRpcError, JsonRpcMessage, JsonRpcResponse, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
     WriterMessage,
 };
-use crate::mcp::request_meta::{
-    MISSING_CLIENT_CAPABILITIES_MSG, lacks_required_client_capabilities,
-};
+use crate::mcp::request_meta::missing_required_envelope_field;
 use crate::mcp::server::McpServer;
 use crate::mcp::session_context::SessionContext;
 
@@ -677,15 +675,12 @@ async fn handle_post(
     //
     // Before dispatch, so a malformed request does no work — the same
     // placement as `validate_protocol_version` at the top of this function.
-    if lacks_required_client_capabilities(
+    if let Some(detail) = missing_required_envelope_field(
         msg.method.as_deref().unwrap_or_default(),
         msg.id.is_some(),
         msg.params.as_ref(),
     ) {
-        return bad_request(
-            msg.id.clone(),
-            JsonRpcError::invalid_params(MISSING_CLIENT_CAPABILITIES_MSG),
-        );
+        return bad_request(msg.id.clone(), JsonRpcError::invalid_params(detail));
     }
 
     let request = crate::mcp::protocol::JsonRpcRequest {
@@ -1203,7 +1198,7 @@ mod tests {
         use tower::ServiceExt;
 
         let response = build_test_router()
-            .oneshot(modern_post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
+            .oneshot(modern_post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#))
             .await
             .unwrap();
 
@@ -1238,7 +1233,7 @@ mod tests {
                     .header("origin", "http://localhost:5173")
                     .header("content-type", "application/json")
                     .header("mcp-method", "tools/list")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#))
                     .unwrap(),
             )
             .await
@@ -1284,7 +1279,11 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("mcp-protocol-version", "2025-03-26")
                     .header("mcp-method", "tools/list")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#))
+                    // Header and body name the SAME Legacy revision on purpose.
+                    // They are a validated pair: disagreeing would be a header
+                    // mismatch (`-32020`) and would never reach the
+                    // version-support check this test is about.
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-03-26","io.modelcontextprotocol/clientCapabilities":{}}}}"#))
                     .unwrap(),
             )
             .await
@@ -1517,7 +1516,7 @@ mod tests {
 
         let response = build_test_router()
             .oneshot(modern_post(
-                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .await
             .unwrap();
@@ -1548,7 +1547,7 @@ mod tests {
 
         let response = build_test_router()
             .oneshot(modern_post(
-                r#"{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                r#"{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .await
             .unwrap();
@@ -1645,7 +1644,7 @@ mod tests {
 
         let response = router
             .oneshot(modern_post(
-                r#"{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                r#"{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .await
             .unwrap();
@@ -1750,7 +1749,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("mcp-protocol-version", "2026-07-28")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
                     ))
                     .unwrap(),
             )
@@ -1792,7 +1791,7 @@ mod tests {
                     .header("mcp-method", "tools/list")
                     .header("mcp-name", "ssh_exec")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ssh_exec","_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ssh_exec","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
                     ))
                     .unwrap(),
             )
@@ -1826,7 +1825,7 @@ mod tests {
                     .header("mcp-protocol-version", "2026-07-28")
                     .header("mcp-method", "tools/call")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ssh_status","_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ssh_status","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
                     ))
                     .unwrap(),
             )
@@ -1853,7 +1852,7 @@ mod tests {
 
         let response = build_test_router()
             .oneshot(modern_post(
-                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .await
             .unwrap();
@@ -1903,7 +1902,7 @@ mod tests {
 
         let response = build_test_router()
             .oneshot(
-                modern_post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#),
+                modern_post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#),
             )
             .await
             .unwrap();
@@ -1961,7 +1960,7 @@ mod tests {
         // the gate does not special-case by method name in either direction.
         let response = build_test_router()
             .oneshot(
-                modern_post(r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#),
+                modern_post(r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#),
             )
             .await
             .unwrap();
@@ -2008,7 +2007,7 @@ mod tests {
 
         let response = build_test_router()
             .oneshot(modern_post(
-                r#"{"jsonrpc":"2.0","id":3,"method":"nope/definitely_not_a_method","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"nope/definitely_not_a_method","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .await
             .unwrap();
@@ -2043,7 +2042,7 @@ mod tests {
         // `-32601`.
         let response = build_test_router()
             .oneshot(modern_post(
-                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"definitely_not_a_tool","arguments":{},"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"definitely_not_a_tool","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
             ))
             .await
             .unwrap();
