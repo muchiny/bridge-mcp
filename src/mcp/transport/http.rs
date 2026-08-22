@@ -424,6 +424,53 @@ const MCP_NAME_METHODS: &[(&str, &str)] = &[
     ("prompts/get", "name"),
 ];
 
+/// Wrapper marking a header value as Base64 rather than literal.
+///
+/// *"The prefix `=?base64?` and suffix `?=` indicate that the value is
+/// Base64-encoded. These markers are case-sensitive and **MUST** appear exactly
+/// as shown (lowercase)."*
+const B64_SENTINEL_PREFIX: &str = "=?base64?";
+const B64_SENTINEL_SUFFIX: &str = "?=";
+
+/// Decode a header value that may carry the Base64 sentinel.
+///
+/// Required, not decorative: *"servers **MUST** decode an encoded `Mcp-Name` or
+/// `Mcp-Param-{Name}` value before comparing it to the corresponding request
+/// body value during Server Validation."*
+///
+/// Without it every conforming request whose name or URI is not plain-ASCII-safe
+/// is rejected `-32020` for a mismatch that does not exist. That is not a corner
+/// case here: `Mcp-Name` mirrors `params.uri` on `resources/read`, and this
+/// server serves `file://` and `log://` URIs off remote hosts, where a
+/// non-ASCII path is ordinary. A client is REQUIRED to encode in that case —
+/// *"clients **MUST** use Base64 encoding of the UTF-8 representation"* — so
+/// the better a client conformed, the more reliably it was refused.
+///
+/// STANDARD alphabet with padding, not URL-safe: the spec's own examples
+/// contain `/` (`PT9iYXNlNjQ/bGl0ZXJhbD89`) and `=` padding
+/// (`SGVsbG8sIOS4lueVjA==`).
+///
+/// A value that does not carry the wrapper is returned untouched. Clients
+/// resolve the ambiguity from the other side — *"clients **MUST** also
+/// Base64-encode any plain-ASCII value that matches the sentinel pattern"* — so
+/// an unwrapped value is always literal.
+fn decode_header_sentinel(value: &str) -> Result<std::borrow::Cow<'_, str>, &'static str> {
+    use base64::Engine as _;
+
+    let Some(encoded) = value
+        .strip_prefix(B64_SENTINEL_PREFIX)
+        .and_then(|rest| rest.strip_suffix(B64_SENTINEL_SUFFIX))
+    else {
+        return Ok(std::borrow::Cow::Borrowed(value));
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "not valid Base64")?;
+    String::from_utf8(bytes)
+        .map(std::borrow::Cow::Owned)
+        .map_err(|_| "not valid UTF-8")
+}
+
 /// Server Validation for MCP 2026-07-28 Streamable HTTP.
 ///
 /// The spec makes three request headers REQUIRED on a POST — *"Every POST
@@ -520,6 +567,14 @@ fn check_modern_headers(headers: &HeaderMap, body: &Value) -> Result<(), JsonRpc
                 .and_then(|p| p.get(field))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            // Decoded BEFORE comparison, because that is the order the spec
+            // states. Comparing the wrapper against the body value would
+            // refuse every correctly-encoded request.
+            let name = decode_header_sentinel(name).map_err(|why| {
+                JsonRpcError::header_mismatch(format!(
+                    "`Mcp-Name` carries the Base64 sentinel but its payload is {why}"
+                ))
+            })?;
             if name != body_name {
                 return Err(JsonRpcError::header_mismatch(format!(
                     "`Mcp-Name: {name}` does not match the body's `params.{field}` \
@@ -1858,6 +1913,111 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ============== Mcp-Name Base64 sentinel ==============
+
+    /// The spec's own encoding table, used as test vectors.
+    ///
+    /// Four rows, each covering a distinct reason a value cannot travel as a
+    /// plain header: non-ASCII, edge whitespace, a control character, and a
+    /// literal value that happens to look like the wrapper.
+    #[test]
+    fn the_sentinel_decodes_the_specs_own_examples() {
+        for (encoded, expected) in [
+            ("=?base64?SGVsbG8sIOS4lueVjA==?=", "Hello, 世界"),
+            ("=?base64?IHBhZGRlZCA=?=", " padded "),
+            ("=?base64?bGluZTEKbGluZTI=?=", "line1\nline2"),
+            ("=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=", "=?base64?literal?="),
+        ] {
+            assert_eq!(
+                decode_header_sentinel(encoded).expect("a spec example decodes"),
+                expected,
+                "decoding {encoded}"
+            );
+        }
+    }
+
+    /// A value without the wrapper is literal and is NOT decoded.
+    ///
+    /// Clients resolve the ambiguity from their side by encoding any
+    /// plain-ASCII value that matches the sentinel pattern, so an unwrapped
+    /// value can always be taken at face value. A decoder that tried Base64
+    /// opportunistically would corrupt ordinary tool names, most of which are
+    /// valid Base64 by accident.
+    #[test]
+    fn an_unwrapped_value_is_returned_untouched() {
+        for literal in ["ssh_exec", "file:///etc/hosts", "", "=?base64?", "?="] {
+            assert_eq!(
+                decode_header_sentinel(literal).expect("a literal is not decoded"),
+                literal
+            );
+        }
+    }
+
+    /// A wrapper whose payload is not Base64, or not UTF-8, is a validation
+    /// failure rather than a silent pass-through.
+    #[test]
+    fn a_malformed_sentinel_payload_is_an_error() {
+        assert!(decode_header_sentinel("=?base64?not base64!?=").is_err());
+        // `/w==` is a valid Base64 encoding of the single byte 0xFF, which is
+        // not valid UTF-8 on its own.
+        assert!(decode_header_sentinel("=?base64?/w==?=").is_err());
+    }
+
+    /// END TO END, and the reason this whole block exists: a conforming client
+    /// reading a resource whose URI is not plain-ASCII-safe MUST send the
+    /// encoded form, and used to be refused `-32020` for a mismatch that did
+    /// not exist. The better the client conformed, the more reliably it was
+    /// rejected.
+    #[test]
+    fn an_encoded_mcp_name_matches_a_non_ascii_body_uri() {
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-protocol-version", "2026-07-28".parse().unwrap());
+        headers.insert("mcp-method", "resources/read".parse().unwrap());
+        // "file:///srv/données.txt"
+        headers.insert(
+            "mcp-name",
+            "=?base64?ZmlsZTovLy9zcnYvZG9ubsOpZXMudHh0?="
+                .parse()
+                .unwrap(),
+        );
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": { "uri": "file:///srv/données.txt" }
+        });
+
+        assert!(
+            check_modern_headers(&headers, &body).is_ok(),
+            "a correctly encoded Mcp-Name must be accepted"
+        );
+    }
+
+    /// THE NEGATIVE TWIN. Decoding must not become "accept anything wrapped":
+    /// an encoded value that decodes to something else is still a mismatch.
+    /// Without this, deleting the comparison entirely would leave the test
+    /// above green.
+    #[test]
+    fn an_encoded_mcp_name_that_decodes_to_a_different_value_is_a_mismatch() {
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-protocol-version", "2026-07-28".parse().unwrap());
+        headers.insert("mcp-method", "tools/call".parse().unwrap());
+        // "ssh_exec"
+        headers.insert("mcp-name", "=?base64?c3NoX2V4ZWM=?=".parse().unwrap());
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "ssh_reboot" }
+        });
+
+        let err = check_modern_headers(&headers, &body)
+            .expect_err("a decoded value that differs is still a mismatch");
+        assert_eq!(err.code, -32020, "{err:?}");
     }
 
     // ============== C3: mandatory clientCapabilities over HTTP ==============
