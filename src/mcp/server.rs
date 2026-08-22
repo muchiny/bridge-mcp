@@ -1102,6 +1102,40 @@ impl McpServer {
         // remain. The spec's "never deliver an unrequested notification
         // type" invariant is only maintainable if dead subscriptions cannot
         // linger behind a reused channel.
+        //
+        // NO GRACEFUL-CLOSURE RESPONSE IS SENT HERE, AND THAT IS THE
+        // CONFORMANT CHOICE — not an omission, which is what it looks like.
+        //
+        // Subscriptions says a server that ends a subscription "on its own
+        // initiative (for example, during shutdown)" SHOULD answer the
+        // original `subscriptions/listen` with `{"resultType": "complete",
+        // "_meta": {"io.modelcontextprotocol/subscriptionId": <id>}}` before
+        // closing the stream. That response is what distinguishes a clean end
+        // from a drop: "a transport that closes without it indicates an
+        // unexpected disconnect, which the client MAY treat as a trigger to
+        // reconnect."
+        //
+        // This line is reached when `reader.recv()` returned `None` — stdin
+        // EOF, socket closed, client gone. That is the spec's THIRD ending,
+        // "the underlying transport closes", of which it says outright: "an
+        // abrupt transport drop, which carries no response". Emitting here
+        // would tell a client that reconnects on an unclean close that the
+        // close was clean, which is the one thing this response exists to
+        // discriminate — and it would write to a channel whose reader has
+        // already gone.
+        //
+        // The server has no path of its OWN today: `serve()` ends its accept
+        // loop and then blocks draining live sessions, so a session only ever
+        // ends because its client ended it, and the HTTP side's
+        // `SubscriptionStreamGuard` fires when the response body is dropped,
+        // which is the same event. The SHOULD has no site to apply to. When
+        // one is added — a shutdown signal that closes live sessions — that is
+        // where the completion result belongs, and `remove_for_tx` will need
+        // to return the ids it removed rather than a count.
+        //
+        // `a_transport_drop_closes_a_subscription_without_a_response` pins
+        // this, so a future graceful-closure implementation cannot quietly
+        // acquire the abrupt-drop case as well.
         self.subscriptions.remove_for_tx(&tx);
 
         // G-15: the writer task's `rx.recv()` yields `None` only when EVERY
@@ -7446,6 +7480,91 @@ rbac:
              proves nothing about the listen specifically"
         );
         assert_eq!(active.len(), 1, "exactly the listen, and nothing else");
+
+        serve.abort();
+    }
+
+    /// A subscription ended by a TRANSPORT DROP gets no response at all.
+    ///
+    /// Subscriptions lists three endings and gives them different answers.
+    /// The server ending one "on its own initiative (for example, during
+    /// shutdown)" SHOULD answer the original request with `{"resultType":
+    /// "complete", "_meta": {"io.modelcontextprotocol/subscriptionId":
+    /// <id>}}`. A transport close is the other case, and the spec is
+    /// explicit: "an abrupt transport drop, which carries no response". The
+    /// whole point of the completion result is that a client can tell the two
+    /// apart and decide whether to reconnect, so emitting it on a drop
+    /// destroys the only signal it carries.
+    ///
+    /// This server reaches session teardown ONLY by transport close —
+    /// `reader.recv()` returning `None` — so today this is the only ending it
+    /// has, and silence is correct. The test exists for the day that changes:
+    /// graceful closure is a real gap, and the natural place to "fix" it is
+    /// the `remove_for_tx` call in teardown, which is precisely the wrong
+    /// place. This goes red if someone puts it there.
+    ///
+    /// THE PREMISE IS ESTABLISHED FIRST, and without that the test is empty.
+    /// It waits for the acknowledgement, so the subscription is known to have
+    /// been accepted and its id known to be held open, BEFORE closing the
+    /// transport. An absence asserted over a subscription that never existed
+    /// would pass against a server with the whole mechanism broken.
+    #[tokio::test]
+    async fn a_transport_drop_closes_a_subscription_without_a_response() {
+        let server = Arc::new(create_test_server());
+        let (session, client_tx, mut server_rx) = in_memory_session();
+        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+
+        client_tx
+            .send(client_request(
+                1,
+                "subscriptions/listen",
+                Some(params_declaring_nothing(
+                    json!({ "notifications": { "toolsListChanged": true } }),
+                )),
+            ))
+            .unwrap();
+
+        // Establish the premise: the listen was ACCEPTED.
+        let mut saw_ack = false;
+        while !saw_ack {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
+                .await
+                .expect("no acknowledgement — the subscription was never accepted")
+                .expect("session writer channel closed");
+            if let WriterMessage::Notification(n) = msg
+                && n.method == "notifications/subscriptions/acknowledged"
+            {
+                saw_ack = true;
+            }
+        }
+        assert_eq!(server.subscriptions.len(), 1, "the listen must be live");
+
+        // The drop: the client goes away, so `recv()` yields `None` and the
+        // reader loop falls through to teardown.
+        drop(client_tx);
+
+        // Drain whatever teardown writes. Bounded by a timeout rather than by
+        // channel close: the writer task outlives `drop(tx)` here (the
+        // `mcp_logger` sender is still alive), so waiting for `None` would
+        // hang instead of failing.
+        let mut written = Vec::new();
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), server_rx.recv()).await
+        {
+            written.push(msg);
+        }
+
+        for msg in &written {
+            if let WriterMessage::Response(r) = msg {
+                assert!(
+                    r.id != Some(json!(1)) && r.id != Some(json!("1")),
+                    "a completion result was written for a subscription the CLIENT \
+                     dropped; the spec reserves that response for a server-initiated \
+                     close, and a client that reconnects on an unclean close would be \
+                     told this one was clean"
+                );
+            }
+        }
 
         serve.abort();
     }
