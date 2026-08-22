@@ -459,6 +459,19 @@ const MCP_NAME_METHODS: &[(&str, &str)] = &[
 /// non-conformant for 2026-07-28 — the assumption in particular let a Legacy
 /// client through the door it is now refused at.
 ///
+/// `Accept` IS NOT CHECKED, AND THAT IS CORRECT — recorded because the
+/// omission looks like one. Sending Messages does say *"The client MUST
+/// include an `Accept` header listing both `application/json` and
+/// `text/event-stream`"*, and reading only that line makes a missing `Accept`
+/// look like a request this server should refuse. It is a CLIENT MUST with no
+/// server-side counterpart: Server Validation enumerates exactly three
+/// conditions — a required standard header (`MCP-Protocol-Version`,
+/// `Mcp-Method`, `Mcp-Name`) missing, a header value not matching the body, a
+/// header value containing invalid characters — and `Accept` is in none of
+/// them, nor in the "required standard header" list that clause names.
+/// Rejecting on it would invent a `-32020` the closed-world rule for
+/// `-32020..-32099` does not allow this server to mint.
+///
 /// ORDERING: header validation runs BEFORE version-support checking. The two
 /// MUSTs can fire on the same request — a Legacy client at 2025-06-18 or
 /// later DOES send `MCP-Protocol-Version`, so its `initialize` POST is both
@@ -697,6 +710,31 @@ async fn handle_post(
         // with no body.
         return StatusCode::ACCEPTED.into_response();
     }
+
+    // "If the server does not implement the requested RPC method, it MUST
+    // respond with `404 Not Found` and a JSON-RPC error with code `-32601`
+    // (`Method not found`)."
+    //
+    // The BODY was already right; only the status was wrong, and the status is
+    // the half that carries information this server cannot otherwise send.
+    // The spec says why in the same paragraph: "The JSON-RPC error body
+    // distinguishes this case from a `404` returned by a legacy HTTP+SSE
+    // server that does not host the modern MCP endpoint." The two halves are a
+    // pair — `404` says "not here", the body says "this IS the endpoint, that
+    // method is not". Answering `200` broke the client's side of that
+    // handshake: Backward Compatibility has a dual-era client fall back to
+    // `initialize` on `400`/`404`/`405` unless the body is a recognised modern
+    // error, and a `200` is not one of the statuses it inspects at all.
+    //
+    // Scoped to `-32601` on the nose. Every other JSON-RPC error is a fault in
+    // a method this server DOES implement, and those stay `200` — remapping
+    // them would tell a client the endpoint is missing whenever a tool
+    // rejected its arguments.
+    let is_method_not_found = resp.error.as_ref().is_some_and(|e| e.code == -32601);
+    if is_method_not_found {
+        return (StatusCode::NOT_FOUND, Json(resp)).into_response();
+    }
+
     Json(resp).into_response()
 }
 
@@ -786,9 +824,29 @@ async fn serve_listen_stream(
         json_str.map(|data| Ok::<_, Infallible>(Event::default().event("message").data(data)))
     });
 
-    Sse::new(stream)
+    let mut response = Sse::new(stream)
         .keep_alive(KeepAlive::default())
-        .into_response()
+        .into_response();
+
+    // "When initiating an SSE stream, servers SHOULD include the
+    // `X-Accel-Buffering: no` header in the HTTP response. This instructs
+    // reverse proxies (such as nginx) to disable response buffering."
+    //
+    // It matters most for exactly this stream. A `subscriptions/listen` is
+    // quiet by design — it exists to carry an event that has not happened yet
+    // — and a buffering proxy will hold each notification until it has enough
+    // bytes to flush. The symptom is not a broken connection but a stream that
+    // silently arrives minutes late, which reads as "the server never sent
+    // it".
+    //
+    // `KeepAlive::default()` above covers the other half the transport page
+    // asks for: the periodic SSE comment line that stops an intermediary or an
+    // idle timeout from closing a quiet stream.
+    response.headers_mut().insert(
+        axum::http::header::HeaderName::from_static("x-accel-buffering"),
+        axum::http::HeaderValue::from_static("no"),
+    );
+    response
 }
 
 /// GET /.well-known/mcp.json — MCP server discovery metadata.
@@ -802,11 +860,19 @@ async fn serve_listen_stream(
 /// the guard is now `test_well_known_mcp_json_reports_the_real_revision`
 /// below.
 ///
-/// KNOWN AND NOT FIXED HERE: the `capabilities` block is four hardcoded
-/// booleans, and `roots` is among them — but `roots` is a CLIENT capability,
-/// declared per request in `_meta`, and a server cannot have it. Correcting
-/// that changes a payload third parties may parse, so it is left as a
-/// separate decision rather than folded into a version fix.
+/// `roots` USED TO BE ADVERTISED HERE and has been removed. It is a CLIENT
+/// capability, declared per request in `_meta`, so a server claiming it is
+/// stating something that cannot be true — and this endpoint's whole job is to
+/// tell a client what this server is. It was left in place once as "a separate
+/// decision" because correcting it changes a payload third parties may parse;
+/// 3.0.0 is where that decision is taken, alongside every other breaking wire
+/// change, rather than deferred into a release that promises stability.
+///
+/// The three that remain are all real server capabilities and all genuinely
+/// unconditional: this server registers tools, resources and prompts in every
+/// build. They are still HARDCODED, which is a smaller version of the same
+/// problem — nothing recomputes them from the registry, so a build that
+/// dropped one would keep advertising it here.
 async fn handle_mcp_discovery(State(state): State<Arc<HttpTransportState>>) -> Response {
     let bind = &state.config.bind;
     let base_url = format!("http://{bind}");
@@ -822,7 +888,6 @@ async fn handle_mcp_discovery(State(state): State<Arc<HttpTransportState>>) -> R
                 "tools": true,
                 "resources": true,
                 "prompts": true,
-                "roots": true,
             },
             "oauth": if state.oauth.enabled {
                 serde_json::json!({
@@ -1901,12 +1966,102 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        // The SUBJECT is that it was answered at all rather than swallowed as
+        // a notification, so that is what is asserted: not `202`, and a body
+        // carrying the id.
+        //
+        // The status is `404` rather than `200` because `notifications/
+        // initialized` is one of the methods 3.0.0 removed, so this reaches
+        // the `-32601` path — a separate MUST, pinned separately by
+        // `an_unimplemented_method_is_404_with_method_not_found`. Asserting
+        // `OK` here made this test fail for a reason having nothing to do with
+        // the id gate it exists to guard.
+        assert_ne!(
+            response.status(),
+            StatusCode::ACCEPTED,
+            "a message with an `id` is a request and must be answered"
+        );
+        let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["id"], serde_json::json!(7));
+        assert_eq!(json["id"], serde_json::json!(7), "status was {status}");
+    }
+
+    /// "If the server does not implement the requested RPC method, it MUST
+    /// respond with `404 Not Found` and a JSON-RPC error with code `-32601`
+    /// (`Method not found`)."
+    ///
+    /// The body was already correct and the status was `200`. The two are a
+    /// pair, and the spec says so in the same paragraph: "The JSON-RPC error
+    /// body distinguishes this case from a `404` returned by a legacy HTTP+SSE
+    /// server that does not host the modern MCP endpoint." `404` says "not
+    /// here"; the body says "this IS the endpoint, that method is not".
+    ///
+    /// `200` broke the client half of that: a dual-era client falls back to
+    /// `initialize` on `400`/`404`/`405` unless the body is a recognised
+    /// modern error, and `200` is not a status it inspects at all.
+    #[tokio::test]
+    async fn an_unimplemented_method_is_404_with_method_not_found() {
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":3,"method":"nope/definitely_not_a_method","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"]["code"],
+            serde_json::json!(-32601),
+            "the 404 must carry the JSON-RPC body that distinguishes it from a \
+             legacy server's 404: {json}"
+        );
+        assert_eq!(json["id"], serde_json::json!(3), "{json}");
+    }
+
+    /// The counterweight, and without it the test above is a licence to answer
+    /// `404` for everything.
+    ///
+    /// Only `-32601` is remapped. Every other JSON-RPC error comes from a
+    /// method this server DOES implement, and remapping those would tell a
+    /// client the endpoint is missing whenever a tool rejected its arguments —
+    /// which is exactly the fallback-to-`initialize` trigger this change
+    /// exists to get right.
+    #[tokio::test]
+    async fn an_implemented_method_that_errors_is_still_200() {
+        use tower::ServiceExt;
+
+        // A real method, given arguments it must refuse: `-32602`, not
+        // `-32601`.
+        let response = build_test_router()
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"definitely_not_a_tool","arguments":{},"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a fault inside an implemented method is not a missing endpoint"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_ne!(
+            json["error"]["code"],
+            serde_json::json!(-32601),
+            "this test only means something while the error is NOT method-not-found: {json}"
+        );
     }
 
     #[tokio::test]

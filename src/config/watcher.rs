@@ -21,8 +21,30 @@ use crate::security::CommandValidator;
 ///
 /// Functional core of the watcher: the notify callback passes the current
 /// instant explicitly, so kind/path filtering and the debounce window are
-/// unit-testable without a real filesystem or clock. On acceptance the
-/// debounce timestamp is updated.
+/// unit-testable without a real filesystem or clock.
+///
+/// THE DEBOUNCE WINDOW IS NOT SPENT HERE. It is spent by
+/// [`commit_reload`], which the caller invokes only after a reload actually
+/// SUCCEEDS. The distinction is the whole point of the split, and getting it
+/// wrong loses reloads outright:
+///
+/// A single logical save is several inotify events. Writing without an atomic
+/// rename truncates first, so an event fires while the file is empty or
+/// half-written; and a writer that chmods after writing — which anything
+/// handling a secrets file does, since `load_config` REFUSES a mode looser
+/// than `0600` — fires one more while the mode is still wrong. Either of
+/// those reads fails.
+///
+/// When acceptance spent the window, that first doomed event consumed it, and
+/// every remaining event of the same save fell inside the 500 ms and was
+/// debounced away — including the one that would have succeeded. The config
+/// stayed stale until the NEXT edit, behind a single logged error. The
+/// operator's evidence was a file they had changed and a server still running
+/// the old settings.
+///
+/// So a failed read now leaves the window untouched and the next event of the
+/// same save gets its turn. Debouncing still does its actual job — collapsing
+/// the duplicate events that follow a reload that WORKED.
 fn should_process_event(
     event: &Event,
     config_path: &Path,
@@ -38,15 +60,25 @@ fn should_process_event(
         return false;
     }
 
-    let mut last = last_reload
+    let last = last_reload
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if now.duration_since(*last) < DEBOUNCE_DURATION {
         debug!(path = %config_path.display(), "Debouncing config reload");
         return false;
     }
-    *last = now;
     true
+}
+
+/// Start the debounce window, after a reload that succeeded.
+///
+/// Separate from [`should_process_event`] so that a reload which FAILED does
+/// not silence the rest of its own save — see that function's docs.
+fn commit_reload(last_reload: &Mutex<Instant>, now: Instant) {
+    let mut last = last_reload
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *last = now;
 }
 
 /// Build the notify callback shared by all constructors.
@@ -65,12 +97,18 @@ fn make_reload_handler(
     ));
     move |res| match res {
         Ok(event) => {
-            if !should_process_event(&event, &path, &last_reload, Instant::now()) {
+            let now = Instant::now();
+            if !should_process_event(&event, &path, &last_reload, now) {
                 return;
             }
             info!(path = %path.display(), "Configuration file changed, reloading...");
             match load_config(&path) {
                 Ok(new_config) => {
+                    // Only a reload that WORKED starts the debounce window.
+                    // Spending it on the attempt is what used to swallow the
+                    // rest of a save after its first event caught the file
+                    // truncated or still world-readable.
+                    commit_reload(&last_reload, now);
                     let security_config = new_config.security.clone();
                     {
                         // blocking_write: we're in a sync callback on the
@@ -1302,13 +1340,31 @@ mod tests {
             ));
         }
 
+        /// Supersedes `updates_last_reload_timestamp_on_acceptance`, which
+        /// asserted that ACCEPTANCE started the debounce window.
+        ///
+        /// It is `commit_reload` — called only after a reload succeeds — that
+        /// starts it. The old contract lost reloads: the first event of a save
+        /// often catches the file truncated or still world-readable
+        /// (`load_config` refuses a mode looser than 0600), and that doomed
+        /// event spent the window for every later event of the same save.
         #[test]
-        fn updates_last_reload_timestamp_on_acceptance() {
+        fn only_a_committed_reload_starts_the_debounce_window() {
+            use super::super::commit_reload;
+
             let p = PathBuf::from("/etc/bridge/config.yaml");
             let now = Instant::now();
             let last = past_instant(now);
+
             assert!(should_process_event(&modify_event(&p), &p, &last, now));
-            // Second event at the same instant: now inside the debounce window.
+            // Nothing committed: the same instant is still outside the window,
+            // so the next event of this save still gets its turn. This is the
+            // assertion the lost-reload bug fails.
+            assert!(should_process_event(&modify_event(&p), &p, &last, now));
+
+            commit_reload(&last, now);
+            // Committed: duplicate events from the same successful save are
+            // collapsed, which is what debouncing is actually for.
             assert!(!should_process_event(&modify_event(&p), &p, &last, now));
         }
 

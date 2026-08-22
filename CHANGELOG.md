@@ -173,7 +173,43 @@ until it ships Modern support.
   open. A REFUSED listen answers as JSON — it has no stream to hold open,
   and dressing a refusal as a stream turns an error into a hang. The
   subscription is dropped when the response body is dropped, by whatever
-  route: client disconnect, cancellation, or the server dropping it.
+  route: client disconnect, cancellation, or the server dropping it. The
+  stream now carries `X-Accel-Buffering: no`, the header the transport page
+  SHOULD-requires when opening SSE. It matters most for this stream
+  precisely because it is quiet by design: a buffering reverse proxy holds
+  each notification until it has bytes enough to flush, and the symptom is
+  not a broken connection but an event arriving minutes late, which reads as
+  "the server never sent it".
+
+- **BREAKING: an unimplemented method over HTTP is `404`, not `200`.**
+  *"If the server does not implement the requested RPC method, it MUST
+  respond with `404 Not Found` and a JSON-RPC error with code `-32601`."*
+  The body was already right; the status was `200`. The two are a pair, and
+  the spec says why in the same paragraph — the JSON-RPC body is what
+  distinguishes this `404` from one returned by a legacy HTTP+SSE server
+  that does not host the modern endpoint. `200` broke the client half:
+  a dual-era client falls back to `initialize` on `400`/`404`/`405` unless
+  the body is a recognised modern error, and `200` is not a status it
+  inspects at all. Scoped to `-32601` exactly; every other JSON-RPC error
+  comes from a method this server does implement and still answers `200`,
+  because remapping those would claim the endpoint is missing whenever a
+  tool rejected its arguments.
+
+- **`/.well-known/mcp.json` no longer advertises `"roots": true`.** `roots`
+  is a CLIENT capability, declared per request in `_meta`; a server claiming
+  it states something that cannot be true, on the one endpoint whose job is
+  to say what this server is. It was knowingly left in place once as "a
+  separate decision" because the payload may have third-party parsers — this
+  is where that decision is taken, alongside every other breaking wire change
+  rather than deferred into a release that promises stability. `tools`,
+  `resources` and `prompts` remain and are all real server capabilities.
+
+  Not changed, and worth stating because it looks like the same bug: the
+  `Accept` header is still not validated. *"The client MUST include an
+  `Accept` header"* is a client MUST with no server counterpart — Server
+  Validation enumerates three failure conditions and `Accept` is in none of
+  them — so refusing on it would mint a `-32020` outside what the spec
+  allocates.
 
   `/health` no longer reports `sessions` or `max_sessions`.
   **`http.max_sessions` and `http.session_timeout_seconds` are now REJECTED
