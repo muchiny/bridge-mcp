@@ -268,7 +268,13 @@ impl ActiveRequests {
         self.0.lock().map_or(0, |m| m.len())
     }
 
-    /// Snapshot of currently-registered request ids. Test helper.
+    /// Whether `id` is still registered. Test helper.
+    ///
+    /// The doc above this said "snapshot of currently-registered request ids",
+    /// which describes a function that returns a collection — this one answers
+    /// a single membership question. `len()` cannot stand in for it: a count is
+    /// equally satisfied by the WRONG id being present, and the question an
+    /// accepted `subscriptions/listen` raises is whether THIS id survived.
     #[cfg(test)]
     fn contains(&self, id: &str) -> bool {
         self.0.lock().is_ok_and(|m| m.contains_key(id))
@@ -895,17 +901,53 @@ impl McpServer {
     /// concurrently with the reader; notifications and responses are
     /// multiplexed through the `mpsc::Sender<WriterMessage>` that
     /// [`Self::notification_tx`] caches for this session.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Allocates the per-session bundle — pending-requests map (Vuln 8),
+    /// active-requests map (FIND-038), notification tx, runtime override slot
+    /// (FIND-033), roots vec (FIND-037) — and hands it to
+    /// [`Self::serve_session_with_context`], which is the whole of the
+    /// behaviour. The split exists so a test can hold a handle on that bundle;
+    /// see that function's docs.
     async fn serve_session(self: Arc<Self>, session: Session) {
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(100);
+        let (tx, rx) = mpsc::channel::<WriterMessage>(100);
+        let session_ctx = SessionContext::new(tx);
+        self.serve_session_with_context(session, session_ctx, rx)
+            .await;
+    }
 
-        // Allocate the per-session bundle: pending-requests map (Vuln 8),
-        // capability flags (Vuln 9), active-requests map (FIND-038),
-        // notification tx, runtime override slot (FIND-033), and roots vec
-        // (FIND-037). Every
-        // field is Arc-wrapped so cloning the bundle into spawned tasks
-        // is cheap.
-        let session_ctx = SessionContext::new(tx.clone());
+    /// [`Self::serve_session`] with the per-session bundle supplied by the
+    /// caller.
+    ///
+    /// THE SEAM EXISTS FOR ONE GUARANTEE THAT HAD NO OTHER WITNESS. An
+    /// accepted `subscriptions/listen` must keep its request `id` registered
+    /// in `active_requests` for the lifetime of the subscription — that is
+    /// what lets `notifications/cancelled` find and close it. `serve_session`
+    /// built the bundle internally and never exposed it, so no test could
+    /// name the map, and the obligation sat unpinned. Not for want of trying:
+    /// there is nothing to assert on from the outside, because the guarantee
+    /// is precisely that something INVISIBLE stays present.
+    ///
+    /// Same shape and same remedy as `live_subscription_count`, added so a
+    /// test could prove the HTTP stream guard actually fires.
+    ///
+    /// Taking the `Receiver` too, rather than creating the channel here, keeps
+    /// `notification_tx` and the writer's `rx` two halves of ONE channel — a
+    /// seam that let a caller pass a bundle wired to a different channel would
+    /// be a way to build a session whose notifications go nowhere.
+    ///
+    /// A test that keeps a whole `SessionContext` clone also keeps a
+    /// `notification_tx` clone, which is a sender the teardown census counts:
+    /// the writer will not see `None` and teardown takes its bounded 2s path.
+    /// Clone the one field under test (`ActiveRequests` is `Clone` and holds
+    /// no sender) rather than the bundle.
+    #[allow(clippy::too_many_lines)]
+    async fn serve_session_with_context(
+        self: Arc<Self>,
+        session: Session,
+        session_ctx: SessionContext,
+        mut rx: mpsc::Receiver<WriterMessage>,
+    ) {
+        let tx = session_ctx.notification_tx.clone();
 
         // Writer task: consume the channel, forward every message to
         // the session's writer half. The writer is moved in here; it
@@ -7319,6 +7361,92 @@ rbac:
         // never exit and the await would hang. Same pattern as the G-1
         // harness above, and the reason is the pre-existing teardown
         // defect recorded in the task 35 commit.
+        serve.abort();
+    }
+
+    /// Task 66, obligation 4: an accepted `subscriptions/listen` keeps its
+    /// request `id` REGISTERED in `active_requests`.
+    ///
+    /// This is what makes the subscription cancellable — `handle_cancelled`
+    /// looks the id up in that map, so unregistering it would sever the only
+    /// route by which a client can close a stream it opened. The dispatch
+    /// path gets this right by RETURNING EARLY past the `unregister` call,
+    /// which is a fragile way to be correct: nothing about that `return`
+    /// announces that the skipped line is the point.
+    ///
+    /// It went unpinned until now for a structural reason rather than
+    /// neglect — `serve_session` built its `SessionContext` internally, so no
+    /// test could name the map. `serve_session_with_context` is the seam.
+    ///
+    /// THE SECOND HALF IS NOT OPTIONAL. "id 1 is still registered" is
+    /// satisfied by a server that never unregisters ANYTHING — which is a
+    /// real regression (an unbounded map) that would leave this test green.
+    /// So an ordinary request goes through the same session and must be GONE
+    /// from the map once answered. Together they say the retention is
+    /// specific to the listen, which is the actual obligation.
+    #[tokio::test]
+    async fn an_accepted_listen_keeps_its_id_registered_while_an_ordinary_one_does_not() {
+        let server = Arc::new(create_test_server());
+        let (session, client_tx, mut server_rx) = in_memory_session();
+
+        let (tx, rx) = mpsc::channel::<WriterMessage>(100);
+        let session_ctx = SessionContext::new(tx);
+        // The map only — cloning the whole bundle would mint a
+        // `notification_tx` clone and push teardown onto its 2s path.
+        let active = session_ctx.active_requests.clone();
+
+        let serve =
+            tokio::spawn(Arc::clone(&server).serve_session_with_context(session, session_ctx, rx));
+
+        client_tx
+            .send(client_request(
+                1,
+                "subscriptions/listen",
+                Some(params_declaring_nothing(
+                    json!({ "notifications": { "toolsListChanged": true } }),
+                )),
+            ))
+            .unwrap();
+        client_tx
+            .send(client_request(
+                2,
+                "tools/list",
+                Some(params_declaring_nothing(json!({}))),
+            ))
+            .unwrap();
+
+        // Sequencing device: once id 2 has been ANSWERED, the session has
+        // demonstrably processed past the listen AND finished the ordinary
+        // request, so both assertions below read settled state rather than a
+        // race. Bounded, because `serve_session` keeps the reader alive while
+        // `client_tx` lives — "no more messages" never arrives as a close.
+        let mut answered_two = false;
+        while !answered_two {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(3), server_rx.recv())
+                .await
+                .expect("session went silent before answering tools/list")
+                .expect("session writer channel closed");
+            if let WriterMessage::Response(r) = msg
+                && r.id == Some(json!(2))
+            {
+                answered_two = true;
+            }
+        }
+
+        assert!(
+            active.contains("1"),
+            "the listen's id must stay registered: unregistering it is the \
+             \"keep the id alive\" rule inverted, and it is what lets \
+             notifications/cancelled close the subscription"
+        );
+        assert!(
+            !active.contains("2"),
+            "an ordinary request must be unregistered once answered, or \
+             `active_requests` grows without bound and the assertion above \
+             proves nothing about the listen specifically"
+        );
+        assert_eq!(active.len(), 1, "exactly the listen, and nothing else");
+
         serve.abort();
     }
 
