@@ -1871,7 +1871,7 @@ mod tests {
     /// The stdio dispatcher answers this `-32602` on its own; what it cannot
     /// do is set an HTTP status, because it has no idea which transport is
     /// calling it. So the status is asserted here, and the BODY is asserted
-    /// too — a bare 400 with an unparseable string body (which is what
+    /// too — a bare 400 with an unparsable string body (which is what
     /// `validate_protocol_version` still returns) leaves a JSON-RPC client
     /// with nothing to act on.
     #[tokio::test]

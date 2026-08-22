@@ -16,6 +16,11 @@ extend-ignore-identifiers-re = [
     # base64("user:hunter2") — Authorization: Basic redaction test vector in
     # src/security/sanitizer.rs. typos reads the "ZIy" tail as `Iy` -> `It`.
     "dXNlcjpodW50ZXIy",
+    # W3C Trace Context example `traceparent`, used verbatim as a test vector
+    # in src/mcp/request_meta.rs. typos reads the parent-id's "0ba9" as
+    # `ba` -> `by`/`be`. Pinned to the exact 16-hex span rather than allowing
+    # `ba`, which would disable that correction everywhere.
+    "00f067aa0ba902b7",
 ]
 
 [default.extend-words]

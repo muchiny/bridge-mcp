@@ -33,7 +33,6 @@ pub mod http;
 #[cfg(feature = "http")]
 pub mod oauth;
 
-#[cfg(feature = "http")]
 use async_trait::async_trait;
 
 use super::protocol::{IncomingMessage, WriterMessage};
