@@ -132,13 +132,34 @@ pub struct HttpTransportConfig {
     #[serde(default = "default_http_max_body_size")]
     pub max_body_size: usize,
 
-    /// Session timeout in seconds (default: 1800 = 30 minutes).
-    #[serde(default = "default_http_session_timeout")]
-    pub session_timeout_seconds: u64,
+    /// RETIRED in 3.0.0, and rejected rather than ignored.
+    ///
+    /// It bounded the lifetime of an `Mcp-Session-Id`, and 3.0.0 deleted the
+    /// HTTP session lifecycle entirely: the transport is stateless, so there
+    /// is no session to time out. `Option` rather than a `serde` default
+    /// because the two cases have to stay distinguishable — a default of
+    /// `1800` makes "the operator wrote 1800" identical to "the operator
+    /// wrote nothing", and only the first should be an error. `None` loads;
+    /// `Some(_)` is refused by `validate_config` with the reason.
+    ///
+    /// Kept as a field, rather than removed, because `deny_unknown_fields`
+    /// would otherwise answer an existing config with `unknown field
+    /// "session_timeout_seconds"` — true, and useless. The operator needs to
+    /// know the bound is gone, not that the spelling is unrecognised.
+    #[serde(default)]
+    pub session_timeout_seconds: Option<u64>,
 
-    /// Maximum concurrent sessions (default: 100).
-    #[serde(default = "default_http_max_sessions")]
-    pub max_sessions: usize,
+    /// RETIRED in 3.0.0, and rejected rather than ignored. See
+    /// [`Self::session_timeout_seconds`] for why it is an `Option` and why it
+    /// is still here at all.
+    ///
+    /// This one is the more dangerous of the pair to leave silently inert: an
+    /// operator who sets it believes concurrent HTTP clients are capped, and
+    /// nothing has capped them since the session map was deleted. Note that
+    /// `sessions.max_sessions` is a DIFFERENT and still-live setting — it
+    /// bounds the SSH connection pool.
+    #[serde(default)]
+    pub max_sessions: Option<usize>,
 
     /// OAuth 2.0 configuration.
     #[serde(default)]
@@ -163,8 +184,8 @@ impl Default for HttpTransportConfig {
         Self {
             bind: default_http_bind(),
             max_body_size: default_http_max_body_size(),
-            session_timeout_seconds: default_http_session_timeout(),
-            max_sessions: default_http_max_sessions(),
+            session_timeout_seconds: None,
+            max_sessions: None,
             oauth: HttpOAuthConfig::default(),
             allowed_origins: default_http_allowed_origins(),
             allow_unsafe_bind: false,
@@ -189,14 +210,6 @@ fn default_http_allowed_origins() -> Vec<String> {
 
 const fn default_http_max_body_size() -> usize {
     1_048_576
-}
-
-const fn default_http_session_timeout() -> u64 {
-    1800
-}
-
-const fn default_http_max_sessions() -> usize {
-    100
 }
 
 /// OAuth configuration for the HTTP transport (YAML-serializable).

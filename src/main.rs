@@ -93,10 +93,6 @@ async fn main() -> Result<()> {
             let http_config = http_transport::HttpTransportConfig {
                 bind: bind.unwrap_or_else(|| config.http.bind.clone()),
                 max_body_size: config.http.max_body_size,
-                session_timeout: std::time::Duration::from_secs(
-                    config.http.session_timeout_seconds,
-                ),
-                max_sessions: config.http.max_sessions,
                 oauth,
                 allowed_origins: config.http.allowed_origins.clone(),
                 allow_unsafe_bind: insecure_bind || config.http.allow_unsafe_bind,

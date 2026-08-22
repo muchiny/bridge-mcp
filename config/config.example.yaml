@@ -674,11 +674,18 @@ tool_groups:
 #
 # JWKS HTTP fetching is not yet wired — configure static_keys for now.
 #
+# RETIRED in 3.0.0 — `session_timeout_seconds` and `max_sessions` are now
+# REJECTED at load, not ignored. The HTTP transport became stateless and the
+# `Mcp-Session-Id` lifecycle they governed no longer exists, so neither key
+# ever capped anything again. Remove them from your config; the server will
+# name whichever one it finds and say why. To bound concurrent work use
+# `limits.max_concurrent_commands`, and for per-request duration
+# `limits.command_timeout_seconds`. Note `sessions.max_sessions`, further up
+# this file, is a DIFFERENT setting and still governs the SSH connection pool.
+#
 # http:
 #   bind: "127.0.0.1:3000"
 #   max_body_size: 1048576       # 1 MiB
-#   sessionTimeoutSeconds: 1800  # 30 min
-#   max_sessions: 100
 #   allowed_origins:
 #     - "https://app.example.com"
 #   oauth:

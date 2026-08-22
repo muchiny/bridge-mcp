@@ -234,6 +234,40 @@ fn validate_config(config: &Config) -> Result<()> {
         });
     }
 
+    // Both keys governed the `Mcp-Session-Id` lifecycle, which 3.0.0 deleted
+    // along with the rest of the HTTP session machinery: the transport is
+    // stateless now. They were still parsed, still plumbed into
+    // `mcp::transport::http::HttpTransportConfig`, and read by nothing.
+    //
+    // This is the exact shape 2.2.0's CHANGELOG called out for
+    // `audit.retain_days` — documented in every release and executed in none.
+    // The lesson from that one is that the failure mode is not the wasted
+    // field, it is the operator who believes a limit is in force. Refusing to
+    // start says so once; ignoring the key says nothing, forever.
+    if config.http.session_timeout_seconds.is_some() {
+        return Err(BridgeError::ConfigInvalid {
+            field: "http.session_timeout_seconds".to_string(),
+            reason: "the HTTP session lifecycle was removed in 3.0.0 — the transport is \
+                     stateless and there is no session to expire, so this key has no \
+                     effect. Remove it. Per-request duration is bounded by \
+                     `limits.command_timeout_seconds` and a tool's own \
+                     `timeout_seconds` argument."
+                .to_string(),
+        });
+    }
+
+    if config.http.max_sessions.is_some() {
+        return Err(BridgeError::ConfigInvalid {
+            field: "http.max_sessions".to_string(),
+            reason: "the HTTP session lifecycle was removed in 3.0.0 — the transport is \
+                     stateless and holds no session map, so this key caps nothing. Remove \
+                     it. To bound concurrent work use `limits.max_concurrent_commands`; \
+                     note that `sessions.max_sessions` is a different setting and still \
+                     applies, to the SSH connection pool."
+                .to_string(),
+        });
+    }
+
     Ok(())
 }
 
@@ -893,5 +927,87 @@ hosts:
             matches!(result, Err(BridgeError::ConfigInvalid { field, reason })
             if field.contains("conflict") && reason.contains("mutually exclusive"))
         );
+    }
+
+    /// The minimal `http:` block every one of the retired-key tests below
+    /// builds on, so the difference between them is exactly one line.
+    fn config_with_http(extra: &str) -> String {
+        format!(
+            r#"
+hosts:
+  test:
+    hostname: "10.0.0.1"
+    user: deploy
+    auth:
+      type: agent
+http:
+  bind: "127.0.0.1:3000"
+{extra}"#
+        )
+    }
+
+    fn load_yaml(yaml: &str) -> Result<Config> {
+        let mut file = secure_temp_file();
+        file.write_all(yaml.as_bytes()).unwrap();
+        load_config(file.path())
+    }
+
+    /// THE POSITIVE TWIN, and the reason the two rejections below mean
+    /// anything. Both fire on `is_some()`, so a config that never mentions
+    /// either key must still load — otherwise "the retired key is refused"
+    /// would be satisfied by a loader that refuses every `http:` block, and
+    /// the tests would look identical.
+    #[test]
+    fn an_http_block_without_the_retired_keys_still_loads() {
+        let config = load_yaml(&config_with_http("  max_body_size: 2048\n"))
+            .expect("an http block that mentions neither retired key must load");
+        assert_eq!(config.http.max_body_size, 2048);
+        assert!(config.http.session_timeout_seconds.is_none());
+        assert!(config.http.max_sessions.is_none());
+    }
+
+    #[test]
+    fn http_session_timeout_seconds_is_refused_with_its_reason() {
+        let result = load_yaml(&config_with_http("  session_timeout_seconds: 1800\n"));
+        assert!(
+            matches!(&result, Err(BridgeError::ConfigInvalid { field, reason })
+            if field == "http.session_timeout_seconds" && reason.contains("stateless")),
+            "{result:?}"
+        );
+    }
+
+    /// Refused even when set to the value that used to be the default:
+    /// `1800` and `100` are what an operator who copied the old example file
+    /// has, and those are precisely the configs that must be told the bound
+    /// is gone. This is why the field is an `Option` and not a defaulted
+    /// `u64` — with a `serde` default, this config is byte-identical to one
+    /// that says nothing.
+    #[test]
+    fn http_max_sessions_is_refused_at_its_former_default_too() {
+        let result = load_yaml(&config_with_http("  max_sessions: 100\n"));
+        assert!(
+            matches!(&result, Err(BridgeError::ConfigInvalid { field, reason })
+            if field == "http.max_sessions" && reason.contains("sessions.max_sessions")),
+            "{result:?}"
+        );
+    }
+
+    /// `sessions.max_sessions` is a DIFFERENT key that still governs the SSH
+    /// connection pool. Conflating the two would turn a documentation fix
+    /// into an outage, so the distinction is pinned rather than trusted.
+    #[test]
+    fn the_ssh_pool_max_sessions_is_untouched() {
+        let yaml = r#"
+hosts:
+  test:
+    hostname: "10.0.0.1"
+    user: deploy
+    auth:
+      type: agent
+sessions:
+  max_sessions: 7
+"#;
+        let config = load_yaml(yaml).expect("sessions.max_sessions is still a live setting");
+        assert_eq!(config.sessions.max_sessions, 7);
     }
 }

@@ -156,8 +156,17 @@ until it ships Modern support.
   route: client disconnect, cancellation, or the server dropping it.
 
   `/health` no longer reports `sessions` or `max_sessions`.
-  `http.max_sessions` and `http.session_timeout_seconds` remain in the
-  config schema and now govern nothing.
+  **`http.max_sessions` and `http.session_timeout_seconds` are now REJECTED
+  at load.** They governed the `Mcp-Session-Id` lifecycle this release
+  deletes, so they cap and expire nothing; a config that still sets either
+  one fails to start with a message naming the key and what replaced it.
+  Leaving them parsed-and-inert was the same mistake this project called out
+  in 2.2.0 for `audit.retain_days` — documented in every release, executed
+  in none — and the cost is not the wasted field but the operator who
+  believes a limit is in force. Remove them; use
+  `limits.max_concurrent_commands` and `limits.command_timeout_seconds`
+  instead. `sessions.max_sessions` is a different key and still governs the
+  SSH connection pool.
   Cross-call state must travel as explicit handles in tool arguments —
   which is what `ssh_session_create` → `session_id` → `ssh_session_exec`
   and `output_id` → `ssh_output_fetch` already were.

@@ -90,10 +90,6 @@ pub struct HttpTransportConfig {
     pub bind: String,
     /// Maximum request body size in bytes (default: 1MB).
     pub max_body_size: usize,
-    /// Session timeout (default: 30 minutes).
-    pub session_timeout: Duration,
-    /// Maximum concurrent sessions (default: 100).
-    pub max_sessions: usize,
     /// OAuth configuration (disabled by default).
     pub oauth: OAuthConfig,
     /// Allowlist of origins for the `Origin` header (anti-DNS-rebinding).
@@ -111,8 +107,6 @@ impl Default for HttpTransportConfig {
         Self {
             bind: "127.0.0.1:3000".to_string(),
             max_body_size: 1_048_576,
-            session_timeout: Duration::from_mins(30),
-            max_sessions: 100,
             oauth: OAuthConfig::default(),
             allowed_origins: default_allowed_origins(),
             allow_unsafe_bind: false,
@@ -926,14 +920,7 @@ mod tests {
         let config = HttpTransportConfig::default();
         assert_eq!(config.bind, "127.0.0.1:3000");
         assert_eq!(config.max_body_size, 1_048_576);
-        assert_eq!(config.max_sessions, 100);
         assert!(!config.allow_unsafe_bind);
-    }
-
-    #[test]
-    fn test_default_config_session_timeout() {
-        let config = HttpTransportConfig::default();
-        assert_eq!(config.session_timeout, Duration::from_mins(30));
     }
 
     #[test]
@@ -947,16 +934,12 @@ mod tests {
         let config = HttpTransportConfig {
             bind: "127.0.0.1:8080".to_string(),
             max_body_size: 2_097_152,
-            session_timeout: Duration::from_mins(10),
-            max_sessions: 50,
             oauth: OAuthConfig::default(),
             allowed_origins: Vec::new(),
             allow_unsafe_bind: false,
         };
         assert_eq!(config.bind, "127.0.0.1:8080");
         assert_eq!(config.max_body_size, 2_097_152);
-        assert_eq!(config.session_timeout, Duration::from_mins(10));
-        assert_eq!(config.max_sessions, 50);
     }
 
     // ========================================================================
@@ -1033,7 +1016,7 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(config.bind, cloned.bind);
         assert_eq!(config.max_body_size, cloned.max_body_size);
-        assert_eq!(config.max_sessions, cloned.max_sessions);
+        assert_eq!(config.allowed_origins, cloned.allowed_origins);
     }
 
     #[test]
