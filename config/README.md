@@ -272,7 +272,14 @@ avoid the default `/tmp` fallback.
   These need per-connection notification channels that the daemon
   doesn't yet plumb. If your tool requires elicitation, use the
   stateless path (stop the daemon, run the tool directly).
-- **Batch requests**. JSON-RPC batches are rejected in daemon mode.
+- **Batch requests**. JSON-RPC batches are rejected in daemon mode — with
+  `-32600`, and permanently rather than pending. This line was stale for a
+  release in the other direction: Sprint 3 gave the daemon `serve_session`,
+  which DID dispatch batches, while this list still called them unsupported.
+  3.0.0 removes batching from every transport, because revision 2025-06-18
+  deleted it from the protocol and 2026-07-28 has no array form of
+  `JSONRPCMessage`. The session survives the refusal; send one message per
+  frame.
 - **Config hot-reload from inside the daemon**. Restart the daemon
   after editing `config.yaml`.
 

@@ -35,7 +35,7 @@ pub mod oauth;
 
 use async_trait::async_trait;
 
-use super::protocol::{IncomingMessage, WriterMessage};
+use super::protocol::{JsonRpcError, JsonRpcMessage, WriterMessage};
 
 /// Transport abstraction for MCP JSON-RPC communication.
 ///
@@ -87,11 +87,16 @@ pub trait SessionReader: Send {
     /// Read the next incoming message.
     ///
     /// - `None` — EOF (client disconnected, stdin closed, socket shut).
-    /// - `Some(Ok(msg))` — a parsed JSON-RPC single message or batch.
-    /// - `Some(Err(msg))` — the next line was not valid JSON. The serve
-    ///   loop will respond with a JSON-RPC `parse_error` and keep
-    ///   reading so one bad line does not kill the session.
-    async fn recv(&mut self) -> Option<std::result::Result<IncomingMessage, String>>;
+    /// - `Some(Ok(msg))` — one parsed JSON-RPC message.
+    /// - `Some(Err(e))` — the line could not be accepted, carrying the
+    ///   JSON-RPC error to answer with. The serve loop writes it back and
+    ///   keeps reading, so one bad line does not kill the session.
+    ///
+    /// The error is a `JsonRpcError` rather than a `String` because the two
+    /// rejections are different and the caller must not conflate them:
+    /// `-32700` for malformed JSON, `-32600` for a JSON array, which is
+    /// well-formed JSON that this protocol has no shape for.
+    async fn recv(&mut self) -> Option<std::result::Result<JsonRpcMessage, JsonRpcError>>;
 }
 
 /// Writes outgoing JSON-RPC messages to a client.

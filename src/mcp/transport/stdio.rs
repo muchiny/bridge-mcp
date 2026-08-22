@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error};
 
 use super::{Session, SessionReader, SessionWriter, Transport};
-use crate::mcp::protocol::{IncomingMessage, WriterMessage};
+use crate::mcp::protocol::{JsonRpcError, JsonRpcMessage, WriterMessage};
 use crate::mcp::server::McpServer;
 
 /// Single-session stdio transport built on `tokio::io::{stdin,stdout}`.
@@ -72,7 +72,7 @@ impl StdioSessionReader {
 
 #[async_trait]
 impl SessionReader for StdioSessionReader {
-    async fn recv(&mut self) -> Option<std::result::Result<IncomingMessage, String>> {
+    async fn recv(&mut self) -> Option<std::result::Result<JsonRpcMessage, JsonRpcError>> {
         loop {
             let mut line = String::new();
 
@@ -91,8 +91,8 @@ impl SessionReader for StdioSessionReader {
             return match McpServer::parse_incoming(trimmed) {
                 Ok(msg) => Some(Ok(msg)),
                 Err(e) => {
-                    error!(error = %e, "Failed to parse message");
-                    Some(Err(e.to_string()))
+                    error!(code = e.code, message = %e.message, "Rejecting message");
+                    Some(Err(e))
                 }
             };
         }
@@ -119,7 +119,6 @@ impl SessionWriter for StdioSessionWriter {
             WriterMessage::Response(r) => serde_json::to_string(r),
             WriterMessage::Notification(n) => serde_json::to_string(n),
             WriterMessage::Request(r) => serde_json::to_string(&r),
-            WriterMessage::BatchResponse(responses) => serde_json::to_string(responses),
         };
         let Ok(json_str) = json_str else {
             error!("Failed to serialize message");
@@ -163,94 +162,91 @@ mod tests {
     #[test]
     fn test_parse_incoming_single_request() {
         let input = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-        let result = McpServer::parse_incoming(input);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            IncomingMessage::Single(msg) => {
-                assert_eq!(msg.method.as_deref(), Some("initialize"));
-                assert_eq!(msg.id, Some(serde_json::json!(1)));
-            }
-            IncomingMessage::Batch(_) => panic!("Expected Single, got Batch"),
-        }
+        let msg = McpServer::parse_incoming(input).expect("a lone object parses");
+        assert_eq!(msg.method.as_deref(), Some("initialize"));
+        assert_eq!(msg.id, Some(serde_json::json!(1)));
     }
 
+    /// Supersedes `test_parse_incoming_batch`, which asserted that a
+    /// two-element array parsed into two messages.
+    ///
+    /// JSON-RPC batching was removed in revision 2025-06-18 and 2026-07-28
+    /// does not restore it: `JSONRPCMessage` has three object forms and no
+    /// array form, and "batch" appears nowhere in the published schema.
+    ///
+    /// The CODE assertion is what matters, not merely that it errors.
+    /// `-32600 Invalid Request` says the JSON was fine and the shape was not;
+    /// `-32700 Parse error` would tell a client its JSON was malformed, which
+    /// is false and sends it looking in the wrong place. `test_parse_incoming
+    /// _invalid_json` below holds the other end of that distinction, so
+    /// neither test can be satisfied by a function that returns one code for
+    /// everything.
     #[test]
-    fn test_parse_incoming_batch() {
+    fn a_json_array_is_refused_as_invalid_request_not_a_parse_error() {
         let input = r#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"resources/list"}]"#;
-        let result = McpServer::parse_incoming(input);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            IncomingMessage::Batch(msgs) => {
-                assert_eq!(msgs.len(), 2);
-                assert_eq!(msgs[0].method.as_deref(), Some("tools/list"));
-                assert_eq!(msgs[1].method.as_deref(), Some("resources/list"));
-            }
-            IncomingMessage::Single(_) => panic!("Expected Batch, got Single"),
-        }
+        let err = McpServer::parse_incoming(input).expect_err("batching was removed in 2025-06-18");
+        assert_eq!(err.code, -32600, "{}", err.message);
+        assert!(err.message.contains("batching"), "{}", err.message);
+    }
+
+    /// `[]` is the case most likely to be waved through as harmless — it
+    /// carries no messages, so nothing would execute either way. It is
+    /// refused for the same reason as a populated array: the array form is
+    /// not a thing this protocol has, and accepting the empty one would leave
+    /// `parse_incoming` with a shape it has to model.
+    #[test]
+    fn an_empty_json_array_is_refused_too() {
+        let err = McpServer::parse_incoming("[]").expect_err("there is no array form at all");
+        assert_eq!(err.code, -32600, "{}", err.message);
+    }
+
+    /// Leading whitespace must not smuggle an array past the check — the
+    /// guard trims before testing the first byte, and this is what pins that
+    /// it still does.
+    #[test]
+    fn an_array_behind_leading_whitespace_is_still_refused() {
+        let err = McpServer::parse_incoming("   [{\"jsonrpc\":\"2.0\",\"id\":1}]")
+            .expect_err("whitespace is not a bypass");
+        assert_eq!(err.code, -32600, "{}", err.message);
     }
 
     #[test]
     fn test_parse_incoming_notification() {
         let input = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-        let result = McpServer::parse_incoming(input);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            IncomingMessage::Single(msg) => {
-                assert_eq!(msg.method.as_deref(), Some("notifications/initialized"));
-                assert!(msg.id.is_none());
-            }
-            IncomingMessage::Batch(_) => panic!("Expected Single, got Batch"),
-        }
+        let msg = McpServer::parse_incoming(input).expect("a notification parses");
+        assert_eq!(msg.method.as_deref(), Some("notifications/initialized"));
+        assert!(msg.id.is_none());
     }
 
     #[test]
     fn test_parse_incoming_invalid_json() {
-        let input = "not valid json{{{";
-        let result = McpServer::parse_incoming(input);
-        assert!(result.is_err());
+        let err = McpServer::parse_incoming("not valid json{{{").expect_err("malformed");
+        assert_eq!(
+            err.code, -32700,
+            "malformed JSON is a parse error, not an invalid request: {}",
+            err.message
+        );
     }
 
     #[test]
     fn test_parse_incoming_empty_string() {
-        let input = "";
-        let result = McpServer::parse_incoming(input);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_incoming_empty_batch() {
-        let input = "[]";
-        let result = McpServer::parse_incoming(input);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            IncomingMessage::Batch(msgs) => assert!(msgs.is_empty()),
-            IncomingMessage::Single(_) => panic!("Expected Batch, got Single"),
-        }
+        let err = McpServer::parse_incoming("").expect_err("an empty line is not a message");
+        assert_eq!(err.code, -32700, "{}", err.message);
     }
 
     #[test]
     fn test_parse_incoming_with_leading_whitespace() {
         let input = "   {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
-        let result = McpServer::parse_incoming(input);
-        assert!(result.is_ok());
+        let msg = McpServer::parse_incoming(input).expect("leading whitespace is trimmed");
+        assert_eq!(msg.method.as_deref(), Some("tools/list"));
     }
 
     #[test]
     fn test_parse_incoming_response_no_method() {
-        let input = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]})"#;
-        // Note: we intentionally include a syntax quirk to ensure parser
-        // errors are surfaced. Below is the valid variant we actually test.
-        let _ = input;
         let valid = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
-        let result = McpServer::parse_incoming(valid);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            IncomingMessage::Single(msg) => {
-                assert!(msg.method.is_none());
-                assert_eq!(msg.id, Some(serde_json::json!(1)));
-            }
-            IncomingMessage::Batch(_) => panic!("Expected Single, got Batch"),
-        }
+        let msg = McpServer::parse_incoming(valid).expect("a client response parses");
+        assert!(msg.method.is_none());
+        assert_eq!(msg.id, Some(serde_json::json!(1)));
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use super::{Session, SessionReader, SessionWriter, Transport};
-use crate::mcp::protocol::{IncomingMessage, WriterMessage};
+use crate::mcp::protocol::{JsonRpcError, JsonRpcMessage, WriterMessage};
 use crate::mcp::server::McpServer;
 
 /// Multi-session Unix socket transport.
@@ -123,7 +123,7 @@ impl UnixSessionReader {
 
 #[async_trait]
 impl SessionReader for UnixSessionReader {
-    async fn recv(&mut self) -> Option<std::result::Result<IncomingMessage, String>> {
+    async fn recv(&mut self) -> Option<std::result::Result<JsonRpcMessage, JsonRpcError>> {
         loop {
             let mut line = String::new();
 
@@ -148,8 +148,8 @@ impl SessionReader for UnixSessionReader {
             return match McpServer::parse_incoming(trimmed) {
                 Ok(msg) => Some(Ok(msg)),
                 Err(e) => {
-                    warn!(error = %e, line = %trimmed, "Unix session parse failed");
-                    Some(Err(e.to_string()))
+                    warn!(code = e.code, message = %e.message, line = %trimmed, "Unix session rejected a line");
+                    Some(Err(e))
                 }
             };
         }
@@ -174,7 +174,6 @@ impl SessionWriter for UnixSessionWriter {
             WriterMessage::Response(r) => serde_json::to_string(r),
             WriterMessage::Notification(n) => serde_json::to_string(n),
             WriterMessage::Request(r) => serde_json::to_string(&r),
-            WriterMessage::BatchResponse(responses) => serde_json::to_string(responses),
         };
         let Ok(json_str) = json_str else {
             error!("Failed to serialize Unix session message");

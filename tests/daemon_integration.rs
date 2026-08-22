@@ -172,16 +172,23 @@ fn test_daemon_status_reports_stale_for_dead_pid() {
     }
 }
 
-/// **Sprint 3 Phase B.2:** batch JSON-RPC requests are now supported
-/// in daemon mode thanks to the shared `serve_session()` dispatch
-/// path.
+/// Supersedes `test_daemon_batch_requests_are_dispatched`, which sent three
+/// requests as a JSON array and asserted three responses came back.
 ///
-/// This test exercises the behavior that `daemon/connection.rs` used
-/// to reject with a warning: send a JSON array of three requests in
-/// a single frame and verify three responses come back — exactly
-/// what stdio has supported since Sprint 1.
+/// The daemon socket shares `serve_session()` with stdio, so it inherited
+/// batching from it — and 3.0.0 removes it from both. JSON-RPC batching was
+/// dropped in revision 2025-06-18 and 2026-07-28 does not restore it:
+/// `JSONRPCMessage` has three object forms and no array form. Until now the
+/// HTTP transport refused an array while these two accepted one, so the
+/// server's answer depended on which door the client knocked at.
+///
+/// TWO halves, and the second is what makes the first mean anything. The
+/// refusal alone is satisfied by a daemon that has stopped answering at all,
+/// or that drops the connection on the bad frame. So the same connection then
+/// sends an ordinary `tools/list` and must get an ordinary result: the array
+/// is refused, the session is not.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_daemon_batch_requests_are_dispatched() {
+async fn a_json_array_is_refused_on_the_daemon_socket() {
     let tmp = TempDir::new().expect("create tempdir");
     let socket = tmp.path().join("batch.sock");
 
@@ -206,14 +213,14 @@ async fn test_daemon_batch_requests_are_dispatched() {
     }
     assert!(ready, "daemon failed to bind socket within 2s");
 
-    // Send a batch of three tools/list + resources/list + prompts/list.
+    // The exact frame the superseded test asserted was dispatched.
     let mut client = UnixStream::connect(&socket).await.expect("connect");
     let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}},{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}]
 "#;
     client.write_all(batch).await.expect("write");
     client.flush().await.expect("flush");
 
-    let (r, _w) = client.split();
+    let (r, mut w) = client.split();
     let mut reader = BufReader::new(r);
     let mut response_line = String::new();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut response_line))
@@ -221,24 +228,48 @@ async fn test_daemon_batch_requests_are_dispatched() {
         .expect("read timeout")
         .expect("read ok");
 
-    // The response must be a JSON array of 3 elements (batch response).
     let response: serde_json::Value =
-        serde_json::from_str(response_line.trim()).expect("valid json batch response");
-    let arr = response
-        .as_array()
-        .expect("batch response must be a JSON array");
-    assert_eq!(
-        arr.len(),
-        3,
-        "batch of 3 requests must produce 3 responses, got: {arr:?}"
+        serde_json::from_str(response_line.trim()).expect("valid json response");
+    assert!(
+        !response.is_array(),
+        "the array must be refused, not dispatched: {response}"
     );
-    // Every response must carry one of the 3 ids.
-    let mut seen: Vec<i64> = arr
-        .iter()
-        .map(|r| r["id"].as_i64().expect("numeric id"))
-        .collect();
-    seen.sort_unstable();
-    assert_eq!(seen, vec![1, 2, 3]);
+    // `-32600 Invalid Request`, not `-32700 Parse error`: the frame was
+    // well-formed JSON. Telling the client its JSON was malformed would send
+    // it looking in the wrong place.
+    assert_eq!(
+        response["error"]["code"], -32600,
+        "expected Invalid Request: {response}"
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("batching"),
+        "the refusal must say what was wrong: {response}"
+    );
+
+    // THE POSITIVE TWIN. Same connection, an ordinary single request. The
+    // reader loop answers a bad line and keeps reading, so one refused frame
+    // must not end the session — and a daemon that had simply stopped
+    // answering would fail here rather than passing the assertions above.
+    let single = br#"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}
+"#;
+    w.write_all(single).await.expect("write single");
+    w.flush().await.expect("flush single");
+
+    let mut single_line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut single_line))
+        .await
+        .expect("read timeout after the refusal — the session died with the bad frame")
+        .expect("read ok");
+    let single_response: serde_json::Value =
+        serde_json::from_str(single_line.trim()).expect("valid json response");
+    assert_eq!(single_response["id"], 9, "{single_response}");
+    assert!(
+        single_response["result"]["tools"].is_array(),
+        "the session must still serve ordinary requests: {single_response}"
+    );
 
     drop(client);
     daemon_handle.abort();

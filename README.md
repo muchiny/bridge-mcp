@@ -789,7 +789,8 @@ appears; there are no headers here.
 missing header, or one that contradicts the body, is refused `400` with
 JSON-RPC `-32020` — the request is REJECTED rather than resolved in favour of
 the body, so a gateway can never route on a header that lies. JSON-RPC
-batching is not accepted: an array body is refused `400` with `-32600`.
+batching is not accepted on any transport: an array is refused with `-32600`
+(`400` here, and the same code on stdio and the daemon socket).
 `GET /mcp` and
 `DELETE /mcp` return **405** — the standalone SSE stream and the session
 lifecycle are gone. There is no `Mcp-Session-Id`, no `Last-Event-ID`, and no

@@ -45,8 +45,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator};
 
 use crate::mcp::protocol::{
-    IncomingMessage, JsonRpcError, JsonRpcMessage, JsonRpcResponse, PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS, WriterMessage,
+    JsonRpcError, JsonRpcMessage, JsonRpcResponse, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
+    WriterMessage,
 };
 use crate::mcp::request_meta::{
     MISSING_CLIENT_CAPABILITIES_MSG, lacks_required_client_capabilities,
@@ -600,13 +600,14 @@ async fn handle_post(
     // and `400` follows the same reasoning as every other malformed-request
     // refusal on this transport.
     //
-    // SCOPE, and it is a real divergence rather than an oversight: this
-    // refuses arrays on HTTP only. `serve_session`'s batch arm still accepts
-    // them, because the quoted MUST is written for the HTTP POST body and the
-    // daemon's Unix socket is a bridge-mcp transport rather than MCP stdio.
-    // The schema's lack of an array form makes stdio batching non-conformant
-    // too; retiring it is a separate breaking change with its own users, and
-    // it is recorded rather than smuggled in here.
+    // SCOPE: this refusal was HTTP-only for one release, and the divergence
+    // it created is now closed. `serve_session`'s batch arm accepted arrays
+    // on stdio and the daemon socket, on the reasoning that the quoted MUST
+    // is written for the HTTP POST body. That reasoning held for the quote
+    // and not for the schema: `JSONRPCMessage` has no array form on ANY
+    // transport, so the answer must not depend on which door the client
+    // knocked at. `McpServer::parse_incoming` now refuses arrays with the
+    // same `-32600` for the other two.
     if body.is_array() {
         warn!("Rejecting a JSON array body: 2026-07-28 has no JSON-RPC batching");
         return bad_request(
@@ -627,129 +628,76 @@ async fn handle_post(
         return bad_request(body.get("id").cloned(), e);
     }
 
-    // Parse the request
-    let incoming = if body.is_array() {
-        match serde_json::from_value::<Vec<JsonRpcMessage>>(body) {
-            Ok(msgs) => IncomingMessage::Batch(msgs),
-            Err(e) => {
-                let resp = JsonRpcResponse::error(
-                    None,
-                    JsonRpcError::parse_error(format!("Invalid batch: {e}")),
-                );
-                return Json(resp).into_response();
-            }
-        }
-    } else {
-        match serde_json::from_value::<JsonRpcMessage>(body) {
-            Ok(msg) => IncomingMessage::Single(msg),
-            Err(e) => {
-                let resp = JsonRpcResponse::error(
-                    None,
-                    JsonRpcError::parse_error(format!("Invalid JSON-RPC: {e}")),
-                );
-                return Json(resp).into_response();
-            }
+    // Parse the request. The array case is already gone: the guard above
+    // returns before this point, so there is exactly one shape left to
+    // deserialise. Until 3.0.0 an `if body.is_array()` branch stood here
+    // building an `IncomingMessage::Batch` — dead code, unreachable behind
+    // that same guard, and the sort that reads as a supported feature to
+    // anyone scanning the file.
+    let msg = match serde_json::from_value::<JsonRpcMessage>(body) {
+        Ok(msg) => msg,
+        Err(e) => {
+            let resp = JsonRpcResponse::error(
+                None,
+                JsonRpcError::parse_error(format!("Invalid JSON-RPC: {e}")),
+            );
+            return Json(resp).into_response();
         }
     };
 
-    // Process the request through the MCP server
-    match incoming {
-        IncomingMessage::Single(msg) => {
-            if msg.method.is_none() {
-                return StatusCode::NO_CONTENT.into_response();
-            }
-            // JSON-RPC 2.0 §4.1: a Notification is a Request with no `id`.
-            // Gate on that, not on the method name — the batch arm below
-            // does the same (`request.id.is_none()`), and the stdio
-            // transport's `McpServer::route_incoming_message` gates
-            // identically. Still dispatch through `handle_request` for
-            // symmetry with the batch arm, even though
-            // `handle_request_with_cancel` has no arm for any
-            // `notifications/*` method today — it falls through to
-            // `method_not_found`, which is discarded below just like any
-            // real result would be.
-            let is_notification = msg.id.is_none();
-
-            // C3: the SAME predicate the dispatch chokepoint uses, answered
-            // here with a real HTTP status. `handle_request` produces the
-            // `-32602` body on its own; what it cannot do is set the status,
-            // because it has no idea it is being called over HTTP.
-            //
-            // Before dispatch, so a malformed request does no work — the same
-            // placement as `validate_protocol_version` at the top of this
-            // function.
-            //
-            // The BATCH arm below deliberately does NOT do this. A batch is a
-            // transport container of independent messages and HTTP has only
-            // one status; voiding conforming members because a sibling was
-            // malformed would be worse than answering each on its own merits.
-            // Each malformed member still gets its own `-32602`, from the
-            // dispatch gate, inside the 200 array.
-            if lacks_required_client_capabilities(
-                msg.method.as_deref().unwrap_or_default(),
-                msg.id.is_some(),
-                msg.params.as_ref(),
-            ) {
-                return bad_request(
-                    msg.id.clone(),
-                    JsonRpcError::invalid_params(MISSING_CLIENT_CAPABILITIES_MSG),
-                );
-            }
-
-            let request = crate::mcp::protocol::JsonRpcRequest {
-                jsonrpc: msg.jsonrpc,
-                id: msg.id,
-                method: msg.method.unwrap_or_default(),
-                params: msg.params,
-            };
-
-            // The one method whose answer is a STREAM rather than a value.
-            // Routed before the generic dispatch because everything below
-            // assumes a single completed response.
-            if request.method == "subscriptions/listen" {
-                return serve_listen_stream(&state, request).await;
-            }
-
-            let resp = state.server.handle_request(request).await;
-            if is_notification {
-                // §5: "the receiver must not send a response to a
-                // notification". The Streamable HTTP transport spec is
-                // explicit: a POST body consisting solely of notifications
-                // (or responses) MUST get HTTP 202 Accepted with no body.
-                // The batch arm below applies the same rule to an
-                // all-notifications batch.
-                return StatusCode::ACCEPTED.into_response();
-            }
-            Json(resp).into_response()
-        }
-        IncomingMessage::Batch(msgs) => {
-            let mut responses = Vec::new();
-            for msg in msgs {
-                if msg.method.is_none() {
-                    continue;
-                }
-                let request = crate::mcp::protocol::JsonRpcRequest {
-                    jsonrpc: msg.jsonrpc,
-                    id: msg.id.clone(),
-                    method: msg.method.unwrap_or_default(),
-                    params: msg.params,
-                };
-                let is_notification = request.id.is_none();
-                let resp = state.server.handle_request(request).await;
-                if !is_notification {
-                    responses.push(resp);
-                }
-            }
-            if responses.is_empty() {
-                // Every message in the batch was a notification (or a bare
-                // response/method-less message) — nothing to answer. Same
-                // rule as the single-message arm above: HTTP 202 Accepted,
-                // no body, not `200` with an empty `[]`.
-                return StatusCode::ACCEPTED.into_response();
-            }
-            Json(responses).into_response()
-        }
+    if msg.method.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
     }
+    // JSON-RPC 2.0 §4.1: a Notification is a Request with no `id`. Gate on
+    // that, not on the method name — the stdio transport's
+    // `McpServer::route_incoming_message` gates identically. Still dispatch
+    // through `handle_request`, even though `handle_request_with_cancel` has
+    // no arm for any `notifications/*` method today: it falls through to
+    // `method_not_found`, which is discarded below just like any real result
+    // would be.
+    let is_notification = msg.id.is_none();
+
+    // C3: the SAME predicate the dispatch chokepoint uses, answered here with
+    // a real HTTP status. `handle_request` produces the `-32602` body on its
+    // own; what it cannot do is set the status, because it has no idea it is
+    // being called over HTTP.
+    //
+    // Before dispatch, so a malformed request does no work — the same
+    // placement as `validate_protocol_version` at the top of this function.
+    if lacks_required_client_capabilities(
+        msg.method.as_deref().unwrap_or_default(),
+        msg.id.is_some(),
+        msg.params.as_ref(),
+    ) {
+        return bad_request(
+            msg.id.clone(),
+            JsonRpcError::invalid_params(MISSING_CLIENT_CAPABILITIES_MSG),
+        );
+    }
+
+    let request = crate::mcp::protocol::JsonRpcRequest {
+        jsonrpc: msg.jsonrpc,
+        id: msg.id,
+        method: msg.method.unwrap_or_default(),
+        params: msg.params,
+    };
+
+    // The one method whose answer is a STREAM rather than a value. Routed
+    // before the generic dispatch because everything below assumes a single
+    // completed response.
+    if request.method == "subscriptions/listen" {
+        return serve_listen_stream(&state, request).await;
+    }
+
+    let resp = state.server.handle_request(request).await;
+    if is_notification {
+        // §5: "the receiver must not send a response to a notification". The
+        // Streamable HTTP transport spec is explicit: a POST body consisting
+        // solely of notifications (or responses) MUST get HTTP 202 Accepted
+        // with no body.
+        return StatusCode::ACCEPTED.into_response();
+    }
+    Json(resp).into_response()
 }
 
 /// Removes this stream's subscriptions when the stream is dropped.
@@ -834,7 +782,6 @@ async fn serve_listen_stream(
             WriterMessage::Response(r) => serde_json::to_string(&**r).ok(),
             WriterMessage::Notification(n) => serde_json::to_string(n).ok(),
             WriterMessage::Request(r) => serde_json::to_string(r).ok(),
-            WriterMessage::BatchResponse(rs) => serde_json::to_string(rs).ok(),
         };
         json_str.map(|data| Ok::<_, Infallible>(Event::default().event("message").data(data)))
     });
@@ -1899,32 +1846,24 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// A BATCH is answered per member, not voided as a whole.
-    ///
-    /// The single-message arm returns 400 before dispatch; the batch arm
-    /// deliberately does not. A batch is a transport container of independent
-    /// messages and HTTP carries one status, so refusing the whole POST would
-    /// destroy the conforming member's answer because of its sibling. Each
-    /// malformed member gets its own `-32602` from the dispatch gate, inside
-    /// a 200 array.
-    ///
-    /// This is the test that would catch someone "making the batch arm
-    /// consistent" with the single arm later.
-
-    // ============== Single-message notification suppression (G-18) ==============
+    // ============== Notification suppression (G-18) ==============
     //
     // JSON-RPC 2.0 §4.1/§5: a Notification is a Request with no `id`, and
-    // "the receiver must not send a response to a notification". The batch
-    // path in this file already gates on `request.id.is_none()`; the
-    // single-message path built and returned a full JsonRpcResponse
-    // regardless. Mirrors the stdio fix (`McpServer::route_incoming_message`,
-    // gated on `message.id.is_none()`, not on the method name).
+    // "the receiver must not send a response to a notification". This path
+    // built and returned a full JsonRpcResponse regardless. Mirrors the stdio
+    // fix (`McpServer::route_incoming_message`, gated on `message.id.is_none()`,
+    // not on the method name).
     //
     // Status code: the Streamable HTTP transport spec MUST-requires 202
-    // Accepted with no body when the POST body is solely notifications (or
-    // responses) — both this arm and the all-notifications batch arm below
-    // return 202, not 200, so the two paths agree instead of each picking
-    // its own answer to the same situation.
+    // Accepted with no body when the POST body is solely a notification (or a
+    // response).
+    //
+    // A `///` block stood above this one until 3.0.0, describing a batch test
+    // that had already been deleted. Having nothing left to document, it
+    // re-attached itself to the FIRST TEST BELOW, which is about something
+    // else entirely — the same failure as the orphaned `#[cfg]` and the
+    // orphaned `SessionCapabilities` doc comment. Removing an item is never
+    // one edit.
 
     #[tokio::test]
     async fn test_post_single_notification_gets_no_response_body() {

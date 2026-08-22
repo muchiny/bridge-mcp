@@ -23,7 +23,7 @@ use super::completion_provider::DefaultCompletionProvider;
 use super::logger::McpLogger;
 use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
-use super::protocol::{IncomingMessage, JsonRpcMessage, RootsListResult};
+use super::protocol::{JsonRpcMessage, RootsListResult};
 use super::request_meta::{
     CAPABILITY_EXEMPT_METHODS, MISSING_CLIENT_CAPABILITIES_MSG, RequestMeta,
     lacks_required_client_capabilities,
@@ -947,174 +947,109 @@ impl McpServer {
         info!("MCP session started");
 
         while let Some(msg_result) = reader.recv().await {
-            let incoming = match msg_result {
+            let message = match msg_result {
                 Ok(m) => m,
                 Err(e) => {
-                    error!(error = %e, "Failed to parse message");
-                    let response = JsonRpcResponse::error(
-                        None,
-                        JsonRpcError::parse_error(format!("Invalid JSON: {e}")),
-                    );
+                    // The reader hands back the JSON-RPC error to answer with,
+                    // already discriminated: `-32700` for malformed JSON,
+                    // `-32600` for an array body. Re-deriving it here would
+                    // flatten both into a parse error again.
+                    error!(code = e.code, message = %e.message, "Rejecting incoming line");
+                    let response = JsonRpcResponse::error(None, e);
                     let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
                     continue;
                 }
             };
 
-            match incoming {
-                IncomingMessage::Single(message) => {
-                    let Some(request) = Self::route_incoming_message(message, &session_ctx) else {
-                        continue;
+            let Some(request) = Self::route_incoming_message(message, &session_ctx) else {
+                continue;
+            };
+
+            // Acquire permit (blocks if at concurrency limit).
+            // Control-plane methods are exempt — see
+            // `is_concurrency_exempt` for why blocking here is a
+            // whole-session freeze and not just a queue.
+            let permit = if Self::is_concurrency_exempt(&request.method) {
+                None
+            } else if let Ok(permit) = self.concurrent_limit.clone().acquire_owned().await {
+                Some(permit)
+            } else {
+                error!("Semaphore closed unexpectedly");
+                break;
+            };
+
+            let server = Arc::clone(&self);
+            let tx = tx.clone();
+
+            // Register the request so `notifications/cancelled`
+            // can find its `CancellationToken`. We normalize
+            // the id to a String the same way
+            // `route_incoming_message` does.
+            let request_id: Option<String> = request.id.as_ref().map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            });
+            let cancel_token = request_id
+                .as_ref()
+                .map(|id| session_ctx.active_requests.register(id.clone()));
+            // Kept alongside the token moved into the handler below
+            // so the send site can confirm the token ACTUALLY fired
+            // — see `should_write_back`.
+            let cancel_token_for_suppression = cancel_token.clone();
+            let rid_cleanup = request_id;
+            let session_ctx_for_task = session_ctx.clone();
+
+            // Attach request-scoped tracing fields. `.instrument()`
+            // (not `.entered()`) because `EnteredSpan` is not
+            // `Send` and can't cross await points in a spawned
+            // task.
+            let span = tracing::info_span!(
+                "mcp.request",
+                id = ?rid_cleanup,
+                method = %request.method,
+            );
+            tokio::spawn(
+                async move {
+                    let Some(response) = server
+                        .handle_request_with_cancel(
+                            request,
+                            cancel_token,
+                            Some(&session_ctx_for_task),
+                        )
+                        .await
+                    else {
+                        // A live `subscriptions/listen`: MCP
+                        // 2026-07-28 requires the request `id` to
+                        // stay alive for the lifetime of the
+                        // subscription and to be answered only at
+                        // graceful teardown, so nothing is written
+                        // now. The id is deliberately left
+                        // registered in `active_requests` too —
+                        // unregistering it is exactly the "keep the
+                        // id alive" rule inverted, and keeping it
+                        // is what lets `notifications/cancelled`
+                        // close the subscription.
+                        drop(permit);
+                        return;
                     };
-
-                    // Acquire permit (blocks if at concurrency limit).
-                    // Control-plane methods are exempt — see
-                    // `is_concurrency_exempt` for why blocking here is a
-                    // whole-session freeze and not just a queue.
-                    let permit = if Self::is_concurrency_exempt(&request.method) {
-                        None
-                    } else if let Ok(permit) = self.concurrent_limit.clone().acquire_owned().await {
-                        Some(permit)
-                    } else {
-                        error!("Semaphore closed unexpectedly");
-                        break;
-                    };
-
-                    let server = Arc::clone(&self);
-                    let tx = tx.clone();
-
-                    // Register the request so `notifications/cancelled`
-                    // can find its `CancellationToken`. We normalize
-                    // the id to a String the same way
-                    // `route_incoming_message` does.
-                    let request_id: Option<String> = request.id.as_ref().map(|v| match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    });
-                    let cancel_token = request_id
+                    let token_was_cancelled = cancel_token_for_suppression
                         .as_ref()
-                        .map(|id| session_ctx.active_requests.register(id.clone()));
-                    // Kept alongside the token moved into the handler below
-                    // so the send site can confirm the token ACTUALLY fired
-                    // — see `should_write_back`.
-                    let cancel_token_for_suppression = cancel_token.clone();
-                    let rid_cleanup = request_id;
-                    let session_ctx_for_task = session_ctx.clone();
-
-                    // Attach request-scoped tracing fields. `.instrument()`
-                    // (not `.entered()`) because `EnteredSpan` is not
-                    // `Send` and can't cross await points in a spawned
-                    // task.
-                    let span = tracing::info_span!(
-                        "mcp.request",
-                        id = ?rid_cleanup,
-                        method = %request.method,
-                    );
-                    tokio::spawn(
-                        async move {
-                            let Some(response) = server
-                                .handle_request_with_cancel(
-                                    request,
-                                    cancel_token,
-                                    Some(&session_ctx_for_task),
-                                )
-                                .await
-                            else {
-                                // A live `subscriptions/listen`: MCP
-                                // 2026-07-28 requires the request `id` to
-                                // stay alive for the lifetime of the
-                                // subscription and to be answered only at
-                                // graceful teardown, so nothing is written
-                                // now. The id is deliberately left
-                                // registered in `active_requests` too —
-                                // unregistering it is exactly the "keep the
-                                // id alive" rule inverted, and keeping it
-                                // is what lets `notifications/cancelled`
-                                // close the subscription.
-                                drop(permit);
-                                return;
-                            };
-                            let token_was_cancelled = cancel_token_for_suppression
-                                .as_ref()
-                                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
-                            if McpServer::should_write_back(&response, token_was_cancelled) {
-                                let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
-                            } else {
-                                debug!(
-                                    id = ?rid_cleanup,
-                                    "Suppressing response for a cancelled request"
-                                );
-                            }
-                            if let Some(rid) = rid_cleanup {
-                                session_ctx_for_task.active_requests.unregister(&rid);
-                            }
-                            drop(permit);
-                        }
-                        .instrument(span),
-                    );
-                }
-                IncomingMessage::Batch(messages) => {
-                    if messages.is_empty() {
-                        let response = JsonRpcResponse::error(
-                            None,
-                            JsonRpcError::invalid_request("Empty batch"),
-                        );
+                        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
+                    if McpServer::should_write_back(&response, token_was_cancelled) {
                         let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
-                        continue;
-                    }
-
-                    // Reject batches containing `initialize` (MCP spec)
-                    let has_initialize = messages
-                        .iter()
-                        .any(|m| m.method.as_deref() == Some("initialize"));
-                    if has_initialize {
-                        let response = JsonRpcResponse::error(
-                            None,
-                            JsonRpcError::invalid_request(
-                                "initialize must not be part of a batch request",
-                            ),
+                    } else {
+                        debug!(
+                            id = ?rid_cleanup,
+                            "Suppressing response for a cancelled request"
                         );
-                        let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
-                        continue;
                     }
-
-                    // Execute batch requests in parallel
-                    let server = Arc::clone(&self);
-                    let tx_batch = tx.clone();
-                    tokio::spawn(async move {
-                        let mut handles = Vec::with_capacity(messages.len());
-                        for message in messages {
-                            let server = Arc::clone(&server);
-                            handles.push(tokio::spawn(async move {
-                                // Notifications (no method) don't produce responses
-                                let method = message.method?;
-                                let request = JsonRpcRequest {
-                                    jsonrpc: message.jsonrpc,
-                                    id: message.id,
-                                    method,
-                                    params: message.params,
-                                };
-                                // Notifications (no id) don't produce responses per JSON-RPC 2.0
-                                let is_notification = request.id.is_none();
-                                let response = server.handle_request(request).await;
-                                if is_notification {
-                                    None
-                                } else {
-                                    Some(response)
-                                }
-                            }));
-                        }
-                        let mut responses = Vec::new();
-                        for handle in handles {
-                            if let Ok(Some(response)) = handle.await {
-                                responses.push(response);
-                            }
-                        }
-                        if !responses.is_empty() {
-                            let _ = tx_batch.send(WriterMessage::BatchResponse(responses)).await;
-                        }
-                    });
+                    if let Some(rid) = rid_cleanup {
+                        session_ctx_for_task.active_requests.unregister(&rid);
+                    }
+                    drop(permit);
                 }
-            }
+                .instrument(span),
+            );
         }
 
         info!("Client disconnected, session ending");
@@ -1225,18 +1160,32 @@ impl McpServer {
         Self::should_send_response(response) || !token_was_cancelled
     }
 
-    /// Parse an incoming line as a single JSON-RPC message or a batch.
-    pub fn parse_incoming(
-        trimmed: &str,
-    ) -> std::result::Result<IncomingMessage, serde_json::Error> {
+    /// Parse one line as a single JSON-RPC message.
+    ///
+    /// Returns the JSON-RPC error to answer with, rather than a
+    /// `serde_json::Error`, because the two failures here are NOT the same
+    /// failure and the caller cannot tell them apart from a parse error alone:
+    /// a syntactically valid array is well-formed JSON that this protocol has
+    /// no shape for, and answering `-32700 Parse error` to it would tell a
+    /// client its JSON was malformed when it was not.
+    ///
+    /// JSON-RPC batching was removed in revision 2025-06-18 and 2026-07-28
+    /// does not bring it back: `JSONRPCMessage` is `JSONRPCRequest |
+    /// JSONRPCNotification | JSONRPCResponse` — three object types, no array
+    /// form — and the word "batch" does not appear anywhere in the published
+    /// schema. Until 3.0.0 this function accepted an array on stdio and the
+    /// daemon socket while the HTTP transport refused one, which made the
+    /// server's own answer depend on which door the client knocked at.
+    pub fn parse_incoming(trimmed: &str) -> std::result::Result<JsonRpcMessage, JsonRpcError> {
         let trimmed = trimmed.trim_start();
         if trimmed.starts_with('[') {
-            let batch: Vec<JsonRpcMessage> = serde_json::from_str(trimmed)?;
-            Ok(IncomingMessage::Batch(batch))
-        } else {
-            let msg: JsonRpcMessage = serde_json::from_str(trimmed)?;
-            Ok(IncomingMessage::Single(msg))
+            return Err(JsonRpcError::invalid_request(
+                "an MCP message must be a single JSON-RPC request or notification; \
+                 JSON-RPC batching was removed in revision 2025-06-18",
+            ));
         }
+        serde_json::from_str(trimmed)
+            .map_err(|e| JsonRpcError::parse_error(format!("Invalid JSON: {e}")))
     }
 
     /// Route a single incoming message: client response or client request.
@@ -3229,12 +3178,12 @@ mod tests {
 
     /// Feeds `serve_session` a scripted sequence of client messages.
     struct ChannelReader {
-        rx: mpsc::UnboundedReceiver<IncomingMessage>,
+        rx: mpsc::UnboundedReceiver<JsonRpcMessage>,
     }
 
     #[async_trait::async_trait]
     impl SessionReader for ChannelReader {
-        async fn recv(&mut self) -> Option<std::result::Result<IncomingMessage, String>> {
+        async fn recv(&mut self) -> Option<std::result::Result<JsonRpcMessage, JsonRpcError>> {
             self.rx.recv().await.map(Ok)
         }
     }
@@ -3256,10 +3205,10 @@ mod tests {
     /// a sender that plays the client, and a receiver of server output.
     fn in_memory_session() -> (
         Session,
-        mpsc::UnboundedSender<IncomingMessage>,
+        mpsc::UnboundedSender<JsonRpcMessage>,
         mpsc::UnboundedReceiver<WriterMessage>,
     ) {
-        let (client_tx, client_rx) = mpsc::unbounded_channel::<IncomingMessage>();
+        let (client_tx, client_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
         let (server_tx, server_rx) = mpsc::unbounded_channel::<WriterMessage>();
         let session = Session {
             reader: Box::new(ChannelReader { rx: client_rx }),
@@ -3269,15 +3218,15 @@ mod tests {
     }
 
     /// One JSON-RPC request, shaped exactly as a reader hands it to the loop.
-    fn client_request(id: i64, method: &str, params: Option<Value>) -> IncomingMessage {
-        IncomingMessage::Single(JsonRpcMessage {
+    fn client_request(id: i64, method: &str, params: Option<Value>) -> JsonRpcMessage {
+        JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(id)),
             method: Some(method.to_string()),
             params,
             result: None,
             error: None,
-        })
+        }
     }
 
     /// G-1 regression, straight from the audit's own reproduction.
@@ -7349,7 +7298,6 @@ rbac:
                         saw_ack = true;
                     }
                 }
-                WriterMessage::BatchResponse(_) => panic!("unexpected batch response"),
                 // Server-initiated requests (elicitation, sampling) are
                 // unrelated to this assertion; skip rather than panic so an
                 // unrelated feature cannot fail this test spuriously.
@@ -8965,8 +8913,12 @@ rbac:
         impl SessionReader for EofReader {
             async fn recv(
                 &mut self,
-            ) -> Option<std::result::Result<crate::mcp::protocol::IncomingMessage, String>>
-            {
+            ) -> Option<
+                std::result::Result<
+                    crate::mcp::protocol::JsonRpcMessage,
+                    crate::mcp::protocol::JsonRpcError,
+                >,
+            > {
                 None
             }
         }

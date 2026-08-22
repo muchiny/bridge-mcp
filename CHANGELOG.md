@@ -127,16 +127,36 @@ until it ships Modern support.
   client reads `supportedVersions` and picks one — refusing it would deny
   the client the list it needs to recover.
 
-- **BREAKING: JSON-RPC batching is refused over HTTP.** Batching was removed
-  in revision 2025-06-18 and 2026-07-28 does not reinstate it:
-  `JSONRPCMessage` has no array form, and *"The body of the HTTP POST MUST
-  be a single JSON-RPC request or notification."* An array body is answered
-  `400` with `-32600`. The code is this server's choice — the spec states
-  the client-side MUST but defines no server-side procedure.
+- **BREAKING: JSON-RPC batching is refused on every transport.** Batching was
+  removed in revision 2025-06-18 and 2026-07-28 does not reinstate it:
+  `JSONRPCMessage` is `JSONRPCRequest | JSONRPCNotification | JSONRPCResponse`
+  — three object forms, no array form — the word "batch" appears nowhere in
+  the published schema, and Streamable HTTP adds *"The body of the HTTP POST
+  MUST be a single JSON-RPC request or notification."* An array is answered
+  `-32600` (`400` over HTTP). The code is this server's choice — the spec
+  states the client-side MUST but defines no server-side procedure.
 
-  The stdio/daemon batch path is UNCHANGED and therefore also
-  non-conformant, since the schema has no array form on any transport.
-  Retiring it is a separate breaking change with its own users.
+  `-32600 Invalid Request`, deliberately, and not `-32700 Parse error`: the
+  array is well-formed JSON that this protocol has no shape for, and telling
+  a client its JSON was malformed sends it looking in the wrong place.
+
+  **stdio and the daemon socket are included, and that is the change.** For
+  one release the refusal was HTTP-only, on the reasoning that the quoted
+  MUST is written for the HTTP POST body. That held for the quote and not for
+  the schema, which has no array form on any transport — so the server's
+  answer depended on which door the client knocked at. A client that batched
+  over the daemon socket will now get `-32600` per frame; the session is not
+  closed, and ordinary single requests on the same connection continue to be
+  served.
+
+  Removed from the public API with it: `mcp::protocol::IncomingMessage` (both
+  variants) and `WriterMessage::BatchResponse`.
+  `McpServer::parse_incoming` now returns `Result<JsonRpcMessage,
+  JsonRpcError>` instead of `Result<IncomingMessage, serde_json::Error>`, and
+  `SessionReader::recv` yields `Result<JsonRpcMessage, JsonRpcError>` instead
+  of `Result<IncomingMessage, String>` — the error type changed because a
+  `String` cannot carry the `-32600`/`-32700` distinction the caller has to
+  make.
 
 - **HTTP: sessions and stream resumption are gone.** No `Mcp-Session-Id`
   header, no session lifecycle, no `DELETE /mcp`. `GET /mcp` no longer
