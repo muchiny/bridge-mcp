@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Gate: the shipped prose describes a Modern-only (2026-07-28) server.
-# Not a spell-checker — it looks for the specific claims that became false
-# when the legacy handshake and the GET-SSE stream were deleted.
+# Gate: README, server card, DXT manifest and CLAUDE.md describe a Modern-only
+# server and carry no Legacy leftovers. Run from the repo root.
+#
+# WHAT THIS IS NOT: presence/absence greps over documentation. It reads no
+# .rs file. A claim can be present, this script green, and the server doing
+# the opposite -- which is exactly what happened while it passed against an
+# HTTP transport that still ran sessions, GET-SSE and DELETE.
+#
+# It guards the PROSE against regression. The behaviour is guarded by tests.
 set -euo pipefail
 
 fail=0

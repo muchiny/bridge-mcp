@@ -93,22 +93,71 @@ until it ships Modern support.
   the `io.modelcontextprotocol/tasks` extension, declared as a key of
   `capabilities.extensions`.
 
-- **HTTP transport.** `MCP-Protocol-Version` is now a routing hint only —
-  the authoritative revision is the one in `_meta`, which is the only copy
-  that exists over stdio. Two new request headers mirror the body for
-  gateways and WAFs: `Mcp-Method` (the JSON-RPC method) and `Mcp-Name`
-  (tool name for `tools/call`, resource URI for `resources/read`). A
-  mismatch between `Mcp-Method` and the body is treated as a malformed
-  request; the body always wins.
+- **HTTP transport: three REQUIRED request headers.** Every POST must carry
+  `MCP-Protocol-Version`, and every request must carry `Mcp-Method` (the
+  JSON-RPC method). `Mcp-Name` is required for `tools/call`,
+  `resources/read` and `prompts/get`, mirroring `params.name` or
+  `params.uri`. These are not routing hints: *"These headers are REQUIRED
+  for compliance."*
+
+  A missing required header, or one whose value contradicts the body, is a
+  Server Validation failure — **HTTP `400` plus JSON-RPC `-32020`
+  HeaderMismatch**, both mandated. `MCP-Protocol-Version` and
+  `_meta.protocolVersion` are a header/body pair and must agree; a
+  disagreement is a mismatch (`-32020`), not an unsupported version.
+
+  ORDER MATTERS AND IS OBSERVABLE: header validation runs before
+  version-support checking. A Legacy `initialize` POST trips both — it is
+  missing `Mcp-Method` and names an unsupported revision — and the
+  Compatibility Matrix resolves that row to server validation, so the
+  answer is `-32020`, not `-32022`.
+
+  Browser clients: `Mcp-Method` and `Mcp-Name` are in the CORS allowlist. A
+  required header that preflight strips is a header the browser can never
+  send.
+
+- **The declared revision is enforced on BOTH transports.** A request whose
+  `_meta["io.modelcontextprotocol/protocolVersion"]` names a revision this
+  server does not speak is refused `-32022`, carrying `data.supported` and
+  `data.requested`. In 2.2.0 this field was parsed and read by nobody, so
+  any value was served. An ABSENT `protocolVersion` is still served:
+  nothing establishes it as mandatory the way `clientCapabilities` is.
+
+  `server/discover` is exempt, because the discovery result is where a
+  client reads `supportedVersions` and picks one — refusing it would deny
+  the client the list it needs to recover.
+
+- **BREAKING: JSON-RPC batching is refused over HTTP.** Batching was removed
+  in revision 2025-06-18 and 2026-07-28 does not reinstate it:
+  `JSONRPCMessage` has no array form, and *"The body of the HTTP POST MUST
+  be a single JSON-RPC request or notification."* An array body is answered
+  `400` with `-32600`. The code is this server's choice — the spec states
+  the client-side MUST but defines no server-side procedure.
+
+  The stdio/daemon batch path is UNCHANGED and therefore also
+  non-conformant, since the schema has no array form on any transport.
+  Retiring it is a separate breaking change with its own users.
 
 - **HTTP: sessions and stream resumption are gone.** No `Mcp-Session-Id`
   header, no session lifecycle, no `DELETE /mcp`. `GET /mcp` no longer
   serves an SSE stream — `subscriptions/listen`, issued as an ordinary
   POST, is the only server-to-client notification path. `GET` and `DELETE`
-  on `/mcp` return **405**. `Last-Event-ID` is ignored and there is no
-  redelivery buffer: a broken stream means the client re-issues with a
-  **new** request id, so plan for duplicate work rather than assuming
-  id-keyed idempotency. List endpoints no longer vary per connection.
+  on `/mcp` return **405** with `Allow: POST` — the path exists, the method
+  does not. There is no `Last-Event-ID` and no redelivery buffer: a broken
+  stream means the client re-issues with a **new** request id, so plan for
+  duplicate work rather than assuming id-keyed idempotency. List endpoints
+  no longer vary per connection.
+
+  An accepted `subscriptions/listen` answers on the response body of the
+  POST that carried it, as `text/event-stream`, and holds its request id
+  open. A REFUSED listen answers as JSON — it has no stream to hold open,
+  and dressing a refusal as a stream turns an error into a hang. The
+  subscription is dropped when the response body is dropped, by whatever
+  route: client disconnect, cancellation, or the server dropping it.
+
+  `/health` no longer reports `sessions` or `max_sessions`.
+  `http.max_sessions` and `http.session_timeout_seconds` remain in the
+  config schema and now govern nothing.
   Cross-call state must travel as explicit handles in tool arguments —
   which is what `ssh_session_create` → `session_id` → `ssh_session_exec`
   and `output_id` → `ssh_output_fetch` already were.
@@ -126,9 +175,13 @@ longer describe the code. This is intentional; do not re-apply them.
 - 2.2.0 taught the server to accept **both** `completion/complete` and
   `completions/complete`. 3.0.0 accepts only the singular spelling the
   spec defines.
-- 2.2.0 made the HTTP layer reject a malformed `MCP-Protocol-Version`
-  header with 400. In 3.0.0 the header is advisory; a wrong revision is
-  refused with `-32022` from the `_meta` value instead, on both transports.
+- 2.2.0 made the HTTP layer reject an unsupported `MCP-Protocol-Version`
+  header with 400, and ACCEPTED an absent one by assuming `2025-03-26`. The
+  400 stands and is now a JSON-RPC body rather than a bare string; the
+  assumption is gone, because assuming a Legacy revision for a header-less
+  POST was the door a pre-Modern client walked through. The header is
+  required, not advisory. The `_meta` revision is enforced separately, on
+  both transports.
 - 2.2.0 hardened `initialize` param parsing (raising a swallowed `debug!`
   to `warn!` and recovering `protocolVersion` from the raw value). All of
   that code is deleted: `initialize` is now a single `-32022` arm.
@@ -190,6 +243,15 @@ corrections, and the five command-injection sites.
 
 - The `Mcp-Session-Id` session lifecycle, the standalone `GET /mcp` SSE
   handler, `DELETE /mcp`, and the `Last-Event-ID` resumption buffer.
+- **BREAKING (lib API)**: `bridge_mcp::mcp::transport::session_store` and
+  `build_router_with_store`. The store existed to be swapped for a shared
+  backend "once the stateless-transport spec lands"; that spec landed and
+  removed sessions rather than distributing them.
+- **BREAKING (lib API)**: `bridge_mcp::mcp::session_capabilities` and its
+  `SessionCapabilities` type, `SessionContext::caps`, and
+  `McpServer::allocate_session_capabilities_for_test`. Capabilities are
+  per-request; a request that declares none is refused before any handler
+  reads one.
 - The `initialize` / `notifications/initialized` handshake, `ping`,
   `logging/setLevel`, `notifications/roots/list_changed`,
   `resources/subscribe`, `resources/unsubscribe`.

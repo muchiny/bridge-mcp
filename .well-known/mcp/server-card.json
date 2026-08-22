@@ -26,8 +26,8 @@
       "io.modelcontextprotocol/clientCapabilities"
     ],
     "notifications": "opt-in via subscriptions/listen; every notification carries _meta[\"io.modelcontextprotocol/subscriptionId\"]",
-    "legacy_initialize": "answered with -32022 { supported: [\"2026-07-28\"] }; pre-Modern clients cannot fall forward",
-    "http": "POST /mcp only; GET and DELETE return 405. No Mcp-Session-Id, no Last-Event-ID, no stream resumption."
+    "legacy_initialize": "stdio: -32022 { supported: [\"2026-07-28\"] }. HTTP: 400 + -32020 HeaderMismatch, because the POST carries no Mcp-Method and header validation precedes version support. Pre-Modern clients cannot fall forward on either transport.",
+    "http": "POST /mcp only; GET and DELETE return 405 with Allow: POST. MCP-Protocol-Version, Mcp-Method and Mcp-Name are REQUIRED; a missing or contradicting header is 400 + -32020. JSON-RPC batching is refused (400 + -32600). No Mcp-Session-Id, no Last-Event-ID, no stream resumption. subscriptions/listen answers text/event-stream on its own POST body."
   },
   "authentication": [
     "oauth2",

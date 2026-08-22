@@ -524,6 +524,28 @@ fn check_modern_headers(headers: &HeaderMap, body: &Value) -> Result<(), JsonRpc
         }
     }
 
+    // The header and the envelope are a header/body PAIR, so a disagreement
+    // between them is a mismatch under the same rule as `Mcp-Method`:
+    // *"reject requests where the values specified in the headers do not
+    // match the corresponding values in the request body"*. The spec's table
+    // names `method` and `params.name`/`params.uri` as source fields and does
+    // not list the revision, so this is the rule read on its own terms rather
+    // than a row quoted from the table — and it is checked before support,
+    // because "your two copies disagree" is a different and more actionable
+    // answer than "I do not speak the one I happened to read".
+    if let Some(declared) = body
+        .get("params")
+        .and_then(|params| params.get("_meta"))
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+        && declared != version
+    {
+        return Err(JsonRpcError::header_mismatch(format!(
+            "`MCP-Protocol-Version: {version}` does not match the body's \
+             `_meta` protocolVersion `{declared}`"
+        )));
+    }
+
     // Version support is checked LAST, per the ordering note above. Over HTTP
     // the spec pins this one too: *"If the server does not implement the
     // requested protocol version ... it **MUST** respond with `400 Bad
@@ -1363,6 +1385,71 @@ mod tests {
         builder
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// The header and the envelope must AGREE about the revision.
+    ///
+    /// They are a header/body pair, so a disagreement is a mismatch under the
+    /// same rule as `Mcp-Method` — and the answer is `-32020`, not `-32022`.
+    /// The distinction matters to a client: "your two copies disagree" is
+    /// actionable, while "I do not speak 2026-07-28" would be nonsense when
+    /// the header said exactly that.
+    ///
+    /// Both values here are ones the server DOES support, which is what makes
+    /// the test about disagreement rather than about support.
+    #[tokio::test]
+    async fn test_header_and_envelope_revisions_must_agree() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost:5173")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2026-07-28")
+                    .header("mcp-method", "tools/list")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"]["code"],
+            serde_json::json!(-32020),
+            "a header/body disagreement is a MISMATCH, not an unsupported \
+             version: {json}"
+        );
+    }
+
+    /// THE POSITIVE TWIN: agreeing copies are served.
+    ///
+    /// Without it, "the two must agree" is satisfied by a gate that refuses
+    /// every request carrying a revision in its envelope at all — which is
+    /// every conformant Modern client.
+    #[tokio::test]
+    async fn test_agreeing_header_and_envelope_revisions_are_served() {
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(modern_post(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     // ============== Stateless transport: no session, no GET, no DELETE ==============

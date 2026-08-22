@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # Gate: the 3.0.0 CHANGELOG entry exists, carries a MIGRATION section, and
 # names every method removed by the Modern-only cut. Run from the repo root.
+#
+# WHAT THIS IS NOT: it greps CHANGELOG.md for literals. It reads no .rs file,
+# builds nothing, and starts no server. It therefore passes on a CHANGELOG
+# that describes behaviour the code does not have -- and it DID, for a whole
+# cycle, while the HTTP transport contradicted every line it checked here.
+#
+# It is a regression guard on the PROSE: it stops a rewrite from silently
+# dropping a documented removal. What proves the behaviour is the test suite,
+# and specifically `src/mcp/transport/http.rs`'s tests for the 405s, the
+# required headers and the listen stream. Do not read a green run here as
+# evidence about the server.
 set -euo pipefail
 
 fail=0

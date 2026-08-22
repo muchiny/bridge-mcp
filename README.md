@@ -48,7 +48,7 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 - **Smart output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV mode (60-80% token savings), pagination via `ssh_output_fetch`, per-client size limits (see [Token-efficient output](#token-efficient-output))
 - **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 476 schemas up front
 - **MCP 2026-07-28 (Modern) only** — `server/discover` opens the connection, per-request `_meta` carries the revision and client capabilities, notifications are opt-in via `subscriptions/listen`. A pre-Modern client sending `initialize` gets `-32022` and cannot fall forward — see [Protocol Support](#protocol-support)
-- **MCP Tasks extension** — every tool advertises `taskSupport: "optional"` under the `io.modelcontextprotocol/tasks` extension, enabling polled async execution, cancellation and progress notifications for long-running operations
+- **MCP Tasks extension** — declared under `capabilities.extensions` as `io.modelcontextprotocol/tasks`, enabling polled async execution, cancellation and progress notifications for long-running operations. The SERVER decides which calls become tasks (see `task_policy::LONG_RUNNING_TOOLS`); 2026-07-28 removed per-tool `execution.taskSupport` entirely, and no tool advertises it
 - **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
 - **Daemon mode** — Unix-socket transport for multi-client local usage; built-in `WinRmPool` (120 s TTL) and `K8sExecPool` (300 s TTL) amortize TLS handshakes across calls
 - **8700+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
@@ -783,9 +783,14 @@ stdin/stdout. The `_meta` envelope is the only place the protocol revision
 appears; there are no headers here.
 
 **Streamable HTTP** (`bridge-mcp serve-http`, requires the `http` feature) —
-`POST /mcp` only. Requests carry `MCP-Protocol-Version`, `Mcp-Method` and
-`Mcp-Name` headers so gateways and WAFs can route without parsing the body;
-the body is always authoritative and a mismatch is rejected. `GET /mcp` and
+`POST /mcp` only. Requests MUST carry `MCP-Protocol-Version` and
+`Mcp-Method`, plus `Mcp-Name` for `tools/call`, `resources/read` and
+`prompts/get`, so gateways and WAFs can route without parsing the body. A
+missing header, or one that contradicts the body, is refused `400` with
+JSON-RPC `-32020` — the request is REJECTED rather than resolved in favour of
+the body, so a gateway can never route on a header that lies. JSON-RPC
+batching is not accepted: an array body is refused `400` with `-32600`.
+`GET /mcp` and
 `DELETE /mcp` return **405** — the standalone SSE stream and the session
 lifecycle are gone. There is no `Mcp-Session-Id`, no `Last-Event-ID`, and no
 redelivery: a broken stream means the client re-issues with a new request id.

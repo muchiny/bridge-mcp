@@ -218,7 +218,11 @@ Detailed guidance is loaded automatically via `.claude/rules/`:
 ## Recent Changes
 
 - **v3.0.0 (2026-08-20, not yet tagged)** — **Modern-only.** `PROTOCOL_VERSION = "2026-07-28"`,
-  `SUPPORTED_PROTOCOL_VERSIONS = ["2026-07-28"]` (`src/mcp/protocol.rs:894-895`).
+  `SUPPORTED_PROTOCOL_VERSIONS = ["2026-07-28"]`
+  (`src/mcp/protocol.rs`, `PROTOCOL_VERSION` and `SUPPORTED_PROTOCOL_VERSIONS`).
+  Named rather than cited by line: the previous citation pointed at lines
+  894-895, which is unrelated code, and a stale line number in the file agents
+  load first is worse than no citation.
   `server/discover` replaces the `initialize` handshake; the only remaining
   `initialize` arm answers `-32022` with the supported-version list, because a
   legacy client cannot fall forward on its own. Protocol revision, client
