@@ -43,10 +43,10 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 
 - **476 tools, 77 groups** — manage Linux, Windows, Docker, Kubernetes, Podman, AWX, databases, LDAP, network equipment, certificates, and more
 - **9 protocol adapters** — SSH, WinRM, PSRP (PowerShell Remoting), Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP
-- **Security-first** — command whitelist/blacklist, 63 secret-redaction patterns + entropy detection, tamper-proof session recording, opt-in MCP elicitation confirmation for destructive operations
+- **Security-first** — command whitelist/blacklist, 63 secret-redaction patterns + entropy detection, tamper-proof session recording, MCP confirmation before destructive operations (on by default)
 - **Auto-discovery** — reads `~/.ssh/config` automatically, merges with YAML config
 - **Smart output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV mode (60-80% token savings), pagination via `ssh_output_fetch`, per-client size limits (see [Token-efficient output](#token-efficient-output))
-- **Progressive MCP discovery** — three meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool`) let clients browse the registry on demand instead of loading all 476 schemas up front
+- **Progressive MCP discovery** — `tools/list` returns four meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool` to browse the registry on demand, `mcp_call_tool` to invoke what you found) instead of loading all 476 schemas up front
 - **MCP 2026-07-28 (Modern) only** — `server/discover` opens the connection, per-request `_meta` carries the revision and client capabilities, notifications are opt-in via `subscriptions/listen`. A pre-Modern client sending `initialize` gets `-32022` and cannot fall forward — see [Protocol Support](#protocol-support)
 - **MCP Tasks extension** — declared under `capabilities.extensions` as `io.modelcontextprotocol/tasks`, enabling polled async execution, cancellation and progress notifications for long-running operations. The SERVER decides which calls become tasks (see `task_policy::LONG_RUNNING_TOOLS`); 2026-07-28 removed per-tool `execution.taskSupport` entirely, and no tool advertises it
 - **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
@@ -97,12 +97,12 @@ bridge-mcp tool ssh_win_event_query    host=appsrv log=System level=Error since=
 
 13 Windows tool groups (services, events, AD, IIS, scheduled tasks, registry, Hyper-V, …) map cleanly onto the same `ssh_*` namespace, no protocol switch in your prompts.
 
-### 4. Audited destructive ops with elicitation
+### 4. Audited destructive ops with confirmation
 
 ```yaml
 # config.yaml
 security:
-  require_elicitation_on_destructive: true   # MCP elicitation/create before any destructive_hint:true tool
+  require_elicitation_on_destructive: true   # DEFAULT. Confirm any destructive_hint:true tool
 audit:
   enabled: true
   path: /var/log/bridge-mcp/audit.log        # absolute, or ~/… (expanded to $HOME)
@@ -112,11 +112,22 @@ Session recording (tamper-proof asciinema/JSON) is driven at runtime by the
 `ssh_recording_*` tools plus the `MCP_RECORDING_KEY` env var — not a config
 section.
 
-```bash
-bridge-mcp tool ssh_helm_rollback host=k8s release=api revision=7
-# → MCP client (Claude Code etc.) shows a confirmation dialog before the call leaves the bridge.
-# → Audit log records the prompt, args, sanitized stdout, exit code, duration.
+```jsonc
+// Over MCP. The gate is MCP-only — see the note below the snippet.
+{"method": "tools/call",
+ "params": {"name": "ssh_helm_rollback",
+            "arguments": {"host": "k8s", "release": "api", "revision": 7}}}
 ```
+
+The server answers `resultType: "input_required"` carrying an
+`elicitation/create` request and a signed `requestState`; the client gathers the
+confirmation and RETRIES the same call under a new id with the answer attached.
+Nothing runs until then, and the audit log records the args, sanitized stdout,
+exit code and duration of the call that finally executes.
+
+> **The CLI is not covered by this gate.** `bridge-mcp tool ssh_helm_rollback …`
+> has no client to ask and never prompts. Confirmation is an MCP-mode control;
+> the CLI's protection is the blacklist and the audit log.
 
 The dispatcher distinguishes `read_only` vs `mutating` vs `mutating_idempotent` vs `destructive` per tool (audited via `tests/annotation_audit.rs`), so confirmations only fire when state actually changes.
 
@@ -200,7 +211,7 @@ irreversible and every action is logged:
 ```yaml
 security:
   mode: standard                             # blacklist + whitelist for ssh_exec
-  require_elicitation_on_destructive: true   # confirm before any destructive tool runs
+  require_elicitation_on_destructive: true   # DEFAULT; set false to run destructive tools unconfirmed
 audit:
   enabled: true
   path: ~/.local/share/bridge-mcp/audit.log  # ~ expands to $HOME; absolute paths also fine
@@ -230,6 +241,20 @@ Add to `~/.claude/settings.json`:
 > host is not there yet, pin `bridge-mcp = "2"` — the CLI-as-tool mode
 > (`bridge-mcp tool …`) is unaffected either way, because it never speaks
 > JSON-RPC at all.
+
+> **Claude Code needs one setting, or it sends the Legacy handshake.** Measured
+> on 2.1.239: it implements 2026-07-28 fully, but defaults stdio servers to the
+> Legacy path, so it opens with `initialize` and sees ZERO tools. Turn
+> negotiation on:
+>
+> ```json
+> { "env": { "MCP_PROTOCOL_NEGOTIATION": "auto" } }
+> ```
+>
+> in `.claude/settings.json` (or `settings.local.json`), then restart. Verify
+> with `claude mcp list` — the server should read `✔ Connected`. Check your own
+> client's behaviour before assuming; the symptom of getting this wrong is an
+> empty tool list, not an error message.
 
 ### 4. Verify
 
@@ -420,11 +445,37 @@ security:
         replacement: "[INTERNAL_REDACTED]"
 ```
 
-**Destructive-op confirmation** — opt-in gate that asks the user to confirm via MCP `elicitation/create` before any tool annotated `destructive_hint: true` (`ssh_terraform_apply`, `ssh_k8s_delete`, `ssh_cron_remove`, `ssh_win_update_reboot`, …) executes. The gate reads `_meta["io.modelcontextprotocol/clientCapabilities"].elicitation` **on the request that calls the tool**, and is fail-closed: a request that does not advertise elicitation is refused rather than executed unconfirmed. **This gate applies to MCP mode only** — `bridge-mcp tool …` on the CLI has no elicitation channel and never prompts, so do not treat the CLI as covered by this control:
+**Destructive-op confirmation** — **on by default.** Before any tool annotated
+`destructive_hint: true` (`ssh_terraform_apply`, `ssh_k8s_delete`,
+`ssh_cron_remove`, `ssh_win_update_reboot`, …) executes, the server answers
+`resultType: "input_required"` with an `elicitation/create` request and an
+integrity-protected `requestState`. The client gathers the confirmation and
+retries the same call under a new id with the answer attached; only then does
+the tool run.
+
+The gate reads `_meta["io.modelcontextprotocol/clientCapabilities"].elicitation`
+**on the request that calls the tool**, and is fail-closed: a request that does
+not declare elicitation is refused rather than executed unconfirmed.
+
+Two properties worth knowing before you rely on it:
+
+- **An answer counts only with the `requestState` the server signed for that
+  exact call.** Without that binding a client could send
+  `inputResponses: {"confirm_destructive": {"action": "accept"}}` on its FIRST
+  call and confirm on the user's behalf. The state binds the tool name AND its
+  arguments, so a confirmation for `ssh_exec rm /tmp/x` cannot authorise
+  `ssh_exec rm /`.
+- **This flag is the WHOLE confirmation policy.** Nineteen handlers used to ask
+  a second time on their own, independently of it. They no longer do — one
+  question per operation. If you had the flag off and relied on the per-handler
+  prompt, turn it on.
+
+**MCP mode only.** `bridge-mcp tool …` on the CLI has no client to ask and never
+prompts, so do not treat the CLI as covered by this control:
 
 ```yaml
 security:
-  require_elicitation_on_destructive: true  # default: false
+  require_elicitation_on_destructive: true  # default: true — set false to opt OUT
 ```
 
 **Audit logging:**
@@ -774,6 +825,7 @@ bridge-mcp 3.x implements **MCP revision `2026-07-28`** and only that revision.
 | Revision + client identity + client capabilities | per-request `_meta`, keys `io.modelcontextprotocol/protocolVersion`, `…/clientInfo`, `…/clientCapabilities` |
 | Notifications | opt-in via `subscriptions/listen`; every notification carries `_meta["io.modelcontextprotocol/subscriptionId"]` |
 | Async execution | the `io.modelcontextprotocol/tasks` extension, declared under `capabilities.extensions` |
+| Server needs something from the client | Multi Round-Trip Requests — the server RETURNS `resultType: "input_required"` and the client retries under a NEW id. It never sends `elicitation/create`, `sampling/createMessage` or `roots/list` as its own request; that pattern is deleted in this revision |
 | Older client sends `initialize` | `-32022`, with `data.supported = ["2026-07-28"]` |
 
 ### Transports
@@ -785,7 +837,11 @@ appears; there are no headers here.
 **Streamable HTTP** (`bridge-mcp serve-http`, requires the `http` feature) —
 `POST /mcp` only. Requests MUST carry `MCP-Protocol-Version` and
 `Mcp-Method`, plus `Mcp-Name` for `tools/call`, `resources/read` and
-`prompts/get`, so gateways and WAFs can route without parsing the body. A
+`prompts/get`, so gateways and WAFs can route without parsing the body. A value
+that cannot travel as plain ASCII — a `file://` URI with an accent, a name with
+edge whitespace — arrives wrapped as `=?base64?…?=` and is decoded before the
+header is compared to the body, which matters here because `Mcp-Name` mirrors
+`params.uri` on `resources/read`. A
 missing header, or one that contradicts the body, is refused `400` with
 JSON-RPC `-32020` — the request is REJECTED rather than resolved in favour of
 the body, so a gateway can never route on a header that lies. JSON-RPC
@@ -803,6 +859,36 @@ in tool arguments — `ssh_session_create` returns a `session_id` you pass to
 `ssh_session_exec`, and a truncated response returns an `output_id` you pass
 to `ssh_output_fetch`.
 
+### Multi Round-Trip Requests
+
+Three things make the server ask the client for something, and all three now
+travel the same way: the server returns `input_required` and the client retries
+the original call under a new id with `inputResponses` and the `requestState`
+attached, as siblings of `_meta` on `params`.
+
+| Trigger | Asks for | Costs |
+|---|---|---|
+| A `destructive_hint: true` tool, with the confirmation gate on | `elicitation/create` | one round trip before the tool runs |
+| A path-scoped tool (`ssh_ls`, `ssh_find`, `ssh_upload`, `ssh_download`, `ssh_sync`, `ssh_file_write`, `ssh_files_write`) from a client that declared `roots` | `roots/list` | one round trip **per call** — a Modern server may not reuse a previous request's answer |
+| `summarize=true` on a diagnostic tool, from a client that declared `sampling` | `sampling/createMessage` | one round trip, and the remote command runs ONCE — the finished result is sealed into the `requestState` rather than the call being replayed |
+
+Nothing is asked for a capability the client did not declare: a client that
+declares no `sampling` gets its raw output with no summary, and one that
+declares no `roots` runs unscoped. That is the spec's rule, not a fallback.
+
+`requestState` is HMAC-SHA256 over base64url JSON. It binds a 5-minute TTL and
+a digest of the originating call — the tool name AND its arguments, so a
+confirmation for one call cannot authorise another. It also binds the
+authenticated principal, which is **empty on every transport that reaches the
+gate today**: stdio and the daemon socket authenticate nobody, and HTTP
+dispatches ordinary POSTs with no session, so the gate refuses destructive tools
+there before issuing any state. The field is signed and checked regardless, so
+the cross-user check activates the day a transport supplies a principal. **Set
+`MCP_REQUEST_STATE_KEY` on any deployment running more than one bridge-mcp
+process behind one address** — without it each process signs with its own
+startup key, so a retry landing on another instance is refused and the user
+confirms forever. A single stdio process needs nothing.
+
 ---
 
 ## Troubleshooting
@@ -817,6 +903,32 @@ to `ssh_output_fetch`.
 **"SSH connection failed"** — Verify: (1) the host is reachable (`ping hostname`), (2) SSH works manually (`ssh user@host`), (3) key permissions are correct (`chmod 600 ~/.ssh/id_*`).
 
 **"Unknown host key"** — Add it: `ssh-keyscan hostname >> ~/.ssh/known_hosts`
+
+**The server connects but exposes no tools** — Expected in progressive listing
+mode: `tools/list` returns only the four meta-tools, and every enabled tool
+still dispatches by its own name. If you see *nothing at all*, the client is on the Legacy
+handshake — see the `MCP_PROTOCOL_NEGOTIATION` note in [Quick Start](#quick-start).
+
+**`-32022 Unsupported protocol version`** — The client opened with `initialize`
+or declared a revision this server does not speak. `data.supported` lists what
+it does.
+
+**`-32602 missing _meta[…/protocolVersion]`** — Both `protocolVersion` and
+`clientCapabilities` are REQUIRED on every request in this revision. A client
+sending neither is answered on the version first, because that is the one that
+tells it which era it got wrong.
+
+**`-32602 requestState is not valid for this request`** — A confirmation was
+replayed onto a different call, arrived after its 5-minute TTL, or was signed by
+another process. The last case is the one that surprises people: without
+`MCP_REQUEST_STATE_KEY`, each process signs with its own startup key, so a fleet
+behind one address refuses every retry. Re-send the original request with no
+`requestState` and no `inputResponses` to start a fresh round trip.
+
+**A destructive tool runs without asking** — Check `security.require_elicitation
+_on_destructive` (default `true`) and that the tool is annotated
+`destructive_hint: true` (`mcp_describe_tool` shows it). Note the CLI is never
+covered: `bridge-mcp tool …` has no client to ask.
 
 **Host key verification modes:**
 
