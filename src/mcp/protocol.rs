@@ -500,6 +500,22 @@ pub struct ToolCallParams {
     /// Client-provided metadata (e.g., `progressToken` for progress notifications).
     #[serde(rename = "_meta", default)]
     pub meta: Option<ToolCallMeta>,
+    /// MRTR: the client's answers to a previous `InputRequiredResult`, keyed by
+    /// the identifiers the server assigned in `inputRequests`.
+    ///
+    /// A SIBLING of `_meta` on `params`, not a member of it. The reference
+    /// client lifts exactly `["inputResponses", "requestState"]` off `params`,
+    /// and the published request-params shape declares both there.
+    ///
+    /// Renamed explicitly: this struct carries no `rename_all`, so without the
+    /// attribute serde would look for `input_responses` and silently find
+    /// nothing — the retry would parse fine and arrive with no answers, which
+    /// reads as "the client did not confirm".
+    #[serde(rename = "inputResponses", default)]
+    pub input_responses: Option<serde_json::Map<String, Value>>,
+    /// MRTR: the opaque state the server issued, echoed back verbatim.
+    #[serde(rename = "requestState", default)]
+    pub request_state: Option<String>,
 }
 
 /// Client-provided metadata for tool calls.
@@ -658,15 +674,24 @@ pub struct ResourceTemplatesListResult {
 /// every `tasks/get` answer carries `resultType: "complete"`, including one
 /// reporting `status: "working"`.
 ///
-/// `input_required` is in the core union but is not spelled here: bridge-mcp
-/// never enters that state (see `TaskStatus::InputRequired`).
+/// `input_required` IS spelled here now. It was omitted on the reasoning that
+/// "bridge-mcp never enters that state", which stopped being true when the
+/// destructive-confirmation gate moved to Multi Round-Trip Requests: an
+/// `InputRequiredResult` is exactly how the server asks for that confirmation.
 ///
 /// `Serialize` only, on purpose: this server emits `resultType` and never
 /// parses one. Adding `Deserialize` would need a catch-all variant, and
 /// serde's `#[serde(other)]` is not available on a plain externally-tagged
 /// enum.
+/// `snake_case`, not `camelCase`. The wire values are `"complete"`, `"task"` and
+/// `"input_required"`; the first two are identical under either convention,
+/// which is why `camelCase` stood here unchallenged and would have emitted
+/// `"inputRequired"` the moment a third variant existed. A client seeing that
+/// MUST treat it as invalid — *"A `resultType` of any value unrecognized by
+/// the client MUST be considered invalid"* — so the bug would have surfaced as
+/// every confirmation being rejected, not as a cosmetic difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum ResultType {
     /// The standard result shape. Carried by every `tasks/get` answer
     /// whatever the task's status, and by the `tasks/cancel` /`tasks/update`
@@ -675,6 +700,10 @@ pub enum ResultType {
     /// A task handle returned in lieu of a standard result. Legal on
     /// `CreateTaskResult` and nowhere else.
     Task,
+    /// More input is needed before the request can be completed. Legal on
+    /// `prompts/get`, `resources/read` and `tools/call`, and *"Servers MUST NOT
+    /// send `InputRequiredResult` responses on any other client requests."*
+    InputRequired,
 }
 
 /// One flat struct covering `CreateTaskResult` and `GetTaskResult`.
@@ -893,12 +922,69 @@ impl LogLevel {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ElicitationCreateParams {
+    /// Which `ElicitRequest` variant this is.
+    ///
+    /// The published request params are a union discriminated by `mode`, and
+    /// the spec's own MRTR example carries `"mode": "form"` explicitly. It was
+    /// absent here, so every request this server built was missing the
+    /// discriminator its own union needs.
+    pub mode: ElicitationMode,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_schema: Option<Value>,
-    /// SEP-1036 URL mode: client opens browser.
+    /// SEP-1036 URL mode: client opens browser. Required when
+    /// [`ElicitationMode::Url`], and meaningless otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+/// The `ElicitRequest` variant discriminator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElicitationMode {
+    /// Ask for structured input against `requestedSchema`.
+    Form,
+    /// Send the user to a URL.
+    Url,
+}
+
+/// A result saying the request cannot finish until the client supplies more.
+///
+/// *"Servers MUST include at least one of `inputRequests` or `requestState` in
+/// every `InputRequiredResult` response."* Both are `Option` because either may
+/// be omitted individually; [`InputRequiredResult::new`] is the constructor
+/// that enforces the "at least one" part, so no call site can build an empty
+/// one by accident. The reference client rejects that shape by name.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputRequiredResult {
+    /// Always [`ResultType::InputRequired`].
+    pub result_type: ResultType,
+    /// Server-assigned keys to `ElicitRequest` / `CreateMessageRequest` /
+    /// `ListRootsRequest` objects. *"keys are server assigned identifiers and
+    /// MUST be unique within the scope of the request"* — a `Map` gives that
+    /// for free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_requests: Option<serde_json::Map<String, Value>>,
+    /// Opaque to the client: *"Clients MUST NOT inspect, parse, modify, or make
+    /// any assumptions about its contents."*
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_state: Option<String>,
+}
+
+impl InputRequiredResult {
+    /// Build a result carrying one server-to-client request and the state
+    /// needed to recognise the retry.
+    #[must_use]
+    pub fn new(key: &str, request: Value, request_state: String) -> Self {
+        let mut requests = serde_json::Map::new();
+        requests.insert(key.to_string(), request);
+        Self {
+            result_type: ResultType::InputRequired,
+            input_requests: Some(requests),
+            request_state: Some(request_state),
+        }
+    }
 }
 
 /// Response from client for `elicitation/create`.

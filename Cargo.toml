@@ -26,7 +26,7 @@ ignored = ["hyper-util", "tower"]
 [features]
 default = ["cli"]
 cli = ["dep:clap", "dep:clap_complete"]
-http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper-util", "dep:tokio-stream", "dep:base64"]
+http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper-util", "dep:tokio-stream"]
 mimalloc = ["dep:mimalloc"]
 
 # Protocol adapters (Tier 1)
@@ -61,11 +61,19 @@ air-gapped = ["winrm", "telnet"]
 all-protocols = ["winrm", "psrp", "telnet", "k8s-exec", "serial", "ssm", "azure", "gcp"]
 
 [dependencies]
-# Streamable HTTP Server Validation: `Mcp-Name` and `Mcp-Param-*` header values
-# that cannot travel as plain ASCII arrive wrapped as `=?base64?...?=`, and the
-# spec makes decoding them before the header/body comparison a MUST. Same
-# version the dev-dependency already pulls, so no new resolution.
-base64 = { version = "0.23", optional = true }
+# Two unrelated MUSTs need it, on transports that do not share a feature flag:
+# Streamable HTTP Server Validation decodes the `=?base64?...?=` sentinel on
+# `Mcp-Name`, and the MRTR `requestState` is base64url on every transport
+# including stdio. Unconditional for that second reason.
+base64 = "0.23"
+# MRTR `requestState` integrity. The spec makes protecting it a MUST when the
+# state influences authorization, which it does here — it is the token that
+# says a destructive operation was confirmed. Real HMAC, not the
+# `Sha256(key || data)` prefix construction used by the recording hash chain,
+# which is length-extendable. Both are already in the lockfile (hmac via
+# jsonwebtoken, subtle via the RustCrypto stack), so this adds no new crate.
+hmac = "0.13"
+subtle = "2"
 # Async runtime (explicit features instead of "full" for smaller binary)
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "net", "process", "time", "fs", "io-std", "macros", "sync", "signal"] }
 

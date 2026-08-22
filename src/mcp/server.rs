@@ -25,6 +25,7 @@ use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
 use super::protocol::{JsonRpcMessage, RootsListResult};
 use super::request_meta::{ENVELOPE_EXEMPT_METHODS, RequestMeta, missing_required_envelope_field};
+use super::request_state::{RequestStateSigner, params_digest};
 use super::session_context::SessionContext;
 use super::subscriptions::{NotificationTopic, SubscriptionRegistry, SubscriptionsListenParams};
 use super::transport::{Session, Transport, stdio::StdioTransport};
@@ -35,13 +36,13 @@ use super::protocol::{
     BUILD_META_KEY, BUILD_REV, CANCELLED_ERROR_CODE, CacheHints, CacheScope, CompletionRef,
     CompletionResult, CompletionsCapability, CompletionsCompleteParams, CompletionsCompleteResult,
     DISCOVER_TTL_MS, DetailedTask, DiscoverMeta, DiscoverResult, DiscoverResultType, Icon,
-    JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, LogLevel,
-    LoggingCapability, PROTOCOL_VERSION, PromptsCapability, PromptsGetParams, PromptsGetResult,
-    PromptsListResult, ResourceTemplatesListResult, ResourcesCapability, ResourcesListResult,
-    ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME, SERVER_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams, TaskGetParams,
-    TaskNotificationParams, TaskStatus, TaskUpdateParams, ToolCallParams, ToolCallResult,
-    ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
+    InputRequiredResult, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    LogLevel, LoggingCapability, PROTOCOL_VERSION, PromptsCapability, PromptsGetParams,
+    PromptsGetResult, PromptsListResult, ResourceTemplatesListResult, ResourcesCapability,
+    ResourcesListResult, ResourcesReadParams, ResourcesReadResult, SERVER_ICON_URL, SERVER_NAME,
+    SERVER_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities, ServerInfo, TaskCancelParams,
+    TaskGetParams, TaskNotificationParams, TaskStatus, TaskUpdateParams, ToolCallParams,
+    ToolCallResult, ToolContent, ToolsCapability, ToolsListResult, WriterMessage,
 };
 use super::registry::{ToolRegistry, create_filtered_registry};
 use super::resource_registry::{ResourceRegistry, create_default_resource_registry};
@@ -155,6 +156,46 @@ impl ListenOutcome {
     }
 }
 
+/// What the destructive-confirmation gate decided about a `tools/call`.
+///
+/// An enum rather than `Result<(), String>` because there are now THREE
+/// outcomes, and the middle one is not an error: an `InputRequiredResult` is a
+/// successful response that happens not to be the final one. Collapsing it into
+/// the error arm is how a round trip gets reported to the user as a failure.
+#[derive(Debug)]
+enum ConfirmGate {
+    /// Nothing to confirm, or the client already confirmed on this request.
+    Proceed,
+    /// Answer the client with this and run nothing.
+    NeedInput(Box<InputRequiredResult>),
+    /// Refuse, as a tool error the model can read.
+    Refuse(String),
+    /// Refuse a `requestState` that failed verification, as a JSON-RPC error.
+    ///
+    /// Separate from [`Self::Refuse`] because it is a malformed PARAMETER, not
+    /// a tool that ran and failed — the same distinction `-32602` draws for an
+    /// unknown tool name.
+    BadState(&'static str),
+}
+
+/// The authenticated principal to bind a `requestState` to.
+///
+/// Empty today on every transport that reaches the gate, and structurally so
+/// rather than by oversight:
+///
+/// - stdio and the daemon socket authenticate nobody. There is no principal to
+///   bind, and the check is vacuously satisfied.
+/// - HTTP authenticates via OAuth, but ordinary POSTs dispatch with no
+///   `SessionContext` at all, so the gate refuses destructive tools outright
+///   before any state is issued. It never reaches this function.
+///
+/// The field is bound into the MAC regardless, so the cross-principal check
+/// activates the day a transport supplies one instead of needing to be
+/// remembered then. This is the line to change.
+const fn request_principal(_session: Option<&SessionContext>) -> &'static str {
+    ""
+}
+
 pub struct McpServer {
     config: Arc<RwLock<Config>>,
     validator: Arc<CommandValidator>,
@@ -184,6 +225,13 @@ pub struct McpServer {
     completion_provider: DefaultCompletionProvider,
     /// Application metrics for token consumption analytics.
     metrics: Arc<crate::metrics::Metrics>,
+    /// Signs and verifies the MRTR `requestState`.
+    ///
+    /// Holds a key and nothing else — deliberately no map of issued states.
+    /// The whole point of Multi Round-Trip Requests is that the server keeps
+    /// none: *"it allows servers to request additional information without
+    /// maintaining any server-side state."*
+    request_state: RequestStateSigner,
 }
 
 /// Per-session map of in-flight JSON-RPC request ids to their
@@ -415,6 +463,21 @@ impl McpServer {
             subscriptions: SubscriptionRegistry::new(),
             completion_provider: DefaultCompletionProvider,
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            request_state: {
+                let signer = RequestStateSigner::from_env();
+                if signer.is_ephemeral() {
+                    // Warned once at boot rather than per refusal. A single
+                    // process is fine; a fleet behind one address is not,
+                    // because a retry landing on another instance fails its
+                    // signature check and the user re-confirms forever.
+                    debug!(
+                        env = super::request_state::KEY_ENV,
+                        "No shared request-state key configured; using a per-process key. \
+                         Set it when running more than one bridge-mcp behind one address."
+                    );
+                }
+                signer
+            },
         };
 
         (server, audit_task)
@@ -472,66 +535,180 @@ impl McpServer {
         Arc::new(RwLock::new(Vec::new()))
     }
 
-    /// Create a `ToolContext` for tool execution
+    /// Server-assigned key for the destructive-confirmation `inputRequest`.
     ///
-    /// This reads a snapshot of the current configuration, ensuring
-    /// consistent config values during a single tool execution.
-    /// Build a `ToolContext` for a single request.
+    /// One constant, used to write the key on the way out and to read the
+    /// answer on the way back. *"`inputRequests` keys are server assigned
+    /// identifiers and MUST be unique within the scope of the request"* — one
+    /// key per request satisfies that trivially.
+    const CONFIRM_KEY: &'static str = "confirm_destructive";
+
+    /// Decide whether a `tools/call` may proceed, needs confirmation, or is
+    /// refused.
     ///
-    /// Pass `cancel_token = Some(token)` to allow long-running tools to race
-    /// their work against a MCP `notifications/cancelled`. Pass `None` for
-    /// handlers that don't participate in cancellation (resources/list,
-    /// prompts/get, etc.).
-    /// Ask the client to confirm a destructive tool call via `elicitation/create`.
+    /// # Why this is not a blocking call any more
     ///
-    /// Returns `Ok(())` when the operation is allowed (not destructive, feature
-    /// disabled, or user confirmed). Returns `Err(msg)` with a user-facing
-    /// reason string when the operation must be blocked (user declined,
-    /// cancelled, elicitation unsupported, or transport unavailable).
+    /// It used to send `elicitation/create` as a server-initiated JSON-RPC
+    /// request and await the answer inline. 2026-07-28 deleted that pattern
+    /// outright: *"Servers MUST send server-to-client requests (such as
+    /// `roots/list`, `sampling/createMessage`, or `elicitation/create`) using
+    /// the MRTR pattern. The previous pattern of server-initiated requests is
+    /// no longer supported. This is a breaking change."* A conforming client is
+    /// under no obligation to answer a request the server invents, so the
+    /// operator's confirmation gate was resting on a mechanism that could
+    /// silently stop working — the failure mode being that a destructive tool
+    /// blocks for two minutes and then times out, or worse, that a future
+    /// client answers nothing and the gate is bypassed by whatever the timeout
+    /// arm does.
+    ///
+    /// Now the server RETURNS an [`InputRequiredResult`] and the client retries
+    /// the same call under a new id with the answer attached. Nothing has run
+    /// by the time this gate fires — it sits ahead of argument execution, ahead
+    /// of task promotion, and ahead of any audit write — so replaying the whole
+    /// call on the retry is free of side effects. That is what makes this
+    /// particular caller convertible at all.
+    ///
+    /// # The check that matters
+    ///
+    /// `inputResponses` are honoured ONLY when accompanied by a `requestState`
+    /// this server signed for THIS principal and THIS exact call. Without that
+    /// binding a client could simply post
+    /// `inputResponses: {"confirm_destructive": {"action": "accept"}}` on the
+    /// first try and confirm on the user's behalf, which would turn the gate
+    /// into a formality any caller can satisfy. The state is the evidence; the
+    /// answer alone is not.
     async fn check_destructive_elicitation(
         &self,
-        tool_name: &str,
-        arguments: Option<&Value>,
+        call_params: &ToolCallParams,
         session: Option<&SessionContext>,
-    ) -> std::result::Result<(), String> {
+    ) -> ConfirmGate {
         let require = {
             let cfg = self.config.read().await;
             cfg.security.require_elicitation_on_destructive
         };
         if !require {
-            return Ok(());
+            return ConfirmGate::Proceed;
         }
 
+        let tool_name = call_params.name.as_str();
         let is_destructive = super::registry::tool_annotations(tool_name)
             .destructive_hint
             .unwrap_or(false);
         if !is_destructive {
-            return Ok(());
+            return ConfirmGate::Proceed;
         }
 
-        // Per-session capabilities (Vuln 9 audit 2026-05-09): the server no
-        // longer keeps a global `client_supports_elicitation` AtomicBool, so
-        // the gate MUST consult THIS session's `SessionCapabilities`. Without
-        // a session handle (legacy non-MCP code paths), refuse the operation
-        // since we cannot prove the connected client advertised the capability.
+        let principal = request_principal(session);
+        // The "identifier for the originating request" the spec asks be bound
+        // into the state. Tool name AND arguments: same tool with different
+        // arguments is a different operation, so a confirmation for
+        // `ssh_exec rm /tmp/x` must not authorise `ssh_exec rm /`.
+        // `inputResponses`, `requestState` and `_meta` are excluded by
+        // construction — all three differ between the original and the retry.
+        let digest = params_digest(&json!({
+            "name": tool_name,
+            "arguments": call_params.arguments,
+        }));
+
+        // ---- retry path ----
+        if let Some(state) = call_params.request_state.as_deref() {
+            if let Err(err) = self
+                .request_state
+                .verify(state, principal, "tools/call", &digest)
+            {
+                warn!(
+                    tool = tool_name,
+                    reason = ?err,
+                    "Rejected a requestState on a destructive call"
+                );
+                return ConfirmGate::BadState(err.client_message());
+            }
+
+            let answer = call_params
+                .input_responses
+                .as_ref()
+                .and_then(|map| map.get(Self::CONFIRM_KEY));
+            let Some(answer) = answer else {
+                // "If the client fails to send all the information requested in
+                // a previous `InputRequests`, and the missing information is
+                // necessary for the server to process the request, the server
+                // SHOULD respond with a new `InputRequiredResult` requesting the
+                // missing information again, rather than returning an error."
+                return self.ask_for_confirmation(call_params, session, principal, &digest);
+            };
+
+            // BOTH halves, via one predicate: the action must be `accept` AND
+            // the form's `confirm` must be true. Reading only the action would
+            // take an accepted form with the box left unticked as consent —
+            // which is the check the blocking implementation already made, and
+            // which is easy to lose when the transport changes underneath it.
+            if super::elicitation::destructive_confirmation_granted(answer) {
+                return ConfirmGate::Proceed;
+            }
+            // Fail closed for everything else. `decline` and `cancel` get their
+            // own wording because they are the user's own answer; anything
+            // unrecognised is refused too, because treating what is not a
+            // recognised refusal as consent is how a confirmation gate becomes
+            // a rubber stamp.
+            return match answer.get("action").and_then(Value::as_str) {
+                Some("decline") => ConfirmGate::Refuse(format!(
+                    "User declined execution of destructive tool `{tool_name}`."
+                )),
+                Some("cancel") => ConfirmGate::Refuse(format!(
+                    "User cancelled confirmation for destructive tool `{tool_name}`."
+                )),
+                _ => ConfirmGate::Refuse(format!(
+                    "Confirmation for destructive tool `{tool_name}` was not granted; the \
+                     operation was not run."
+                )),
+            };
+        }
+
+        // ---- first pass ----
+        //
+        // `inputResponses` WITHOUT a `requestState` reaches here and is ignored,
+        // which is the intended behaviour: unsigned answers are not evidence of
+        // anything. The client is asked again.
+        self.ask_for_confirmation(call_params, session, principal, &digest)
+    }
+
+    /// Build the `InputRequiredResult` that asks the user to confirm.
+    fn ask_for_confirmation(
+        &self,
+        call_params: &ToolCallParams,
+        session: Option<&SessionContext>,
+        principal: &str,
+        digest: &str,
+    ) -> ConfirmGate {
+        let tool_name = call_params.name.as_str();
+
+        // Fail closed without a session, exactly as before. The gate cannot
+        // prove the caller can be asked, so it does not run the tool. Note this
+        // is what makes the HTTP transport refuse destructive tools outright
+        // today: ordinary POSTs dispatch with no session.
         let Some(session) = session else {
-            return Err(format!(
-                "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is enabled, but no session context is available — the operation cannot be confirmed."
+            return ConfirmGate::Refuse(format!(
+                "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is \
+                 enabled, but no session context is available — the operation cannot be confirmed."
             ));
         };
+        // "Servers MUST NOT send an `inputRequests` that the client has not
+        // declared support for in its capabilities. For example, if a client
+        // does not declare support for `elicitation`, the server MUST NOT
+        // include any `elicitation/create` requests in the `inputRequests`
+        // field." So this is a MUST NOT on the wire, not only a local policy —
+        // and the refusal is still the fail-closed one, because a client that
+        // cannot be asked cannot confirm.
         if !session.supports_elicitation() {
-            return Err(format!(
-                "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is enabled, but the client does not support elicitation. Either upgrade the client or set `security.require_elicitation_on_destructive: false`."
+            return ConfirmGate::Refuse(format!(
+                "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is \
+                 enabled, but the client did not declare the `elicitation` capability on this \
+                 request. Either declare it in `_meta` or set \
+                 `security.require_elicitation_on_destructive: false`."
             ));
         }
 
-        let tx = session.notification_tx.clone();
-        // Per-session pending-requests map (Vuln 8 audit 2026-05-09): the
-        // server no longer keeps a global handle, so the elicitation
-        // round-trip MUST run against the session-local map.
-        let pending = Arc::clone(&session.pending);
-
-        let summary = arguments.map_or_else(
+        let summary = call_params.arguments.as_ref().map_or_else(
             || "(no arguments)".to_string(),
             |v| {
                 let s = serde_json::to_string(v).unwrap_or_default();
@@ -547,33 +724,36 @@ impl McpServer {
             },
         );
 
-        let requester = Arc::new(super::client_requester::ClientRequester::new(
-            tx,
-            pending,
-            std::time::Duration::from_mins(2),
-        ));
-        let elicitation = super::elicitation::ElicitationService::new(requester);
-        elicitation.set_supported(true);
-
-        let plan = super::elicitation::ElicitationPlan {
-            command: plan_command_from_args(arguments),
-            diff: None,
+        let elicit = super::elicitation::confirm_destructive_request(
+            tool_name,
+            &summary,
+            plan_command_from_args(call_params.arguments.as_ref()),
+        );
+        let request = match serde_json::to_value(&elicit) {
+            Ok(value) => json!({ "method": "elicitation/create", "params": value }),
+            Err(e) => {
+                error!(error = %e, "Failed to build the confirmation request");
+                return ConfirmGate::Refuse(format!(
+                    "Could not build a confirmation prompt for `{tool_name}`; the operation was \
+                     not run."
+                ));
+            }
         };
-        match elicitation
-            .confirm_destructive_with_plan(tool_name, &summary, Some(plan))
-            .await
-        {
-            Ok(true) => Ok(()),
-            Ok(false) | Err(super::client_requester::ClientRequestError::Declined) => Err(format!(
-                "User declined execution of destructive tool `{tool_name}`."
-            )),
-            Err(super::client_requester::ClientRequestError::Cancelled) => Err(format!(
-                "User cancelled confirmation for destructive tool `{tool_name}`."
-            )),
-            Err(e) => Err(format!(
-                "Elicitation failed for destructive tool `{tool_name}`: {e}"
-            )),
-        }
+
+        // The context is signed but NOT encrypted, so it carries nothing the
+        // client may not see. The tool name is already visible in the call it
+        // is retrying.
+        let state = self.request_state.issue(
+            principal,
+            "tools/call",
+            digest,
+            json!({ "tool": tool_name }),
+        );
+        ConfirmGate::NeedInput(Box::new(InputRequiredResult::new(
+            Self::CONFIRM_KEY,
+            request,
+            state,
+        )))
     }
 
     async fn create_tool_context(
@@ -2149,15 +2329,30 @@ impl McpServer {
         // is set, ask the client to confirm via `elicitation/create` before
         // executing any tool annotated `destructive_hint: true`. Runs before the
         // task branch so async task creation itself is gated.
-        if let Err(msg) = self
-            .check_destructive_elicitation(
-                &call_params.name,
-                call_params.arguments.as_ref(),
-                session,
-            )
+        match self
+            .check_destructive_elicitation(&call_params, session)
             .await
         {
-            return JsonRpcResponse::success_or_serialize_error(id, &ToolCallResult::error(msg));
+            ConfirmGate::Proceed => {}
+            // A SUCCESS response, not an error: the round trip is the normal
+            // path. `resultType: "input_required"` is what tells the client to
+            // gather the input and retry under a new id.
+            ConfirmGate::NeedInput(result) => {
+                return JsonRpcResponse::success_or_serialize_error(id, &*result);
+            }
+            ConfirmGate::Refuse(msg) => {
+                return JsonRpcResponse::success_or_serialize_error(
+                    id,
+                    &ToolCallResult::error(msg),
+                );
+            }
+            // A bad `requestState` is a malformed parameter, not a tool that
+            // ran and failed, so it is a JSON-RPC error rather than an
+            // `isError` result — the same line `tools/call` already draws for
+            // an unknown tool name.
+            ConfirmGate::BadState(detail) => {
+                return JsonRpcResponse::error(id, JsonRpcError::invalid_params(detail));
+            }
         }
 
         // Server-elected task. MCP 2026-07-28 deleted `params.task`: "The
@@ -4136,7 +4331,7 @@ rbac:
         assert!(result["isError"].as_bool().unwrap_or(false));
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
-            text.contains("does not support elicitation"),
+            text.contains("did not declare the `elicitation` capability"),
             "unexpected error text: {text}"
         );
     }
@@ -4419,7 +4614,7 @@ rbac:
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
-            text.contains("does not support elicitation"),
+            text.contains("did not declare the `elicitation` capability"),
             "gate must fire by default (FIND-022): {text}"
         );
     }
@@ -4488,14 +4683,266 @@ rbac:
         }
     }
 
+    // ============== MRTR destructive-confirmation round trip ==============
+
+    /// A destructive call, its arguments, and a session that can be asked.
+    fn destructive_call() -> Value {
+        json!({
+            "name": "ssh_cron_remove",
+            "arguments": { "host": "prod", "name": "backup" }
+        })
+    }
+
+    async fn first_pass(server: &McpServer, session: &SessionContext) -> Value {
+        server
+            .handle_tools_call(
+                Some(json!(1)),
+                Some(destructive_call()),
+                None,
+                Some(session),
+            )
+            .await
+            .result
+            .expect("an input_required result")
+    }
+
+    /// THE round trip, end to end. First call asks; the retry carrying the
+    /// server's own state and an accepted form gets past the gate.
+    ///
+    /// "Past the gate" is asserted as the ABSENCE of both refusals, not as a
+    /// successful command: the fixture host does not exist, so the tool fails
+    /// at the SSH layer — which is downstream of everything this test is about.
+    #[tokio::test]
+    async fn a_signed_confirmation_lets_the_destructive_call_through() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+
+        let asked = first_pass(&server, &session).await;
+        assert_eq!(asked["resultType"], "input_required", "{asked}");
+        let state = asked["requestState"].as_str().expect("a requestState");
+
+        let mut retry = destructive_call();
+        retry["requestState"] = json!(state);
+        retry["inputResponses"] = json!({
+            "confirm_destructive": { "action": "accept", "content": { "confirm": true } }
+        });
+
+        let response = server
+            .handle_tools_call(Some(json!(2)), Some(retry), None, Some(&session))
+            .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.expect("a result");
+        assert_ne!(
+            result["resultType"], "input_required",
+            "a signed acceptance must not be asked again: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            !text.contains("declined") && !text.contains("was not granted"),
+            "the gate refused a valid confirmation: {text}"
+        );
+    }
+
+    /// THE BYPASS TEST. `inputResponses` with no `requestState` must NOT
+    /// confirm anything.
+    ///
+    /// Without this binding a client posts
+    /// `{"confirm_destructive": {"action": "accept", "content": {"confirm": true}}}`
+    /// on its FIRST call and runs any destructive tool with no human involved —
+    /// turning the operator's gate into a field any caller can fill in. The
+    /// signed state is the evidence; the answer on its own is not.
+    #[tokio::test]
+    async fn an_unsigned_confirmation_confirms_nothing() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+
+        let mut forged = destructive_call();
+        forged["inputResponses"] = json!({
+            "confirm_destructive": { "action": "accept", "content": { "confirm": true } }
+        });
+
+        let result = server
+            .handle_tools_call(Some(json!(1)), Some(forged), None, Some(&session))
+            .await
+            .result
+            .expect("a result");
+        assert_eq!(
+            result["resultType"], "input_required",
+            "an unsigned acceptance must be ignored and the user asked: {result}"
+        );
+    }
+
+    /// "servers MUST protect its integrity ... and MUST reject state that fails
+    /// verification". A tampered or invented state is `-32602`, not a silent
+    /// pass.
+    #[tokio::test]
+    async fn an_invented_request_state_is_rejected() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+
+        let mut retry = destructive_call();
+        retry["requestState"] = json!("v1.eyJwIjoiIn0.AAAA");
+        retry["inputResponses"] = json!({
+            "confirm_destructive": { "action": "accept", "content": { "confirm": true } }
+        });
+
+        let error = server
+            .handle_tools_call(Some(json!(2)), Some(retry), None, Some(&session))
+            .await
+            .error
+            .expect("a forged state must be refused");
+        assert_eq!(error.code, -32602, "{error:?}");
+        assert!(error.message.contains("requestState"), "{}", error.message);
+    }
+
+    /// Cross-request replay: a confirmation obtained for ONE call must not
+    /// authorise a different one. The state binds the tool name and its
+    /// arguments, so moving it is refused.
+    #[tokio::test]
+    async fn a_confirmation_does_not_transfer_to_another_call() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+
+        let state = first_pass(&server, &session).await["requestState"]
+            .as_str()
+            .expect("a requestState")
+            .to_string();
+
+        // Same tool, DIFFERENT arguments — the case that matters most, because
+        // binding only the method name would let this through.
+        let mut elsewhere = json!({
+            "name": "ssh_cron_remove",
+            "arguments": { "host": "prod", "name": "something-else" }
+        });
+        elsewhere["requestState"] = json!(state);
+        elsewhere["inputResponses"] = json!({
+            "confirm_destructive": { "action": "accept", "content": { "confirm": true } }
+        });
+
+        let error = server
+            .handle_tools_call(Some(json!(2)), Some(elsewhere), None, Some(&session))
+            .await
+            .error
+            .expect("a state presented on another call must be refused");
+        assert_eq!(error.code, -32602, "{error:?}");
+    }
+
+    /// An ACCEPTED form with the box left unticked is not consent. Reading only
+    /// `action` would run the tool.
+    #[tokio::test]
+    async fn accepting_the_form_without_ticking_confirm_is_not_consent() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+
+        let state = first_pass(&server, &session).await["requestState"]
+            .as_str()
+            .expect("a requestState")
+            .to_string();
+
+        let mut retry = destructive_call();
+        retry["requestState"] = json!(state);
+        retry["inputResponses"] = json!({
+            "confirm_destructive": { "action": "accept", "content": { "confirm": false } }
+        });
+
+        let result = server
+            .handle_tools_call(Some(json!(2)), Some(retry), None, Some(&session))
+            .await
+            .result
+            .expect("a result");
+        assert!(result["isError"].as_bool().unwrap_or(false), "{result}");
+    }
+
+    /// A declined form is the user's answer and is reported as such.
+    #[tokio::test]
+    async fn a_declined_confirmation_refuses_the_call() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+
+        let state = first_pass(&server, &session).await["requestState"]
+            .as_str()
+            .expect("a requestState")
+            .to_string();
+
+        let mut retry = destructive_call();
+        retry["requestState"] = json!(state);
+        retry["inputResponses"] = json!({ "confirm_destructive": { "action": "decline" } });
+
+        let result = server
+            .handle_tools_call(Some(json!(2)), Some(retry), None, Some(&session))
+            .await
+            .result
+            .expect("a result");
+        assert!(result["isError"].as_bool().unwrap_or(false), "{result}");
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("declined"), "{text}");
+    }
+
+    /// "If the client fails to send all the information requested in a previous
+    /// `InputRequests` ... the server SHOULD respond with a new
+    /// `InputRequiredResult` requesting the missing information again, rather
+    /// than returning an error."
+    #[tokio::test]
+    async fn a_retry_with_a_valid_state_but_no_answer_is_asked_again() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+
+        let state = first_pass(&server, &session).await["requestState"]
+            .as_str()
+            .expect("a requestState")
+            .to_string();
+
+        let mut retry = destructive_call();
+        retry["requestState"] = json!(state);
+        // Valid state, and answers for a key we never asked about.
+        retry["inputResponses"] = json!({ "something_else": { "action": "accept" } });
+
+        let response = server
+            .handle_tools_call(Some(json!(2)), Some(retry), None, Some(&session))
+            .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(
+            response.result.expect("a result")["resultType"],
+            "input_required"
+        );
+    }
+
+    /// The whole exchange must be legal to send: `input_required` is only
+    /// allowed on three methods, and this one is `tools/call`. Pinned so the
+    /// gate cannot be lifted to a method the spec forbids it on —
+    /// "Servers MUST NOT send `InputRequiredResult` responses on any other
+    /// client requests."
+    #[tokio::test]
+    async fn input_required_carries_the_two_fields_the_client_validates() {
+        let server = create_test_server();
+        let (session, _rx) = session_declaring(&json!({ "elicitation": {} }));
+        let asked = first_pass(&server, &session).await;
+
+        // The reference client refuses a result carrying neither.
+        assert!(asked["inputRequests"].is_object(), "{asked}");
+        assert!(asked["requestState"].is_string(), "{asked}");
+        // snake_case on the wire, not `inputRequired`.
+        assert_eq!(asked["resultType"], "input_required", "{asked}");
+        // The request object is a full JSON-RPC-shaped {method, params} pair.
+        let req = &asked["inputRequests"]["confirm_destructive"];
+        assert_eq!(req["method"], "elicitation/create", "{req}");
+        assert_eq!(req["params"]["mode"], "form", "{req}");
+        assert!(req["params"]["requestedSchema"].is_object(), "{req}");
+    }
+
     #[tokio::test]
     async fn test_destructive_elicitation_prompt_is_bounded() {
         // Regression: `plan_command_from_args` used to copy the whole
         // `command` arg into the elicitation prompt with no cap (the diff
         // next to it is capped at 4000), producing a prompt too large for
         // the client to render or the operator to approve.
+        //
+        // Read out of the RESULT now, not off the notification channel. Under
+        // MRTR the prompt is returned rather than sent, so a test that waited
+        // for a `WriterMessage::Request` would wait forever — and the bound it
+        // guards is unchanged.
         let server = create_test_server();
-        let (session_ctx, mut rx) = session_declaring(&json!({ "elicitation": {} }));
+        let (session_ctx, _rx) = session_declaring(&json!({ "elicitation": {} }));
 
         let params = json!({
             "name": "ssh_cron_remove",
@@ -4505,27 +4952,21 @@ rbac:
                 "command": "a".repeat(50_000),
             }
         });
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(300),
-            server.handle_tools_call(Some(json!(1)), Some(params), None, Some(&session_ctx)),
-        )
-        .await;
+        let result = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session_ctx))
+            .await
+            .result
+            .expect("an input_required result");
 
-        let msg = rx
-            .try_recv()
-            .expect("elicitation/create must have been sent");
-        match msg {
-            WriterMessage::Request(req) => {
-                let params = req.params.expect("params");
-                let message = params["message"].as_str().expect("message").to_string();
-                assert!(
-                    message.len() < 10_000,
-                    "elicitation prompt must be bounded, got {} bytes",
-                    message.len()
-                );
-            }
-            _ => panic!("expected a WriterMessage::Request"),
-        }
+        assert_eq!(result["resultType"], "input_required", "{result}");
+        let message = result["inputRequests"]["confirm_destructive"]["params"]["message"]
+            .as_str()
+            .expect("the confirmation prompt");
+        assert!(
+            message.len() < 10_000,
+            "elicitation prompt must be bounded, got {} bytes",
+            message.len()
+        );
     }
 
     #[tokio::test]
@@ -4553,7 +4994,7 @@ rbac:
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
-            text.contains("does not support elicitation"),
+            text.contains("did not declare the `elicitation` capability"),
             "gate must fire on inner tool after dispatcher rewrite: {text}"
         );
     }
@@ -8443,37 +8884,28 @@ rbac:
     /// No `initialize` ever happens — a Modern (2026-07-28) client's very
     /// first message is `tools/call`, and the only place it declares
     /// elicitation support is the per-request `_meta` envelope. The
-    /// fail-closed destructive gate (`server.rs:451`) must honour that
-    /// declaration, otherwise every `destructive_hint: true` tool starts
-    /// refusing the moment the handshake is deleted.
+    /// fail-closed destructive gate must honour that declaration, otherwise
+    /// every `destructive_hint: true` tool starts refusing the moment the
+    /// handshake is deleted.
+    ///
+    /// Rewritten for MRTR: the proof used to be "the server sent
+    /// `elicitation/create`", which is the pattern this revision deleted. The
+    /// proof is now "the server answered `input_required` carrying an
+    /// `elicitation/create` request" — the same capability check, observed
+    /// where the answer actually appears. A gate that ignored `_meta` would
+    /// refuse with `isError` instead, which is what the second half asserts is
+    /// NOT happening.
     #[tokio::test]
     async fn test_destructive_gate_honours_elicitation_from_request_meta_only() {
         let mut config = test_config();
         config.security.require_elicitation_on_destructive = true;
         let (server, _audit_task) = McpServer::new(config);
 
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(8);
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
         let session_ctx = SessionContext::new(tx);
         // Proof of the premise: no handshake ran, so the session flags are
         // all false and only the envelope can grant the capability.
         assert!(!session_ctx.supports_elicitation());
-
-        // Fake Modern client: wait for the server's `elicitation/create`,
-        // then decline it. Reaching this point at all proves the capability
-        // check passed on the strength of `_meta` alone.
-        let pending = Arc::clone(&session_ctx.pending);
-        let fake_client = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if let WriterMessage::Request(req) = msg
-                    && req.method == "elicitation/create"
-                {
-                    let id = req.id.as_str().unwrap_or_default().to_string();
-                    pending.resolve(&id, ClientResponse::Success(json!({ "action": "decline" })));
-                    return true;
-                }
-            }
-            false
-        });
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -8493,32 +8925,28 @@ rbac:
             })),
         };
 
-        let response = server
+        let result = server
             .handle_request_with_cancel(request, None, Some(&session_ctx))
             .await
-            .expect("only subscriptions/listen yields no response");
+            .expect("only subscriptions/listen yields no response")
+            .result
+            .expect("an input_required result");
 
-        let elicited = tokio::time::timeout(std::time::Duration::from_secs(5), fake_client)
-            .await
-            .expect(
-                "timed out waiting for elicitation/create — the gate ignored the per-request _meta envelope",
-            )
-            .unwrap();
-        assert!(
-            elicited,
-            "server never sent elicitation/create — the gate ignored the per-request _meta envelope"
+        assert_eq!(
+            result["resultType"], "input_required",
+            "the gate ignored the per-request _meta envelope: {result}"
         );
-
-        assert!(response.error.is_none());
-        let result = response.result.unwrap();
-        let text = result["content"][0]["text"].as_str().unwrap_or_default();
-        assert!(
-            !text.contains("does not support elicitation"),
-            "gate rejected on capability instead of eliciting: {text}"
+        assert_eq!(
+            result["inputRequests"]["confirm_destructive"]["method"], "elicitation/create",
+            "{result}"
         );
         assert!(
-            text.contains("User declined execution of destructive tool"),
-            "unexpected error text: {text}"
+            result["requestState"].is_string(),
+            "a confirmation the server cannot verify on retry is not a gate: {result}"
+        );
+        assert!(
+            !result["isError"].as_bool().unwrap_or(false),
+            "asking for input is not an error: {result}"
         );
     }
 
@@ -8553,7 +8981,7 @@ rbac:
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
-            text.contains("does not support elicitation"),
+            text.contains("did not declare the `elicitation` capability"),
             "unexpected error text: {text}"
         );
     }
@@ -9275,7 +9703,7 @@ rbac:
         let result = response.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
-            text.contains("does not support elicitation"),
+            text.contains("did not declare the `elicitation` capability"),
             "per-request denial did not override the handshake flag: {text}"
         );
     }

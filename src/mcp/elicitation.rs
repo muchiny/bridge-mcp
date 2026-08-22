@@ -118,6 +118,67 @@ pub struct ElicitationPlan {
     pub diff: Option<String>,
 }
 
+/// Build the destructive-confirmation `ElicitRequest`, without sending it.
+///
+/// Pure: it returns the params and nothing else. Under Multi Round-Trip
+/// Requests the server does not send this — it embeds it in an
+/// `InputRequiredResult` and the client retries the call with the answer — so
+/// the construction and the transmission had to come apart. The wording,
+/// schema and `confirm` field are carried over unchanged from
+/// `ElicitationService::confirm_destructive_with_plan`, so an operator sees the
+/// same prompt as before.
+#[must_use]
+pub fn confirm_destructive_request(
+    tool_name: &str,
+    summary: &str,
+    command: Option<String>,
+) -> ElicitationCreateParams {
+    let mut message = format!("Confirm destructive operation: `{tool_name}`\n\n{summary}\n");
+    if let Some(cmd) = command {
+        let _ = write!(message, "\n**Command:**\n```sh\n{cmd}\n```\n");
+    }
+    message.push_str("\nProceed?");
+
+    ElicitationCreateParams {
+        mode: crate::mcp::protocol::ElicitationMode::Form,
+        message,
+        requested_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "confirm": schema::bool_default(
+                    "confirm",
+                    "Set to true to execute the destructive operation",
+                    false
+                )
+            },
+            "required": ["confirm"]
+        })),
+        url: None,
+    }
+}
+
+/// Whether an `ElicitResult` for [`confirm_destructive_request`] approves the
+/// operation.
+///
+/// BOTH halves are required: `action == "accept"` says the user engaged with
+/// the form rather than dismissing it, and `content.confirm == true` says what
+/// they actually put in it. A form can be accepted with the checkbox left
+/// false, and reading only the action would take that as consent.
+///
+/// Everything else — a missing action, a missing `content`, a non-boolean
+/// `confirm`, an unrecognised action — is NOT consent.
+#[must_use]
+pub fn destructive_confirmation_granted(answer: &Value) -> bool {
+    if answer.get("action").and_then(Value::as_str) != Some("accept") {
+        return false;
+    }
+    answer
+        .get("content")
+        .and_then(|c| c.get("confirm"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 impl ElicitationService {
     /// Create a new elicitation service.
     #[must_use]
@@ -155,6 +216,7 @@ impl ElicitationService {
         }
 
         let params = ElicitationCreateParams {
+            mode: crate::mcp::protocol::ElicitationMode::Form,
             message: message.to_string(),
             requested_schema: schema,
             url: None,
@@ -290,6 +352,7 @@ impl ElicitationService {
         }
 
         let params = ElicitationCreateParams {
+            mode: crate::mcp::protocol::ElicitationMode::Form,
             message: message.to_string(),
             requested_schema: None,
             url: Some(url.to_string()),

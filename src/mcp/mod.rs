@@ -13,6 +13,7 @@ pub mod prompts;
 pub mod protocol;
 pub mod registry;
 pub mod request_meta;
+pub mod request_state;
 pub mod resource_registry;
 pub mod resources;
 pub mod sampling;
