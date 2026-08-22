@@ -183,24 +183,6 @@ impl ToolHandler for SshFilesWriteHandler {
 
         let stop_on_error = args.stop_on_error.unwrap_or(false);
 
-        // Confirm destructive batch write via elicitation. Falls back
-        // to a no-op when the client does not advertise the elicitation
-        // capability — the global `require_elicitation_on_destructive`
-        // gate still applies in that case.
-        let summary = format!(
-            "Write {} file(s) on host `{}` (stop_on_error={})",
-            args.files.len(),
-            args.host,
-            stop_on_error,
-        );
-        if let Some(false) = ctx.elicit_confirm(self.name(), &summary).await? {
-            return Ok(ToolCallResult::error(format!(
-                "User declined batch write of {} files on `{}`",
-                args.files.len(),
-                args.host
-            )));
-        }
-
         info!(
             host = %args.host,
             file_count = args.files.len(),

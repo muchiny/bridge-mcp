@@ -144,7 +144,7 @@ pub trait StandardTool: Send + Sync + 'static {
 
     /// Async hook invoked AFTER args parsing/validation but BEFORE the
     /// command is built or executed. Receives the full [`ToolContext`]
-    /// so handlers can call `ctx.elicit_confirm`, inspect `ctx.roots`,
+    /// so handlers can inspect `ctx.roots`,
     /// emit log notifications, etc.
     ///
     /// Returning `Ok(Some(result))` short-circuits the pipeline — the
@@ -337,7 +337,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         }
 
         // Step 4c: Optional async pre-execute hook with `ToolContext`
-        // access. Used by destructive tools to call `ctx.elicit_confirm`
+        // access. Used by destructive tools
         // and short-circuit the pipeline when the user declines.
         if let Some(early) = T::pre_execute(&args, ctx).await? {
             return Ok(early);

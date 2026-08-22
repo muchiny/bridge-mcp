@@ -12,8 +12,6 @@ use crate::domain::use_cases::windows_service::{
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
-use crate::ports::ToolContext;
-use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
 pub struct SshWinServiceStopArgs {
@@ -77,24 +75,6 @@ impl StandardTool for WinServiceStopTool {
     fn validate(args: &SshWinServiceStopArgs, _host_config: &HostConfig) -> Result<()> {
         validate_service_name(&args.name)?;
         Ok(())
-    }
-
-    /// Confirm destructive operation via `elicitation/create` before
-    /// running the underlying command. Falls back to a no-op when the
-    /// client does not advertise the elicitation capability — the
-    /// global `security.require_elicitation_on_destructive` gate still
-    /// applies in that case.
-    async fn pre_execute(args: &Self::Args, ctx: &ToolContext) -> Result<Option<ToolCallResult>> {
-        let summary = format!(
-            "Stop Windows service `{}` on host `{}`",
-            args.name, args.host,
-        );
-        match ctx.elicit_confirm(Self::NAME, &summary).await? {
-            Some(false) => Ok(Some(ToolCallResult::error(
-                "User declined destructive operation".to_string(),
-            ))),
-            _ => Ok(None),
-        }
     }
 }
 

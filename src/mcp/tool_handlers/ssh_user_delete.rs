@@ -9,8 +9,6 @@ use crate::domain::use_cases::user_management::UserCommandBuilder;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
-use crate::ports::ToolContext;
-use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
 pub struct SshUserDeleteArgs {
@@ -88,30 +86,6 @@ impl StandardTool for UserDeleteTool {
             &args.username,
             args.remove_home.unwrap_or(false),
         ))
-    }
-
-    /// Ask the client to confirm the user deletion at runtime via
-    /// `elicitation/create`. The home-directory removal flag is
-    /// surfaced so the user knows the full impact before approving.
-    /// Falls back to a no-op when the client does not advertise
-    /// elicitation support.
-    async fn pre_execute(
-        args: &SshUserDeleteArgs,
-        ctx: &ToolContext,
-    ) -> Result<Option<ToolCallResult>> {
-        let summary = format!(
-            "Delete user `{}` from `{}` (remove_home={})?",
-            args.username,
-            args.host,
-            args.remove_home.unwrap_or(false),
-        );
-        match ctx.elicit_confirm(Self::NAME, &summary).await? {
-            Some(false) => Ok(Some(ToolCallResult::error(format!(
-                "User declined deletion of account `{}`",
-                args.username
-            )))),
-            _ => Ok(None),
-        }
     }
 }
 

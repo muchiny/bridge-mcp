@@ -142,23 +142,6 @@ impl ToolHandler for SshFileWriteHandler {
 
         let append = args.append.unwrap_or(false);
 
-        // Step 4b: Confirm destructive write via elicitation. Falls back
-        // to a no-op when the client does not advertise the elicitation
-        // capability — the global `require_elicitation_on_destructive`
-        // gate still applies in that case.
-        let summary = format!(
-            "{} `{}` ({} bytes) on host `{}`",
-            if append { "Append to" } else { "Overwrite" },
-            args.path,
-            args.content.len(),
-            args.host,
-        );
-        if let Some(false) = ctx.elicit_confirm(self.name(), &summary).await? {
-            return Ok(ToolCallResult::error(format!(
-                "User declined write to `{}`",
-                args.path
-            )));
-        }
         let threshold = ctx.config.limits.sftp_write_threshold_bytes;
         let use_sftp = threshold == 0 || args.content.len() >= threshold;
 
