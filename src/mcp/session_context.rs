@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use tokio::sync::{RwLock, mpsc};
 
-use super::protocol::{RootEntry, WriterMessage};
+use super::protocol::WriterMessage;
 use super::request_meta::RequestMeta;
 
 /// All per-session state bundled into one cloneable handle.
@@ -50,9 +50,6 @@ pub struct SessionContext {
     /// FIND-033. (It was written by `handle_initialize` until 3.0.0 reduced
     /// that arm to a bare -32022.)
     pub runtime_max_output: Arc<RwLock<Option<usize>>>,
-    /// Per-session client-declared workspace roots. Written by
-    /// `fetch_roots` on the session's first client request. FIND-037.
-    pub roots: Arc<RwLock<Vec<RootEntry>>>,
     /// The `_meta` envelope of the ONE request currently being handled
     /// (MCP 2026-07-28). `None` on the session-level bundle and on every
     /// request from a Legacy client.
@@ -73,7 +70,6 @@ impl SessionContext {
             active_requests: super::server::ActiveRequests::new(),
             notification_tx,
             runtime_max_output: Arc::new(RwLock::new(None)),
-            roots: Arc::new(RwLock::new(Vec::new())),
             request_meta: None,
         }
     }
@@ -174,7 +170,6 @@ mod tests {
 
         // All map/list state empty on construction.
         assert!(ctx.runtime_max_output.read().await.is_none());
-        assert!(ctx.roots.read().await.is_empty());
     }
 
     #[tokio::test]

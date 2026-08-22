@@ -126,9 +126,11 @@ mod tests {
             assert!(
                 !destructive,
                 "{name} is annotated destructive_hint: true and must not be promoted to a \
-                 task: this server's confirmation gate still sends `elicitation/create` as \
-                 a server-initiated request, which 2026-07-28 replaced with MRTR, so \
-                 confirmation-then-task would be built on a deleted flow"
+                 task. Nothing technical stops it any more — the confirmation gate is \
+                 MRTR-shaped and runs BEFORE task promotion, so a promoted call is one \
+                 already confirmed. This is a deliberate product hold: handing a client a \
+                 task handle for an operation it just approved is a separate decision, and \
+                 the module doc records it"
             );
         }
     }

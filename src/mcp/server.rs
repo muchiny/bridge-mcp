@@ -22,7 +22,7 @@ use crate::ssh::SessionManager;
 use super::completion_provider::DefaultCompletionProvider;
 use super::logger::McpLogger;
 use super::progress::ProgressReporter;
-use super::protocol::JsonRpcMessage;
+use super::protocol::{JsonRpcMessage, RootEntry, RootsListResult};
 use super::request_meta::{ENVELOPE_EXEMPT_METHODS, RequestMeta, missing_required_envelope_field};
 use super::request_state::{RequestStateSigner, params_digest};
 use super::session_context::SessionContext;
@@ -163,8 +163,13 @@ impl ListenOutcome {
 /// the error arm is how a round trip gets reported to the user as a failure.
 #[derive(Debug)]
 enum ConfirmGate {
-    /// Nothing to confirm, or the client already confirmed on this request.
-    Proceed,
+    /// Everything this call needed is in hand. Carries the client roots when
+    /// the request supplied them, because they are per-REQUEST: a Modern server
+    /// may not reuse the ones a previous request delivered
+    /// ("Servers MUST NOT rely on prior requests over the same connection to
+    /// establish context"), so they travel with the decision instead of being
+    /// stashed on the session.
+    Proceed { roots: Vec<RootEntry> },
     /// Answer the client with this and run nothing.
     NeedInput(Box<InputRequiredResult>),
     /// Refuse, as a tool error the model can read.
@@ -175,6 +180,19 @@ enum ConfirmGate {
     /// a tool that ran and failed — the same distinction `-32602` draws for an
     /// unknown tool name.
     BadState(&'static str),
+}
+
+/// The destructive-confirmation half of the MRTR gate's decision.
+#[derive(Debug)]
+enum Confirmation {
+    /// The flag is off, or the tool is not destructive.
+    NotRequired,
+    /// The client answered, and the answer is consent.
+    Granted,
+    /// Ask the client this `elicitation/create`.
+    Ask(Value),
+    /// Do not run the tool, and say why.
+    Refused(String),
 }
 
 /// The authenticated principal to bind a `requestState` to.
@@ -492,6 +510,19 @@ impl McpServer {
     /// stays out of the public docs.
     #[doc(hidden)]
     #[must_use]
+    /// Build a `ToolContext` the way an ordinary request would, for tests that
+    /// need to assert what it does and does not carry.
+    ///
+    /// Public because `tests/per_session_state.rs` asserts that roots never
+    /// come from the session — a property with no other observable surface now
+    /// that the session slot they used to live in is gone.
+    pub async fn create_tool_context_for_test(
+        &self,
+        session: Option<&SessionContext>,
+    ) -> ToolContext {
+        self.create_tool_context(None, None, session).await
+    }
+
     pub fn allocate_session_active_requests_for_test(&self) -> ActiveRequests {
         ActiveRequests::new()
     }
@@ -507,29 +538,40 @@ impl McpServer {
         Arc::new(RwLock::new(None))
     }
 
-    /// Allocate a fresh per-session roots vec.
-    ///
-    /// Test helper used by `tests/per_session_state.rs` to verify
-    /// that two sessions on the same `McpServer` instance get independent
-    /// `Vec<RootEntry>` instances (FIND-037 audit 2026-05-09).
-    #[doc(hidden)]
-    #[must_use]
-    pub fn allocate_session_roots_for_test(
-        &self,
-    ) -> Arc<RwLock<Vec<crate::mcp::protocol::RootEntry>>> {
-        Arc::new(RwLock::new(Vec::new()))
-    }
-
     /// Server-assigned key for the destructive-confirmation `inputRequest`.
     ///
     /// One constant, used to write the key on the way out and to read the
     /// answer on the way back. *"`inputRequests` keys are server assigned
-    /// identifiers and MUST be unique within the scope of the request"* — one
-    /// key per request satisfies that trivially.
+    /// identifiers and MUST be unique within the scope of the request"* — a
+    /// `Map` gives that for free.
     const CONFIRM_KEY: &'static str = "confirm_destructive";
 
-    /// Decide whether a `tools/call` may proceed, needs confirmation, or is
-    /// refused.
+    /// Server-assigned key for the `roots/list` `inputRequest`.
+    const ROOTS_KEY: &'static str = "client_roots";
+
+    /// Tools whose path arguments are scoped to the client's declared roots.
+    ///
+    /// The list is here rather than derived from the handlers because the
+    /// decision has to be made BEFORE dispatch: `validate_root_scope` runs
+    /// inside `execute`, and by the time a handler could ask for roots the
+    /// write it guards may already have happened. A gate that fires after the
+    /// side effect is not a gate.
+    ///
+    /// `root_scoped_tools_matches_the_handlers_that_check` keeps it honest by
+    /// reading the handler sources, so adding a `validate_root_scope` call
+    /// without adding the tool here fails the build rather than silently
+    /// leaving that tool unscoped.
+    const ROOT_SCOPED_TOOLS: &'static [&'static str] = &[
+        "ssh_download",
+        "ssh_file_write",
+        "ssh_files_write",
+        "ssh_find",
+        "ssh_ls",
+        "ssh_sync",
+        "ssh_upload",
+    ];
+
+    /// Decide whether a `tools/call` may proceed, needs input, or is refused.
     ///
     /// # Why this is not a blocking call any more
     ///
@@ -541,48 +583,39 @@ impl McpServer {
     /// no longer supported. This is a breaking change."* A conforming client is
     /// under no obligation to answer a request the server invents, so the
     /// operator's confirmation gate was resting on a mechanism that could
-    /// silently stop working — the failure mode being that a destructive tool
-    /// blocks for two minutes and then times out, or worse, that a future
-    /// client answers nothing and the gate is bypassed by whatever the timeout
-    /// arm does.
+    /// silently stop working.
     ///
     /// Now the server RETURNS an [`InputRequiredResult`] and the client retries
-    /// the same call under a new id with the answer attached. Nothing has run
-    /// by the time this gate fires — it sits ahead of argument execution, ahead
-    /// of task promotion, and ahead of any audit write — so replaying the whole
-    /// call on the retry is free of side effects. That is what makes this
-    /// particular caller convertible at all.
+    /// the same call under a new id with the answers attached. Nothing has run
+    /// by the time this fires — it sits ahead of argument execution, ahead of
+    /// task promotion, and ahead of any audit write — so replaying the whole
+    /// call on the retry is free of side effects. That is what makes these
+    /// callers convertible at all, and it is why `ToolContext::sample` is not
+    /// among them.
+    ///
+    /// # Both questions in ONE round trip
+    ///
+    /// A destructive tool that also takes a path needs a confirmation AND the
+    /// client's roots. They are asked together, because `inputRequests` is a
+    /// map and asking twice would make the operator answer, wait, and answer
+    /// again — the incremental-challenge shape the spec calls out as degrading
+    /// the user experience.
     ///
     /// # The check that matters
     ///
     /// `inputResponses` are honoured ONLY when accompanied by a `requestState`
     /// this server signed for THIS principal and THIS exact call. Without that
-    /// binding a client could simply post
+    /// binding a client could post
     /// `inputResponses: {"confirm_destructive": {"action": "accept"}}` on the
-    /// first try and confirm on the user's behalf, which would turn the gate
-    /// into a formality any caller can satisfy. The state is the evidence; the
-    /// answer alone is not.
+    /// first try and confirm on the user's behalf, and could hand itself an
+    /// arbitrary root set to widen its own scoping. The state is the evidence;
+    /// the answers alone are not.
     async fn check_destructive_elicitation(
         &self,
         call_params: &ToolCallParams,
         session: Option<&SessionContext>,
     ) -> ConfirmGate {
-        let require = {
-            let cfg = self.config.read().await;
-            cfg.security.require_elicitation_on_destructive
-        };
-        if !require {
-            return ConfirmGate::Proceed;
-        }
-
         let tool_name = call_params.name.as_str();
-        let is_destructive = super::registry::tool_annotations(tool_name)
-            .destructive_hint
-            .unwrap_or(false);
-        if !is_destructive {
-            return ConfirmGate::Proceed;
-        }
-
         let principal = request_principal(session);
         // The "identifier for the originating request" the spec asks be bound
         // into the state. Tool name AND arguments: same tool with different
@@ -595,84 +628,128 @@ impl McpServer {
             "arguments": call_params.arguments,
         }));
 
-        // ---- retry path ----
-        if let Some(state) = call_params.request_state.as_deref() {
-            if let Err(err) = self
-                .request_state
-                .verify(state, principal, "tools/call", &digest)
-            {
-                warn!(
-                    tool = tool_name,
-                    reason = ?err,
-                    "Rejected a requestState on a destructive call"
-                );
-                return ConfirmGate::BadState(err.client_message());
+        // ONE verification for every question this call asks. Answers arriving
+        // without a state that verifies are not answers — they are a client's
+        // opinion about what it should be allowed to do.
+        let answers = match call_params.request_state.as_deref() {
+            Some(state) => {
+                if let Err(err) = self
+                    .request_state
+                    .verify(state, principal, "tools/call", &digest)
+                {
+                    warn!(
+                        tool = tool_name,
+                        reason = ?err,
+                        "Rejected a requestState on a tools/call"
+                    );
+                    return ConfirmGate::BadState(err.client_message());
+                }
+                call_params.input_responses.clone().unwrap_or_default()
             }
+            None => serde_json::Map::new(),
+        };
 
-            let answer = call_params
-                .input_responses
-                .as_ref()
-                .and_then(|map| map.get(Self::CONFIRM_KEY));
-            let Some(answer) = answer else {
-                // "If the client fails to send all the information requested in
-                // a previous `InputRequests`, and the missing information is
-                // necessary for the server to process the request, the server
-                // SHOULD respond with a new `InputRequiredResult` requesting the
-                // missing information again, rather than returning an error."
-                return self.ask_for_confirmation(call_params, session, principal, &digest);
-            };
+        let mut pending = serde_json::Map::new();
 
+        match self
+            .confirmation_needed(call_params, session, &answers)
+            .await
+        {
+            Confirmation::NotRequired | Confirmation::Granted => {}
+            Confirmation::Refused(message) => return ConfirmGate::Refuse(message),
+            Confirmation::Ask(request) => {
+                pending.insert(Self::CONFIRM_KEY.to_string(), request);
+            }
+        }
+
+        let mut roots = Vec::new();
+        if Self::ROOT_SCOPED_TOOLS.contains(&tool_name)
+            && session.is_some_and(SessionContext::supports_roots)
+        {
+            if let Some(answer) = answers.get(Self::ROOTS_KEY) {
+                // A malformed `ListRootsResult` yields no roots, which means no
+                // scoping — the same place a client that declares nothing ends
+                // up, and not a refusal: roots are advisory, and failing the
+                // call because the client's answer was odd would be worse than
+                // the scoping it buys.
+                roots = serde_json::from_value::<RootsListResult>(answer.clone())
+                    .map(|r| r.roots)
+                    .unwrap_or_default();
+            } else {
+                pending.insert(
+                    Self::ROOTS_KEY.to_string(),
+                    json!({ "method": "roots/list", "params": {} }),
+                );
+            }
+        }
+
+        if pending.is_empty() {
+            return ConfirmGate::Proceed { roots };
+        }
+        let state = self.request_state.issue(
+            principal,
+            "tools/call",
+            &digest,
+            json!({ "tool": tool_name }),
+        );
+        ConfirmGate::NeedInput(Box::new(InputRequiredResult::with_requests(pending, state)))
+    }
+
+    /// The destructive-confirmation half of [`Self::check_destructive_elicitation`].
+    async fn confirmation_needed(
+        &self,
+        call_params: &ToolCallParams,
+        session: Option<&SessionContext>,
+        answers: &serde_json::Map<String, Value>,
+    ) -> Confirmation {
+        let require = {
+            let cfg = self.config.read().await;
+            cfg.security.require_elicitation_on_destructive
+        };
+        if !require {
+            return Confirmation::NotRequired;
+        }
+        let tool_name = call_params.name.as_str();
+        if !super::registry::tool_annotations(tool_name)
+            .destructive_hint
+            .unwrap_or(false)
+        {
+            return Confirmation::NotRequired;
+        }
+
+        if let Some(answer) = answers.get(Self::CONFIRM_KEY) {
             // BOTH halves, via one predicate: the action must be `accept` AND
             // the form's `confirm` must be true. Reading only the action would
             // take an accepted form with the box left unticked as consent —
             // which is the check the blocking implementation already made, and
             // which is easy to lose when the transport changes underneath it.
             if super::elicitation::destructive_confirmation_granted(answer) {
-                return ConfirmGate::Proceed;
+                return Confirmation::Granted;
             }
-            // Fail closed for everything else. `decline` and `cancel` get their
-            // own wording because they are the user's own answer; anything
-            // unrecognised is refused too, because treating what is not a
-            // recognised refusal as consent is how a confirmation gate becomes
-            // a rubber stamp.
-            return match answer.get("action").and_then(Value::as_str) {
-                Some("decline") => ConfirmGate::Refuse(format!(
-                    "User declined execution of destructive tool `{tool_name}`."
-                )),
-                Some("cancel") => ConfirmGate::Refuse(format!(
-                    "User cancelled confirmation for destructive tool `{tool_name}`."
-                )),
-                _ => ConfirmGate::Refuse(format!(
+            // Fail closed. `decline` and `cancel` get their own wording because
+            // they are the user's own answer; anything unrecognised is refused
+            // too, because treating what is not a recognised refusal as consent
+            // is how a confirmation gate becomes a rubber stamp.
+            return Confirmation::Refused(match answer.get("action").and_then(Value::as_str) {
+                Some("decline") => {
+                    format!("User declined execution of destructive tool `{tool_name}`.")
+                }
+                Some("cancel") => {
+                    format!("User cancelled confirmation for destructive tool `{tool_name}`.")
+                }
+                _ => format!(
                     "Confirmation for destructive tool `{tool_name}` was not granted; the \
                      operation was not run."
-                )),
-            };
+                ),
+            });
         }
-
-        // ---- first pass ----
-        //
-        // `inputResponses` WITHOUT a `requestState` reaches here and is ignored,
-        // which is the intended behaviour: unsigned answers are not evidence of
-        // anything. The client is asked again.
-        self.ask_for_confirmation(call_params, session, principal, &digest)
-    }
-
-    /// Build the `InputRequiredResult` that asks the user to confirm.
-    fn ask_for_confirmation(
-        &self,
-        call_params: &ToolCallParams,
-        session: Option<&SessionContext>,
-        principal: &str,
-        digest: &str,
-    ) -> ConfirmGate {
-        let tool_name = call_params.name.as_str();
 
         // Fail closed without a session, exactly as before. The gate cannot
         // prove the caller can be asked, so it does not run the tool. Note this
         // is what makes the HTTP transport refuse destructive tools outright
         // today: ordinary POSTs dispatch with no session.
         let Some(session) = session else {
-            return ConfirmGate::Refuse(format!(
+            return Confirmation::Refused(format!(
                 "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is \
                  enabled, but no session context is available — the operation cannot be confirmed."
             ));
@@ -685,7 +762,7 @@ impl McpServer {
         // and the refusal is still the fail-closed one, because a client that
         // cannot be asked cannot confirm.
         if !session.supports_elicitation() {
-            return ConfirmGate::Refuse(format!(
+            return Confirmation::Refused(format!(
                 "Tool `{tool_name}` is destructive and `require_elicitation_on_destructive` is \
                  enabled, but the client did not declare the `elicitation` capability on this \
                  request. Either declare it in `_meta` or set \
@@ -714,31 +791,18 @@ impl McpServer {
             &summary,
             plan_command_from_args(call_params.arguments.as_ref()),
         );
-        let request = match serde_json::to_value(&elicit) {
-            Ok(value) => json!({ "method": "elicitation/create", "params": value }),
+        match serde_json::to_value(&elicit) {
+            Ok(value) => {
+                Confirmation::Ask(json!({ "method": "elicitation/create", "params": value }))
+            }
             Err(e) => {
                 error!(error = %e, "Failed to build the confirmation request");
-                return ConfirmGate::Refuse(format!(
+                Confirmation::Refused(format!(
                     "Could not build a confirmation prompt for `{tool_name}`; the operation was \
                      not run."
-                ));
+                ))
             }
-        };
-
-        // The context is signed but NOT encrypted, so it carries nothing the
-        // client may not see. The tool name is already visible in the call it
-        // is retrying.
-        let state = self.request_state.issue(
-            principal,
-            "tools/call",
-            digest,
-            json!({ "tool": tool_name }),
-        );
-        ConfirmGate::NeedInput(Box::new(InputRequiredResult::new(
-            Self::CONFIRM_KEY,
-            request,
-            state,
-        )))
+        }
     }
 
     async fn create_tool_context(
@@ -795,8 +859,16 @@ impl McpServer {
         // affected.
         if let Some(s) = session {
             ctx.runtime_max_output_chars = Some(Arc::clone(&s.runtime_max_output));
-            ctx.roots.clone_from(&*s.roots.read().await);
         }
+        // `ctx.roots` is deliberately NOT filled from the session here. Roots
+        // are per-REQUEST in this revision — they arrive as the answer to a
+        // `roots/list` `inputRequest` on the retry of the call that needs them
+        // — and copying a previous request's answer forward is precisely what
+        // "Servers MUST NOT rely on prior requests over the same connection to
+        // establish context" forbids. `handle_tools_call` sets it from the
+        // verified answer; every other caller leaves it empty, which means no
+        // scoping, which is what `validate_root_scope` already does with an
+        // empty list.
         ctx.metrics = Some(Arc::clone(&self.metrics));
         ctx.cancel_token = cancel_token;
         ctx.notification_tx = session.map(|s| s.notification_tx.clone());
@@ -2217,11 +2289,12 @@ impl McpServer {
         // is set, ask the client to confirm via `elicitation/create` before
         // executing any tool annotated `destructive_hint: true`. Runs before the
         // task branch so async task creation itself is gated.
-        match self
+        // Client roots for THIS request, empty unless the retry supplied them.
+        let request_roots: Vec<RootEntry> = match self
             .check_destructive_elicitation(&call_params, session)
             .await
         {
-            ConfirmGate::Proceed => {}
+            ConfirmGate::Proceed { roots } => roots,
             // A SUCCESS response, not an error: the round trip is the normal
             // path. `resultType: "input_required"` is what tells the client to
             // gather the input and retry under a new id.
@@ -2241,7 +2314,7 @@ impl McpServer {
             ConfirmGate::BadState(detail) => {
                 return JsonRpcResponse::error(id, JsonRpcError::invalid_params(detail));
             }
-        }
+        };
 
         // Server-elected task. MCP 2026-07-28 deleted `params.task`: "The
         // server is the sole decider; clients do not signal task preference on
@@ -2302,6 +2375,7 @@ impl McpServer {
             )
             .await;
         ctx.mcp_logger = request_logger.clone();
+        ctx.roots = request_roots;
 
         if let Some(ref reporter) = progress_reporter {
             reporter.report(2, Some(&format!("Executing {}...", call_params.name)));
@@ -4572,6 +4646,271 @@ rbac:
             )
             .await;
         }
+    }
+
+    // ============== MRTR: client roots ==============
+
+    /// A server with every tool group on, so the path-scoped tools are
+    /// registered (the default profile leaves several groups out).
+    fn server_with_all_groups() -> McpServer {
+        let mut config = test_config();
+        config.tool_groups = crate::mcp::registry::all_enabled_tool_groups_config_for_test();
+        McpServer::new(config).0
+    }
+
+    fn ls_call(path: &str) -> Value {
+        json!({ "name": "ssh_ls", "arguments": { "host": "no-such-host-xyz", "path": path } })
+    }
+
+    /// THE LIST IS THE CONTRACT. Every handler that calls
+    /// `validate_root_scope` must be named in `ROOT_SCOPED_TOOLS`, because the
+    /// check runs inside `execute` — by the time a handler could ask for roots,
+    /// the write it guards may already have happened, so the ASKING has to
+    /// happen at the gate and the gate needs the list.
+    ///
+    /// Reads the handler sources rather than trusting a comment: adding a
+    /// `validate_root_scope` call without adding the tool here would leave that
+    /// tool silently unscoped, which is the failure this whole mechanism
+    /// exists to prevent.
+    #[test]
+    fn root_scoped_tools_matches_the_handlers_that_check() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tool_handlers");
+        let mut found: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the tool_handlers directory")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                let source = std::fs::read_to_string(&path).ok()?;
+                source
+                    .contains("validate_root_scope")
+                    .then(|| path.file_stem()?.to_str().map(str::to_string))
+                    .flatten()
+            })
+            .collect();
+        found.sort();
+
+        let mut declared: Vec<String> = McpServer::ROOT_SCOPED_TOOLS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        declared.sort();
+
+        assert_eq!(
+            found, declared,
+            "ROOT_SCOPED_TOOLS must name exactly the handlers that call \
+             validate_root_scope"
+        );
+    }
+
+    /// A path-scoped tool must never be promoted to a task.
+    ///
+    /// Not a style rule: the task path builds its own `ToolContext` and does
+    /// not receive the roots the gate verified, so a promoted call would run
+    /// unscoped. The two lists are disjoint today; this fails the day someone
+    /// makes them overlap, which is cheaper than discovering it as a silently
+    /// unscoped write.
+    #[test]
+    fn no_root_scoped_tool_is_promoted_to_a_task() {
+        for name in McpServer::ROOT_SCOPED_TOOLS {
+            assert!(
+                !super::super::task_policy::is_long_running(name),
+                "{name} is path-scoped AND task-promoted: the task path carries no roots"
+            );
+        }
+    }
+
+    /// The ask. A client that declared `roots` calling a path-scoped tool is
+    /// asked for them before the tool runs.
+    #[tokio::test]
+    async fn a_root_scoped_tool_asks_for_the_client_roots() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({ "roots": {} }));
+
+        let result = server
+            .handle_tools_call(
+                Some(json!(1)),
+                Some(ls_call("/srv/app")),
+                None,
+                Some(&session),
+            )
+            .await
+            .result
+            .expect("a result");
+
+        assert_eq!(result["resultType"], "input_required", "{result}");
+        assert_eq!(
+            result["inputRequests"]["client_roots"]["method"], "roots/list",
+            "{result}"
+        );
+        assert!(result["requestState"].is_string(), "{result}");
+    }
+
+    /// "Servers MUST NOT send an `inputRequests` that the client has not
+    /// declared support for in its capabilities." A client that declared no
+    /// `roots` is not asked, and its call runs unscoped — which is what
+    /// `validate_root_scope` already does with an empty list.
+    #[tokio::test]
+    async fn a_client_that_declares_no_roots_is_not_asked() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({}));
+
+        let result = server
+            .handle_tools_call(
+                Some(json!(1)),
+                Some(ls_call("/srv/app")),
+                None,
+                Some(&session),
+            )
+            .await
+            .result
+            .expect("a result");
+
+        assert_ne!(result["resultType"], "input_required", "{result}");
+    }
+
+    /// A tool that touches no path is not asked either, even from a
+    /// roots-declaring client. Asking on every call would put a round trip in
+    /// front of every tool for a check most of them never make.
+    #[tokio::test]
+    async fn a_tool_that_touches_no_path_is_not_asked_for_roots() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({ "roots": {} }));
+
+        let result = server
+            .handle_tools_call(
+                Some(json!(1)),
+                Some(json!({ "name": "ssh_status", "arguments": {} })),
+                None,
+                Some(&session),
+            )
+            .await
+            .result
+            .expect("a result");
+
+        assert_ne!(result["resultType"], "input_required", "{result}");
+    }
+
+    /// THE POINT OF THE ROUND TRIP. Roots supplied on the retry actually scope
+    /// the call: a path outside them is refused before the host is contacted.
+    #[tokio::test]
+    async fn supplied_roots_scope_the_call() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({ "roots": {} }));
+
+        let state = server
+            .handle_tools_call(Some(json!(1)), Some(ls_call("/etc")), None, Some(&session))
+            .await
+            .result
+            .expect("a result")["requestState"]
+            .as_str()
+            .expect("a requestState")
+            .to_string();
+
+        let mut retry = ls_call("/etc");
+        retry["requestState"] = json!(state);
+        retry["inputResponses"] = json!({
+            "client_roots": { "roots": [{ "uri": "file:///srv/app" }] }
+        });
+
+        let result = server
+            .handle_tools_call(Some(json!(2)), Some(retry), None, Some(&session))
+            .await
+            .result
+            .expect("a result");
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("outside declared workspace roots"),
+            "/etc is outside file:///srv/app and must be refused: {result}"
+        );
+    }
+
+    /// THE POSITIVE TWIN. Without it, a gate that refused every path would
+    /// satisfy the test above.
+    #[tokio::test]
+    async fn supplied_roots_admit_a_path_inside_them() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({ "roots": {} }));
+
+        let state = server
+            .handle_tools_call(
+                Some(json!(1)),
+                Some(ls_call("/srv/app/logs")),
+                None,
+                Some(&session),
+            )
+            .await
+            .result
+            .expect("a result")["requestState"]
+            .as_str()
+            .expect("a requestState")
+            .to_string();
+
+        let mut retry = ls_call("/srv/app/logs");
+        retry["requestState"] = json!(state);
+        retry["inputResponses"] = json!({
+            "client_roots": { "roots": [{ "uri": "file:///srv/app" }] }
+        });
+
+        let result = server
+            .handle_tools_call(Some(json!(2)), Some(retry), None, Some(&session))
+            .await
+            .result
+            .expect("a result");
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            !text.contains("outside declared workspace roots"),
+            "a path inside the declared root must not be refused for scope: {result}"
+        );
+    }
+
+    /// THE BYPASS TEST, roots edition. Unsigned `inputResponses` must not let a
+    /// client hand itself a root set — widening its own scope is the whole
+    /// point of forging one.
+    #[tokio::test]
+    async fn unsigned_roots_are_ignored() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({ "roots": {} }));
+
+        let mut forged = ls_call("/etc");
+        forged["inputResponses"] = json!({
+            "client_roots": { "roots": [{ "uri": "file:///" }] }
+        });
+
+        let result = server
+            .handle_tools_call(Some(json!(1)), Some(forged), None, Some(&session))
+            .await
+            .result
+            .expect("a result");
+        assert_eq!(
+            result["resultType"], "input_required",
+            "an unsigned root set must be ignored and the client asked: {result}"
+        );
+    }
+
+    /// A destructive path-scoped tool asks BOTH questions in one result rather
+    /// than making the operator answer, wait, and answer again.
+    #[tokio::test]
+    async fn a_destructive_path_tool_asks_both_at_once() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({ "roots": {}, "elicitation": {} }));
+
+        let result = server
+            .handle_tools_call(
+                Some(json!(1)),
+                Some(json!({
+                    "name": "ssh_file_write",
+                    "arguments": { "host": "no-such-host-xyz", "path": "/srv/app/x", "content": "hi" }
+                })),
+                None,
+                Some(&session),
+            )
+            .await
+            .result
+            .expect("a result");
+
+        assert_eq!(result["resultType"], "input_required", "{result}");
+        let asked = result["inputRequests"].as_object().expect("a map");
+        assert!(asked.contains_key("confirm_destructive"), "{result}");
+        assert!(asked.contains_key("client_roots"), "{result}");
     }
 
     // ============== MRTR destructive-confirmation round trip ==============

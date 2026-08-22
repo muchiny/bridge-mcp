@@ -19,9 +19,11 @@
 
 use std::sync::Arc;
 
+use bridge_mcp::mcp::session_context::SessionContext;
+
 use bridge_mcp::config::Config;
 use bridge_mcp::mcp::McpServer;
-use bridge_mcp::mcp::protocol::{RootEntry, WriterMessage};
+use bridge_mcp::mcp::protocol::WriterMessage;
 use serde_json::json;
 use tokio::sync::{RwLock, mpsc};
 
@@ -169,50 +171,37 @@ async fn subscriptions_are_removed_per_session_channel() {
     );
 }
 
-/// `FIND-037` — `roots: Arc<RwLock<Vec<RootEntry>>>` was a single
-/// global vec. `fetch_roots` overwrote it from whichever client most
-/// recently completed `notifications/initialized`. Tool handlers
-/// reading `ctx.roots` (path scope validation) saw the wrong client's
-/// roots. The fix is per-session storage cloned into `ToolContext` at
-/// `create_tool_context` time.
+/// `FIND-037`, re-expressed for roots that are per-REQUEST.
+///
+/// The original bug was a single global `roots: Arc<RwLock<Vec<RootEntry>>>`
+/// that `fetch_roots` overwrote from whichever client most recently finished
+/// its handshake, so a handler validating a path saw another client's roots.
+/// The fix then was per-SESSION storage, and this test compared two handles.
+///
+/// 3.0.0 removes the storage entirely. Roots now arrive as the answer to a
+/// `roots/list` `inputRequest` on the retry of the call that needs them, and
+/// are set on that call's `ToolContext` and nowhere else — because carrying a
+/// previous request's answer forward is exactly what this revision forbids:
+/// *"Servers MUST NOT rely on prior requests over the same connection to
+/// establish context (e.g., capabilities, protocol version, client identity).
+/// Every request supplies this metadata in its `_meta` field."*
+///
+/// Per-request is strictly stronger than per-session: there is no shared slot
+/// for one client to overwrite. What is left to assert is the absence itself —
+/// a context built from a session carries no roots, whatever that session has
+/// done before.
 #[tokio::test]
-async fn roots_isolated_per_session() {
+async fn roots_never_come_from_the_session() {
     let config = Config::default();
     let (server, _audit_task) = McpServer::new(config);
-    let server = Arc::new(server);
 
-    let roots_a: Arc<RwLock<Vec<RootEntry>>> = server.allocate_session_roots_for_test();
-    let roots_b: Arc<RwLock<Vec<RootEntry>>> = server.allocate_session_roots_for_test();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let session = SessionContext::new(tx);
 
-    // Session A advertises one set of roots.
-    *roots_a.write().await = vec![RootEntry {
-        uri: "file:///srv/app-a".to_string(),
-        name: Some("app-a".to_string()),
-    }];
-
-    // Session B independently advertises a DIFFERENT set.
-    *roots_b.write().await = vec![RootEntry {
-        uri: "file:///srv/app-b".to_string(),
-        name: Some("app-b".to_string()),
-    }];
-
-    let snap_a = roots_a.read().await.clone();
-    let snap_b = roots_b.read().await.clone();
-    assert_eq!(snap_a.len(), 1);
-    assert_eq!(snap_a[0].uri, "file:///srv/app-a");
-    assert_eq!(
-        snap_b.len(),
-        1,
-        "FIND-037: B's roots must remain its own after A has set its roots"
-    );
-    assert_eq!(snap_b[0].uri, "file:///srv/app-b");
-
-    // Session A clears its roots — B's stay put.
-    roots_a.write().await.clear();
-    assert_eq!(roots_a.read().await.len(), 0);
-    assert_eq!(
-        roots_b.read().await.len(),
-        1,
-        "FIND-037: A clearing its roots must not affect B"
+    let ctx = server.create_tool_context_for_test(Some(&session)).await;
+    assert!(
+        ctx.roots.is_empty(),
+        "roots must come from the request, not the session: {:?}",
+        ctx.roots
     );
 }

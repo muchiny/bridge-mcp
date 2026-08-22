@@ -979,9 +979,24 @@ impl InputRequiredResult {
     pub fn new(key: &str, request: Value, request_state: String) -> Self {
         let mut requests = serde_json::Map::new();
         requests.insert(key.to_string(), request);
+        Self::with_requests(requests, request_state)
+    }
+
+    /// Build a result carrying SEVERAL server-to-client requests at once.
+    ///
+    /// The spec's own example carries two, and asking for everything the
+    /// request needs in one result is what the error-handling section pushes
+    /// toward: challenging incrementally "forces multiple authorization
+    /// round-trips for a single operation". A confirmation and a `roots/list`
+    /// wanted by the same call travel together.
+    #[must_use]
+    pub fn with_requests(
+        input_requests: serde_json::Map<String, Value>,
+        request_state: String,
+    ) -> Self {
         Self {
             result_type: ResultType::InputRequired,
-            input_requests: Some(requests),
+            input_requests: Some(input_requests),
             request_state: Some(request_state),
         }
     }
