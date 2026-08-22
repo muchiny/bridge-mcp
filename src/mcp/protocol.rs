@@ -1076,28 +1076,6 @@ pub struct SamplingCreateMessageResult {
 // Reverse Request Types (server → client requests for Elicitation/Sampling)
 // ============================================================================
 
-/// Outbound JSON-RPC request (server → client).
-#[derive(Debug, Clone, Serialize)]
-pub struct JsonRpcOutboundRequest {
-    pub jsonrpc: String,
-    pub id: Value,
-    pub method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub params: Option<Value>,
-}
-
-impl JsonRpcOutboundRequest {
-    #[must_use]
-    pub fn new(id: Value, method: impl Into<String>, params: Option<Value>) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            method: method.into(),
-            params,
-        }
-    }
-}
-
 /// Flexible inbound JSON-RPC message (can be a request OR a response).
 ///
 /// Used by the main loop to distinguish client requests from client responses
@@ -1382,9 +1360,14 @@ pub enum WriterMessage {
     /// A JSON-RPC response to a client request.
     Response(Box<JsonRpcResponse>),
     /// An unsolicited server notification (e.g., `list_changed`).
+    ///
+    /// A NOTIFICATION, never a request. 2026-07-28 removed the third variant
+    /// this enum used to carry: *"Servers MUST send server-to-client requests
+    /// ... using the MRTR pattern. The previous pattern of server-initiated
+    /// requests is no longer supported."* Server-to-client requests now travel
+    /// as `inputRequests` inside an `InputRequiredResult` — a RESULT, on the
+    /// `Response` variant — so nothing this server writes is ever a request.
     Notification(JsonRpcNotification),
-    /// A server-initiated JSON-RPC request (elicitation, sampling).
-    Request(JsonRpcOutboundRequest),
 }
 
 // ============================================================================

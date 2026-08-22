@@ -333,7 +333,7 @@ mod tests {
             WriterMessage::Notification(n) => {
                 assert_eq!(n.method, "notifications/tools/list_changed");
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
         assert!(
             rx_res.try_recv().is_err(),
@@ -369,7 +369,7 @@ mod tests {
                 assert_eq!(params["uri"], "history://recent");
                 assert_eq!(params["_meta"][META_SUBSCRIPTION_ID], id);
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
     }
 
@@ -501,7 +501,7 @@ mod tests {
                     "the correlation id must be the request id verbatim"
                 );
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
     }
 }

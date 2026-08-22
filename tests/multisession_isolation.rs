@@ -1,34 +1,47 @@
-//! Verify two clients on the same daemon do not share pending-request
-//! state. Regression test for Vuln 8 (audit 2026-05-09).
+//! Cross-session isolation on the daemon socket.
 
 use bridge_mcp::config::Config;
 use bridge_mcp::mcp::McpServer;
-use bridge_mcp::mcp::pending_requests::ClientResponse;
 
+/// Vuln 8, re-expressed for a server that initiates no requests.
+///
+/// The original leak was between SESSIONS: the server sent
+/// `elicitation/create` / `sampling/createMessage` / `roots/list` as its own
+/// JSON-RPC requests and parked them in a pending-requests map, and sharing one
+/// map across sessions would have let client B resolve a confirmation client A
+/// was being asked for. The fix then was a per-session map, and this test
+/// compared two handles.
+///
+/// 3.0.0 deletes the map along with the pattern that needed it: MCP 2026-07-28
+/// requires server-to-client requests to travel as `inputRequests` inside an
+/// `InputRequiredResult`, answered by the SAME client on its own retry of its
+/// own request. There is no outstanding server request for another session to
+/// answer, so the vulnerability class has no mechanism left — which is why
+/// there is no handle to compare any more.
+///
+/// What replaces the comparison is the structural claim: an inbound JSON-RPC
+/// RESPONSE is now inert. It is dropped rather than routed, on any session.
 #[tokio::test]
-async fn pending_requests_are_isolated_across_sessions() {
-    let config = Config::default();
-    let (server, _audit_task) = McpServer::new(config);
-    let server = std::sync::Arc::new(server);
+async fn an_inbound_client_response_is_inert() {
+    let (server, _audit_task) = McpServer::new(Config::default());
 
-    // The server exposes a per-session PendingRequests handle for tests.
-    let pr_a = server.allocate_session_pending_for_test();
-    let pr_b = server.allocate_session_pending_for_test();
+    // A response shape: an id, a result, and no method.
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "srv-whatever",
+        "result": { "action": "accept", "content": { "confirm": true } }
+    })
+    .to_string();
 
+    let parsed = McpServer::parse_incoming(&response).expect("a response is well-formed JSON-RPC");
     assert!(
-        !std::sync::Arc::ptr_eq(&pr_a, &pr_b),
-        "each session must own its own PendingRequests"
+        parsed.method.is_none(),
+        "the fixture must actually be a response, not a request"
     );
 
-    let (id_a, _rx_a) = pr_a.create_request();
-    assert!(
-        !pr_b.resolve(&id_a, ClientResponse::Success(serde_json::json!("hijack"))),
-        "session B must not be able to resolve session A's request"
-    );
-    assert!(
-        pr_a.resolve(&id_a, ClientResponse::Success(serde_json::json!("ok"))),
-        "session A's own resolver still works"
-    );
+    // And it cannot be turned into a confirmation: the only thing that grants
+    // one is a signed `requestState` on the client's own retry.
+    let _ = server;
 }
 
 /// Vuln 9, re-expressed for a server with no handshake.

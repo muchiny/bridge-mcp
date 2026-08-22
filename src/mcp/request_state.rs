@@ -184,7 +184,7 @@ impl RequestStateSigner {
     ///
     /// 32 bytes from two v4 UUIDs — 244 bits of CSPRNG output, since v4 fixes
     /// six version and variant bits. `uuid` is already the source of the
-    /// unguessable server-request ids in `pending_requests`, so this reuses the
+    /// unguessable identifiers this crate already generates, so this reuses the
     /// entropy path the crate already trusts rather than adding a second one.
     ///
     /// Correct for a single process and wrong for a fleet — see [`KEY_ENV`].

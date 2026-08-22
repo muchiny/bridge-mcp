@@ -99,7 +99,7 @@ async fn notification_tx_does_not_cross_sessions() {
             assert_eq!(n.method, "notifications/test");
             assert_eq!(n.params.unwrap()["who"], "A");
         }
-        _ => panic!("expected Notification on A"),
+        WriterMessage::Response(_) => panic!("expected Notification on A"),
     }
 
     // CRITICAL: nothing should be on B's channel — the per-session
@@ -127,7 +127,7 @@ async fn notification_tx_does_not_cross_sessions() {
         WriterMessage::Notification(n) => {
             assert_eq!(n.params.unwrap()["who"], "B");
         }
-        _ => panic!("expected Notification on B"),
+        WriterMessage::Response(_) => panic!("expected Notification on B"),
     }
 }
 

@@ -897,7 +897,6 @@ async fn serve_listen_stream(
         let json_str = match &msg {
             WriterMessage::Response(r) => serde_json::to_string(&**r).ok(),
             WriterMessage::Notification(n) => serde_json::to_string(n).ok(),
-            WriterMessage::Request(r) => serde_json::to_string(r).ok(),
         };
         json_str.map(|data| Ok::<_, Infallible>(Event::default().event("message").data(data)))
     });

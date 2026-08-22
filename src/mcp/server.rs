@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::AtomicU8;
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -21,9 +21,8 @@ use crate::ssh::SessionManager;
 
 use super::completion_provider::DefaultCompletionProvider;
 use super::logger::McpLogger;
-use super::pending_requests::{ClientResponse, PendingRequests};
 use super::progress::ProgressReporter;
-use super::protocol::{JsonRpcMessage, RootsListResult};
+use super::protocol::JsonRpcMessage;
 use super::request_meta::{ENVELOPE_EXEMPT_METHODS, RequestMeta, missing_required_envelope_field};
 use super::request_state::{RequestStateSigner, params_digest};
 use super::session_context::SessionContext;
@@ -483,20 +482,6 @@ impl McpServer {
         (server, audit_task)
     }
 
-    /// Allocate a fresh per-session pending-requests handle.
-    ///
-    /// Test helper used by `tests/multisession_isolation.rs` to verify
-    /// that two sessions on the same `McpServer` instance get independent
-    /// `Arc<PendingRequests>` instances (Vuln 8 audit 2026-05-09).
-    /// Integration tests live in their own crate so this helper cannot
-    /// be `#[cfg(test)]`; it is gated `#[doc(hidden)]` instead so it
-    /// stays out of the public docs.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn allocate_session_pending_for_test(&self) -> Arc<PendingRequests> {
-        Arc::new(PendingRequests::new())
-    }
-
     /// Allocate a fresh per-session `ActiveRequests` handle.
     ///
     /// Test helper used by `tests/cross_session_cancel.rs` to verify
@@ -816,7 +801,6 @@ impl McpServer {
         ctx.cancel_token = cancel_token;
         ctx.notification_tx = session.map(|s| s.notification_tx.clone());
         ctx.progress_token = progress_token;
-        ctx.pending_requests = session.map(|s| Arc::clone(&s.pending));
         // Per-session capabilities (Vuln 9 audit 2026-05-09): the server no
         // longer holds global `client_supports_*` flags. Snapshot the
         // current session's flags into `ToolContext`; default to `false`
@@ -1465,26 +1449,24 @@ impl McpServer {
         message: JsonRpcMessage,
         session: &SessionContext,
     ) -> Option<JsonRpcRequest> {
-        // If no method, it's a response to a server-initiated request (elicitation/sampling)
+        // A message with no method is a RESPONSE, and this server no longer
+        // issues anything for a client to respond to.
+        //
+        // It used to be routed to the pending-requests map that resolved
+        // server-initiated `elicitation/create`, `sampling/createMessage` and
+        // `roots/list` calls. 2026-07-28 deleted that pattern — server-to-client
+        // requests travel as `inputRequests` inside an `InputRequiredResult`
+        // now, and their answers come back as `inputResponses` on the client's
+        // RETRY of its own request, which is an ordinary request with a method.
+        //
+        // Dropped rather than answered: JSON-RPC 2.0 has no reply to a
+        // Response, and a client sending one is either speaking an older
+        // revision or confused.
         if message.method.is_none() {
-            if let Some(id) = &message.id {
-                let id_str = match id {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                let response = if let Some(error) = message.error {
-                    ClientResponse::Error {
-                        code: error.code,
-                        message: error.message,
-                        data: error.data,
-                    }
-                } else {
-                    ClientResponse::Success(message.result.unwrap_or(Value::Null))
-                };
-                if !session.pending.resolve(&id_str, response) {
-                    debug!(id = %id_str, "Received response for unknown request ID");
-                }
-            }
+            debug!(
+                id = ?message.id,
+                "Ignoring a JSON-RPC response: this server initiates no requests"
+            );
             return None;
         }
 
@@ -1510,36 +1492,6 @@ impl McpServer {
             return None;
         }
 
-        // Modern (2026-07-28) removed `notifications/initialized`, which
-        // used to trigger the one-shot `roots/list` fetch. Fire it lazily
-        // on the first client request of the session instead. `swap` makes
-        // this exactly-once even under a burst of concurrent requests, and
-        // the fetch itself is spawned, so the reader loop is never blocked
-        // (audit 2026-08-02).
-        //
-        // The request's own `_meta` envelope is attached first: a Modern
-        // client declares `roots` per-request, and without the scope the
-        // `supports_roots()` gate inside `spawn_fetch_roots` would read the
-        // session-level flags — always `false` with no handshake — and
-        // never fetch anything.
-        // The capability is evaluated BEFORE the latch is consumed, and the
-        // order is a fix, not a style choice. `swap` used to fire on the
-        // first request to arrive, whatever it was — and the first request a
-        // Modern client sends is `server/discover`, whose envelope declares
-        // `{}` (no roots, authoritatively). The latch burned on that probe,
-        // `supports_roots()` was false, no fetch was spawned, and every later
-        // request found the latch already spent: a client that declares
-        // `roots` on all its real requests got its roots fetched NEVER.
-        //
-        // Short-circuiting on `supports_roots()` keeps the exactly-once
-        // guarantee (the `swap` is still the only gate) while spending the
-        // latch only on a request that can actually fetch. The cost is one
-        // capability read per request instead of one atomic swap.
-        let scoped = session.with_request_meta(RequestMeta::from_params(message.params.as_ref()));
-        if scoped.supports_roots() && !session.roots_fetched.swap(true, Ordering::Relaxed) {
-            Self::spawn_fetch_roots(&scoped);
-        }
-
         // It's a client request — convert to JsonRpcRequest
         Some(JsonRpcRequest {
             jsonrpc: message.jsonrpc,
@@ -1547,70 +1499,6 @@ impl McpServer {
             method: message.method.unwrap_or_default(),
             params: message.params,
         })
-    }
-
-    /// Start a roots fetch **off** the session reader loop.
-    ///
-    /// Audit 2026-08-02: [`Self::fetch_roots`] must never be awaited from
-    /// `route_incoming_message`, because that runs inside
-    /// `serve_session`'s reader loop — the only place the client's
-    /// `roots/list` *response* can be read. Awaiting inline deadlocked the
-    /// session against itself until the 10s `ClientRequester` timeout
-    /// expired, delaying the first `tools/list` of every session that
-    /// advertises the `roots` capability.
-    ///
-    /// Fire-and-forget is correct here: nothing in the request path reads
-    /// `session.roots` synchronously, and a client that never answers
-    /// simply leaves the slot empty.
-    fn spawn_fetch_roots(session: &SessionContext) {
-        if !session.supports_roots() {
-            return;
-        }
-        let session = session.clone();
-        tokio::spawn(async move {
-            Self::fetch_roots(&session).await;
-        });
-    }
-
-    /// Fetch roots from the client after initialization.
-    ///
-    /// Uses the SESSION-LOCAL pending-requests map so a `roots/list`
-    /// response coming back from the client is resolved against this
-    /// session only (Vuln 8 audit 2026-05-09). The fetched roots are
-    /// stored on the session-local roots slot (FIND-037 audit
-    /// 2026-05-09): a different client's `roots/list` response cannot
-    /// overwrite this session's roots.
-    ///
-    /// Always call via [`Self::spawn_fetch_roots`] from the reader loop —
-    /// awaiting this inline deadlocks the session (audit 2026-08-02).
-    ///
-    /// NON-CONFORMANT AS WRITTEN: 2026-07-28 requires `roots/list` to be
-    /// carried by Multi Round-Trip Requests rather than sent as a
-    /// server-initiated request, which is what this does. Against a strictly
-    /// conforming client the roots simply come back empty. See
-    /// [`crate::mcp::client_requester`] for the quote and the scope.
-    async fn fetch_roots(session: &SessionContext) {
-        if !session.supports_roots() {
-            return;
-        }
-
-        let requester = super::client_requester::ClientRequester::new(
-            session.notification_tx.clone(),
-            Arc::clone(&session.pending),
-            std::time::Duration::from_secs(10),
-        );
-
-        match requester.send_request("roots/list", json!({})).await {
-            Ok(value) => {
-                if let Ok(result) = serde_json::from_value::<RootsListResult>(value) {
-                    info!(count = result.roots.len(), "Received client roots");
-                    *session.roots.write().await = result.roots;
-                }
-            }
-            Err(e) => {
-                debug!(error = %e, "Failed to fetch roots from client");
-            }
-        }
     }
 
     /// Handle a single JSON-RPC request and return the response.
@@ -3752,7 +3640,9 @@ mod tests {
                     assert!(response.error.is_none(), "unexpected error: {response:?}");
                     answered.insert(response.id.clone());
                 }
-                _ => panic!("expected a response, got a notification or a batch"),
+                WriterMessage::Notification(_) => {
+                    panic!("expected a response, got a notification")
+                }
             }
         }
 
@@ -5046,11 +4936,6 @@ rbac:
     async fn test_roots_list_changed_notification_is_inert() {
         let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
         let session_ctx = SessionContext::new(tx);
-        // Pretend the one-shot fetch already happened.
-        session_ctx
-            .roots_fetched
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
         let message = super::super::protocol::JsonRpcMessage {
             jsonrpc: "2.0".to_string(),
             id: None,
@@ -5067,47 +4952,6 @@ rbac:
         assert!(
             rx.try_recv().is_err(),
             "roots/list_changed must not trigger a re-fetch in Modern"
-        );
-    }
-
-    /// Modern (2026-07-28) removed `notifications/initialized`. The
-    /// one-shot `roots/list` fetch it used to trigger now fires on the
-    /// FIRST client request of the session, exactly once.
-    #[tokio::test]
-    async fn test_first_request_triggers_roots_fetch_once() {
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
-        let session_ctx = SessionContext::new(tx);
-
-        let make = || super::super::protocol::JsonRpcMessage {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: Some("tools/list".to_string()),
-            params: Some(params_declaring_roots()),
-            result: None,
-            error: None,
-        };
-
-        assert!(
-            McpServer::route_incoming_message(make(), &session_ctx).is_some(),
-            "a request must still be dispatched"
-        );
-        assert!(McpServer::route_incoming_message(make(), &session_ctx).is_some());
-        assert!(McpServer::route_incoming_message(make(), &session_ctx).is_some());
-
-        let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("expected a roots/list request within 2s")
-            .expect("channel closed unexpectedly");
-        match sent {
-            WriterMessage::Request(req) => assert_eq!(req.method, "roots/list"),
-            _ => panic!("expected WriterMessage::Request(roots/list)"),
-        }
-
-        // Exactly once: three requests, one fetch.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(
-            rx.try_recv().is_err(),
-            "roots/list must be fetched once per session, not once per request"
         );
     }
 
@@ -5138,102 +4982,6 @@ rbac:
             rx.try_recv().is_err(),
             "notifications/initialized must have no side effect in Modern"
         );
-    }
-
-    #[tokio::test]
-    async fn test_first_request_fetches_roots_when_supported() {
-        // When the client supports roots, the session's FIRST client
-        // request must trigger a server-initiated `roots/list` request on
-        // the writer channel. Modern (2026-07-28) has no
-        // `notifications/initialized` to hang this off.
-        //
-        // The fetch is spawned (audit 2026-08-02), so routing returns at
-        // once and the `roots/list` request lands on tx from the detached
-        // task.
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
-        let session_ctx = SessionContext::new(tx);
-        let message = super::super::protocol::JsonRpcMessage {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: Some("tools/list".to_string()),
-            params: Some(params_declaring_roots()),
-            result: None,
-            error: None,
-        };
-
-        assert!(
-            McpServer::route_incoming_message(message, &session_ctx).is_some(),
-            "a request is dispatched"
-        );
-
-        let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("expected a roots/list request within 2s")
-            .expect("channel closed unexpectedly");
-        match sent {
-            WriterMessage::Request(req) => {
-                assert_eq!(req.method, "roots/list");
-            }
-            _ => panic!("expected WriterMessage::Request(roots/list)"),
-        }
-    }
-
-    /// Regression (audit 2026-08-02): the first-request roots fetch must
-    /// NOT block the session reader loop while the `roots/list` round-trip
-    /// is in flight. (The trigger used to be `notifications/initialized`;
-    /// Modern deleted it, but the deadlock it could cause is a property of
-    /// the fetch, not of the trigger, so the guarantee outlived the
-    /// method.)
-    ///
-    /// `route_incoming_message` runs *inside* `serve_session`'s reader loop.
-    /// When `fetch_roots` was awaited inline, the loop could not read the
-    /// client's `roots/list` response — the very message it was waiting
-    /// for — so every session stalled for the full `ClientRequester`
-    /// timeout (10s) before serving its first request. Claude Code
-    /// advertises the `roots` capability, so its `tools/list` health check
-    /// timed out with `MCP error -32001` on every connect.
-    ///
-    /// The fetch is fire-and-forget: routing returns immediately and the
-    /// roots land on the session slot whenever the client answers.
-    #[tokio::test]
-    async fn test_first_request_does_not_block_reader_loop() {
-        let (tx, mut rx) = mpsc::channel::<WriterMessage>(64);
-        let session_ctx = SessionContext::new(tx);
-        let message = super::super::protocol::JsonRpcMessage {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: Some("tools/list".to_string()),
-            params: Some(params_declaring_roots()),
-            result: None,
-            error: None,
-        };
-
-        // No client response is ever sent. Routing must still return well
-        // inside the 10s ClientRequester timeout — 500ms is two orders of
-        // magnitude below it, so this cannot flake on a slow machine
-        // without also being a real regression. `route_incoming_message`
-        // being synchronous is the structural half of the guarantee; this
-        // wall-clock bound is the behavioural half, and it survives a
-        // future refactor that makes the function async again.
-        let started = std::time::Instant::now();
-        let routed = McpServer::route_incoming_message(message, &session_ctx);
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "the first-request roots fetch blocked the reader loop for {elapsed:?}"
-        );
-        assert!(routed.is_some(), "a request is dispatched");
-
-        // The fetch still happened — just off the reader loop.
-        let sent = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("expected a roots/list request within 2s")
-            .expect("channel closed unexpectedly");
-        match sent {
-            WriterMessage::Request(req) => assert_eq!(req.method, "roots/list"),
-            _ => panic!("expected WriterMessage::Request(roots/list)"),
-        }
     }
 
     #[tokio::test]
@@ -7355,7 +7103,7 @@ rbac:
             WriterMessage::Notification(n) => {
                 assert_eq!(n.method, "notifications/subscriptions/acknowledged");
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
         assert_eq!(
             server.subscriptions.subscribed_resource_uris(),
@@ -7416,7 +7164,7 @@ rbac:
                     json!(["history://recent"])
                 );
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
     }
 
@@ -7451,7 +7199,7 @@ rbac:
                     json!("listen-7f3a")
                 );
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
     }
 
@@ -7641,7 +7389,7 @@ rbac:
                 assert_eq!(n.method, "notifications/resources/updated");
                 assert_eq!(n.params.expect("params")["uri"], "history://recent");
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
 
         // A URI nobody subscribed to reaches nobody.
@@ -7730,7 +7478,7 @@ rbac:
                 assert_eq!(n.method, "notifications/resources/updated");
                 assert_eq!(n.params.expect("params")["uri"], "history://recent");
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
 
         // The revision is consumed: with no new command the tick is silent
@@ -7784,7 +7532,7 @@ rbac:
                 assert_eq!(n.method, "notifications/resources/updated");
                 assert_eq!(n.params.expect("params")["uri"], "history://recent");
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
         handle.abort();
     }
@@ -7838,7 +7586,7 @@ rbac:
                 assert_eq!(n.method, "notifications/resources/updated");
                 assert_eq!(n.params.expect("params")["uri"], "health://server");
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
 
         // Exactly what `serve()` does to this vec on shutdown.
@@ -7885,7 +7633,7 @@ rbac:
             WriterMessage::Notification(n) => {
                 assert_eq!(n.method, "notifications/subscriptions/acknowledged");
             }
-            _ => panic!("expected a Notification, not a Response"),
+            WriterMessage::Response(_) => panic!("expected a Notification, not a Response"),
         }
     }
 
@@ -7953,11 +7701,9 @@ rbac:
                     if n.method == "notifications/subscriptions/acknowledged" {
                         saw_ack = true;
                     }
-                }
-                // Server-initiated requests (elicitation, sampling) are
-                // unrelated to this assertion; skip rather than panic so an
-                // unrelated feature cannot fail this test spuriously.
-                WriterMessage::Request(_) => {}
+                } // Server-initiated requests (elicitation, sampling) are
+                  // unrelated to this assertion; skip rather than panic so an
+                  // unrelated feature cannot fail this test spuriously.
             }
         }
 
@@ -8183,7 +7929,7 @@ rbac:
             WriterMessage::Notification(n) => {
                 assert_eq!(n.method, "notifications/tools/list_changed");
             }
-            _ => panic!("expected a Notification"),
+            WriterMessage::Response(_) => panic!("expected a Notification"),
         }
         assert!(
             rx_silent.try_recv().is_err(),
@@ -9014,21 +8760,7 @@ rbac:
         config.security.require_elicitation_on_destructive = true;
         let (server, _audit_task) = McpServer::new(config);
 
-        let (session_ctx, mut rx) = session_declaring(&json!({ "elicitation": {} }));
-
-        let pending = Arc::clone(&session_ctx.pending);
-        let fake_client = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if let WriterMessage::Request(req) = msg
-                    && req.method == "elicitation/create"
-                {
-                    let id = req.id.as_str().unwrap_or_default().to_string();
-                    pending.resolve(&id, ClientResponse::Success(json!({ "action": "decline" })));
-                    return true;
-                }
-            }
-            false
-        });
+        let (session_ctx, _rx) = session_declaring(&json!({ "elicitation": {} }));
 
         // No `_meta` anywhere on this request — the exact shape C3 refuses.
         let request = JsonRpcRequest {
@@ -9054,18 +8786,16 @@ rbac:
             "C3 must refuse before the destructive gate is consulted: {error:?}"
         );
 
-        // The gate was never consulted, so nothing was elicited — even though
-        // `caps` says elicitation is supported. That is the whole point: the
-        // fallback cannot be reached, so it cannot grant anything.
-        match tokio::time::timeout(std::time::Duration::from_millis(500), fake_client).await {
-            // Timed out with nothing sent: the gate was never reached.
-            Err(_) => {}
-            Ok(joined) => assert!(
-                !joined.expect("the fake client task panicked"),
-                "an elicitation/create was sent for a request C3 refused before \
-                 the destructive gate could run"
-            ),
-        }
+        // The gate was never consulted, so nothing was asked for. Observed on
+        // the RESULT now rather than on the notification channel: an elicited
+        // call answers `resultType: "input_required"`, so its absence is the
+        // same evidence the old channel-watching task collected, without
+        // waiting on a request this server no longer sends.
+        assert!(
+            response.result.is_none(),
+            "C3 refused before the gate, so there is no input_required either: {:?}",
+            response.result
+        );
 
         // And no tool ran. The old test asserted a `result` here — the
         // decline path's content block — which only exists when the call
@@ -9616,61 +9346,6 @@ rbac:
         );
     }
 
-    // ============== The roots latch is spent on a FETCH ==============
-
-    /// Regression: `roots_fetched` used to be consumed by the first request
-    /// to ARRIVE, whatever it was.
-    ///
-    /// The first request a Modern client sends is `server/discover`, whose
-    /// envelope declares `{}` — no roots, authoritatively. The latch burned
-    /// on that probe, no fetch was spawned, and every later request found it
-    /// already spent: a client that declares `roots` on all its real requests
-    /// got its roots fetched NEVER.
-    ///
-    /// Two measurement points, because one proves nothing about ordering: a
-    /// non-declaring request must leave the latch UNSPENT, and a declaring
-    /// one must spend it. Asserting only the second is satisfied by the buggy
-    /// version too.
-    #[tokio::test]
-    async fn the_roots_latch_is_spent_on_a_fetch_not_on_the_first_request() {
-        let (tx, _rx) = mpsc::channel::<WriterMessage>(8);
-        let session = SessionContext::new(tx);
-
-        // The probe: declares capabilities, but not roots.
-        let probe = JsonRpcMessage {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: Some("server/discover".to_string()),
-            params: Some(params_declaring_nothing(json!({}))),
-            result: None,
-            error: None,
-        };
-        let _ = McpServer::route_incoming_message(probe, &session);
-        assert!(
-            !session.roots_fetched.load(Ordering::Relaxed),
-            "a request that cannot fetch roots must not spend the one-shot latch"
-        );
-
-        // A later request that DOES declare roots.
-        let declaring = JsonRpcMessage {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(2)),
-            method: Some("tools/list".to_string()),
-            params: Some(json!({
-                "_meta": {
-                    "io.modelcontextprotocol/clientCapabilities": { "roots": {} }
-                }
-            })),
-            result: None,
-            error: None,
-        };
-        let _ = McpServer::route_incoming_message(declaring, &session);
-        assert!(
-            session.roots_fetched.load(Ordering::Relaxed),
-            "a request declaring roots must spend the latch and fetch"
-        );
-    }
-
     /// Precedence: an explicit empty `clientCapabilities` in the request
     /// envelope is an authoritative denial and beats a stale handshake flag.
     #[tokio::test]
@@ -9861,7 +9536,9 @@ rbac:
             WriterMessage::Notification(n) => {
                 assert_eq!(n.method, "notifications/subscriptions/acknowledged");
             }
-            _ => panic!("expected the listen acknowledgement, not a response or batch"),
+            WriterMessage::Response(_) => {
+                panic!("expected the listen acknowledgement, not a response or batch")
+            }
         }
 
         // EOF: the reader's senders are gone, so the loop ends.

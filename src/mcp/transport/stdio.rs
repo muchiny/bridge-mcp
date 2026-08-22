@@ -118,7 +118,6 @@ impl SessionWriter for StdioSessionWriter {
         let json_str = match &msg {
             WriterMessage::Response(r) => serde_json::to_string(r),
             WriterMessage::Notification(n) => serde_json::to_string(n),
-            WriterMessage::Request(r) => serde_json::to_string(&r),
         };
         let Ok(json_str) = json_str else {
             error!("Failed to serialize message");
@@ -269,7 +268,7 @@ mod tests {
 
         let json_str = match &msg {
             WriterMessage::Response(r) => serde_json::to_string(r),
-            _ => unreachable!(),
+            WriterMessage::Notification(_) => unreachable!(),
         };
         assert!(json_str.is_ok());
         let s = json_str.unwrap();

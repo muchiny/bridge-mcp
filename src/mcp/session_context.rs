@@ -26,11 +26,9 @@
 //! either.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use tokio::sync::{RwLock, mpsc};
 
-use super::pending_requests::PendingRequests;
 use super::protocol::{RootEntry, WriterMessage};
 use super::request_meta::RequestMeta;
 
@@ -41,8 +39,6 @@ use super::request_meta::RequestMeta;
 /// parameters through the dispatch chain.
 #[derive(Clone)]
 pub struct SessionContext {
-    /// Per-session pending-requests map (Vuln 8).
-    pub pending: Arc<PendingRequests>,
     /// Per-session active-requests map for MCP cancellation (FIND-038).
     pub active_requests: super::server::ActiveRequests,
     /// Per-session writer channel for server-initiated messages
@@ -57,11 +53,6 @@ pub struct SessionContext {
     /// Per-session client-declared workspace roots. Written by
     /// `fetch_roots` on the session's first client request. FIND-037.
     pub roots: Arc<RwLock<Vec<RootEntry>>>,
-    /// One-shot latch: set the first time this session dispatches a
-    /// client request, gating the `roots/list` fetch. Modern
-    /// (2026-07-28) deleted `notifications/initialized`, which used to
-    /// be the trigger.
-    pub roots_fetched: Arc<AtomicBool>,
     /// The `_meta` envelope of the ONE request currently being handled
     /// (MCP 2026-07-28). `None` on the session-level bundle and on every
     /// request from a Legacy client.
@@ -79,12 +70,10 @@ impl SessionContext {
     #[must_use]
     pub fn new(notification_tx: mpsc::Sender<WriterMessage>) -> Self {
         Self {
-            pending: Arc::new(PendingRequests::new()),
             active_requests: super::server::ActiveRequests::new(),
             notification_tx,
             runtime_max_output: Arc::new(RwLock::new(None)),
             roots: Arc::new(RwLock::new(Vec::new())),
-            roots_fetched: Arc::new(AtomicBool::new(false)),
             request_meta: None,
         }
     }
@@ -148,7 +137,7 @@ impl SessionContext {
     ///
     /// This one has a live caller that depends on the `false`:
     /// `route_incoming_message` asks it before spending the one-shot
-    /// `roots_fetched` latch, and the first request of every Modern session
+    /// one-shot roots fetch, and the first request of every Modern session
     /// is the exempt `server/discover`. A `true` here would spend the latch
     /// on a probe that cannot fetch.
     #[must_use]

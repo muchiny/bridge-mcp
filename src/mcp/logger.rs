@@ -136,7 +136,7 @@ mod tests {
                 assert_eq!(params["logger"], "ssh");
                 assert_eq!(params["data"], "trace details");
             }
-            _ => panic!("Expected notification"),
+            WriterMessage::Response(_) => panic!("Expected notification"),
         }
     }
 
@@ -158,7 +158,7 @@ mod tests {
                 assert_eq!(params["logger"], "ssh");
                 assert_eq!(params["data"]["host"], "web1");
             }
-            _ => panic!("Expected notification"),
+            WriterMessage::Response(_) => panic!("Expected notification"),
         }
     }
 }

@@ -60,7 +60,7 @@ mod tests {
                 assert_eq!(params["total"], 3);
                 assert_eq!(params["message"], "Connecting...");
             }
-            _ => panic!("Expected notification"),
+            WriterMessage::Response(_) => panic!("Expected notification"),
         }
     }
 
@@ -79,7 +79,7 @@ mod tests {
                 assert!(params.get("total").is_none() || params["total"].is_null());
                 assert!(params.get("message").is_none() || params["message"].is_null());
             }
-            _ => panic!("Expected notification"),
+            WriterMessage::Response(_) => panic!("Expected notification"),
         }
     }
 
@@ -105,7 +105,7 @@ mod tests {
                 let params = n.params.unwrap();
                 assert_eq!(params["progressToken"], 42);
             }
-            _ => panic!("Expected notification"),
+            WriterMessage::Response(_) => panic!("Expected notification"),
         }
     }
 }

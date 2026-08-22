@@ -153,7 +153,6 @@ fn build_docker_ctx() -> ToolContext {
         cancel_token: None,
         notification_tx: None,
         progress_token: None,
-        pending_requests: None,
         client_supports_elicitation: false,
         client_supports_sampling: false,
         mcp_logger: None,

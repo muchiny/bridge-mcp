@@ -90,9 +90,8 @@ pub struct ToolContext {
     /// (progress, elicitation, sampling, logging notifications).
     ///
     /// Tool handlers that need to initiate a server → client interaction
-    /// (e.g. [`crate::mcp::protocol::WriterMessage::Request`] for an
-    /// elicitation, or [`crate::mcp::protocol::WriterMessage::Notification`]
-    /// for a progress update) send on this channel. It is `None` in
+    /// ([`crate::mcp::protocol::WriterMessage::Notification`] for a progress
+    /// update) send on this channel. It is `None` in
     /// test contexts and for handlers invoked outside a live MCP session.
     ///
     /// This replaces the legacy `McpServer::notification_tx` global slot
@@ -114,15 +113,6 @@ pub struct ToolContext {
     ///
     /// `None` when the client did not request progress reporting.
     pub progress_token: Option<serde_json::Value>,
-    /// Snapshot of the per-server pending-requests map.
-    ///
-    /// Required to send a server → client request (elicitation, sampling)
-    /// and await the matching response. `None` in test contexts and
-    /// non-MCP call paths — callers must treat that case as "feature
-    /// unavailable" and fall back to whatever default behavior makes
-    /// sense (typically: skip the prompt and rely on configured
-    /// safeguards).
-    pub pending_requests: Option<Arc<crate::mcp::pending_requests::PendingRequests>>,
     /// Snapshot of `MCPServer::client_supports_elicitation` taken at the
     /// time the request was dispatched. When `false`, the
     /// The sampling helper short-circuits without sending a
@@ -182,7 +172,6 @@ impl ToolContext {
             cancel_token: None,
             notification_tx: None,
             progress_token: None,
-            pending_requests: None,
             client_supports_elicitation: false,
             client_supports_sampling: false,
             mcp_logger: None,
@@ -218,60 +207,53 @@ impl ToolContext {
         ))
     }
 
-    /// Ask the MCP client's LLM to analyze the given content via
-    /// `sampling/createMessage`. Returns:
+    /// Ask the MCP client's LLM to analyze the given content.
     ///
-    /// - `Ok(Some(text))` — the LLM produced a textual response
-    /// - `Ok(None)` — sampling is unavailable (no notification channel,
-    ///   no pending-requests slot, or the client did not advertise the
-    ///   capability). Handlers should fall back to returning the raw
-    ///   data without an LLM-side summary.
-    /// - `Err(_)` — transport-level failure
+    /// **Always returns `Ok(None)`.** This is the "sampling is unavailable"
+    /// path every caller already handles — it is what happened for any client
+    /// that did not declare the `sampling` capability — so the thirteen
+    /// handlers behind `summarize=true` return their raw data with no
+    /// LLM-side summary, exactly as they already did for most clients.
     ///
-    /// `prompt` is the system-style instruction (e.g. "Identify the top
-    /// 3 anomalies in this output"); `content` is the data to analyze
-    /// (e.g. the raw `ssh_diagnose` output). `max_tokens` caps the
-    /// response length.
+    /// # Why it is not a Multi Round-Trip Request
     ///
-    /// Designed for diagnostic / aggregation tools that opt-in to a
-    /// `summarize=true` parameter — handlers should always return the
-    /// raw data alongside the summary so the user can verify and so
-    /// downstream automation never depends on the LLM output alone.
+    /// It used to send `sampling/createMessage` as a server-initiated JSON-RPC
+    /// request and block on the reply, which 2026-07-28 removed: *"Servers MUST
+    /// send server-to-client requests ... using the MRTR pattern. The previous
+    /// pattern of server-initiated requests is no longer supported."* So the
+    /// old shape had to go regardless.
+    ///
+    /// Converting it is a different job from converting the confirmation gate,
+    /// and the difference is structural rather than a matter of effort. The
+    /// gate runs BEFORE the tool does, so answering `input_required` and
+    /// replaying the whole call on the retry costs nothing. `sample()` is
+    /// called from the MIDDLE of `execute`, after the remote command has
+    /// already run, on output that does not exist until it has. To return
+    /// `input_required` from there, `ToolHandler::execute` would have to be
+    /// able to express "I need input" in its return type — it returns
+    /// `Result<ToolCallResult>` — and every retry would re-run the remote
+    /// command, since the server keeps no state between round trips.
+    ///
+    /// That refactor is a deliberate piece of work with its own trade-off to
+    /// weigh (a second remote execution per summary, or the command output
+    /// carried inside `requestState`). Leaving a non-conformant request on the
+    /// wire until it is done was not an option; leaving the seam documented is.
     ///
     /// # Errors
     ///
-    /// Returns `BridgeError::McpInvalidRequest` for transport errors.
+    /// Never. The signature keeps its `Result` so the callers do not change
+    /// shape, and so restoring the round trip does not touch them again.
+    #[expect(
+        clippy::unused_async,
+        reason = "signature preserved for the MRTR conversion; see the doc above"
+    )]
     pub async fn sample(
         &self,
-        prompt: &str,
-        content: &str,
-        max_tokens: u32,
+        _prompt: &str,
+        _content: &str,
+        _max_tokens: u32,
     ) -> Result<Option<String>> {
-        let (Some(tx), Some(pending)) =
-            (self.notification_tx.clone(), self.pending_requests.clone())
-        else {
-            return Ok(None);
-        };
-        if !self.client_supports_sampling {
-            return Ok(None);
-        }
-        let requester = Arc::new(crate::mcp::client_requester::ClientRequester::new(
-            tx,
-            pending,
-            std::time::Duration::from_mins(2),
-        ));
-        let service = crate::mcp::sampling::SamplingService::new(requester);
-        service.set_supported(true);
-        match service.analyze(prompt, content, max_tokens).await {
-            Ok(result) => {
-                let crate::mcp::protocol::SamplingContent::Text { text } = result.content;
-                Ok(Some(text))
-            }
-            Err(crate::mcp::client_requester::ClientRequestError::NotSupported) => Ok(None),
-            Err(e) => Err(crate::error::BridgeError::McpInvalidRequest(format!(
-                "sample failed: {e:?}"
-            ))),
-        }
+        Ok(None)
     }
 
     /// Check if a path is within the declared client roots.
@@ -538,7 +520,6 @@ pub mod mock {
             cancel_token: None,
             notification_tx: None,
             progress_token: None,
-            pending_requests: None,
             client_supports_elicitation: false,
             client_supports_sampling: false,
             mcp_logger: None,
@@ -593,7 +574,6 @@ pub mod mock {
             cancel_token: None,
             notification_tx: None,
             progress_token: None,
-            pending_requests: None,
             client_supports_elicitation: false,
             client_supports_sampling: false,
             mcp_logger: None,
@@ -647,7 +627,6 @@ pub mod mock {
             cancel_token: None,
             notification_tx: None,
             progress_token: None,
-            pending_requests: None,
             client_supports_elicitation: false,
             client_supports_sampling: false,
             mcp_logger: None,
@@ -692,7 +671,6 @@ pub mod mock {
             cancel_token: None,
             notification_tx: None,
             progress_token: None,
-            pending_requests: None,
             client_supports_elicitation: false,
             client_supports_sampling: false,
             mcp_logger: None,
@@ -752,7 +730,9 @@ mod tests {
                 assert_eq!(params["logger"], "ssh_runbook");
                 assert_eq!(params["data"], "step 1/3 complete");
             }
-            _ => panic!("expected Notification"),
+            crate::mcp::protocol::WriterMessage::Response(_) => {
+                panic!("expected Notification")
+            }
         }
     }
 
@@ -761,40 +741,6 @@ mod tests {
         let ctx = mock::create_test_context();
         let result = ctx.sample("p", "c", 100).await.unwrap();
         assert_eq!(result, None);
-    }
-
-    #[tokio::test]
-    async fn test_sample_sends_request_when_supported() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let mut ctx = mock::create_test_context();
-        ctx.notification_tx = Some(tx);
-        ctx.pending_requests = Some(Arc::new(
-            crate::mcp::pending_requests::PendingRequests::new(),
-        ));
-        ctx.client_supports_sampling = true;
-
-        let handle = tokio::spawn(async move {
-            ctx.sample("Identify top 3 issues", "raw diagnostic output...", 256)
-                .await
-        });
-
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("notification within timeout")
-            .expect("channel open");
-
-        match msg {
-            crate::mcp::protocol::WriterMessage::Request(req) => {
-                assert_eq!(req.method, "sampling/createMessage");
-                let params = req.params.expect("params");
-                assert_eq!(params["maxTokens"], 256);
-                let text = params["messages"][0]["content"]["text"].as_str().unwrap();
-                assert!(text.contains("Identify top 3 issues"));
-                assert!(text.contains("raw diagnostic output..."));
-            }
-            _ => panic!("expected Request"),
-        }
-        handle.abort();
     }
 
     #[test]
@@ -884,10 +830,10 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         let mut ctx = mock::create_test_context();
         ctx.notification_tx = Some(tx);
-        ctx.pending_requests = Some(Arc::new(
-            crate::mcp::pending_requests::PendingRequests::new(),
-        ));
-        // client_supports_sampling stays false — must short-circuit.
+        // `sample()` no longer contacts the client at all — see its docs. The
+        // short-circuit this test guards is now unconditional rather than
+        // conditional on the capability, and the timeout is still the
+        // assertion that matters: it must not wait on anything.
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             ctx.sample("p", "c", 100),
