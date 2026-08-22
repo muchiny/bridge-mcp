@@ -170,7 +170,11 @@ impl ToolHandler for SshSessionExecHandler {
         let result = ctx
             .session_manager
             .exec(&args.session_id, &command, timeout_secs)
-            .await?;
+            .await
+            .inspect_err(|e| {
+                ctx.execute_use_case
+                    .log_failure(audit_host, &args.command, &e.to_string());
+            })?;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         // `ssh_exec` gets this from `process_success`; a session formats its
@@ -359,6 +363,36 @@ mod tests {
             }
             e => panic!("Expected SessionNotFound, got: {e:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_session_not_found_leaves_a_failure_trace() {
+        let handler = SshSessionExecHandler;
+        let ctx = create_permissive_context();
+
+        let before = ctx.history.recent(10).len();
+
+        let result = handler
+            .execute(
+                Some(json!({
+                    "session_id": "nonexistent-id",
+                    "command": "ls"
+                })),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_err());
+
+        // The test context's `AuditLogger::disabled()` makes audit a non-
+        // observable here — `CommandHistory` is the only place `log_failure`
+        // leaves a trace we can assert on, same as the Step 1 success test.
+        let after = ctx.history.recent(10);
+        assert_eq!(
+            after.len(),
+            before + 1,
+            "a failed session command must leave a trace too, not just a successful one"
+        );
+        assert!(!after[0].success, "the trace must record it as a failure");
     }
 
     #[tokio::test]
