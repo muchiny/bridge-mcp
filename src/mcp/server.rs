@@ -2319,7 +2319,7 @@ impl McpServer {
         // handler `None` when the token is absent, so a promoted tool CANNOT
         // report progress even if it asks. Progress for a task lives in
         // `statusMessage` instead. This matters most for the tool most likely
-        // to join the promotion list after the MRTR item closes —
+        // to join the promotion list once the elicitation gate speaks MRTR —
         // `ssh_runbook_execute` is one of the four handlers that do call
         // `progress_reporter`.
         let ctx = self
@@ -2850,10 +2850,28 @@ impl McpServer {
     /// A no-op acknowledgement, and conformant as one. bridge-mcp never enters
     /// `input_required`: no tool suspends mid-execution to elicit, and the
     /// destructive-confirmation gate resolves on the ORIGINAL `tools/call`
-    /// through core multi-round-trip, before any task exists — which is what
-    /// the spec prescribes ("a server that needs client input _before_
-    /// returning a `CreateTaskResult` uses the multi round-trip request flow
-    /// on the original request").
+    /// before any task exists — which is the ordering the spec prescribes ("a
+    /// server that needs client input _before_ returning a `CreateTaskResult`
+    /// uses the multi round-trip request flow on the original request").
+    ///
+    /// **The ORDERING is right and the MECHANISM is not, and an earlier
+    /// version of this comment claimed both.** It said the gate resolves
+    /// "through core multi-round-trip". It does not:
+    /// `check_destructive_elicitation` sends `elicitation/create` as a
+    /// server-initiated JSON-RPC request via `ClientRequester` and blocks on
+    /// the reply. MRTR is the opposite shape — the server RETURNS
+    /// `resultType: "input_required"` and the client retries under a new id —
+    /// and the MRTR page opens by deleting the pattern still in use here:
+    /// "Servers MUST send server-to-client requests (such as `roots/list`,
+    /// `sampling/createMessage`, or `elicitation/create`) using the MRTR
+    /// pattern. The previous pattern of server-initiated requests is no longer
+    /// supported. This is a breaking change."
+    ///
+    /// That is an open conformance gap, tracked as its own item. It does not
+    /// change what THIS method should do, because the gap is upstream of any
+    /// task: whichever way the confirmation is carried, it is finished before
+    /// a `CreateTaskResult` exists, so no task of this server's ever waits on
+    /// input.
     ///
     /// So this server never issues an `inputRequest`, so no key a client sends
     /// can be outstanding, and the spec says what to do with those: "A server
@@ -4127,8 +4145,8 @@ rbac:
         let promoted = json!({
             "name": super::super::meta_tools::CALL_TOOL,
             "arguments": {
-                "name": "ssh_ansible_playbook",
-                "arguments": {"host": "nowhere", "playbook": "site.yml"}
+                "name": "ssh_vuln_scan",
+                "arguments": {"host": "nowhere"}
             }
         });
         let response = server
@@ -5205,8 +5223,16 @@ rbac:
 
     /// D8: the destructive-op elicitation gate MUST resolve BEFORE a task
     /// exists. Creating the task first and asking for confirmation afterwards
-    /// is the flow the spec says cannot be implemented without reading the
-    /// multi-round-trip page first — the named MRTR debt.
+    /// inverts the spec's ordering ("a server that needs client input _before_
+    /// returning a `CreateTaskResult` uses the multi round-trip request flow
+    /// on the original request").
+    ///
+    /// An earlier version of this comment said the spec forbade the flow
+    /// "without reading the multi-round-trip page first". The page has since
+    /// been read; it says nothing about tasks or destructive operations at
+    /// all. What blocks confirmation-then-task here is local, not textual:
+    /// this server's gate still uses the server-initiated request pattern that
+    /// MRTR replaced. See `task_policy`'s rule 2.
     ///
     /// **This ordering is not observable at runtime today, and saying so is
     /// worth more than a test that appears to prove it.**
@@ -5217,7 +5243,7 @@ rbac:
     /// things happen in order when one of them never happens, and it would sit
     /// green forever whatever the order.
     ///
-    /// The two meet the day the MRTR item closes and a destructive tool joins
+    /// The two meet the day the gate speaks MRTR and a destructive tool joins
     /// `LONG_RUNNING_TOOLS` — which is exactly when a silent reordering would
     /// ship the forbidden flow. So the order is pinned now, as source text,
     /// while the code is still correct. A source-text guard is the weakest
@@ -5260,7 +5286,8 @@ rbac:
         assert!(
             gate < promotion,
             "the destructive-op elicitation gate must resolve BEFORE the task branch: a task \
-             created first and confirmed afterwards is the MRTR flow this release cannot ship"
+             created first and confirmed afterwards inverts the spec's ordering, and this \
+             release cannot ship the confirmation half at all until the gate speaks MRTR"
         );
     }
 
@@ -5299,8 +5326,8 @@ rbac:
         let server = create_test_server();
         let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
 
         let response = server
@@ -5340,8 +5367,8 @@ rbac:
         // A session with NO envelope on this request: the non-declaring case.
         let session = SessionContext::new(tx);
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
 
         let response = server
@@ -5369,8 +5396,8 @@ rbac:
         let server = create_test_server();
         let (session_ctx, mut rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
 
         let response = server
@@ -5424,13 +5451,13 @@ rbac:
         config
             .tool_groups
             .groups
-            .insert("ansible".to_string(), false);
+            .insert("security_scan".to_string(), false);
         let (server, _audit_task) = McpServer::new(config);
         let (session, _rx) = session_declaring_tasks();
 
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
 
         let response = server
@@ -5441,7 +5468,7 @@ rbac:
             .error
             .expect("a tool that is not registered must be a JSON-RPC error");
         assert_eq!(error.code, -32602);
-        assert!(error.message.contains("ssh_ansible_playbook"));
+        assert!(error.message.contains("ssh_vuln_scan"));
     }
 
     #[tokio::test]
@@ -5451,8 +5478,8 @@ rbac:
         // Create a task the only way a client can now: call a listed tool
         // while declaring the extension.
         let call_params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
         let call_response = server
             .handle_tools_call(Some(json!(1)), Some(call_params), None, Some(&session))
@@ -5562,8 +5589,8 @@ rbac:
         let server = create_test_server();
         let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
 
         let call_response = server
@@ -5640,8 +5667,8 @@ rbac:
         let server = create_test_server();
         let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
         let call = server
             .handle_tools_call(Some(json!(1)), Some(params), None, Some(&session))
@@ -5691,8 +5718,8 @@ rbac:
         let server = create_test_server();
         let (session, mut rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
 
         let response = server
@@ -5709,14 +5736,14 @@ rbac:
         {
             if let WriterMessage::Notification(n) = msg {
                 // MUST NOT, spec 5.14: progress is not supported on tasks at
-                // all. This cannot fire today — none of the four promoted
+                // all. This cannot fire today — none of the three promoted
                 // tools calls `progress_reporter` — so it is a TRIPWIRE, not
                 // proof. The guarantee itself is structural: the progress
                 // token is not a parameter of `handle_tools_call_async`, and
                 // `ToolContext::progress_reporter` returns `None` without one.
                 // The tripwire is aimed at `ssh_runbook_execute`, which does
-                // report progress and is the first candidate to join the list
-                // once the MRTR item closes.
+                // report progress and is a candidate to join the list once the
+                // elicitation gate speaks MRTR.
                 assert_ne!(
                     n.method, "notifications/progress",
                     "progress MUST NOT be sent for a task"
@@ -5924,8 +5951,8 @@ rbac:
 
         let (session, _rx) = session_declaring_tasks();
         let params = json!({
-            "name": "ssh_ansible_playbook",
-            "arguments": {"host": "nowhere", "playbook": "site.yml"}
+            "name": "ssh_vuln_scan",
+            "arguments": {"host": "nowhere"}
         });
         // If the permit were acquired BEFORE the `tokio::spawn` (i.e. still
         // in the dispatch path, the exact regression this test guards

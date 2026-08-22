@@ -63,7 +63,7 @@ impl_common_args!(SshAnsiblePlaybookArgs);
 #[mcp_standard_tool(
     name = "ssh_ansible_playbook",
     group = "ansible",
-    annotation = "mutating"
+    annotation = "destructive"
 )]
 pub struct AnsiblePlaybookTool;
 
