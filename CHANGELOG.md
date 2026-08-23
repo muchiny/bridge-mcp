@@ -501,6 +501,41 @@ produced. Each has its own bypass test.
   `Mcp-Param-{Name}` header that ... does not match") has no recognized header
   to act on. It becomes real the day a tool schema carries the annotation.
 
+### Raspberry Pi campaign fixes (2026-08-23)
+
+Four defects found by a live end-to-end campaign against a Raspberry Pi, all
+one family: a mechanism reporting a state it had not established.
+
+- **BREAKING (lib API)**: `ParsedTable::select_columns`
+  (`src/mcp/tool_handlers/utils.rs`) now takes `self` by value instead of
+  `&self`. `ParsedTable` is publicly reachable
+  (`bridge_mcp::mcp::tool_handlers::utils::ParsedTable`), so
+  `let a = table.select_columns(x); let b = table.select_columns(y);` on the
+  same binding no longer compiles — the second call needs a table rebuilt
+  from the first result. (`ParsedTable` also gained and then lost
+  `#[derive(Clone)]` within this same range; net effect on the public surface
+  is only this signature change.)
+- **`registry::unknown_tool_message` is new (lib API).** It tells a tool that
+  is registered but whose group is disabled apart from one that is not
+  registered at all — both used to answer the identical
+  `"Unknown tool: …"` text.
+- **`server/discover` now reports `cacheScope: "private"`, not `"public"`.**
+  Its `instructions` vary by caller — the `LIMITS:` line states a per-client
+  override — so a shared cache could otherwise replay one caller's stated
+  limit to a different caller entitled to a different one.
+- **The `LIMITS:` line in server instructions now states the limit the
+  calling client actually gets.** It read the base
+  `config.limits.max_output_chars` (40000) while the server applied
+  `effective_max_output_chars(client_name)`, which doubles that to 80000 for
+  a Claude client under the built-in Tier 1 override — an agent budgeting
+  against the advertised figure was under-using its own allowance by half.
+- **`ssh_session_exec` now leaves an audit-log and history trace on both
+  success and failure.** Previously only a denied session command was
+  recorded — under `security.mode: permissive` almost nothing is denied, so
+  a session command that ran (including a destructive one) or failed with a
+  session-manager error left no trace at all in `audit.log` or
+  `ssh_history`.
+
 ## [2.2.0] - 2026-08-19
 
 Major version because this release breaks compatibility in **21 places, ten
