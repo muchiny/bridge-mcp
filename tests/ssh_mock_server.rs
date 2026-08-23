@@ -377,6 +377,15 @@ struct MockSession {
     tunnel_channels: Arc<Mutex<HashSet<ChannelId>>>,
 }
 
+// The signatures below are dictated by the russh traits, not by this file: a
+// method must stay awaitable whether or not this particular test double has
+// anything to await. Desugaring the `?`-carrying bodies into
+// `std::future::ready` would rewrite the mock for a lint that describes the
+// trait, not the code.
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "trait-mandated async signature; the mock has nothing to await"
+)]
 impl ServerHandler for MockSession {
     type Error = russh::Error;
 
@@ -596,6 +605,15 @@ fn fs_attrs(path: &Path) -> FileAttributes {
     attrs
 }
 
+// The signatures below are dictated by the russh traits, not by this file: a
+// method must stay awaitable whether or not this particular test double has
+// anything to await. Desugaring the `?`-carrying bodies into
+// `std::future::ready` would rewrite the mock for a lint that describes the
+// trait, not the code.
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "trait-mandated async signature; the mock has nothing to await"
+)]
 impl russh_sftp::server::Handler for MockSftpSession {
     type Error = StatusCode;
 

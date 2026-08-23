@@ -96,15 +96,11 @@ impl StandardTool for CanaryExecTool {
     /// the request, so they get the same whitelist treatment as `ssh_exec`
     /// instead of the blacklist-only `validate_builtin` the pipeline applies to
     /// builder-produced commands.
-    async fn pre_execute(
+    fn pre_execute(
         args: &SshCanaryExecArgs,
         ctx: &ToolContext,
-    ) -> Result<Option<ToolCallResult>> {
-        validate_free_form_command(ctx, &args.host, &args.command)?;
-        if let Some(health_check) = args.health_check.as_deref().filter(|hc| !hc.is_empty()) {
-            validate_free_form_command(ctx, &args.host, health_check)?;
-        }
-        Ok(None)
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        std::future::ready(validate_canary_commands(args, ctx))
     }
 
     fn build_command(args: &SshCanaryExecArgs, _host_config: &HostConfig) -> Result<String> {
@@ -113,6 +109,19 @@ impl StandardTool for CanaryExecTool {
             args.health_check.as_deref(),
         ))
     }
+}
+
+/// The `?`-carrying half of `pre_execute`, kept synchronous: nothing here
+/// awaits, so the hook returns a ready future rather than a coroutine.
+fn validate_canary_commands(
+    args: &SshCanaryExecArgs,
+    ctx: &ToolContext,
+) -> Result<Option<ToolCallResult>> {
+    validate_free_form_command(ctx, &args.host, &args.command)?;
+    if let Some(health_check) = args.health_check.as_deref().filter(|hc| !hc.is_empty()) {
+        validate_free_form_command(ctx, &args.host, health_check)?;
+    }
+    Ok(None)
 }
 
 pub type SshCanaryExecHandler = StandardToolHandler<CanaryExecTool>;

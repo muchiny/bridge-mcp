@@ -184,12 +184,12 @@ pub mod mock {
     impl SshConnector for MockSshConnector {
         type Client = MockSshClient;
 
-        async fn connect(
+        fn connect(
             &self,
             host_name: &str,
             _host: &HostConfig,
             _limits: &LimitsConfig,
-        ) -> Result<Self::Client> {
+        ) -> impl std::future::Future<Output = Result<Self::Client>> + Send {
             // Record the connection attempt
             self.connect_calls.lock().unwrap().push(ConnectCall {
                 host_name: host_name.to_string(),
@@ -198,7 +198,7 @@ pub mod mock {
 
             // Check for errors
             if let Some(error) = self.errors.lock().unwrap().get(host_name) {
-                return Err(match error {
+                return std::future::ready(Err(match error {
                     BridgeError::SshConnection { host, reason } => BridgeError::SshConnection {
                         host: host.clone(),
                         reason: reason.clone(),
@@ -214,29 +214,29 @@ pub mod mock {
                         host: host_name.to_string(),
                         reason: "Mock error".to_string(),
                     },
-                });
+                }));
             }
 
             // Get the client config or return error
             let clients = self.clients.lock().unwrap();
-            if let Some(config) = clients.get(host_name) {
+            std::future::ready(if let Some(config) = clients.get(host_name) {
                 Ok(MockSshClient::new(host_name, config.clone()))
             } else {
                 Err(BridgeError::SshConnection {
                     host: host_name.to_string(),
                     reason: "Host not configured in mock".to_string(),
                 })
-            }
+            })
         }
 
-        async fn connect_via_jump(
+        fn connect_via_jump(
             &self,
             host_name: &str,
             _host: &HostConfig,
             jump_host_name: &str,
             _jump_host: &HostConfig,
             _limits: &LimitsConfig,
-        ) -> Result<Self::Client> {
+        ) -> impl std::future::Future<Output = Result<Self::Client>> + Send {
             // Record the connection attempt with jump host
             self.connect_calls.lock().unwrap().push(ConnectCall {
                 host_name: host_name.to_string(),
@@ -245,7 +245,7 @@ pub mod mock {
 
             // Check for errors
             if let Some(error) = self.errors.lock().unwrap().get(host_name) {
-                return Err(match error {
+                return std::future::ready(Err(match error {
                     BridgeError::SshConnection { host, reason } => BridgeError::SshConnection {
                         host: host.clone(),
                         reason: reason.clone(),
@@ -261,19 +261,19 @@ pub mod mock {
                         host: host_name.to_string(),
                         reason: "Mock error".to_string(),
                     },
-                });
+                }));
             }
 
             // Get the client config or return error
             let clients = self.clients.lock().unwrap();
-            if let Some(config) = clients.get(host_name) {
+            std::future::ready(if let Some(config) = clients.get(host_name) {
                 Ok(MockSshClient::new(host_name, config.clone()))
             } else {
                 Err(BridgeError::SshConnection {
                     host: host_name.to_string(),
                     reason: "Host not configured in mock".to_string(),
                 })
-            }
+            })
         }
     }
 
@@ -336,29 +336,33 @@ pub mod mock {
     }
 
     impl SshClientTrait for MockSshClient {
-        async fn exec(&self, command: &str, _limits: &LimitsConfig) -> Result<CommandOutput> {
+        fn exec(
+            &self,
+            command: &str,
+            _limits: &LimitsConfig,
+        ) -> impl std::future::Future<Output = Result<CommandOutput>> + Send {
             // Record the exec call
             self.exec_calls.lock().unwrap().push(command.to_string());
 
             // Return the configured response or default
-            if let Some(response) = self.exec_responses.get(command) {
+            std::future::ready(if let Some(response) = self.exec_responses.get(command) {
                 Ok(response.clone())
             } else {
                 Ok(self.default_response.clone())
-            }
+            })
         }
 
-        async fn is_connected(&self) -> bool {
-            self.is_connected.load(Ordering::SeqCst)
+        fn is_connected(&self) -> impl std::future::Future<Output = bool> + Send {
+            std::future::ready(self.is_connected.load(Ordering::SeqCst))
         }
 
         fn host_name(&self) -> &str {
             &self.host_name
         }
 
-        async fn close(self) -> Result<()> {
+        fn close(self) -> impl std::future::Future<Output = Result<()>> + Send {
             self.closed.store(true, Ordering::SeqCst);
-            Ok(())
+            std::future::ready(Ok(()))
         }
     }
 

@@ -110,14 +110,14 @@ impl StandardTool for TerraformApplyTool {
     /// resource transition (Plan/Creating/Modifying/Destroying/Apply
     /// complete) so the client can render the apply progress live.
     /// Errors surface at `LogLevel::Error`.
-    async fn enrich(
+    fn enrich(
         result: ToolCallResult,
         args: &Self::Args,
         output: &str,
         ctx: &ToolContext,
-    ) -> Result<ToolCallResult> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResult>> + Send {
         let Some(logger) = ctx.mcp_logger.as_ref() else {
-            return Ok(result);
+            return std::future::ready(Ok(result));
         };
         logger.log(
             LogLevel::Info,
@@ -172,7 +172,7 @@ impl StandardTool for TerraformApplyTool {
                 );
             }
         }
-        Ok(result)
+        std::future::ready(Ok(result))
     }
 }
 

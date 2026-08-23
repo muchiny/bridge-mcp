@@ -124,14 +124,14 @@ impl StandardTool for LogAggregateTool {
     /// Optional LLM-side summary appended after the raw aggregation
     /// output. Falls back to raw-only when the client does not
     /// advertise the sampling capability.
-    async fn enrich(
+    fn enrich(
         result: ToolCallResult,
         args: &Self::Args,
         output: &str,
         ctx: &ToolContext,
-    ) -> Result<ToolCallResult> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResult>> + Send {
         if !args.summarize.unwrap_or(false) {
-            return Ok(result);
+            return std::future::ready(Ok(result));
         }
         let max_tokens = args.summary_max_tokens.unwrap_or(512);
         let prompt = "You are an SRE. Summarize the top 3 anomalies from \
@@ -142,7 +142,7 @@ impl StandardTool for LogAggregateTool {
         // the client's retry, so the remote command runs exactly once and
         // the summary describes the output the caller is actually shown.
         ctx.request_summary(prompt, output, max_tokens);
-        Ok(result)
+        std::future::ready(Ok(result))
     }
 }
 

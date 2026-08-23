@@ -132,14 +132,14 @@ impl StandardTool for K8sRolloutTool {
     /// `Waiting for deployment "<name>" rollout to finish: N of M new
     /// replicas have been updated...`, or
     /// `error: deployment "<name>" exceeded its progress deadline`.
-    async fn enrich(
+    fn enrich(
         result: ToolCallResult,
         args: &Self::Args,
         output: &str,
         ctx: &ToolContext,
-    ) -> Result<ToolCallResult> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResult>> + Send {
         let Some(logger) = ctx.mcp_logger.as_ref() else {
-            return Ok(result);
+            return std::future::ready(Ok(result));
         };
         logger.log(
             LogLevel::Info,
@@ -175,7 +175,7 @@ impl StandardTool for K8sRolloutTool {
                 );
             }
         }
-        Ok(result)
+        std::future::ready(Ok(result))
     }
 }
 

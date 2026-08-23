@@ -190,7 +190,7 @@ pub struct ToolContext {
     pub client_supports_elicitation: bool,
     /// Snapshot of `MCPServer::client_supports_sampling` taken at the
     /// time the request was dispatched. When `false`, the
-    /// [`Self::sample`] helper short-circuits without sending a
+    /// [`Self::request_summary`] helper short-circuits without sending a
     /// `sampling/createMessage` request — handlers can still proceed
     /// with the raw output, just without the LLM-side summary.
     pub client_supports_sampling: bool,

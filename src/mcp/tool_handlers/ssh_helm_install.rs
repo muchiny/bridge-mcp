@@ -186,14 +186,14 @@ impl StandardTool for HelmInstallTool {
     /// Mirror of `ssh_helm_upgrade::enrich`: emit a synthetic
     /// `phase=start` event then one log per helm status field. Errors
     /// surface at `LogLevel::Error`.
-    async fn enrich(
+    fn enrich(
         result: ToolCallResult,
         args: &Self::Args,
         output: &str,
         ctx: &ToolContext,
-    ) -> Result<ToolCallResult> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResult>> + Send {
         let Some(logger) = ctx.mcp_logger.as_ref() else {
-            return Ok(result);
+            return std::future::ready(Ok(result));
         };
         logger.log(
             LogLevel::Info,
@@ -238,7 +238,7 @@ impl StandardTool for HelmInstallTool {
                 );
             }
         }
-        Ok(result)
+        std::future::ready(Ok(result))
     }
 }
 

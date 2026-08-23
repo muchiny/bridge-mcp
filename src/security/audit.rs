@@ -421,7 +421,7 @@ impl AuditLogger {
         let file = open_audit_file(&config.path)?;
         // Seed the rotation counter from the existing file so a restart on an
         // already-oversized log rotates on the next event (G-26).
-        let written_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let written_bytes = file.metadata().map_or(0, |m| m.len());
 
         // Create channel for async logging
         let (tx, rx) = mpsc::unbounded_channel();

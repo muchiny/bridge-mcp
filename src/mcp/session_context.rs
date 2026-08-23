@@ -19,8 +19,8 @@
 //! Vuln 9 — one session's capability flags granting rights to another —
 //! used to be answered by a per-session `SessionCapabilities` here. 3.0.0
 //! deleted it: capabilities are declared per REQUEST, in `_meta`, and
-//! [`Self::with_request_meta`] gives each request its own envelope without
-//! touching the session. The guarantee is now tighter than Vuln 9 asked
+//! [`SessionContext::with_request_meta`] gives each request its own envelope
+//! without touching the session. The guarantee is now tighter than Vuln 9 asked
 //! for, because the unit of isolation shrank from the session to the
 //! request — a sibling request of the SAME session cannot inherit one
 //! either.
