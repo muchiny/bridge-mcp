@@ -7,8 +7,13 @@ use crate::config::{Config, OsType, SecurityMode};
 /// Includes configured hosts, security mode, enabled/disabled tool groups,
 /// key limits, and static usage guidance so that the AI client fully
 /// understands the server's configuration.
+///
+/// `client_name` comes from this request's `_meta` clientInfo. Modern carries
+/// client identity per request, so the effective output limit is a property
+/// of the caller, not of the server — and the line that states it must be
+/// too.
 #[allow(clippy::too_many_lines)]
-pub fn build_instructions(config: &Config, tool_count: usize) -> String {
+pub fn build_instructions(config: &Config, tool_count: usize, client_name: Option<&str>) -> String {
     let mut out = String::with_capacity(2048);
 
     // --- Header ---
@@ -106,7 +111,8 @@ pub fn build_instructions(config: &Config, tool_count: usize) -> String {
     let _ = writeln!(
         out,
         "LIMITS: {}s command timeout, {} char output limit.",
-        config.limits.command_timeout_seconds, config.limits.max_output_chars
+        config.limits.command_timeout_seconds,
+        config.limits.effective_max_output_chars(client_name)
     );
 
     // --- Apps ---
@@ -247,7 +253,7 @@ mod tests {
     #[test]
     fn test_empty_config() {
         let config = default_config();
-        let out = build_instructions(&config, 337);
+        let out = build_instructions(&config, 337, None);
 
         assert!(out.contains("337 tools"));
         // Dynamic discovery line: enabled count out of the real inventory total.
@@ -274,7 +280,7 @@ mod tests {
             minimal_host(OsType::Windows, Some("Domain controller")),
         );
 
-        let out = build_instructions(&config, 195);
+        let out = build_instructions(&config, 195, None);
 
         // Sorted alphabetically: db-main, web-prod, win-dc
         let db_pos = out.find("db-main").unwrap();
@@ -292,7 +298,7 @@ mod tests {
     fn test_strict_mode() {
         let mut config = default_config();
         config.security.mode = SecurityMode::Strict;
-        let out = build_instructions(&config, 337);
+        let out = build_instructions(&config, 337, None);
         assert!(out.contains("strict mode (only whitelisted commands allowed)"));
     }
 
@@ -300,7 +306,7 @@ mod tests {
     fn test_permissive_mode() {
         let mut config = default_config();
         config.security.mode = SecurityMode::Permissive;
-        let out = build_instructions(&config, 337);
+        let out = build_instructions(&config, 337, None);
         assert!(out.contains("permissive mode"));
     }
 
@@ -317,7 +323,7 @@ mod tests {
             .insert("monitoring".to_string(), false);
         config.tool_groups.groups.insert("docker".to_string(), true);
 
-        let out = build_instructions(&config, 190);
+        let out = build_instructions(&config, 190, None);
 
         assert!(out.contains("DISABLED GROUPS: monitoring, sessions"));
         assert!(!out.contains("docker"));
@@ -329,7 +335,7 @@ mod tests {
         config.limits.command_timeout_seconds = 60;
         config.limits.max_output_chars = 80_000;
 
-        let out = build_instructions(&config, 337);
+        let out = build_instructions(&config, 337, None);
 
         assert!(out.contains("60s command timeout"));
         assert!(out.contains("80000 char output limit"));
@@ -339,7 +345,7 @@ mod tests {
     fn test_progressive_listing_mode_announced() {
         let mut config = default_config();
         config.tool_groups.listing = ToolListingMode::Progressive;
-        let out = build_instructions(&config, 4);
+        let out = build_instructions(&config, 4, None);
 
         assert!(out.contains("TOOL LISTING: progressive mode"));
         assert!(out.contains("mcp_call_tool(name, arguments)"));
@@ -349,7 +355,7 @@ mod tests {
     fn test_full_listing_mode_not_announced() {
         let mut config = default_config();
         config.tool_groups.listing = ToolListingMode::Full;
-        let out = build_instructions(&config, 337);
+        let out = build_instructions(&config, 337, None);
 
         assert!(!out.contains("TOOL LISTING:"));
     }
@@ -357,7 +363,7 @@ mod tests {
     #[test]
     fn test_static_guidance_present() {
         let config = default_config();
-        let out = build_instructions(&config, 337);
+        let out = build_instructions(&config, 337, None);
 
         assert!(out.contains("DISCOVERY:"));
         assert!(out.contains("mcp_list_tool_groups"));
@@ -390,5 +396,25 @@ mod tests {
         assert!(out.contains("max_output"));
         assert!(out.contains("SAVE OUTPUT:"));
         assert!(out.contains("save_output="));
+    }
+
+    #[test]
+    fn limits_line_reports_the_limit_this_client_actually_gets() {
+        let config = default_config();
+
+        // The base default, for a client with no override.
+        let anonymous = build_instructions(&config, 10, None);
+        assert!(
+            anonymous.contains("40000 char output limit"),
+            "got: {anonymous}"
+        );
+
+        // A Claude client is granted 80000 by the built-in Tier 1 override.
+        // Advertising 40000 to it understates its own allowance by half.
+        let claude = build_instructions(&config, 10, Some("claude-code"));
+        assert!(
+            claude.contains("80000 char output limit"),
+            "instructions must state the effective limit, got: {claude}"
+        );
     }
 }

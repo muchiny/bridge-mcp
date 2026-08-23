@@ -1991,7 +1991,7 @@ impl McpServer {
         }
 
         Some(match request.method.as_str() {
-            "server/discover" => self.handle_discover(id).await,
+            "server/discover" => self.handle_discover(id, session).await,
             "initialize" => Self::handle_initialize(id, request.params.as_ref()),
             "tools/list" => self.handle_tools_list(id, request.params.as_ref()).await,
             "tools/call" => {
@@ -2134,10 +2134,13 @@ impl McpServer {
     /// `test_server_discover_full_wire_shape` pins it. Sole caller:
     /// `handle_discover`. It was shared with `handle_initialize` until that
     /// arm stopped building a payload at all and became a bare `-32022`.
-    pub(crate) async fn build_discovery_payload(&self) -> DiscoveryPayload {
+    pub(crate) async fn build_discovery_payload(
+        &self,
+        client_name: Option<&str>,
+    ) -> DiscoveryPayload {
         let instructions = {
             let config = self.config.read().await;
-            instructions::build_instructions(&config, self.registry.len())
+            instructions::build_instructions(&config, self.registry.len(), client_name)
         };
 
         DiscoveryPayload {
@@ -2198,17 +2201,44 @@ impl McpServer {
     ///
     /// `cacheScope: "public"` is correct **only while this server has no
     /// per-caller authorization**. Every caller gets byte-identical
-    /// capabilities, tool inventory and instructions, because group enablement
-    /// comes from `config.tool_groups` (global, process-wide) and never from
-    /// who is asking — which is also what 2026-07-28 requires of list
-    /// endpoints. `rbac.enabled: true` is rejected at config load
+    /// capabilities and tool inventory, because group enablement comes from
+    /// `config.tool_groups` (global, process-wide) and never from who is
+    /// asking — which is also what 2026-07-28 requires of list endpoints.
+    /// `rbac.enabled: true` is rejected at config load
     /// (`src/config/loader.rs:226`) precisely because nothing in the request
     /// path enforces it. The day RBAC becomes real and `tools/list` starts
     /// varying by caller, this value MUST become session-scoped and the
     /// tripwire test `test_cache_scope_is_public_only_while_rbac_is_dead`
     /// will fail to remind you.
-    async fn handle_discover(&self, id: Option<Value>) -> JsonRpcResponse {
-        let payload = self.build_discovery_payload().await;
+    ///
+    /// `instructions` is the one exception to "byte-identical": its LIMITS
+    /// line states `effective_max_output_chars(client_name)`, which reads a
+    /// per-client override. A `cacheScope: "public"` response MAY legally be
+    /// replayed to a different caller (the caching page's own words: *"may
+    /// be shared between callers even if the Result is coming from an
+    /// authenticated endpoint"*), so a cached response could state the wrong
+    /// client's limit. That is a narrower risk than the RBAC case above — the
+    /// number is advisory (an agent's own output-budgeting hint), not an
+    /// access-control boundary — and is unreachable on stdio, where one
+    /// process serves exactly one client for its lifetime. It is reachable
+    /// only if an HTTP-layer cache in front of this server replays a
+    /// `server/discover` response across two different `clientInfo` values,
+    /// which nothing in this crate does today. Flagged here rather than
+    /// solved, since solving it (`Private` for this method, or splitting the
+    /// limit out of `instructions`) is a call for whoever owns the caching
+    /// contract, not a side effect of stating the right number.
+    async fn handle_discover(
+        &self,
+        id: Option<Value>,
+        session: Option<&SessionContext>,
+    ) -> JsonRpcResponse {
+        // Modern carries client identity per request; there is deliberately
+        // no server-wide `client_info` to read instead.
+        let client_name = session
+            .and_then(|s| s.request_meta.as_ref())
+            .and_then(|m| m.client_info.as_ref())
+            .map(|c| c.name.as_str());
+        let payload = self.build_discovery_payload(client_name).await;
 
         let result = DiscoverResult {
             result_type: DiscoverResultType::Complete,
@@ -4035,7 +4065,7 @@ mod tests {
     #[tokio::test]
     async fn test_resources_capability_advertises_subscribe() {
         let server = create_test_server();
-        let response = server.handle_discover(Some(json!(1))).await;
+        let response = server.handle_discover(Some(json!(1)), None).await;
 
         assert!(response.error.is_none());
         let result = response.result.expect("server/discover result");
@@ -4234,7 +4264,9 @@ mod tests {
     #[tokio::test]
     async fn test_server_discover_full_wire_shape() {
         let server = create_test_server();
-        let response = server.handle_discover(Some(json!("discover-1"))).await;
+        let response = server
+            .handle_discover(Some(json!("discover-1")), None)
+            .await;
 
         assert!(response.error.is_none(), "server/discover must not error");
         assert_eq!(response.id, Some(json!("discover-1")));
@@ -4244,7 +4276,7 @@ mod tests {
 
         let expected_instructions = {
             let config = server.config.read().await;
-            instructions::build_instructions(&config, server.registry.len())
+            instructions::build_instructions(&config, server.registry.len(), None)
         };
 
         assert_eq!(
@@ -4357,7 +4389,7 @@ rbac:
 
         let server = create_test_server();
         let result = server
-            .handle_discover(Some(json!(1)))
+            .handle_discover(Some(json!(1)), None)
             .await
             .result
             .expect("server/discover must return a result");

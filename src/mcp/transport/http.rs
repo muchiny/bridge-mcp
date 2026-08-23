@@ -963,7 +963,16 @@ async fn handle_mcp_discovery(State(state): State<Arc<HttpTransportState>>) -> R
     // something the server never said. It is the same drift the hardcoded
     // protocol version on this endpoint already caused once; the fix was not
     // extended to the field next to it.
-    let capabilities = state.server.build_discovery_payload().await.capabilities;
+    // No per-request `_meta` exists on this plain GET, so there is no client
+    // identity to resolve — `None` is the honest argument, not a placeholder.
+    // This endpoint only reads `.capabilities` below, which does not vary by
+    // caller (see `handle_discover`'s doc comment), so the omission has no
+    // behavioral effect today regardless.
+    let capabilities = state
+        .server
+        .build_discovery_payload(None)
+        .await
+        .capabilities;
 
     Json(serde_json::json!({
         "mcp": {
