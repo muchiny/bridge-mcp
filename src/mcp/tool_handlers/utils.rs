@@ -167,7 +167,6 @@ pub async fn save_output_to_file(path: &str, content: &str) -> Result<String> {
 }
 
 /// Parsed columnar CLI output (docker ps, docker stats, kubectl top, etc.).
-#[derive(Clone)]
 pub struct ParsedTable {
     /// Column headers, lowercased (e.g., `["container id", "image", "status", "names"]`).
     pub headers: Vec<String>,
@@ -186,7 +185,7 @@ impl ParsedTable {
     /// Returns a new `ParsedTable` with only the matching columns,
     /// preserving their original order in the table.
     #[must_use]
-    pub fn select_columns(&self, cols: &[String]) -> Self {
+    pub fn select_columns(self, cols: &[String]) -> Self {
         let lowercase_cols: Vec<String> = cols.iter().map(|c| c.to_lowercase()).collect();
         let indices: Vec<usize> = self
             .headers
@@ -204,7 +203,7 @@ impl ParsedTable {
         // this host" about data that was there, and the caller could not tell
         // that from a genuine empty result.
         if indices.is_empty() {
-            return self.clone();
+            return self;
         }
 
         let headers = indices.iter().map(|&i| self.headers[i].clone()).collect();
