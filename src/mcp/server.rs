@@ -2131,9 +2131,14 @@ impl McpServer {
     /// `build_provenance_meta()`) — the plan this was written against
     /// omitted that field from its literal, but `handle_initialize` has
     /// unconditionally populated it since before this cluster started, and
-    /// `test_server_discover_full_wire_shape` pins it. Sole caller:
-    /// `handle_discover`. It was shared with `handle_initialize` until that
-    /// arm stopped building a payload at all and became a bare `-32022`.
+    /// `test_server_discover_full_wire_shape` pins it. Two callers:
+    /// `handle_discover` (the JSON-RPC `server/discover` method) and
+    /// `handle_mcp_discovery` in `src/mcp/transport/http.rs` (the
+    /// `.well-known/mcp` HTTP discovery endpoint, which reads only
+    /// `.capabilities` off the returned payload and passes `None` for
+    /// `client_name` since a plain GET carries no per-request `_meta`). It
+    /// was shared with `handle_initialize` until that arm stopped building a
+    /// payload at all and became a bare `-32022`.
     pub(crate) async fn build_discovery_payload(
         &self,
         client_name: Option<&str>,
@@ -2199,34 +2204,28 @@ impl McpServer {
     /// protocol version all arrive in each request's `_meta` envelope instead,
     /// which is why `params` is not read here.
     ///
-    /// `cacheScope: "public"` is correct **only while this server has no
-    /// per-caller authorization**. Every caller gets byte-identical
-    /// capabilities and tool inventory, because group enablement comes from
-    /// `config.tool_groups` (global, process-wide) and never from who is
-    /// asking — which is also what 2026-07-28 requires of list endpoints.
+    /// `cacheScope: "private"` — `instructions` states
+    /// `effective_max_output_chars(client_name)` on its LIMITS line, which
+    /// reads a per-client override (the built-in Tier 1 override alone
+    /// doubles the base limit for Claude clients). A `"public"` result
+    /// asserts every caller gets a byte-identical response that any
+    /// intermediary MAY replay to any other caller (`CacheScope`'s own doc,
+    /// quoting the caching page); that is no longer true here, so `"public"`
+    /// would tell some caller the wrong limit.
+    ///
+    /// `capabilities` and the tool inventory ARE still byte-identical for
+    /// every caller — group enablement comes from `config.tool_groups`
+    /// (global, process-wide) and never from who is asking, and
     /// `rbac.enabled: true` is rejected at config load
     /// (`src/config/loader.rs:226`) precisely because nothing in the request
-    /// path enforces it. The day RBAC becomes real and `tools/list` starts
-    /// varying by caller, this value MUST become session-scoped and the
-    /// tripwire test `test_cache_scope_is_public_only_while_rbac_is_dead`
-    /// will fail to remind you.
-    ///
-    /// `instructions` is the one exception to "byte-identical": its LIMITS
-    /// line states `effective_max_output_chars(client_name)`, which reads a
-    /// per-client override. A `cacheScope: "public"` response MAY legally be
-    /// replayed to a different caller (the caching page's own words: *"may
-    /// be shared between callers even if the Result is coming from an
-    /// authenticated endpoint"*), so a cached response could state the wrong
-    /// client's limit. That is a narrower risk than the RBAC case above — the
-    /// number is advisory (an agent's own output-budgeting hint), not an
-    /// access-control boundary — and is unreachable on stdio, where one
-    /// process serves exactly one client for its lifetime. It is reachable
-    /// only if an HTTP-layer cache in front of this server replays a
-    /// `server/discover` response across two different `clientInfo` values,
-    /// which nothing in this crate does today. Flagged here rather than
-    /// solved, since solving it (`Private` for this method, or splitting the
-    /// limit out of `instructions`) is a call for whoever owns the caching
-    /// contract, not a side effect of stating the right number.
+    /// path enforces it — but that is no longer why this method is
+    /// `"private"`; it is a SECOND, independent reason this could never
+    /// safely revert to `"public"` even if a future change moved the LIMITS
+    /// number out of `instructions`. The tripwire test
+    /// `test_cache_scope_is_private_for_two_independent_reasons` pins both
+    /// by behavior: it builds two payloads with different `client_name`s and
+    /// asserts the instructions differ, and it separately re-checks the RBAC
+    /// precondition.
     async fn handle_discover(
         &self,
         id: Option<Value>,
@@ -2252,7 +2251,7 @@ impl McpServer {
             }),
             instructions: Some(payload.instructions),
             ttl_ms: DISCOVER_TTL_MS,
-            cache_scope: CacheScope::Public,
+            cache_scope: CacheScope::Private,
         };
 
         JsonRpcResponse::success_or_serialize_error(id, &result)
@@ -4316,39 +4315,74 @@ mod tests {
                 },
                 "instructions": expected_instructions,
                 "ttlMs": 3_600_000,
-                "cacheScope": "public"
+                "cacheScope": "private"
             })
         );
     }
 
-    /// Tripwire: `cacheScope: "public"` is only sound while this server has no
-    /// per-caller authorization.
+    /// Tripwire: `cacheScope: "private"` on `server/discover` has TWO
+    /// independent live reasons, and this test pins both by BEHAVIOUR rather
+    /// than by grepping source shapes.
     ///
-    /// "public" means the discovery result — capabilities, tool inventory,
-    /// instructions — may be cached and replayed to any caller. That holds
-    /// today because group enablement lives in `config.tool_groups`
-    /// (process-wide) and `rbac.enabled: true` is rejected at config load
-    /// (`src/config/loader.rs:226`) since nothing in the request path enforces
-    /// it. 2026-07-28 in fact *requires* list endpoints not to vary per
-    /// connection, so this is the conformant shape.
+    /// Reason 1 (the CONTROLLING one, since the 2026-08-23 per-client LIMITS
+    /// fix): `instructions` states `effective_max_output_chars(client_name)`
+    /// on its LIMITS line, which reads a per-client override — the built-in
+    /// Tier 1 override alone doubles the base limit for Claude clients. A
+    /// `"public"` result asserts every caller gets a byte-identical response
+    /// that any intermediary MAY replay to any other caller; that is no
+    /// longer true here, so `"public"` would tell some caller the wrong
+    /// number. This is checked below by actually building two payloads with
+    /// different `client_name`s and asserting the instructions differ — NOT
+    /// by asserting the enum variant alone, which would pass even if a future
+    /// edit made `effective_max_output_chars` ignore its argument.
     ///
-    /// When RBAC becomes real — when `RbacConfig::default().enabled` can be
-    /// true, or when the loader stops rejecting it — this test fails, and
-    /// `handle_discover` must switch to a session-scoped cache scope before it
-    /// can pass again. Do not silence it by editing the assertion.
+    /// Reason 2 (independent, still live, previously the sole reason this
+    /// test existed): group enablement is process-wide (`config.tool_groups`)
+    /// and `rbac.enabled: true` is rejected at config load
+    /// (`src/config/loader.rs:226`), so `capabilities` and the tool inventory
+    /// remain byte-identical for every caller. That is NOT what makes
+    /// `"private"` correct today — Reason 1 already does — but it is a
+    /// standing reason a future fix to Reason 1 (e.g. moving the LIMITS
+    /// number out of `instructions`) must not treat as license to revert to
+    /// `"public"` without re-examining RBAC too. When RBAC becomes real —
+    /// `RbacConfig::default().enabled` turns `true`, or the loader stops
+    /// rejecting it — this half of the test fails on its own.
     ///
-    /// Both preconditions are checked by BEHAVIOUR, not by grepping
-    /// `loader.rs` for the shape of its `if`. A source-text guard passes on a
-    /// rejection that has been refactored into something that no longer
-    /// rejects, which is precisely the state it exists to catch. This is also
-    /// the only test in the tree that exercises the load-time refusal at all.
+    /// Do not silence either half by editing an assertion instead of the
+    /// production code it is pinning.
     #[tokio::test]
-    async fn test_cache_scope_is_public_only_while_rbac_is_dead() {
+    async fn test_cache_scope_is_private_for_two_independent_reasons() {
+        // Reason 1: instructions actually vary by caller identity. This is
+        // the assertion that would catch a regression back to the pre-fix
+        // behavior even if someone left `cache_scope: CacheScope::Private`
+        // in place by habit while quietly breaking the thing that justifies
+        // it.
+        let server = create_test_server();
+        let claude_payload = server.build_discovery_payload(Some("claude-code")).await;
+        let other_payload = server
+            .build_discovery_payload(Some("some-other-client"))
+            .await;
+        assert_ne!(
+            claude_payload.instructions, other_payload.instructions,
+            "server/discover's instructions no longer vary by caller — if this \
+             is intentional, cacheScope's \"private\" reasoning in this test and \
+             in handle_discover's doc comment needs re-examining, not just this \
+             assertion"
+        );
+
+        // Reason 1, continued: the actual wire value really is "private".
+        let result = server
+            .handle_discover(Some(json!(1)), None)
+            .await
+            .result
+            .expect("server/discover must return a result");
+        assert_eq!(result["cacheScope"], "private");
+
+        // Reason 2: RBAC is still dead, checked by behavior, twice.
         assert!(
             !crate::security::rbac::RbacConfig::default().enabled,
-            "RBAC default flipped to enabled: server/discover's cacheScope must \
-             stop being \"public\" — a cached discovery result would replay one \
-             caller's capabilities to another"
+            "RBAC default flipped to enabled: capabilities and tool inventory \
+             can no longer be treated as byte-identical across callers"
         );
 
         // Second, independent encoding of the same precondition: an operator
@@ -4376,7 +4410,7 @@ rbac:
 
         let err = crate::config::load_config(config_file.path()).expect_err(
             "`rbac.enabled: true` loaded successfully: per-caller authorization may now \
-             be live, so server/discover's cacheScope can no longer be \"public\"",
+             be live on top of the per-client LIMITS line",
         );
         assert!(
             matches!(
@@ -4384,16 +4418,8 @@ rbac:
                 crate::error::BridgeError::ConfigInvalid { field, .. } if field == "rbac.enabled"
             ),
             "`rbac.enabled: true` was rejected for the wrong reason ({err}); the \
-             load-time RBAC refusal that makes cacheScope \"public\" honest is gone"
+             load-time RBAC refusal that keeps capabilities byte-identical is gone"
         );
-
-        let server = create_test_server();
-        let result = server
-            .handle_discover(Some(json!(1)), None)
-            .await
-            .result
-            .expect("server/discover must return a result");
-        assert_eq!(result["cacheScope"], "public");
     }
 
     /// `server/discover` must be reachable through the public dispatcher, not

@@ -1511,20 +1511,34 @@ pub enum DiscoverResultType {
 /// - `"private"` — the response contains data not meant to be shared between
 ///   callers. Caches MUST NOT be shared across authorization contexts.
 ///
-/// `Public` is honest for the CAPABILITY surface for exactly one reason:
+/// `Public` is honest for a capability surface for exactly one reason:
 /// bridge-mcp has no per-caller authorization. Tool-group enablement is
 /// process-wide (`config.tool_groups`), and `rbac.enabled: true` is rejected at
 /// config load (`src/config/loader.rs:226`) because nothing in the request path
 /// enforces it. 2026-07-28 also requires list endpoints not to vary per
 /// connection, so a uniform answer is the conformant shape, not a shortcut.
+/// `tools/list`, `prompts/list`, `resources/list` and
+/// `resources/templates/list` are `Public` on this basis.
 ///
-/// `Private` exists for a SECOND, independent reason that has nothing to do with
-/// RBAC: `resources/read` does not return capability metadata, it returns
-/// payload — `log://` file contents, `history://recent` command history,
-/// `file://` reads off the remote host. Whether or not two callers are
-/// authorized identically, announcing to every intermediary that a shell history
-/// "may be cached and served to any user" is a claim this server has no business
-/// making. Capability lists are `Public`; read payloads are `Private`.
+/// `server/discover` is `Private` DESPITE that precondition holding for it too
+/// — its `capabilities` and tool inventory are just as uniform as the list
+/// endpoints above. What is NOT uniform is `instructions`: its LIMITS line
+/// states `effective_max_output_chars(client_name)`, a per-client override
+/// (the built-in Tier 1 override alone doubles the base limit for Claude
+/// clients). A `Public` result stating one caller's limit could be replayed
+/// by an intermediary to a caller entitled to a different one — RBAC being
+/// dead does not make this uniform, because this varies from a plain
+/// per-client config lookup that exists independently of RBAC ever shipping.
+/// See `handle_discover` in `src/mcp/server.rs`.
+///
+/// `Private` also covers a second, unrelated case: `resources/read` does not
+/// return capability metadata, it returns payload — `log://` file contents,
+/// `history://recent` command history, `file://` reads off the remote host.
+/// Whether or not two callers are authorized identically, announcing to every
+/// intermediary that a shell history "may be cached and served to any user" is
+/// a claim this server has no business making. Capability lists that are
+/// genuinely uniform are `Public`; read payloads and per-caller-varying
+/// results are `Private`.
 ///
 /// The caching page is explicit that this flag is not itself a control:
 /// *"Servers MUST be aware that responses with a `"public"` `cacheScope` may be
@@ -1532,11 +1546,14 @@ pub enum DiscoverResultType {
 /// endpoint. […] MUST apply appropriate per-primitive access controls, and MUST
 /// NOT rely on `cacheScope` alone to prevent unauthorized access."*
 ///
-/// So if RBAC ever gains a request-path enforcement point, `public` becomes an
-/// information leak — one caller's cached capability list replayed to another —
-/// and this enum needs the `Private` variant. The tripwire test
-/// `test_cache_scope_is_public_only_while_rbac_is_dead` in `src/mcp/server.rs`
-/// fails the day either precondition changes.
+/// So if RBAC ever gains a request-path enforcement point, `Public` becomes an
+/// information leak on the REMAINING `Public` methods above — one caller's
+/// cached capability list replayed to another — and each would need to move to
+/// `Private` too. The tripwire test
+/// `test_cache_scope_is_private_for_two_independent_reasons` in
+/// `src/mcp/server.rs` pins both `server/discover`'s existing reason (the
+/// per-client LIMITS line, checked by actually diffing two payloads) and the
+/// still-live RBAC precondition (checked by behavior) together.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CacheScope {
