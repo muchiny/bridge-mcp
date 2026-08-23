@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn log_success_records_audit_and_history_without_formatting() {
+    fn log_success_records_history_without_formatting() {
         let security = SecurityConfig {
             mode: SecurityMode::Permissive,
             ..SecurityConfig::default()
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(
             entries.len(),
             1,
-            "un succès de session doit laisser une entrée"
+            "a successful session command must leave a history entry"
         );
         assert_eq!(entries[0].host, "raspberry");
         assert_eq!(entries[0].command, "uptime");
