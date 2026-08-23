@@ -515,6 +515,15 @@ one family: a mechanism reporting a state it had not established.
   from the first result. (`ParsedTable` also gained and then lost
   `#[derive(Clone)]` within this same range; net effect on the public surface
   is only this signature change.)
+- **A `columns=` filter that matches no header now returns the full table
+  instead of an empty one.** `ssh_net_connections listening=true
+  columns=["Netid","Local Address:Port"]` — the labels `ss` prints, where the
+  handler normalizes to `LOCAL_ADDRESS`/`PEER_ADDRESS` — reported zero rows
+  on a Pi with twenty-odd sockets listening, and nothing told the caller that
+  apart from a host with nothing listening at all. Two documented contracts
+  already said otherwise: unknown columns are silently ignored, and the
+  header is always preserved. `select_columns` now leaves the table
+  unfiltered when none of the requested names match, rather than emptying it.
 - **`registry::unknown_tool_message` is new (lib API).** It tells a tool that
   is registered but whose group is disabled apart from one that is not
   registered at all — both used to answer the identical
