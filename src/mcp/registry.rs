@@ -72,6 +72,26 @@ pub struct ToolRegistryEntry {
 
 inventory::collect!(ToolRegistryEntry);
 
+/// Build the "unknown tool" message, telling a DISABLED tool apart from one
+/// that does not exist.
+///
+/// Hiding a disabled group is deliberate. Saying "Unknown tool" about it is
+/// not: the two states are indistinguishable to the caller, so an operator
+/// whose group is simply off goes looking for a typo. The compiled inventory
+/// knows every registered tool regardless of config, so the distinction costs
+/// one lookup.
+#[must_use]
+pub fn unknown_tool_message(tool: &str) -> String {
+    match inventory_group_map().get(tool).copied() {
+        Some(group) => format!(
+            "Tool `{tool}` is registered but its group `{group}` is not enabled. \
+             Enable it under `tool_groups.groups` in config.yaml, or run \
+             `bridge-mcp validate` to see which groups are active."
+        ),
+        None => format!("Unknown tool: {tool}. Use mcp_search_tools to discover valid names."),
+    }
+}
+
 /// Global (lazy) cache of `name -> group` for inventory-registered
 /// tools. Built on first call and reused for the life of the process.
 fn inventory_group_map() -> &'static HashMap<&'static str, &'static str> {
@@ -3330,6 +3350,32 @@ mod tests {
         assert!(
             !props.contains_key("jq_filter"),
             "Yaml must not get jq_filter"
+        );
+    }
+
+    #[test]
+    fn unknown_tool_message_names_the_group_when_the_tool_merely_is_disabled() {
+        // A tool that exists in the compiled inventory but whose group the
+        // operator did not enable. The message must send them to `tool_groups`,
+        // not on a hunt for a typo.
+        let msg = unknown_tool_message("ssh_ad_domain_info");
+        assert!(
+            msg.contains("active_directory"),
+            "must name the group that gates it, got: {msg}"
+        );
+        assert!(
+            msg.contains("tool_groups"),
+            "must name the config section, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_tool_message_stays_blunt_for_a_name_that_does_not_exist() {
+        let msg = unknown_tool_message("ssh_nexiste_pas_du_tout");
+        assert!(msg.contains("ssh_nexiste_pas_du_tout"));
+        assert!(
+            !msg.contains("tool_groups"),
+            "a name that is not registered has no group to blame, got: {msg}"
         );
     }
 }

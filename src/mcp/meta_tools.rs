@@ -326,7 +326,8 @@ fn describe(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
 
     let Some(handler) = registry.get(name) else {
         return ToolCallResult::error(format!(
-            "mcp_describe_tool: unknown tool `{name}`. Use mcp_search_tools to discover valid names."
+            "mcp_describe_tool: {}",
+            crate::mcp::registry::unknown_tool_message(name)
         ));
     };
 
@@ -602,6 +603,38 @@ mod tests {
         )
         .expect("meta tool");
         assert_eq!(result.is_error, Some(true));
+    }
+
+    /// `ssh_ad_domain_info` is registered but its group (`active_directory`)
+    /// is off in this registry — the third of the three call sites sharing
+    /// `unknown_tool_message` (the other two are dispatcher-level tests in
+    /// `server.rs`). `describe_unknown_returns_error` above uses a name that
+    /// really does not exist, so it would still pass even if this call site
+    /// were reverted to a bare "unknown tool" string — this test needs its
+    /// own assertion on the message text to catch that.
+    #[test]
+    fn describe_disabled_group_names_the_group_not_a_typo() {
+        let mut groups = crate::mcp::registry::all_enabled_tool_groups_config_for_test().groups;
+        groups.insert("active_directory".to_string(), false);
+        let config = crate::config::ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
+        let registry = crate::mcp::registry::create_filtered_registry(&config);
+
+        let result = execute(
+            DESCRIBE_TOOL,
+            Some(&json!({"name": "ssh_ad_domain_info"})),
+            &registry,
+        )
+        .expect("meta tool");
+        assert_eq!(result.is_error, Some(true));
+
+        let ToolContent::Text { text } = &result.content[0] else {
+            panic!("expected text content, got: {:?}", result.content[0]);
+        };
+        assert!(text.contains("active_directory"), "got: {text}");
+        assert!(text.contains("tool_groups"), "got: {text}");
     }
 
     #[test]

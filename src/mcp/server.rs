@@ -2713,7 +2713,7 @@ impl McpServer {
                 if let crate::error::BridgeError::McpUnknownTool { ref tool } = e {
                     return JsonRpcResponse::error(
                         id,
-                        JsonRpcError::invalid_params(format!("Unknown tool: {tool}")),
+                        JsonRpcError::invalid_params(super::registry::unknown_tool_message(tool)),
                     );
                 }
 
@@ -2761,7 +2761,7 @@ impl McpServer {
         let Some(handler) = self.registry.get(&tool_name) else {
             return JsonRpcResponse::error(
                 id,
-                JsonRpcError::invalid_params(format!("Unknown tool: {tool_name}")),
+                JsonRpcError::invalid_params(super::registry::unknown_tool_message(&tool_name)),
             );
         };
         let handler = Arc::clone(handler);
@@ -5931,6 +5931,47 @@ rbac:
         assert!(
             error.message.contains("Unknown tool"),
             "must reach the registry as an unknown tool, not an earlier param rejection, got: {}",
+            error.message
+        );
+    }
+
+    /// `ssh_ad_domain_info` is registered but its group (`active_directory`)
+    /// is off in this server's config. This drives the real dispatcher —
+    /// not `unknown_tool_message` directly, as `registry::tests` already
+    /// does — so a regression that reverts the call site back to a bare
+    /// `format!("Unknown tool: {tool}")` fails here even though
+    /// `unknown_tool_message` itself would still be fine.
+    #[tokio::test]
+    async fn test_tools_call_disabled_group_names_the_group_not_a_typo() {
+        let mut groups = crate::mcp::registry::all_enabled_tool_groups_config_for_test().groups;
+        groups.insert("active_directory".to_string(), false);
+        let mut config = test_config();
+        config.tool_groups = ToolGroupsConfig {
+            groups,
+            ..Default::default()
+        };
+        let (server, _audit_task) = McpServer::new(config);
+
+        let params = json!({
+            "name": "ssh_ad_domain_info",
+            "arguments": {}
+        });
+        let response = server
+            .handle_tools_call(Some(json!(1)), Some(params), None, None)
+            .await;
+
+        let error = response
+            .error
+            .expect("a disabled-group tool must still be -32602, not an isError result");
+        assert_eq!(error.code, -32602);
+        assert!(
+            error.message.contains("active_directory"),
+            "must name the group that gates it, got: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("tool_groups"),
+            "must name the config section, got: {}",
             error.message
         );
     }
