@@ -204,14 +204,14 @@ impl StandardTool for AnsiblePlaybookTool {
     /// (`fatal:` prefix) are logged at Error; others at Info. The raw
     /// result is returned unchanged — this hook is purely additive
     /// observability.
-    async fn enrich(
+    fn enrich(
         result: ToolCallResult,
         _args: &Self::Args,
         output: &str,
         ctx: &ToolContext,
-    ) -> Result<ToolCallResult> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResult>> + Send {
         let Some(logger) = ctx.mcp_logger.as_ref() else {
-            return Ok(result);
+            return std::future::ready(Ok(result));
         };
         for line in output.lines() {
             let trimmed = line.trim_start();
@@ -241,7 +241,7 @@ impl StandardTool for AnsiblePlaybookTool {
                 );
             }
         }
-        Ok(result)
+        std::future::ready(Ok(result))
     }
 
     fn validate(args: &SshAnsiblePlaybookArgs, _host_config: &HostConfig) -> Result<()> {

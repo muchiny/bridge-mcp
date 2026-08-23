@@ -83,12 +83,13 @@ impl StandardTool for FleetDiffTool {
     /// gets the same whitelist treatment as `ssh_exec` instead of the
     /// blacklist-only `validate_builtin` the pipeline applies to
     /// builder-produced commands.
-    async fn pre_execute(
+    fn pre_execute(
         args: &SshFleetDiffArgs,
         ctx: &ToolContext,
-    ) -> Result<Option<ToolCallResult>> {
-        validate_free_form_command(ctx, &args.host, &args.command)?;
-        Ok(None)
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        std::future::ready(
+            validate_free_form_command(ctx, &args.host, &args.command).map(|()| None),
+        )
     }
 
     fn build_command(args: &SshFleetDiffArgs, _host_config: &HostConfig) -> Result<String> {

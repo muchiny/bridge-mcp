@@ -748,9 +748,7 @@ impl McpServer {
         }
         let pending = ctx.mrtr.take();
         let sealed = serde_json::to_value(SealedResult::of(result)).ok()?;
-        if serde_json::to_vec(&sealed)
-            .map(|v| v.len())
-            .unwrap_or(usize::MAX)
+        if serde_json::to_vec(&sealed).map_or(usize::MAX, |v| v.len())
             > Self::MAX_SEALED_RESULT_BYTES
         {
             debug!(

@@ -232,7 +232,7 @@ impl ToolHandler for SshMetricsMultiHandler {
         // The reporter is `None` if the client did not request progress;
         // calls then become a cheap no-op.
         let progress = ctx.progress_reporter(Some(args.hosts.len() as u64));
-        let mut raw_outputs: Vec<std::result::Result<RawHostOutput, HostMetricsResult>> =
+        let mut raw_outputs: Vec<std::result::Result<RawHostOutput, Box<HostMetricsResult>>> =
             Vec::with_capacity(args.hosts.len());
         let mut completed: u64 = 0;
         let total = args.hosts.len();
@@ -273,7 +273,7 @@ impl ToolHandler for SshMetricsMultiHandler {
                         duration_ms: Some(raw.duration_ms),
                     }
                 }
-                Err(error_result) => error_result,
+                Err(error_result) => *error_result,
             })
             .collect();
 
@@ -368,40 +368,40 @@ async fn collect_from_host(
     cancel_token: tokio_util::sync::CancellationToken,
     timeout_seconds: Option<u64>,
     fail_fast: bool,
-) -> std::result::Result<RawHostOutput, HostMetricsResult> {
+) -> std::result::Result<RawHostOutput, Box<HostMetricsResult>> {
     let start = Instant::now();
 
     // Check if cancelled by a previous fail_fast
     if cancel_token.is_cancelled() {
-        return Err(HostMetricsResult {
+        return Err(Box::new(HostMetricsResult {
             host: host_name,
             success: false,
             metrics: None,
             error: Some("Cancelled due to fail_fast".to_string()),
             duration_ms: None,
-        });
+        }));
     }
 
     // Check rate limit
     if rate_limiter.check(&host_name).is_err() {
-        return Err(HostMetricsResult {
+        return Err(Box::new(HostMetricsResult {
             host: host_name,
             success: false,
             metrics: None,
             error: Some("Rate limit exceeded".to_string()),
             duration_ms: Some(elapsed_ms(&start)),
-        });
+        }));
     }
 
     // Get host config
     let Some(host_config) = config.hosts.get(&host_name) else {
-        return Err(HostMetricsResult {
+        return Err(Box::new(HostMetricsResult {
             host: host_name,
             success: false,
             metrics: None,
             error: Some("Host config not found".to_string()),
             duration_ms: Some(elapsed_ms(&start)),
-        });
+        }));
     };
 
     // Build limits with optional timeout override
@@ -453,13 +453,13 @@ async fn collect_from_host(
                 cancel_token.cancel();
             }
 
-            Err(HostMetricsResult {
+            Err(Box::new(HostMetricsResult {
                 host: host_name,
                 success: false,
                 metrics: None,
                 error: Some(e.to_string()),
                 duration_ms: Some(duration_ms),
-            })
+            }))
         }
     }
 }

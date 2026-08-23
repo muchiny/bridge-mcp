@@ -202,14 +202,14 @@ impl StandardTool for HelmUpgradeTool {
     /// Notes). The raw result is returned unchanged — this hook only
     /// adds observability for clients that subscribed to
     /// `notifications/message`.
-    async fn enrich(
+    fn enrich(
         result: ToolCallResult,
         args: &Self::Args,
         output: &str,
         ctx: &ToolContext,
-    ) -> Result<ToolCallResult> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResult>> + Send {
         let Some(logger) = ctx.mcp_logger.as_ref() else {
-            return Ok(result);
+            return std::future::ready(Ok(result));
         };
         // Header event so the client knows the upgrade started even if
         // the command produced no parseable status lines.
@@ -257,7 +257,7 @@ impl StandardTool for HelmUpgradeTool {
                 );
             }
         }
-        Ok(result)
+        std::future::ready(Ok(result))
     }
 }
 

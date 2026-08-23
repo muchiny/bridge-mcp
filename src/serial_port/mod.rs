@@ -39,12 +39,11 @@ impl SerialConnection {
     /// # Errors
     ///
     /// Returns an error if the serial port cannot be opened.
-    #[expect(clippy::unused_async)]
-    pub async fn connect(
+    pub fn connect(
         host_name: &str,
         host_config: &HostConfig,
         _limits: &LimitsConfig,
-    ) -> Result<Self> {
+    ) -> impl std::future::Future<Output = Result<Self>> + Send {
         let device = &host_config.hostname;
         let baud_rate = if host_config.port == 22 {
             DEFAULT_BAUD_RATE
@@ -59,20 +58,23 @@ impl SerialConnection {
             "Opening serial port"
         );
 
-        let port = tokio_serial::new(device, baud_rate)
-            .open_native_async()
-            .map_err(|e| BridgeError::SshExec {
-                reason: format!("Serial port open failed for {device}: {e}"),
-            })?;
+        let port = match tokio_serial::new(device, baud_rate).open_native_async() {
+            Ok(port) => port,
+            Err(e) => {
+                return std::future::ready(Err(BridgeError::SshExec {
+                    reason: format!("Serial port open failed for {device}: {e}"),
+                }));
+            }
+        };
 
         info!(host = %host_name, "Serial port connected");
 
-        Ok(Self {
+        std::future::ready(Ok(Self {
             port,
             host_name: host_name.to_string(),
             read_timeout: DEFAULT_READ_TIMEOUT,
             failed: false,
-        })
+        }))
     }
 
     /// Send a command and read the response from the serial port.

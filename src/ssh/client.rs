@@ -189,22 +189,24 @@ impl ClientHandler {
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(
+    fn check_server_key(
         &mut self,
         server_public_key: &PublicKey,
-    ) -> std::result::Result<bool, Self::Error> {
-        match known_hosts::verify_host_key(
-            &self.hostname,
-            self.port,
-            server_public_key,
-            self.verification_mode,
-        ) {
-            Ok(()) => Ok(true),
-            Err(e) => {
-                tracing::error!(error = %e, "Host key verification failed");
-                Ok(false)
-            }
-        }
+    ) -> impl std::future::Future<Output = std::result::Result<bool, Self::Error>> + Send {
+        std::future::ready(
+            match known_hosts::verify_host_key(
+                &self.hostname,
+                self.port,
+                server_public_key,
+                self.verification_mode,
+            ) {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    tracing::error!(error = %e, "Host key verification failed");
+                    Ok(false)
+                }
+            },
+        )
     }
 }
 

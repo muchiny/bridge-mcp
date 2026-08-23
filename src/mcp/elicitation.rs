@@ -11,7 +11,7 @@
 //! carried by Multi Round-Trip Requests — returned inside an
 //! `InputRequiredResult` and answered by a client retry — so what is left here
 //! is the pure half: build the request ([`confirm_destructive_request`]), read
-//! the answer ([`destructive_confirmation_granted`]), and the [`schema`]
+//! the answer ([`destructive_confirmation_granted`]), and the `schema`
 //! builders both use. The transmission belongs to
 //! `McpServer::check_destructive_elicitation`, which returns the request
 //! rather than sending it.
