@@ -2232,11 +2232,12 @@ impl McpServer {
         session: Option<&SessionContext>,
     ) -> JsonRpcResponse {
         // Modern carries client identity per request; there is deliberately
-        // no server-wide `client_info` to read instead.
-        let client_name = session
-            .and_then(|s| s.request_meta.as_ref())
-            .and_then(|m| m.client_info.as_ref())
-            .map(|c| c.name.as_str());
+        // no server-wide `client_info` to read instead. Shares
+        // `SessionContext::request_client_name` with `create_tool_context`
+        // (the limit this advertises and the limit it applies must come from
+        // the same lookup, or the two diverge the moment that helper gains
+        // normalization).
+        let client_name = session.and_then(SessionContext::request_client_name);
         let payload = self.build_discovery_payload(client_name).await;
 
         let result = DiscoverResult {
