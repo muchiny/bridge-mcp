@@ -51,7 +51,7 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 - **MCP Tasks extension** — declared under `capabilities.extensions` as `io.modelcontextprotocol/tasks`, enabling polled async execution, cancellation and progress notifications for long-running operations. The SERVER decides which calls become tasks (see `task_policy::LONG_RUNNING_TOOLS`); 2026-07-28 removed per-tool `execution.taskSupport` entirely, and no tool advertises it
 - **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
 - **Daemon mode** — Unix-socket transport for multi-client local usage; built-in `WinRmPool` (120 s TTL) and `K8sExecPool` (300 s TTL) amortize TLS handshakes across calls
-- **8700+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
+- **9500+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
 
 ---
 
@@ -238,9 +238,12 @@ Add to `~/.claude/settings.json`:
 > **Your MCP host must speak MCP 2026-07-28.** bridge-mcp 3.x removed the
 > `initialize` handshake; a host that opens with `initialize` receives
 > `-32022 Unsupported protocol version` and the connection is dead. If your
-> host is not there yet, pin `bridge-mcp = "2"` — the CLI-as-tool mode
-> (`bridge-mcp tool …`) is unaffected either way, because it never speaks
-> JSON-RPC at all.
+> host is not there yet, stay on **v1.20.0** — the last release that speaks the
+> Legacy handshake. There is no 2.x to fall back to: `2.0.0` through `2.2.0`
+> were written but never tagged or published, and those numbers are burnt (see
+> the note under the 2.2.0 heading in [CHANGELOG.md](CHANGELOG.md)). The
+> CLI-as-tool mode (`bridge-mcp tool …`) is unaffected either way, because it
+> never speaks JSON-RPC at all.
 
 > **Claude Code needs one setting, or it sends the Legacy handshake.** Measured
 > on 2.1.239: it implements 2026-07-28 fully, but defaults stdio servers to the
@@ -272,27 +275,37 @@ Bridge MCP sits between Claude Code and your infrastructure. It routes commands 
 
 ```mermaid
 graph LR
-    CC[Claude Code] -->|JSON-RPC stdio or Unix socket| BR[Bridge MCP]
+    CC[MCP client<br/>Claude Code · Claude Desktop · scripts]
+    CC -->|JSON-RPC over stdio,<br/>Unix socket or HTTP| BR[Bridge MCP]
 
-    BR --> SEC[Security<br/>Validator · Sanitizer · Audit]
-    SEC --> ER[Executor Router]
+    BR --> VAL[Validator<br/>blacklist · whitelist · confirmation gate]
+    VAL --> ER[Executor Router]
 
-    subgraph "Air-Gapped Protocols"
-        ER -->|SSH| P1[Linux / Windows<br/>Docker · K8s · Network]
-        ER -->|WinRM| P2[Windows]
-        ER -->|PSRP| P2b[PowerShell Remoting]
-        ER -->|Telnet| P3[Legacy Devices]
+    subgraph TIER1["Tier 1 — remote shells"]
+        ER -->|SSH| T1A[Linux / Windows<br/>Docker · K8s · Network]
+        ER -->|WinRM| T1B[Windows]
+        ER -->|PSRP| T1C[PowerShell Remoting]
+        ER -->|Telnet| T1D[Legacy devices]
     end
 
-    subgraph "Infrastructure Protocols"
-        ER -->|K8s API| P6[K8s Exec]
-        ER -->|Serial| P7[Serial Devices]
+    subgraph TIER2["Tier 2 — attached targets"]
+        ER -->|K8s API| T2A[Pod exec]
+        ER -->|Serial| T2B[Serial devices]
     end
 
-    subgraph "Cloud Protocols"
-        ER -->|SSM · Azure · GCP| P9[Cloud Instances]
+    subgraph TIER3["Tier 3 — cloud, not air-gapped"]
+        ER -->|SSM · Azure · GCP| T3A[Cloud instances]
     end
+
+    T1A & T1B & T1C & T1D & T2A & T2B & T3A --> SAN[Sanitizer + Audit<br/>63 patterns · entropy · audit.log]
+    SAN --> CC
 ```
+
+The validator runs **before** the command leaves the machine; the sanitizer runs
+**after**, on what comes back (`src/domain/use_cases/execute_command.rs`), so a
+secret in stdout is redacted on the return path rather than filtered on the way
+out. Tier numbering matches the protocol feature flags in `Cargo.toml`; SSH is
+always compiled in, every other adapter is opt-in.
 
 ---
 
@@ -422,7 +435,7 @@ limits:
   command_timeout_seconds: 60
   connection_timeout_seconds: 10
   max_concurrent_commands: 5
-  max_output_chars: 20000          # 0 = unlimited
+  max_output_chars: 40000          # this is the default; 0 = unlimited
   rate_limit_per_second: 0         # 0 = disabled
   retry_attempts: 3
   client_overrides:                # Per-client output limits
@@ -956,11 +969,26 @@ make ci-full            # Full CI (ci + hack + geiger)
 make dxt                # Build DXT package for Claude Desktop
 ```
 
-Rust edition 2024, MSRV 1.94+. `#![forbid(unsafe_code)]`. 8700+ tests.
+Rust edition 2024, MSRV 1.94+. `#![forbid(unsafe_code)]`. 9500+ tests.
 
-**Adding a new tool — 3 steps:** annotate the struct with `#[mcp_tool]` (or `#[mcp_standard_tool]`), add the `mod` + `pub use` line, and (only if introducing a new group) update `ToolGroupsConfig`. The `inventory` crate auto-registers the handler at compile time — no test-count assertions to update.
+**Adding a new tool — 3 steps:** annotate the struct with `#[mcp_tool]` (or
+`#[mcp_standard_tool]`), add the `mod` + `pub use` line, and (only if
+introducing a new group) update `ToolGroupsConfig`. The `inventory` crate
+auto-registers the handler at compile time — no test asserts a tool count.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history and [THREAT_MODEL.md](docs/THREAT_MODEL.md) for security design.
+Two things are NOT automatic, and both fail loudly rather than silently:
+
+- Any new tool changes the total in `.migration-baseline.json`. Regenerate it
+  with `python3 scripts/extract_tool_metadata.py` and check the diff;
+  `python3 scripts/validate_baseline.py` is what compares the two. No workflow
+  runs it, so nothing in CI will catch the drift for you.
+- A new *group* must also be added to the hardcoded `known_groups` list in
+  `tests/tool_filtering.rs`, which enumerates all 77 by name.
+
+See [CHANGELOG.md](CHANGELOG.md) for version history. There is no separate
+threat-model document: the security design lives in [Configuration](#configuration)
+— the *Security rules* and *Limits, sanitization & audit* sections — and in
+[Protocol Support](#protocol-support) for the destructive-confirmation gate.
 
 ---
 

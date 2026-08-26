@@ -268,9 +268,9 @@ limits:
   # SSH keepalive interval (seconds)
   keepalive_interval_seconds: 30
 
-  # Max output characters returned per tool call (default: 20000, 0 = no limit)
+  # Max output characters returned per tool call (default: 40000, 0 = no limit)
   # Truncated output includes an output_id for paginated retrieval via ssh_output_fetch
-  # max_output_chars: 20000
+  # max_output_chars: 40000
 
   # Per-client overrides for max_output_chars, auto-detected from MCP client name.
   # The first matching entry (case-insensitive) wins.
