@@ -12,13 +12,18 @@ fuzz_target!(|data: &str| {
 
     // 1. Known dangerous patterns must ALWAYS be rejected (case-insensitive)
     let lower = data.to_lowercase();
-    if lower.contains("drop database") {
+    if contains_keyword(&lower, "drop database") {
         assert!(result.is_err(), "DROP DATABASE must be rejected: {data}");
     }
-    if lower.contains("drop table") {
+    if contains_keyword(&lower, "drop table") {
         assert!(result.is_err(), "DROP TABLE must be rejected: {data}");
     }
-    if lower.contains("truncate") {
+    // `contains` is the wrong test: the validator matches SQL keywords at
+    // token boundaries, so `kortruncate` is correctly accepted while
+    // `truncate t` and `SELECT 1; truncate t` are rejected. Asserting bare
+    // containment demanded that the validator reject any identifier that
+    // merely embeds the word.
+    if contains_keyword(&lower, "truncate") {
         assert!(result.is_err(), "TRUNCATE must be rejected: {data}");
     }
     if lower.contains("delete from") {
@@ -30,3 +35,20 @@ fuzz_target!(|data: &str| {
 
     // 3. The function should never panic, regardless of input (implicit)
 });
+
+/// True when `needle` occurs in `haystack` as a whole token, i.e. not glued to
+/// a neighbouring alphanumeric or `_`. Mirrors how the validator scans, so the
+/// invariant tests the guarantee the product actually makes.
+fn contains_keyword(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle).any(|(i, _)| {
+        let before_ok = i == 0 || !is_word_byte(bytes[i - 1]);
+        let end = i + needle.len();
+        let after_ok = end == bytes.len() || !is_word_byte(bytes[end]);
+        before_ok && after_ok
+    })
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
