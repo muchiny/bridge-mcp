@@ -1620,7 +1620,11 @@ impl McpServer {
     /// guarantee has no other observable: the guard runs on `Drop`, and
     /// without a count the only way to "test" it would be to assert the guard
     /// exists, which asserts nothing about whether it runs.
-    #[cfg(test)]
+    ///
+    /// `feature = "http"` as well as `test`, for the same reason as
+    /// `remove_subscriptions_for_tx` below: that HTTP test is the only caller,
+    /// so a default-feature test build compiled this with nobody calling it.
+    #[cfg(all(test, feature = "http"))]
     pub(crate) fn live_subscription_count(&self) -> usize {
         self.subscriptions.len()
     }
@@ -1633,6 +1637,11 @@ impl McpServer {
     /// response body, so the cleanup belongs to a guard owned by the STREAM.
     /// This is the seam that lets the guard do it without exposing the
     /// registry itself.
+    ///
+    /// Gated on the feature that owns the only caller: `serve_session` reaches
+    /// `remove_for_tx` directly, so without the HTTP transport compiled in this
+    /// method has no callers at all and `dead_code` fires on a default build.
+    #[cfg(feature = "http")]
     pub(crate) fn remove_subscriptions_for_tx(&self, tx: &mpsc::Sender<WriterMessage>) -> usize {
         self.subscriptions.remove_for_tx(tx)
     }

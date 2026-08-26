@@ -382,7 +382,12 @@ struct MockSession {
 // anything to await. Desugaring the `?`-carrying bodies into
 // `std::future::ready` would rewrite the mock for a lint that describes the
 // trait, not the code.
-#[expect(
+// `clippy::unused_async_trait_impl` was added in clippy 1.98. `make ci` runs the
+// 1.94.0 pinned by rust-toolchain.toml, where naming it trips `unknown_lints`
+// under `-D warnings` — hence the outer allow. `allow`, not `expect`: on 1.94
+// the lint cannot fire, so an expectation there would go unfulfilled.
+#[allow(unknown_lints)]
+#[allow(
     clippy::unused_async_trait_impl,
     reason = "trait-mandated async signature; the mock has nothing to await"
 )]
@@ -610,7 +615,12 @@ fn fs_attrs(path: &Path) -> FileAttributes {
 // anything to await. Desugaring the `?`-carrying bodies into
 // `std::future::ready` would rewrite the mock for a lint that describes the
 // trait, not the code.
-#[expect(
+// `clippy::unused_async_trait_impl` was added in clippy 1.98. `make ci` runs the
+// 1.94.0 pinned by rust-toolchain.toml, where naming it trips `unknown_lints`
+// under `-D warnings` — hence the outer allow. `allow`, not `expect`: on 1.94
+// the lint cannot fire, so an expectation there would go unfulfilled.
+#[allow(unknown_lints)]
+#[allow(
     clippy::unused_async_trait_impl,
     reason = "trait-mandated async signature; the mock has nothing to await"
 )]
