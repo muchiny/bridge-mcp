@@ -41,6 +41,8 @@ check 'Mcp-Session-Id'
 check 'Last-Event-ID'
 check 'Mcp-Method'
 check 'Mcp-Name'
-check '[3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v2.2.0...v3.0.0'
+# v2.2.0 was never tagged, so 3.0.0 compares against v1.20.0, the last tag
+# that exists. See the note under the 2.2.0 heading in CHANGELOG.md.
+check '[3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v3.0.0'
 
 exit "$fail"

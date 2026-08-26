@@ -7,12 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.0.0] - 2026-08-20
-
-> **Not tagged, not published.** This entry documents work in progress.
-> `2026-08-20` is the date the entry was written, not a release date. Task 57
-> tags the actual 3.0.0 release; if that lands on a later day, it reconciles
-> this date to match.
+## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
 `2026-07-28` and nothing else. There is no dual-era mode, no negotiation
@@ -538,6 +533,15 @@ one family: a mechanism reporting a state it had not established.
   `effective_max_output_chars(client_name)`, which doubles that to 80000 for
   a Claude client under the built-in Tier 1 override — an agent budgeting
   against the advertised figure was under-using its own allowance by half.
+- **An app table no longer announces a column a `columns=` filter removed.**
+  Four handlers declared a fixed app-table column list and then built the rows
+  from a table `maybe_reduce_table` may have narrowed, so
+  `columns=["USER","COMMAND"]` still published
+  `keys = [user, pid, cpu, mem, command]` with `""` in every filtered cell.
+  The structured half said "this field exists and is empty" about data the
+  caller had asked not to receive, while the text half of the same result was
+  right — a client reading it could not tell an absent column from a genuinely
+  empty value. The columns are now derived from what survived the reduction.
 - **`ssh_session_exec` now leaves an audit-log and history trace on both
   success and failure.** Previously only a denied session command was
   recorded — under `security.mode: permissive` almost nothing is denied, so
@@ -545,7 +549,54 @@ one family: a mechanism reporting a state it had not established.
   session-manager error left no trace at all in `audit.log` or
   `ssh_history`.
 
+### Lint and documentation fixes (2026-08-23)
+
+- **32 clippy errors and two broken rustdoc links, none of them reachable
+  before this release.** `ci.yml` only runs on push-to-main and on pull
+  requests, so the 149 commits that became 3.0.0 were never linted as a
+  branch. The Clippy job also carries no `RUSTUP_TOOLCHAIN`, unlike every
+  other job, so it follows real stable — 1.98 since 2026-08-18 — while a
+  local `cargo clippy` uses the 1.94.0 pinned by `rust-toolchain.toml` and
+  sees none of this. Two of the new lints contradict each other:
+  `unused_async_trait_impl` rejects an `async fn` impl body with no `.await`,
+  and `manual_async_fn` rejects the `fn -> impl Future { async move { … } }`
+  rewrite of that same function. The form both accept is the one the
+  `StandardTool` trait already uses for its own default impls, so 29 impls —
+  19 `enrich`, 3 `pre_execute`, the five `MockSshConnector`/`MockSshClient`
+  methods, `ClientHandler::check_server_key` and `SerialConnection::connect`
+  — now return `std::future::ready(…)` from a plain `fn`. Every caller
+  awaits immediately, so evaluation order is unchanged. Also boxes the
+  280-byte `HostMetricsResult` `Err` variant, replaces two
+  `map(…).unwrap_or(…)` with `map_or`, and repairs three intra-doc links
+  that pointed at a private or non-existent item (`schema`,
+  `Self::with_request_meta`, `Self::sample`).
+
+### Fuzz target repairs (2026-08-26)
+
+- **Four nightly fuzz crashes were assertions in the targets, not panics in
+  the product** (issue #135). The harness did not compile for six weeks, so
+  its invariants drifted away from the code underneath.
+  `fuzz_db_command_builder` asserted `MYSQL_PWD=` and `PGPASSWORD=` were
+  present — FIND-031 removed exactly those, moving the builders to
+  `--defaults-extra-file` and `PGPASSFILE` so the password stays out of the
+  process table; the target was demanding the vulnerability back and failed
+  on every input. It now asserts the secret does **not** travel in an env
+  var. `fuzz_k8s_validation` was missing `pause` and `resume` from its
+  allowlist. `fuzz_db_query_validation` rejected any string *containing*
+  `truncate`, flagging `kortruncate`, while the validator matches at token
+  boundaries — replaced with a boundary-aware helper, applied to the
+  `drop table` and `drop database` invariants too. `fuzz_sanitizer` required
+  non-empty output from non-empty input, which input made only of ANSI
+  escapes and invalid UTF-8 cannot satisfy; the assertion is now conditional
+  on the input carrying printable content. All four crashing inputs are in
+  `fuzz/corpus/` so every future run replays them first.
+
 ## [2.2.0] - 2026-08-19
+
+> **Never tagged.** No `v2.2.0` tag or release exists; the version went
+> straight from `v1.20.0` to `v3.0.0`. This entry is kept because the changes
+> it describes shipped inside 3.0.0, and because the numbers `2.0.0`, `2.0.1`,
+> `2.1.0` and `2.2.0` are burnt and must not be reused.
 
 Major version because this release breaks compatibility in **21 places, ten
 of them in the public library API**. The bar used, so the number is checkable
@@ -2533,8 +2584,7 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Extensible tool handler registry (Open/Closed principle)
 
 [Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...HEAD
-[3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v2.2.0...v3.0.0
-[2.2.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v2.2.0
+[3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v3.0.0
 [1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/muchiny/bridge-mcp/compare/v1.17.0...v1.18.0

@@ -32,9 +32,14 @@ fuzz_target!(|data: &str| {
     let result = KubernetesCommandBuilder::validate_delete("pod", data);
     assert!(result.is_ok(), "Non-namespace resource delete must always succeed");
 
-    // 2. validate_rollout_action — only status/restart/undo/history allowed
+    // 2. validate_rollout_action — only the read-only / recoverable actions
+    // are allowed. This list MUST match `validate_rollout_action` in
+    // src/domain/use_cases/kubernetes.rs; it drifted once already (`pause`
+    // and `resume` were added to the product and not here), and because the
+    // fuzz harness had stopped compiling, nothing reported the divergence
+    // for six weeks.
     let result = KubernetesCommandBuilder::validate_rollout_action(data);
-    let allowed = ["status", "restart", "undo", "history"];
+    let allowed = ["status", "restart", "undo", "history", "pause", "resume"];
     if allowed.contains(&lower.as_str()) {
         assert!(result.is_ok(),
             "Allowed rollout action '{data}' must be accepted");

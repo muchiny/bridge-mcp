@@ -15,7 +15,16 @@ fuzz_target!(|data: &str| {
     // Invariants that must always hold:
     // 1. Result should never be empty if input wasn't empty
     if !data.is_empty() {
-        assert!(!result.is_empty(), "Sanitizer produced empty output for non-empty input");
+        // Non-empty input may legitimately sanitize to nothing: an input made
+        // only of ANSI escape sequences and invalid UTF-8 bytes has no
+        // printable content to keep. The old assertion treated that as a
+        // crash.
+        if data.chars().any(|c| !c.is_control() && c != '\u{fffd}') {
+            assert!(
+                !result.is_empty(),
+                "Sanitizer emptied an input that had printable content: {data:?}"
+            );
+        }
     }
 
     // 2. Result length should be reasonable (not explode due to replacements)
