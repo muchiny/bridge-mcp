@@ -17,6 +17,8 @@ use crate::domain::use_cases::shell;
 use crate::error::{BridgeError, Result};
 use crate::mcp::CommandHistory;
 use crate::mcp::history::HistoryConfig;
+use crate::mcp::protocol::PROTOCOL_VERSION;
+use crate::mcp::request_meta::keys as meta_keys;
 use crate::ports::ExecutorRouter;
 use crate::ports::ToolContext;
 use crate::security::{
@@ -39,6 +41,47 @@ use crate::ssh::{
 ///
 /// The function intentionally swallows `NotFound` and `ConnectionRefused`
 /// errors: these indicate no daemon is running, not a fatal problem.
+/// Build the JSON-RPC `tools/call` the CLI forwards to a running daemon.
+///
+/// Split out of [`try_forward_to_daemon`] so the envelope can be asserted
+/// without a live socket: the bug this guards against was invisible to every
+/// existing test precisely because the request was built inline, mid-I/O.
+///
+/// The `_meta` envelope is NOT optional. 2026-07-28 deleted the
+/// connection-scoped handshake, so every client-to-server request carries the
+/// revision it speaks and the capabilities it has, and the server refuses
+/// `-32602` when either key is absent
+/// (`mcp::request_meta::missing_required_envelope_field`). Without this, every
+/// `bridge-mcp tool …` run with a daemon up returned that refusal instead of
+/// the tool's output.
+///
+/// `clientCapabilities` is `{}` on purpose: the CLI has no channel to answer an
+/// elicitation or serve a root, and capability lookup is fail-closed, so
+/// declaring none is the honest and the safe value.
+fn build_daemon_request(
+    request_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+            "_meta": {
+                meta_keys::PROTOCOL_VERSION: PROTOCOL_VERSION,
+                meta_keys::CLIENT_CAPABILITIES: serde_json::json!({}),
+                meta_keys::CLIENT_INFO: {
+                    "name": "bridge-mcp-cli",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            },
+        },
+    })
+}
+
 async fn try_forward_to_daemon(
     socket_path: &std::path::Path,
     tool_name: &str,
@@ -66,15 +109,7 @@ async fn try_forward_to_daemon(
     };
 
     let request_id = uuid::Uuid::new_v4().to_string();
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments,
-        },
-    });
+    let request = build_daemon_request(&request_id, tool_name, &arguments);
 
     let body = serde_json::to_string(&request).map_err(BridgeError::Json)?;
     stream
@@ -1230,8 +1265,16 @@ pub async fn run_tool(
     // Fast path: if the local daemon is running, forward this tool call
     // to it over the Unix socket. This reuses the daemon's shared SSH
     // connection pool and saves the ~95 ms handshake on every invocation
-    // after the first. Falls back to the stateless in-process path on
-    // any forwarding error (daemon absent, refused, timeout, etc.).
+    // after the first.
+    //
+    // The fallback is narrower than it looks: only a failure to REACH the
+    // daemon (absent socket, connection refused) returns `Ok(None)` and drops
+    // to the stateless path. A daemon that answers with a JSON-RPC *error*
+    // answers `Ok(Some(..))`, and that error is what the user sees. That is
+    // deliberate — a tool that failed on the daemon would fail in-process too,
+    // and silently re-running it would hide the first failure — but it is why
+    // a malformed request envelope surfaced as every `bridge-mcp tool …`
+    // returning `-32602` rather than as a quiet fallback.
     let daemon_socket = crate::daemon::default_socket_path();
     if daemon_socket.exists()
         && let Some(forwarded) = try_forward_to_daemon(
@@ -1442,6 +1485,73 @@ mod tests {
     fn test_data_reduction_flags_is_empty_by_default() {
         let flags = DataReductionFlags::default();
         assert!(flags.is_empty());
+    }
+
+    /// A daemon-forwarded call MUST carry the `_meta` envelope.
+    ///
+    /// Regression guard for the 3.0.0 Modern-only cut: the CLI forwards
+    /// `tools/call` over the Unix socket, the server made the envelope
+    /// mandatory, and nothing updated the client — so with a daemon up, every
+    /// one of the 279 tools answered
+    /// `-32602 missing _meta["io.modelcontextprotocol/protocolVersion"]`
+    /// instead of running. Found by execution against a live daemon; no test
+    /// existed that could have caught it.
+    #[test]
+    fn daemon_request_carries_the_required_meta_envelope() {
+        let request = build_daemon_request("req-1", "ssh_exec", &serde_json::json!({"host": "pi"}));
+
+        let meta = request["params"]["_meta"]
+            .as_object()
+            .expect("params._meta must be an object");
+
+        assert_eq!(
+            meta.get(meta_keys::PROTOCOL_VERSION)
+                .and_then(serde_json::Value::as_str),
+            Some(PROTOCOL_VERSION),
+            "the forwarded request must declare the revision it speaks"
+        );
+        assert!(
+            meta.get(meta_keys::CLIENT_CAPABILITIES)
+                .is_some_and(serde_json::Value::is_object),
+            "clientCapabilities must be present; `{{}}` is the honest value for a \
+             CLI that cannot answer an elicitation, but absent is a `-32602`"
+        );
+        assert!(
+            meta.get(meta_keys::CLIENT_INFO)
+                .is_some_and(serde_json::Value::is_object),
+            "clientInfo must be present"
+        );
+    }
+
+    /// The envelope declares *no* capabilities, and that is deliberate.
+    ///
+    /// Capability lookup is fail-closed: claiming `elicitation` here would let
+    /// the destructive gate believe a CLI process can answer a confirmation it
+    /// has no channel to display.
+    #[test]
+    fn daemon_request_declares_no_client_capabilities() {
+        let request = build_daemon_request("req-2", "ssh_exec", &serde_json::Value::Null);
+
+        let caps = request["params"]["_meta"][meta_keys::CLIENT_CAPABILITIES]
+            .as_object()
+            .expect("clientCapabilities must be an object");
+
+        assert!(
+            caps.is_empty(),
+            "the CLI must not claim capabilities it cannot honour, got {caps:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_request_preserves_tool_name_and_arguments() {
+        let args = serde_json::json!({"host": "pi", "command": "echo hi"});
+        let request = build_daemon_request("req-3", "ssh_exec", &args);
+
+        assert_eq!(request["jsonrpc"], "2.0");
+        assert_eq!(request["id"], "req-3");
+        assert_eq!(request["method"], "tools/call");
+        assert_eq!(request["params"]["name"], "ssh_exec");
+        assert_eq!(request["params"]["arguments"], args);
     }
 
     #[cfg(feature = "jq")]
