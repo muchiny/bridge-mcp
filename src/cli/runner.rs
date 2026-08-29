@@ -389,7 +389,7 @@ pub async fn run_list_tools(
 }
 
 /// Validate the configuration file and report issues
-pub async fn run_validate(config: Arc<Config>) -> Result<()> {
+pub async fn run_validate(config: Arc<Config>, json_output: bool) -> Result<()> {
     use crate::mcp::registry::create_filtered_registry;
     use crate::security::CommandValidator;
 
@@ -435,7 +435,21 @@ pub async fn run_validate(config: Arc<Config>) -> Result<()> {
     let tool_count = registry.len();
 
     // Report
-    if issues.is_empty() && warnings.is_empty() {
+    if json_output {
+        let report = serde_json::json!({
+            "valid": issues.is_empty(),
+            "hosts": config.hosts.len(),
+            "tools": tool_count,
+            "security_mode": format!("{:?}", config.security.mode),
+            "errors": issues,
+            "warnings": warnings,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+    } else if issues.is_empty() && warnings.is_empty() {
         println!("Configuration is valid.");
         println!("  Hosts: {}", config.hosts.len());
         println!("  Tools: {tool_count}");
@@ -468,72 +482,98 @@ pub async fn run_validate(config: Arc<Config>) -> Result<()> {
 }
 
 /// Show differences between current and default configuration
-pub async fn run_config_diff(config: Arc<Config>) -> Result<()> {
+pub async fn run_config_diff(config: Arc<Config>, json_output: bool) -> Result<()> {
     use crate::config::{LimitsConfig, SecurityConfig};
 
     let default_security = SecurityConfig::default();
     let default_limits = LimitsConfig::default();
 
-    println!("=== Configuration Differences (current vs default) ===\n");
+    // Collected first, rendered second, so the text and JSON forms cannot
+    // drift apart the way they do when each branch re-derives the comparison.
+    let mut diffs = serde_json::Map::new();
+    let mut push = |key: &str, current: serde_json::Value, default: serde_json::Value| {
+        diffs.insert(
+            key.to_string(),
+            serde_json::json!({ "current": current, "default": default }),
+        );
+    };
 
-    // Compare security mode
     if config.security.mode != default_security.mode {
-        println!(
-            "security.mode: {:?} (default: {:?})",
-            config.security.mode, default_security.mode
+        push(
+            "security.mode",
+            format!("{:?}", config.security.mode).into(),
+            format!("{:?}", default_security.mode).into(),
         );
     }
-
-    // Compare limits
     if config.limits.command_timeout_seconds != default_limits.command_timeout_seconds {
-        println!(
-            "limits.command_timeout_seconds: {} (default: {})",
-            config.limits.command_timeout_seconds, default_limits.command_timeout_seconds
+        push(
+            "limits.command_timeout_seconds",
+            config.limits.command_timeout_seconds.into(),
+            default_limits.command_timeout_seconds.into(),
         );
     }
     if config.limits.max_concurrent_commands != default_limits.max_concurrent_commands {
-        println!(
-            "limits.max_concurrent_commands: {} (default: {})",
-            config.limits.max_concurrent_commands, default_limits.max_concurrent_commands
+        push(
+            "limits.max_concurrent_commands",
+            config.limits.max_concurrent_commands.into(),
+            default_limits.max_concurrent_commands.into(),
         );
     }
     if config.limits.rate_limit_per_second != default_limits.rate_limit_per_second {
-        println!(
-            "limits.rate_limit_per_second: {} (default: {})",
-            config.limits.rate_limit_per_second, default_limits.rate_limit_per_second
+        push(
+            "limits.rate_limit_per_second",
+            config.limits.rate_limit_per_second.into(),
+            default_limits.rate_limit_per_second.into(),
         );
     }
     if config.limits.max_output_chars != default_limits.max_output_chars {
-        println!(
-            "limits.max_output_chars: {} (default: {})",
-            config.limits.max_output_chars, default_limits.max_output_chars
+        push(
+            "limits.max_output_chars",
+            config.limits.max_output_chars.into(),
+            default_limits.max_output_chars.into(),
         );
     }
-
-    // Compare hosts
-    println!("\nhosts: {} configured", config.hosts.len());
-
-    // Compare blacklist
     if config.security.blacklist.len() != default_security.blacklist.len() {
-        println!(
-            "security.blacklist: {} patterns (default: {} patterns)",
-            config.security.blacklist.len(),
-            default_security.blacklist.len()
+        push(
+            "security.blacklist",
+            config.security.blacklist.len().into(),
+            default_security.blacklist.len().into(),
         );
     }
 
-    // Compare disabled tool groups
-    let disabled: Vec<_> = config
+    let disabled: Vec<&str> = config
         .tool_groups
         .groups
         .iter()
         .filter(|(_, enabled)| !**enabled)
         .map(|(name, _)| name.as_str())
         .collect();
+
+    if json_output {
+        let report = serde_json::json!({
+            "hosts": config.hosts.len(),
+            "differences": diffs,
+            "tool_groups_disabled": disabled,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+        return Ok(());
+    }
+
+    println!("=== Configuration Differences (current vs default) ===\n");
+    for (key, entry) in &diffs {
+        println!(
+            "{key}: {} (default: {})",
+            entry["current"], entry["default"]
+        );
+    }
+    println!("\nhosts: {} configured", config.hosts.len());
     if !disabled.is_empty() {
         println!("tool_groups.disabled: {disabled:?}");
     }
-
     println!("\n(Only non-default values are shown)");
 
     Ok(())
@@ -608,6 +648,7 @@ pub async fn run_exec(
     command: &str,
     timeout: u64,
     working_dir: Option<&str>,
+    json_output: bool,
 ) -> Result<()> {
     let ctx = create_context(Arc::clone(&config));
 
@@ -694,7 +735,20 @@ pub async fn run_exec(
     }
 
     // Print the output
-    println!("{}", response.output);
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "host": host,
+                "command": command,
+                "exit_code": response.exit_code,
+                "output": response.output,
+            }))
+            .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+    } else {
+        println!("{}", response.output);
+    }
 
     // Propagate remote exit code to CLI exit code
     if response.exit_code != 0 {
@@ -737,7 +791,53 @@ fn audit_status_lines(audit: &AuditConfig) -> Vec<String> {
 ///
 /// This function is infallible in practice but returns `Result` for
 /// consistency with other CLI commands.
-pub async fn run_status(config: Arc<Config>) -> Result<()> {
+pub async fn run_status(config: Arc<Config>, json_output: bool) -> Result<()> {
+    if json_output {
+        let hosts: serde_json::Map<String, serde_json::Value> = config
+            .hosts
+            .iter()
+            .map(|(alias, host)| {
+                (
+                    alias.clone(),
+                    serde_json::json!({
+                        "hostname": host.hostname,
+                        "port": host.port,
+                        "user": host.user,
+                        "auth": auth_type_name(&host.auth),
+                        "host_key_verification": format!("{:?}", host.host_key_verification),
+                        "proxy_jump": host.proxy_jump,
+                        "description": host.description,
+                    }),
+                )
+            })
+            .collect();
+
+        let report = serde_json::json!({
+            "security_mode": format!("{:?}", config.security.mode),
+            "whitelist": config.security.whitelist,
+            "blacklist": config.security.blacklist,
+            "hosts": hosts,
+            "limits": {
+                "command_timeout_seconds": config.limits.command_timeout_seconds,
+                "connection_timeout_seconds": config.limits.connection_timeout_seconds,
+                "max_output_bytes": config.limits.max_output_bytes,
+                "max_concurrent_commands": config.limits.max_concurrent_commands,
+                "retry_attempts": config.limits.retry_attempts,
+            },
+            "audit": {
+                "enabled": config.audit.enabled,
+                "path": config.audit.path.display().to_string(),
+                "written_by": "mcp-server-only",
+            },
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+        return Ok(());
+    }
+
     println!("Bridge MCP Status");
     println!("=====================\n");
 
@@ -830,6 +930,7 @@ pub async fn run_history(
     config: Arc<Config>,
     limit: usize,
     host_filter: Option<&str>,
+    json_output: bool,
 ) -> Result<()> {
     let ctx = create_context(config);
 
@@ -838,6 +939,35 @@ pub async fn run_history(
     } else {
         ctx.history.recent(limit)
     };
+
+    if json_output {
+        let rows: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "timestamp": e.timestamp.to_rfc3339(),
+                    "host": e.host,
+                    "command": e.command,
+                    "success": e.success,
+                    // `u32::MAX` is the sentinel for "never produced an exit
+                    // code" (the command errored before running). Emit null
+                    // rather than 4294967295, which a consumer would read as a
+                    // real status.
+                    "exit_code": (e.exit_code != u32::MAX).then_some(e.exit_code),
+                    "duration_ms": e.duration_ms,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "entries": rows,
+                "total": entries.len(),
+            }))
+            .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+        return Ok(());
+    }
 
     if entries.is_empty() {
         println!("No command history available.");
@@ -2315,7 +2445,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2372,7 +2502,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2402,7 +2532,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2426,7 +2556,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2453,7 +2583,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 10, None).await;
+        let result = run_history(Arc::new(config), 10, None, false).await;
         assert!(result.is_ok());
     }
 
@@ -2478,7 +2608,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 10, Some("nonexistent-host")).await;
+        let result = run_history(Arc::new(config), 10, Some("nonexistent-host"), false).await;
         assert!(result.is_ok());
     }
 
@@ -2503,7 +2633,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 0, None).await;
+        let result = run_history(Arc::new(config), 0, None, false).await;
         assert!(result.is_ok());
     }
 
@@ -2528,7 +2658,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 1000, None).await;
+        let result = run_history(Arc::new(config), 1000, None, false).await;
         assert!(result.is_ok());
     }
 
@@ -2555,7 +2685,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_exec(Arc::new(config), "unknown-host", "ls", 30, None).await;
+        let result = run_exec(Arc::new(config), "unknown-host", "ls", 30, None, false).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -2622,7 +2752,7 @@ mod tests {
         };
 
         // Try to execute a command not in whitelist
-        let result = run_exec(Arc::new(config), "test", "rm -rf /", 30, None).await;
+        let result = run_exec(Arc::new(config), "test", "rm -rf /", 30, None, false).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -3390,7 +3520,7 @@ mod tests {
         };
 
         // Should succeed (no hosts is a warning, not error)
-        let result = run_validate(Arc::new(config)).await;
+        let result = run_validate(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -3444,7 +3574,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_validate(Arc::new(config)).await;
+        let result = run_validate(Arc::new(config), false).await;
         assert!(result.is_err());
     }
 
@@ -3471,7 +3601,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_config_diff(Arc::new(config)).await;
+        let result = run_config_diff(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -3500,7 +3630,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_config_diff(Arc::new(config)).await;
+        let result = run_config_diff(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 

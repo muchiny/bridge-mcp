@@ -118,13 +118,21 @@ async fn main() -> Result<()> {
                 println!("[dry-run] Timeout: {timeout}s");
                 return Ok(());
             }
-            run_exec(config, &host, &command, timeout, working_dir.as_deref()).await?;
+            run_exec(
+                config,
+                &host,
+                &command,
+                timeout,
+                working_dir.as_deref(),
+                cli.json,
+            )
+            .await?;
         }
         Some(Commands::Status) => {
-            run_status(config).await?;
+            run_status(config, cli.json).await?;
         }
         Some(Commands::History { limit, host }) => {
-            run_history(config, limit, host.as_deref()).await?;
+            run_history(config, limit, host.as_deref(), cli.json).await?;
         }
         Some(Commands::Completions { shell }) => {
             use clap::CommandFactory;
@@ -193,10 +201,10 @@ async fn main() -> Result<()> {
             .await?;
         }
         Some(Commands::Validate) => {
-            run_validate(config).await?;
+            run_validate(config, cli.json).await?;
         }
         Some(Commands::ConfigDiff) => {
-            run_config_diff(config).await?;
+            run_config_diff(config, cli.json).await?;
         }
         Some(Commands::Upload {
             host,
