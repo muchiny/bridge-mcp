@@ -25,7 +25,8 @@ use crate::security::{
     AuditEvent, AuditLogger, CommandResult, CommandValidator, RateLimiter, Sanitizer,
 };
 use crate::ssh::{
-    SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error, with_retry_if,
+    SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error_for,
+    with_retry_if,
 };
 
 /// Try to forward a `tools/call` request to a running daemon over its
@@ -711,7 +712,9 @@ pub async fn run_exec(
                 }
             }
         },
-        is_retryable_error,
+        // `bridge-mcp exec` runs an arbitrary command; see `ssh_exec`. A
+        // timeout does not prove it never ran, so it is not replayed.
+        |e| is_retryable_error_for(e, false),
     )
     .await;
 

@@ -16,7 +16,7 @@ use crate::mcp::protocol::ToolCallResult;
 use crate::mcp::standard_tool::apply_reduction;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
-use crate::ssh::{is_retryable_error, with_retry_if};
+use crate::ssh::{is_retryable_error_for, with_retry_if};
 
 /// Metric types that can be collected
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -202,7 +202,10 @@ impl ToolHandler for SshMetricsHandler {
                     }
                 }
             },
-            is_retryable_error,
+            // Read-only: replaying cannot change the outcome, so a timeout
+            // stays retryable. Stated explicitly rather than inherited from
+            // the transport-only predicate.
+            |e| is_retryable_error_for(e, true),
         )
         .await;
 
