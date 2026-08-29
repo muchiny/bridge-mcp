@@ -1,7 +1,10 @@
 //! Progressive-discovery meta-tools.
 //!
-//! 338 tools is enough to overflow the context window of a small client when
-//! `tools/list` is called eagerly. These three meta-tools let a client
+//! A few hundred tools is enough to overflow the context window of a small
+//! client when `tools/list` is called eagerly (the registry compiles 476, and
+//! a config typically enables a few hundred of them — the exact number is a
+//! deployment property, so it is deliberately not quoted here). These three
+//! meta-tools let a client
 //! discover the registry on demand: browse groups, search by keyword, then
 //! fetch the full schema only for the one tool it actually needs.
 //!
@@ -101,7 +104,7 @@ pub fn definitions() -> Vec<Tool> {
             description:
                 "Return the full schema and reduction strategy for a single tool. Use after \
                  `mcp_search_tools` to fetch the one schema you need; avoids the ~100 K-token \
-                 cost of loading all 338 schemas up front."
+                 cost of loading every enabled schema up front."
                     .to_string(),
             input_schema: json!({
                 "type": "object",

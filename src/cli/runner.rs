@@ -1289,7 +1289,16 @@ pub async fn run_tool(
 
     // Slow path: stateless in-process execution.
     let ctx = create_context(Arc::clone(&config));
-    let result = registry.execute(tool_name, args, &ctx).await?;
+    // Strip interactive App components, exactly as `McpServer` does before it
+    // answers a `tools/call`. This path calls the registry directly and so
+    // bypassed that filter: a terminal has nothing to render an App with, and
+    // serializing it made the blob the bulk of the output — on `ssh_storage_df`
+    // 3377 of 3950 bytes, and 412 bytes appended to a 6-byte answer that
+    // `jq_filter` had just reduced. `structured_content` survives, as there.
+    let result = registry
+        .execute(tool_name, args, &ctx)
+        .await?
+        .without_apps();
 
     let is_error = result.is_error.unwrap_or(false);
     let exit_code = i32::from(is_error);
@@ -1374,7 +1383,9 @@ pub async fn run_describe_tool(
     tool_name: &str,
     json_output: bool,
 ) -> Result<()> {
-    use crate::mcp::registry::{create_filtered_registry, inject_reduction_schema, tool_group};
+    use crate::mcp::registry::{
+        create_filtered_registry, inject_reduction_schema, tool_annotations, tool_group,
+    };
 
     let registry = create_filtered_registry(&config.tool_groups);
     let handler = registry
@@ -1386,6 +1397,10 @@ pub async fn run_describe_tool(
     let schema = handler.schema();
     let group = tool_group(tool_name);
     let output_kind = handler.output_kind();
+    // `mcp_describe_tool` has always returned these; the CLI dropped them, so
+    // `describe-tool ssh_exec` gave no hint that it is annotated destructive.
+    // Knowing that before invoking is the whole point of the annotation.
+    let annotations = tool_annotations(tool_name);
 
     // Parse and enrich the schema with data-reduction params (jq_filter, columns, etc.)
     let mut input_schema: serde_json::Value =
@@ -1399,6 +1414,7 @@ pub async fn run_describe_tool(
             "description": schema.description,
             "output_kind": format!("{output_kind:?}"),
             "reduction_strategy": output_kind.strategy_hint(),
+            "annotations": annotations,
             "input_schema": input_schema,
         });
         let json =
@@ -1411,6 +1427,25 @@ pub async fn run_describe_tool(
         println!();
         println!("Output Kind: {output_kind:?}");
         println!("Reduction Strategy: {}", output_kind.strategy_hint());
+
+        let hint = |flag: Option<bool>| match flag {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unset",
+        };
+        println!(
+            "Annotations: destructive={} read-only={} idempotent={}",
+            hint(annotations.destructive_hint),
+            hint(annotations.read_only_hint),
+            hint(annotations.idempotent_hint),
+        );
+        if annotations.destructive_hint == Some(true) {
+            println!(
+                "  WARNING: destructive. Under `security.require_elicitation_on_destructive` \
+                 an MCP client is asked to confirm before this runs."
+            );
+        }
+
         println!("\nInput Schema:");
 
         // Pretty-print the schema, showing required fields and property types
