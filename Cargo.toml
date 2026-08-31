@@ -78,7 +78,7 @@ subtle = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "net", "process", "time", "fs", "io-std", "macros", "sync", "signal"] }
 
 # SSH
-russh = "0.62"
+russh = "0.63"
 russh-sftp = "2.1"
 
 # Serialization
