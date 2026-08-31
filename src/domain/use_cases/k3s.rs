@@ -29,7 +29,7 @@ pub fn k3s_detect_prefix(k3s_bin: Option<&str>) -> String {
     {
         return format!("{bin} ");
     }
-    "$(if command -v k3s &>/dev/null; then echo k3s; \
+    "$(if command -v k3s >/dev/null 2>&1; then echo k3s; \
      else echo 'k3s not installed on host' >&2; echo false; fi) "
         .to_string()
 }
@@ -604,7 +604,7 @@ mod tests {
     fn test_detect_prefix_none_uses_subshell() {
         let prefix = k3s_detect_prefix(None);
         assert!(prefix.contains("command -v k3s"), "prefix: {prefix}");
-        assert!(prefix.contains("&>/dev/null"), "prefix: {prefix}");
+        assert!(prefix.contains(">/dev/null 2>&1"), "prefix: {prefix}");
     }
 
     #[test]

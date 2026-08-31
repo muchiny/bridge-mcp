@@ -770,7 +770,12 @@ fn default_blacklist() -> Vec<String> {
         r"(?i)rm\s+-rf\s+/".to_string(),
         r"(?i)mkfs\.".to_string(),
         r"(?i)dd\s+if=".to_string(),
-        r"(?i)>\s*/dev/".to_string(),
+        // Device families only. The original `>\s*/dev/` also denied
+        // `>/dev/null`, `>/dev/stdout` and `>/dev/stderr` — the standard,
+        // harmless redirect targets — which silently blocked 43 built-in
+        // command builders under the default config. Enumerated rather than
+        // excluded because the `regex` crate has no lookahead.
+        r"(?i)>\s*/dev/(sd|hd|vd|xvd|nvme|mmcblk|loop|dm-|md[0-9]|sr[0-9]|fd[0-9]|disk|mem\b|kmem\b|port\b)".to_string(),
         r"(?i)chmod\s+777".to_string(),
         r"(?i)curl.*\|.*sh".to_string(),
         r"(?i)wget.*\|.*sh".to_string(),
@@ -1513,6 +1518,47 @@ mod tests {
         assert!(blacklist.iter().any(|p| p.contains("poweroff")));
         assert!(blacklist.iter().any(|p| p.contains("shutdown")));
         assert!(blacklist.iter().any(|p| p.contains("iptables")));
+    }
+
+    /// The device-redirect pattern must still stop a disk write, and must stop
+    /// blocking the redirect targets every shell command uses.
+    ///
+    /// The original `>\s*/dev/` denied both. That is why 43 command builders
+    /// wrote `&>/dev/null`: not because it was portable — it is bash-only and
+    /// breaks under dash — but because it looked like it dodged the blacklist.
+    /// It did not; `&>/dev/null` contains `>/dev/` and matched too, so under
+    /// the default config those tools were denied either way.
+    #[test]
+    fn default_blacklist_blocks_device_writes_but_not_dev_null() {
+        let pattern = default_blacklist()
+            .into_iter()
+            .find(|p| p.contains("/dev/"))
+            .expect("a device-redirect pattern must exist");
+        let re = regex::Regex::new(&pattern).expect("pattern must compile");
+
+        for denied in [
+            "dd if=/dev/zero > /dev/sda",
+            "cat x >/dev/nvme0n1",
+            "echo 1 > /dev/mmcblk0",
+            "echo 1 >/dev/hda",
+            "echo 1 > /dev/vda",
+            "echo 1 >/dev/loop0",
+            "echo 1 > /dev/mem",
+            "echo 1 >/dev/port",
+        ] {
+            assert!(re.is_match(denied), "must still be denied: {denied}");
+        }
+
+        for allowed in [
+            "kubectl get pods >/dev/null 2>&1",
+            "command -v jq >/dev/null",
+            "echo hi > /dev/stdout",
+            "echo err >/dev/stderr",
+            "echo x >/dev/fd/1",
+            "cat < /dev/urandom",
+        ] {
+            assert!(!re.is_match(allowed), "must be allowed: {allowed}");
+        }
     }
 
     // ============== HostKeyVerification Tests ==============

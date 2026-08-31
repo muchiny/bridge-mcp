@@ -35,9 +35,9 @@ pub fn kubectl_detect_prefix(kubectl_bin: Option<&str>) -> String {
             kubectl_detect_prefix(None)
         }
     } else {
-        "$(if command -v kubectl &>/dev/null; then echo kubectl; \
-         elif command -v k3s &>/dev/null; then echo 'k3s kubectl'; \
-         elif command -v microk8s &>/dev/null; then echo 'microk8s kubectl'; \
+        "$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; \
+         elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; \
+         elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; \
          else echo 'kubectl/k3s/microk8s not installed on host' >&2; echo false; fi) "
             .to_string()
     }
@@ -56,7 +56,7 @@ pub fn helm_detect_prefix(helm_bin: Option<&str>) -> String {
             helm_detect_prefix(None)
         }
     } else {
-        "$(if command -v helm &>/dev/null; then echo helm; \
+        "$(if command -v helm >/dev/null 2>&1; then echo helm; \
          else echo 'helm not installed on host' >&2; echo false; fi) "
             .to_string()
     }

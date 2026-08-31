@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
+reading it. Every item below was reproduced before the fix and measured after.
+
+### BREAKING
+
+- **`bridge-mcp tool <name>` rejects arguments the tool does not declare**,
+  exiting 5. Any invocation passing an extra key stops working. They used to be
+  parsed and dropped in silence, and the keys most likely to be mistyped are the
+  reduction params — `jq_fitler=…` returned the full unreduced output, which
+  looks exactly like a working call. A close miss now names its fix
+  ("Did you mean `jq_filter`?"). `--json-args` is unaffected.
+
+- **A tool annotated `destructiveHint` is now gated in the CLI.** It prompts on
+  a terminal and is refused with exit 4 when stdin is not one; scripts must pass
+  `--yes`, which is logged. Previously the direct path ran destructive tools
+  unchallenged while the daemon path refused them, so the outcome depended on
+  whether a daemon happened to be running — and the default, no daemon, was the
+  unguarded one. The gate follows
+  `security.require_elicitation_on_destructive`; set it false to disable.
+
+### Fixed
+
+- **The daemon refused all 279 tools.** With a daemon up, every
+  `bridge-mcp tool …` returned `-32602 missing
+  _meta["io.modelcontextprotocol/protocolVersion"]`. The CLI forwards
+  `tools/call` over the Unix socket and the Modern-only cut made the `_meta`
+  envelope mandatory; nothing updated the forwarding client. Nothing covered
+  `try_forward_to_daemon`, so a green suite stayed green.
+
+- **The direct CLI path printed MCP Apps components.** 3377 of 3950 bytes on
+  `ssh_storage_df`, and 412 bytes appended to a 6-byte answer `jq_filter` had
+  just reduced — a 69x overhead on the reduced payload. `McpServer` already
+  stripped them; the stateless path called the registry and never met that
+  filter. Now 3950 → 573 bytes.
+
+- **`--json` was ignored by five of seven commands** — `status`, `validate`,
+  `config-diff`, `history`, `exec` — while its help text claimed "applies to all
+  commands". A script parsing `bridge-mcp --json status` got prose and exit 0.
+
+- **A timed-out command was replayed up to three times.** `timeout_seconds=5`
+  blocked for 15s, and worse, a timeout proves nothing about whether the remote
+  command ran, so an arbitrary command was silently re-run.
+  `is_retryable_error_for` already existed for this; four callers driving their
+  own retry loop never met it.
+
+- **Output over `max_output_bytes` failed outright.** The caller's own
+  `max_output` never ran, `save_output=<path>` wrote zero bytes, and the pooled
+  connection was discarded — so the one case truncation and pagination exist for
+  was the one case that failed. Reading now stops at the cap and says so, naming
+  both the limit and what the command actually produced.
+
+- **`describe-tool` printed no annotations**, so a CLI user could not learn that
+  `ssh_exec` is destructive before invoking it.
+
+- The jq parse error echoed the caller's own filter back inside Rust struct
+  syntax (`(File { code: …, path: () }, Lex(…))`).
+
+### Added
+
+- **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
+  the other 475 did not, so on a host where the interesting state is root-owned
+  every specialised tool failed and the only way through was `ssh_exec` — which
+  the server's own instructions tell clients to avoid. On a K3s host that was
+  the whole `cri` group, `ssh_firewall_status`, and every systemd write.
+
+  Elevation is applied by the shared pipeline **before** the blacklist runs, so
+  `sudo=true` cannot launder a denied command past the policy. The whole line is
+  wrapped rather than prefixed — a bare `sudo` leaves redirections and pipes
+  unelevated. `sudo -n`, so a password prompt fails immediately instead of
+  becoming a command timeout that names the wrong cause. `sudo_user` is
+  constrained to `[A-Za-z0-9._-]` and refused if it starts with `-`. Windows
+  hosts refuse elevation and do not advertise the params.
+
+  **The wrapper shell is bash, and that is forced rather than chosen:** 43
+  domain builders emit `&>/dev/null`, which is bash-only. Under dash that
+  backgrounds the probe and leaks its output, corrupting any builder that wraps
+  one in a command substitution. Those 43 remain a latent portability bug on a
+  dash-login host.
+
+### Known issues
+
+- The output cache is MCP-server-only, so CLI truncation emits no `output_id`
+  and the omitted bytes are unrecoverable. The tool says so when called from the
+  CLI; the docs previously implied otherwise.
+- `limits.max_concurrent_commands` does not apply to CLI invocations, which are
+  one process each.
+
 ## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
