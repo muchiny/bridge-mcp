@@ -1376,9 +1376,33 @@ pub async fn run_tool(
             serde_json::to_string(&schema).ok()
         });
         let schema_ref = enriched_schema.as_ref().and_then(|opt| opt.as_deref());
+        // Keys the tool actually declares, including the reduction params
+        // injected above. Empty when the schema could not be parsed, in which
+        // case validation is skipped rather than guessed at.
+        let known_keys: Vec<String> = schema_ref
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|schema| {
+                schema
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|props| props.keys().cloned().collect())
+            })
+            .unwrap_or_default();
+
         let mut map = serde_json::Map::new();
         for pair in kv_args {
             if let Some((key, value)) = pair.split_once('=') {
+                // An unknown key used to be accepted in silence, so a typo in
+                // `jq_filter` or `columns` produced a full, unreduced result
+                // that looked exactly like a working one.
+                if !known_keys.is_empty() && !known_keys.iter().any(|k| k == key) {
+                    let hint = nearest_key(key, &known_keys)
+                        .map_or_else(String::new, |k| format!(". Did you mean `{k}`?"));
+                    return Err(BridgeError::Config(format!(
+                        "Unknown argument `{key}` for tool `{tool_name}`{hint}\n\
+                         Run `bridge-mcp describe-tool {tool_name}` to list valid arguments."
+                    )));
+                }
                 let coerced = coerce_value(value, key, schema_ref);
                 map.insert(key.to_string(), coerced);
             } else {
@@ -1461,6 +1485,42 @@ pub async fn run_tool(
 }
 
 /// Coerce a string value to the appropriate JSON type based on the tool's input schema.
+/// Levenshtein distance, capped implicitly by the short lengths involved.
+///
+/// Written out rather than pulled in: the only edit-distance need in the crate
+/// is suggesting an argument name, over strings a few characters long.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut cur = vec![0usize; b_chars.len() + 1];
+
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b_chars.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b_chars.len()]
+}
+
+/// The closest declared argument name to `key`, if one is close enough to be
+/// worth suggesting.
+///
+/// The threshold scales with the name's length so `hostt` -> `host` is offered
+/// while an unrelated word is not: suggesting a wrong name is worse than
+/// suggesting none, because it sends the reader looking in the wrong place.
+fn nearest_key<'a>(key: &str, candidates: &'a [String]) -> Option<&'a str> {
+    let budget = (key.len() / 3).max(1);
+    candidates
+        .iter()
+        .map(|c| (edit_distance(key, c), c.as_str()))
+        .filter(|(d, _)| *d <= budget)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
 fn coerce_value(value: &str, key: &str, schema_json: Option<&str>) -> serde_json::Value {
     // Try to extract the expected type from the JSON schema
     if let Some(prop_type) = schema_json
@@ -1653,6 +1713,39 @@ mod tests {
     fn test_data_reduction_flags_is_empty_by_default() {
         let flags = DataReductionFlags::default();
         assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn edit_distance_matches_known_pairs() {
+        assert_eq!(edit_distance("host", "host"), 0);
+        assert_eq!(edit_distance("hostt", "host"), 1);
+        assert_eq!(edit_distance("jq_filtr", "jq_filter"), 1);
+        assert_eq!(edit_distance("", "host"), 4);
+        assert_eq!(edit_distance("host", ""), 4);
+    }
+
+    #[test]
+    fn nearest_key_suggests_a_close_typo() {
+        let keys = [
+            "host".to_string(),
+            "command".to_string(),
+            "jq_filter".to_string(),
+        ];
+        assert_eq!(nearest_key("hostt", &keys), Some("host"));
+        assert_eq!(nearest_key("jq_filtr", &keys), Some("jq_filter"));
+    }
+
+    /// A wrong suggestion is worse than none: it sends the reader looking in
+    /// the wrong place. Unrelated words must fall outside the budget.
+    #[test]
+    fn nearest_key_declines_when_nothing_is_close() {
+        let keys = [
+            "host".to_string(),
+            "command".to_string(),
+            "jq_filter".to_string(),
+        ];
+        assert_eq!(nearest_key("param_bidon", &keys), None);
+        assert_eq!(nearest_key("zzz", &keys), None);
     }
 
     /// A daemon-forwarded call MUST carry the `_meta` envelope.
@@ -3329,6 +3422,20 @@ mod tests {
             // Should not panic
             let _ = format!("{:?}", host.host_key_verification);
         }
+    }
+
+    /// Deletion, substitution and the empty-candidate list — the cases the
+    /// existing `edit_distance_matches_known_pairs` and `nearest_key_*` tests
+    /// above do not reach.
+    #[test]
+    fn edit_distance_counts_deletions_and_substitutions() {
+        assert_eq!(edit_distance("hos", "host"), 1);
+        assert_eq!(edit_distance("hoat", "host"), 1);
+    }
+
+    #[test]
+    fn nearest_key_handles_no_candidates() {
+        assert_eq!(nearest_key("host", &[]), None);
     }
 
     // ============== coerce_value Tests ==============
