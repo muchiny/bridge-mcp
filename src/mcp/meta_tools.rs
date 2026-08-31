@@ -236,9 +236,14 @@ fn list_groups(registry: &ToolRegistry) -> ToolCallResult {
 ///
 /// Tiers: exact name, name prefix, name substring, description substring. The
 /// MCP search path had no ranking at all and cut with `Vec::truncate`, so the
-/// best hit was routinely thrown away (audit G-14, 2026-08-19). The CLI path
-/// (`src/cli/runner.rs`) already sorted by name; this adds the tiers on top.
-fn relevance_rank(name: &str, description: &str, query_lower: &str) -> Option<u8> {
+/// best hit was routinely thrown away (audit G-14, 2026-08-19).
+///
+/// `pub(crate)` so `list-tools --search` ranks identically. It did not: the CLI
+/// filtered in name-sorted order only, so `--search kubernetes` led with
+/// `ssh_docker_stats` and `ssh_exec` — description matches — ahead of the 83
+/// tools whose names carry the word. Two search surfaces over one registry
+/// should not disagree about what "best match" means.
+pub(crate) fn relevance_rank(name: &str, description: &str, query_lower: &str) -> Option<u8> {
     let name_lower = name.to_lowercase();
     if name_lower == query_lower {
         return Some(0);

@@ -299,13 +299,24 @@ pub async fn run_list_tools(
         tools.retain(|t| tool_group(&t.name) == group_filter);
     }
 
-    // Filter by search keyword (matches name or description, case-insensitive)
+    // Filter and rank by search keyword, using the same tiers as
+    // `mcp_search_tools`: exact name, name prefix, name substring, description
+    // substring. Filtering alone left the list in name order, so
+    // `--search kubernetes` led with `ssh_docker_stats` — a description match —
+    // ahead of the 83 tools with the word in their name.
     if let Some(query) = search {
         let query_lower = query.to_lowercase();
-        tools.retain(|t| {
-            t.name.to_lowercase().contains(&query_lower)
-                || t.description.to_lowercase().contains(&query_lower)
-        });
+        let mut ranked: Vec<(u8, _)> = tools
+            .into_iter()
+            .filter_map(|t| {
+                crate::mcp::meta_tools::relevance_rank(&t.name, &t.description, &query_lower)
+                    .map(|rank| (rank, t))
+            })
+            .collect();
+        // `list_tools()` is name-sorted and `sort_by_key` is stable, so ties
+        // stay alphabetical.
+        ranked.sort_by_key(|(rank, _)| *rank);
+        tools = ranked.into_iter().map(|(_, t)| t).collect();
     }
 
     // Groups-only mode: show just group names with tool counts

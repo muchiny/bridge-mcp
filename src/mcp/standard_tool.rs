@@ -376,7 +376,8 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 BridgeError::CommandDenied { reason } => reason.clone(),
                 _ => e.to_string(),
             };
-            ctx.execute_use_case.log_denied(&host, &command, &reason);
+            ctx.execute_use_case
+                .log_denied_for_tool(T::NAME, &host, &command, &reason);
             return Err(e);
         }
 
@@ -481,13 +482,13 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // Step 12: Log failure
         let output = output.inspect_err(|e| {
             ctx.execute_use_case
-                .log_failure(&host, &command, &e.to_string());
+                .log_failure_for_tool(T::NAME, &host, &command, &e.to_string());
         })?;
 
         // Step 13: Process success (audit + history + sanitize)
-        let mut response = ctx
-            .execute_use_case
-            .process_success(&host, &command, &output.into());
+        let mut response =
+            ctx.execute_use_case
+                .process_success_for_tool(T::NAME, &host, &command, &output.into());
         let raw_chars = response.stdout.len();
 
         // Step 14: Warn on non-zero exit

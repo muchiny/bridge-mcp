@@ -172,6 +172,39 @@ impl ExecuteCommandUseCase {
             .log(AuditEvent::denied(host, command, reason));
     }
 
+    /// Log a denied command, recording which tool asked for it.
+    ///
+    /// `AuditEvent::event_type` is the literal `"ssh_exec"` for every event, so
+    /// an audit line could not say whether a denial came from `ssh_exec` itself
+    /// or from `ssh_file_write`. `tool_name` has existed on the event since it
+    /// was added but nothing in production ever set it.
+    pub fn log_denied_for_tool(&self, tool: &str, host: &str, command: &str, reason: &str) {
+        self.audit_logger
+            .log(AuditEvent::denied(host, command, reason).with_tool_name(tool));
+    }
+
+    /// Process a successful execution, recording which tool ran it.
+    ///
+    /// See [`Self::log_denied_for_tool`] for why the name is worth carrying.
+    #[must_use]
+    pub fn process_success_for_tool(
+        &self,
+        tool: &str,
+        host: &str,
+        command: &str,
+        output: &CommandOutput,
+    ) -> ExecuteCommandResponse {
+        let redacted = self.sanitizer.sanitize(command);
+        self.record_success_redacted_for_tool(
+            Some(tool),
+            host,
+            &redacted,
+            output.exit_code,
+            output.duration_ms,
+        );
+        self.finish_success(host, &redacted, output)
+    }
+
     /// Process the output from a successful command execution
     #[must_use]
     pub fn process_success(
@@ -187,16 +220,27 @@ impl ExecuteCommandUseCase {
         let redacted = self.sanitizer.sanitize(command);
 
         self.record_success_redacted(host, &redacted, output.exit_code, output.duration_ms);
+        self.finish_success(host, &redacted, output)
+    }
 
-        // Format and sanitize the result. Pass the already-redacted command so
-        // the raw value never appears in `result` even transiently — the
-        // outer `sanitize(&result)` below still runs (it has stdout/stderr
-        // secrets to catch), but the "no raw command past this point"
-        // invariant no longer depends on that second pass alone.
-        let result = Self::format_output(host, &redacted, output);
+    /// Format and sanitize a successful result, after it has been recorded.
+    ///
+    /// Split out so the tool-named variant records a different audit event
+    /// without duplicating any of this.
+    ///
+    /// Takes the already-redacted command so the raw value never appears in
+    /// `result` even transiently — the outer `sanitize(&result)` still runs (it
+    /// has stdout/stderr secrets to catch), but the "no raw command past this
+    /// point" invariant no longer depends on that second pass alone.
+    fn finish_success(
+        &self,
+        host: &str,
+        redacted: &str,
+        output: &CommandOutput,
+    ) -> ExecuteCommandResponse {
+        let result = Self::format_output(host, redacted, output);
         let sanitized = self.sanitizer.sanitize(&result).into_owned();
 
-        // Also sanitize stdout/stderr separately for structured content
         let sanitized_stdout = self.sanitizer.sanitize(&output.stdout).into_owned();
         let sanitized_stderr = self.sanitizer.sanitize(&output.stderr).into_owned();
 
@@ -207,7 +251,7 @@ impl ExecuteCommandUseCase {
             stdout: sanitized_stdout,
             stderr: sanitized_stderr,
             host: host.to_string(),
-            command: redacted.into_owned(),
+            command: redacted.to_string(),
         }
     }
 
@@ -235,16 +279,51 @@ impl ExecuteCommandUseCase {
         exit_code: u32,
         duration_ms: u64,
     ) {
-        self.audit_logger.log(AuditEvent::new(
+        self.record_success_redacted_for_tool(None, host, redacted, exit_code, duration_ms);
+    }
+
+    /// As [`Self::record_success_redacted`], carrying the tool name into the
+    /// audit event when the caller knows it.
+    fn record_success_redacted_for_tool(
+        &self,
+        tool: Option<&str>,
+        host: &str,
+        redacted: &str,
+        exit_code: u32,
+        duration_ms: u64,
+    ) {
+        let mut event = AuditEvent::new(
             host,
             redacted,
             CommandResult::Success {
                 exit_code,
                 duration_ms,
             },
-        ));
+        );
+        if let Some(name) = tool {
+            event = event.with_tool_name(name);
+        }
+        self.audit_logger.log(event);
         self.history
             .record_success(host, redacted, exit_code, duration_ms);
+    }
+
+    /// Log a failed command execution, recording which tool ran it.
+    ///
+    /// See [`Self::log_denied_for_tool`] for why the name is worth carrying.
+    pub fn log_failure_for_tool(&self, tool: &str, host: &str, command: &str, error: &str) {
+        let redacted = self.sanitizer.sanitize(command);
+        self.audit_logger.log(
+            AuditEvent::new(
+                host,
+                &redacted,
+                CommandResult::Error {
+                    message: error.to_string(),
+                },
+            )
+            .with_tool_name(tool),
+        );
+        self.history.record_failure(host, &redacted);
     }
 
     /// Log a failed command execution
