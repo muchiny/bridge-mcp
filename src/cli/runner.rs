@@ -1354,6 +1354,7 @@ pub async fn run_tool(
     json_args: Option<&str>,
     json_output: bool,
     data_reduction: DataReductionFlags,
+    assume_yes: bool,
 ) -> Result<i32> {
     use crate::mcp::registry::{create_filtered_registry, inject_reduction_schema};
 
@@ -1418,6 +1419,15 @@ pub async fn run_tool(
             &data_reduction,
         ))
     };
+
+    // The destructive gate. This runs before either execution path, because
+    // which one serves a call is an accident of whether a daemon happens to be
+    // up — and that decided whether a destructive tool was refused or ran
+    // unchallenged. The daemon path is refused server-side (the CLI declares
+    // `clientCapabilities: {}`, and the check is fail-closed); the direct path
+    // called the registry and never met the gate at all. Same config, same
+    // command, opposite outcome, with the default being the unguarded one.
+    confirm_destructive(tool_name, args.as_ref(), assume_yes, &config)?;
 
     // Fast path: if the local daemon is running, forward this tool call
     // to it over the Unix socket. This reuses the daemon's shared SSH
@@ -1485,6 +1495,85 @@ pub async fn run_tool(
 }
 
 /// Coerce a string value to the appropriate JSON type based on the tool's input schema.
+/// Ask before running a tool annotated `destructiveHint`.
+///
+/// `security.require_elicitation_on_destructive` is enforced by the MCP server
+/// through an elicitation round-trip. A CLI process has no such channel, so the
+/// policy had no representation here at all: the direct path ran destructive
+/// tools unchallenged while the daemon path refused them, and which one served
+/// a given call depended only on whether a daemon happened to be running.
+///
+/// On a terminal the question is asked. Without one — a script, a CI job, a
+/// pipe — there is nobody to ask, so the call is refused unless `--yes` said in
+/// advance that it is intended. Refusing by default matches the server's
+/// fail-closed posture; `--yes` keeps the scripted case possible and explicit.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] when the operator declines, or when
+/// stdin is not a terminal and `--yes` was not given.
+fn confirm_destructive(
+    tool_name: &str,
+    args: Option<&serde_json::Value>,
+    assume_yes: bool,
+    config: &Config,
+) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+
+    if !config.security.require_elicitation_on_destructive {
+        return Ok(());
+    }
+    if crate::mcp::registry::tool_annotations(tool_name).destructive_hint != Some(true) {
+        return Ok(());
+    }
+
+    // Rendered for both the prompt and the refusal: whoever has to decide, or
+    // has to read why a script stopped, needs to see what would have run.
+    let rendered = args
+        .and_then(|a| serde_json::to_string(a).ok())
+        .unwrap_or_else(|| "{}".to_string());
+
+    if assume_yes {
+        // Recorded, not merely allowed: `--yes` is the point at which a human
+        // delegated the decision, and that belongs in the trail.
+        tracing::warn!(
+            tool = tool_name,
+            args = %rendered,
+            "destructive tool confirmed by --yes"
+        );
+        return Ok(());
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "`{tool_name}` is annotated destructive and stdin is not a terminal, \
+                 so there is nobody to confirm with. Pass --yes to confirm in advance, \
+                 or set security.require_elicitation_on_destructive: false to disable \
+                 this gate entirely."
+            ),
+        });
+    }
+
+    eprintln!("\n  DESTRUCTIVE: {tool_name}");
+    eprintln!("  {rendered}");
+    eprint!("  Proceed? [y/N] ");
+    let _ = std::io::stderr().flush();
+
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(BridgeError::Io)?;
+
+    if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!("`{tool_name}` was not confirmed"),
+        })
+    }
+}
+
 /// Levenshtein distance, capped implicitly by the short lengths involved.
 ///
 /// Written out rather than pulled in: the only edit-distance need in the crate
@@ -3422,6 +3511,72 @@ mod tests {
             // Should not panic
             let _ = format!("{:?}", host.host_key_verification);
         }
+    }
+
+    // ============== destructive gate Tests ==============
+    //
+    // The prompt branch needs a terminal on stdin, which a test harness does
+    // not have. Under `cargo test` stdin is never a TTY, so these exercise the
+    // three branches that decide without asking — which are also the three
+    // that decide what a script gets.
+
+    fn gate_config(require: bool) -> Config {
+        let mut config = Config::default();
+        config.security.require_elicitation_on_destructive = require;
+        config
+    }
+
+    #[test]
+    fn destructive_gate_refuses_without_a_terminal() {
+        let err = confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi", "command": "echo hi"})),
+            false,
+            &gate_config(true),
+        )
+        .expect_err("a destructive tool must not run unconfirmed off a terminal");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--yes"),
+            "the refusal must name the way forward, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn destructive_gate_lets_yes_through() {
+        confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi"})),
+            true,
+            &gate_config(true),
+        )
+        .expect("--yes is the scripted confirmation");
+    }
+
+    /// The gate is the CLI's half of `require_elicitation_on_destructive`, so
+    /// turning that policy off must turn the gate off with it — otherwise the
+    /// setting means one thing over MCP and another here.
+    #[test]
+    fn destructive_gate_honours_the_policy_switch() {
+        confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi"})),
+            false,
+            &gate_config(false),
+        )
+        .expect("with the policy off, nothing should be gated");
+    }
+
+    #[test]
+    fn destructive_gate_ignores_non_destructive_tools() {
+        confirm_destructive(
+            "ssh_metrics",
+            Some(&serde_json::json!({"host": "pi"})),
+            false,
+            &gate_config(true),
+        )
+        .expect("a read-only tool must never be gated");
     }
 
     /// Deletion, substitution and the empty-candidate list — the cases the

@@ -170,6 +170,7 @@ async fn main() -> Result<()> {
                 json_args.as_deref(),
                 cli.json,
                 data_reduction,
+                cli.yes,
             )
             .await
             .map_err(map_exit_code)?;
