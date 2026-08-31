@@ -15,6 +15,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for the `ssh_awx_job_launch` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxJobLaunchArgs {
     /// Job template ID to launch.
     template_id: u64,

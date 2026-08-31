@@ -12,6 +12,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_helm_get` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshHelmGetArgs {
     host: String,
     subcommand: String,

@@ -16,6 +16,7 @@ use crate::mcp_standard_tool;
 use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshAdUserListArgs {
     host: String,
     filter: Option<String>,

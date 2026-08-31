@@ -14,6 +14,7 @@ use crate::ports::ToolContext;
 use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshLogAggregateArgs {
     /// Target host name from configuration.
     host: String,

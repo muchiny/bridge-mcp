@@ -19,6 +19,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for `ssh_awx_approval_detail` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxApprovalDetailArgs {
     approval_id: u64,
     #[serde(default)]

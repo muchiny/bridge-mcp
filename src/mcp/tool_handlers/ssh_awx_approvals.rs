@@ -40,6 +40,7 @@ impl ApprovalStatus {
 /// Arguments for the `ssh_awx_approvals` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxApprovalsArgs {
     /// Filter by approval status (default: pending).
     #[serde(default)]

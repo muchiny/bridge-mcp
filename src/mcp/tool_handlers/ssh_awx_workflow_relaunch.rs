@@ -16,6 +16,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for the `ssh_awx_workflow_relaunch` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxWorkflowRelaunchArgs {
     /// AWX workflow job ID to relaunch.
     workflow_job_id: u64,

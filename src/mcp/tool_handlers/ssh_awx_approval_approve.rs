@@ -16,6 +16,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for the `ssh_awx_approval_approve` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxApprovalApproveArgs {
     /// AWX workflow approval ID to approve.
     approval_id: u64,

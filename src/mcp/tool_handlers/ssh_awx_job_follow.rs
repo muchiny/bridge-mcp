@@ -16,6 +16,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_job_follow` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxJobFollowArgs {
     template_id: u64,
     #[serde(default)]

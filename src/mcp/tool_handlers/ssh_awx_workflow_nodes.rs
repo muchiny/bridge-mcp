@@ -16,6 +16,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for the `ssh_awx_workflow_nodes` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxWorkflowNodesArgs {
     /// AWX workflow job ID.
     workflow_job_id: u64,

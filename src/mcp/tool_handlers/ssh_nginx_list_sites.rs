@@ -14,6 +14,7 @@ use crate::mcp_standard_tool;
 use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshNginxListSitesArgs {
     host: String,
     server: Option<String>,

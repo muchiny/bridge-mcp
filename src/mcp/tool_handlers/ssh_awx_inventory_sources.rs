@@ -16,6 +16,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for `ssh_awx_inventory_sources` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxInventorySourcesArgs {
     #[serde(default)]
     inventory: Option<u64>,

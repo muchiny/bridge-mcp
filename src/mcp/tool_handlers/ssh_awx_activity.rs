@@ -17,6 +17,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for `ssh_awx_activity` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxActivityArgs {
     #[serde(default)]
     object_type: Option<String>,

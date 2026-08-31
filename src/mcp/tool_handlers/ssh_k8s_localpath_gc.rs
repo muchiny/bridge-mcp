@@ -18,6 +18,7 @@ const DEFAULT_STORAGE_ROOT: &str = "/var/lib/rancher/k3s/storage";
 
 /// Arguments for the `ssh_k8s_localpath_gc` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sLocalpathGcArgs {
     host: String,
     #[serde(default)]

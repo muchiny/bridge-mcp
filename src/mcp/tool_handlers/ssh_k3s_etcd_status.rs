@@ -10,6 +10,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k3s_etcd_status` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK3sEtcdStatusArgs {
     host: String,
     #[serde(default)]

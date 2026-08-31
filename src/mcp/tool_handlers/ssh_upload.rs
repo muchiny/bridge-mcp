@@ -21,6 +21,7 @@ use super::utils::{connect_with_jump, parse_transfer_mode_checked, validate_path
 
 /// Arguments for `ssh_upload` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshUploadArgs {
     host: String,
     local_path: String,

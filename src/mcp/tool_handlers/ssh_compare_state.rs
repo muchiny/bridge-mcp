@@ -14,6 +14,7 @@ use crate::ports::ToolContext;
 use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshCompareStateArgs {
     host: String,
     /// When `true`, append an LLM-side summary of the output to the

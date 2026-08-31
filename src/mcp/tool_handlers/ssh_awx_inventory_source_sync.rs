@@ -17,6 +17,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for the `ssh_awx_inventory_source_sync` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxInventorySourceSyncArgs {
     /// AWX inventory source ID to refresh.
     inventory_source_id: u64,

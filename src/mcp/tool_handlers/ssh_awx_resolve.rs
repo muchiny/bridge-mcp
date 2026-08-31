@@ -26,6 +26,7 @@ const ALLOWED_KINDS: &[&str] = &[
 /// Arguments for `ssh_awx_resolve` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxResolveArgs {
     kind: String,
     name: String,

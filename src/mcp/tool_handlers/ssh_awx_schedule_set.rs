@@ -15,6 +15,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for the `ssh_awx_schedule_set` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxScheduleSetArgs {
     /// Schedule ID to enable or disable.
     schedule_id: u64,

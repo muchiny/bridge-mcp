@@ -10,6 +10,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_crictl_rmi` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshCrictlRmiArgs {
     host: String,
     #[serde(default)]

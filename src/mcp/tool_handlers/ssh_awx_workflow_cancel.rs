@@ -16,6 +16,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for the `ssh_awx_workflow_cancel` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxWorkflowCancelArgs {
     /// AWX workflow job ID to cancel.
     workflow_job_id: u64,

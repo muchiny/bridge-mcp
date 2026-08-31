@@ -14,6 +14,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_output_fetch` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshOutputFetchArgs {
     output_id: String,
     #[serde(default)]

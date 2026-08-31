@@ -16,6 +16,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k8s_create_token` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sCreateTokenArgs {
     host: String,
     service_account: String,

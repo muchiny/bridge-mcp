@@ -14,6 +14,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_traefik_introspect` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshTraefikIntrospectArgs {
     host: String,
     /// Traefik API path to query (default: /rawdata).

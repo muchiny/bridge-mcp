@@ -37,6 +37,7 @@ enum MetricType {
 
 /// Arguments for `ssh_metrics_multi` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshMetricsMultiArgs {
     hosts: Vec<String>,
     metrics: Vec<MetricType>,

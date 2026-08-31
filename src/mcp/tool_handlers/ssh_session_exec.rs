@@ -19,6 +19,7 @@ use super::utils::shell_escape;
 
 /// Arguments for `ssh_session_exec` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshSessionExecArgs {
     session_id: String,
     command: String,

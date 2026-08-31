@@ -17,6 +17,7 @@ use super::utils::{connect_with_jump, validate_path};
 
 /// Arguments for `ssh_ls` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshLsArgs {
     host: String,
     path: String,

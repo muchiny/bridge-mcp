@@ -14,6 +14,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_helm_template` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshHelmTemplateArgs {
     host: String,
     release: String,

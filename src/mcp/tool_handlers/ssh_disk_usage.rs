@@ -19,6 +19,7 @@ use super::utils::shell_escape;
 
 /// Arguments for the `ssh_disk_usage` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshDiskUsageArgs {
     /// Target host name from configuration.
     host: String,

@@ -10,6 +10,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k3s_kubeconfig_get` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK3sKubeconfigGetArgs {
     host: String,
     #[serde(default)]

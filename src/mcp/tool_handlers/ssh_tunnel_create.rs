@@ -20,6 +20,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_tunnel_create` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshTunnelCreateArgs {
     host: String,
     local_port: u16,

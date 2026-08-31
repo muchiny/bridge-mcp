@@ -15,6 +15,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for the `ssh_awx_job_events` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxJobEventsArgs {
     /// AWX job ID.
     job_id: u64,

@@ -13,6 +13,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k8s_dns_check` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sDnsCheckArgs {
     host: String,
     /// Optional DNS name to resolve (e.g. `kubernetes.default.svc.cluster.local`).

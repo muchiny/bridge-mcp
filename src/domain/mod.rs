@@ -3,6 +3,7 @@
 //! This module contains the use cases and domain entities that
 //! represent the core business logic of the Bridge MCP.
 
+pub mod arg_validation;
 pub mod data_reduction;
 pub mod diff;
 pub mod history;

@@ -300,6 +300,37 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // `T::Args` sees it, so elevation costs nothing per handler.
         let privilege = crate::domain::privilege::PrivilegeArgs::extract(&mut v)?;
 
+        // Step 0b: a reduction param the tool's `OutputKind` cannot use is an
+        // error, not a no-op. `extract` above removes these keys
+        // unconditionally, so `deny_unknown_fields` on `T::Args` never sees
+        // them and a `RawText` tool swallowed `limit=3` without a word.
+        {
+            let mut provided: Vec<&str> = Vec::new();
+            #[cfg(feature = "jq")]
+            {
+                if dr.jq_filter.is_some() {
+                    provided.push("jq_filter");
+                }
+                if dr.yq_filter.is_some() {
+                    provided.push("yq_filter");
+                }
+                if dr.output_format.is_some() {
+                    provided.push("output_format");
+                }
+            }
+            if dr.columns.is_some() {
+                provided.push("columns");
+            }
+            if dr.limit.is_some() {
+                provided.push("limit");
+            }
+            crate::domain::arg_validation::reject_unsupported_reduction(
+                T::NAME,
+                T::OUTPUT_KIND,
+                &provided,
+            )?;
+        }
+
         // Step 1: Parse args
         let args: T::Args =
             serde_json::from_value(v).map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
@@ -788,7 +819,11 @@ mod tests {
 
     // ---- Mock tool for testing the generic pipeline ----
 
+    // Mirrors every real handler's args: the 399 generated `Ssh*Args` structs
+    // all carry this, and without it the fixture would be laxer than anything
+    // it stands in for.
     #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct MockArgs {
         host: String,
         timeout_seconds: Option<u64>,
@@ -797,6 +832,32 @@ mod tests {
     }
 
     impl_common_args!(MockArgs);
+
+    /// A mock whose `OutputKind` accepts `columns` / `limit`.
+    ///
+    /// `MockTool` is `RawText`, which supports no reduction param at all, so a
+    /// test passing `limit` to it was exercising a combination the pipeline now
+    /// (correctly) refuses.
+    struct MockTabularTool;
+
+    impl StandardTool for MockTabularTool {
+        type Args = MockArgs;
+        const NAME: &'static str = "mock_tabular_tool";
+        const DESCRIPTION: &'static str = "A mock tool returning tabular output";
+        const SCHEMA: &'static str = r#"{
+            "type": "object",
+            "properties": {
+                "host": { "type": "string" }
+            },
+            "required": ["host"]
+        }"#;
+        const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
+            crate::domain::output_kind::OutputKind::Tabular;
+
+        fn build_command(_args: &MockArgs, _host_config: &HostConfig) -> Result<String> {
+            Ok("echo hello".to_string())
+        }
+    }
 
     struct MockTool;
 
@@ -1058,7 +1119,7 @@ mod tests {
     #[tokio::test]
     async fn test_data_reduction_extraction() {
         // Verify data reduction params are stripped before arg parsing
-        let handler = StandardToolHandler::<MockTool>::new();
+        let handler = StandardToolHandler::<MockTabularTool>::new();
         let ctx = create_test_context_with_host();
         // Adding columns/limit should not cause parse errors
         let result = handler
@@ -1861,6 +1922,54 @@ mod tests {
 
     /// `sudo` and `sudo_user` are consumed before `T::Args` deserialization,
     /// so a handler that never declared them is unaffected.
+    /// The MCP path must refuse an argument the tool does not declare.
+    ///
+    /// Regression guard for a fix that landed on one path only: the CLI
+    /// rejected unknown keys while `tools/call` still dropped them, so
+    /// `ssh_firewall_status limit=3` came back with 66,443 characters and no
+    /// hint that `limit` is not a parameter of a `RawText` tool.
+    #[tokio::test]
+    async fn mcp_path_rejects_an_argument_the_tool_does_not_declare() {
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("should not reach"),
+        );
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let err = handler
+            .execute(Some(json!({"host": "server1", "param_bidon": 42})), &ctx)
+            .await
+            .expect_err("an undeclared argument must be refused");
+
+        assert!(
+            err.to_string().contains("param_bidon"),
+            "the refusal must name the key: {err}"
+        );
+    }
+
+    /// The reduction and elevation params are lifted off the object before the
+    /// check, so they must not be mistaken for unknown keys.
+    #[tokio::test]
+    async fn mcp_path_still_accepts_the_universal_params() {
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("hello"),
+        );
+        let handler = StandardToolHandler::<MockTabularTool>::new();
+
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "limit": 5, "sudo": true})),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "limit and sudo are extracted before the check: {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn elevation_params_do_not_reach_the_handler_args() {
         let ctx = crate::ports::mock::create_test_context_with_mock_executor(

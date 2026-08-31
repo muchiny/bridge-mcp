@@ -14,6 +14,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_tunnel_close` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshTunnelCloseArgs {
     tunnel_id: String,
 }

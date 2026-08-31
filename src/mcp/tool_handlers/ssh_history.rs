@@ -15,6 +15,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_history` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshHistoryArgs {
     limit: Option<usize>,
     host: Option<String>,

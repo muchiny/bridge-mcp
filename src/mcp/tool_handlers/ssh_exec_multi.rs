@@ -27,6 +27,7 @@ use super::utils::shell_escape;
 
 /// Arguments for `ssh_exec_multi` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshExecMultiArgs {
     hosts: Vec<String>,
     command: String,

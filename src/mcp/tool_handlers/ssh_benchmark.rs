@@ -13,6 +13,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_benchmark` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshBenchmarkArgs {
     host: String,
     bench_type: String,

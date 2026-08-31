@@ -15,6 +15,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k8s_rbac_create` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sRbacCreateArgs {
     host: String,
     kind: String,

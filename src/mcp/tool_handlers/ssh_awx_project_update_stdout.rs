@@ -16,6 +16,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for the `ssh_awx_project_update_stdout` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxProjectUpdateStdoutArgs {
     /// AWX project update ID.
     project_update_id: u64,
