@@ -404,6 +404,18 @@ pub trait ToolHandler: Send + Sync {
     fn output_schema(&self) -> Option<Value> {
         None
     }
+
+    /// Whether this tool accepts `sudo` / `sudo_user`.
+    ///
+    /// Used by the registry to advertise the elevation params, so a client can
+    /// see them in `tools/list` rather than discovering by trial that a
+    /// specialised tool cannot reach root-owned state.
+    ///
+    /// Custom handlers opt out by default: they run their own pipeline and
+    /// would have to apply the elevation themselves.
+    fn supports_elevation(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

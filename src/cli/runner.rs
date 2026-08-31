@@ -1374,6 +1374,9 @@ pub async fn run_tool(
             let mut schema: serde_json::Value =
                 serde_json::from_str(h.schema().input_schema).unwrap_or_default();
             inject_reduction_schema(&mut schema, h.output_kind());
+            if h.supports_elevation() {
+                crate::mcp::registry::inject_privilege_schema(&mut schema);
+            }
             serde_json::to_string(&schema).ok()
         });
         let schema_ref = enriched_schema.as_ref().and_then(|opt| opt.as_deref());
@@ -1688,6 +1691,9 @@ pub async fn run_describe_tool(
     let mut input_schema: serde_json::Value =
         serde_json::from_str(schema.input_schema).unwrap_or_default();
     inject_reduction_schema(&mut input_schema, output_kind);
+    if handler.supports_elevation() {
+        crate::mcp::registry::inject_privilege_schema(&mut input_schema);
+    }
 
     if json_output {
         let obj = serde_json::json!({

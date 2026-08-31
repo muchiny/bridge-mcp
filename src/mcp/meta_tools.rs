@@ -339,6 +339,9 @@ fn describe(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
     let mut input_schema: Value =
         serde_json::from_str(schema.input_schema).unwrap_or_else(|_| json!({}));
     inject_reduction_schema(&mut input_schema, output_kind);
+    if handler.supports_elevation() {
+        super::registry::inject_privilege_schema(&mut input_schema);
+    }
 
     let payload = json!({
         "name": schema.name,

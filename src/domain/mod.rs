@@ -11,6 +11,7 @@ pub mod jq_filter;
 pub mod output_cache;
 pub mod output_kind;
 pub mod output_truncator;
+pub mod privilege;
 pub mod runbook;
 pub mod task_store;
 pub mod use_cases;

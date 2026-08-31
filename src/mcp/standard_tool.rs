@@ -267,6 +267,12 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         T::OUTPUT_SCHEMA.and_then(|s| serde_json::from_str(s).ok())
     }
 
+    /// Every standard tool bar the Windows-only ones: elevation is applied by
+    /// the shared pipeline, so it works without the handler knowing about it.
+    fn supports_elevation(&self) -> bool {
+        !matches!(T::OS_GUARD, Some(OsType::Windows))
+    }
+
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         name = "mcp.tool.execute",
@@ -290,6 +296,9 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             });
         };
         let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)?;
+        // Same lift as the reduction params: taken off the raw object before
+        // `T::Args` sees it, so elevation costs nothing per handler.
+        let privilege = crate::domain::privilege::PrivilegeArgs::extract(&mut v)?;
 
         // Step 1: Parse args
         let args: T::Args =
@@ -345,6 +354,21 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 
         // Step 5: Build command
         let command = T::build_command(&args, host_config)?;
+
+        // Step 5b: Elevate, if asked. Before step 6 on purpose: the blacklist
+        // must see the command that will actually run, not the unelevated one
+        // it was built from. Windows has no `sudo`, and the OS guard above has
+        // already established which kind of host this is.
+        let command = if host_config.os_type == OsType::Windows {
+            if privilege.is_elevated() {
+                return Ok(ToolCallResult::error(format!(
+                    "'sudo' is not supported on Windows host '{host}'."
+                )));
+            }
+            command
+        } else {
+            crate::domain::privilege::elevate(&command, &privilege)
+        };
 
         // Step 6: Validate against security policy
         if let Err(e) = ctx.execute_use_case.validate_builtin(&command) {
@@ -1795,6 +1819,87 @@ mod tests {
             .await;
         // Should be denied by security validation
         assert!(result.is_err());
+    }
+
+    /// The blacklist must inspect the command that will actually run.
+    ///
+    /// Elevation happens at step 5b, before `validate_builtin` at step 6. If
+    /// the order were reversed, `sudo=true` would be a way to launder a
+    /// blacklisted command past the policy — the check would see the
+    /// unelevated string it was built from.
+    #[tokio::test]
+    async fn elevation_happens_before_the_blacklist_sees_the_command() {
+        struct MockBlacklistedTool;
+        impl StandardTool for MockBlacklistedTool {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_blacklisted";
+            const DESCRIPTION: &'static str = "Mock tool building a denied command";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+
+            fn build_command(_args: &MockArgs, _host_config: &HostConfig) -> Result<String> {
+                Ok("rm -rf /".to_string())
+            }
+        }
+
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("should not reach"),
+        );
+        let handler = StandardToolHandler::<MockBlacklistedTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "wrapping a blacklisted command in sudo must not get it past the policy"
+        );
+    }
+
+    /// `sudo` and `sudo_user` are consumed before `T::Args` deserialization,
+    /// so a handler that never declared them is unaffected.
+    #[tokio::test]
+    async fn elevation_params_do_not_reach_the_handler_args() {
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("hello"),
+        );
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "sudo": true, "sudo_user": "postgres"})),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "MockArgs declares neither param, yet the call must succeed: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_sudo_user_is_refused_before_anything_runs() {
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("should not reach"),
+        );
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "sudo": true, "sudo_user": "root; id"})),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a sudo_user carrying a separator must be refused"
+        );
     }
 
     #[tokio::test]
