@@ -12,7 +12,7 @@ use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
-use crate::ssh::{is_retryable_error, with_retry_if};
+use crate::ssh::{is_retryable_error_for, with_retry_if};
 
 use crate::config::ShellType;
 use crate::domain::use_cases::shell;
@@ -214,7 +214,14 @@ impl ToolHandler for SshExecHandler {
                     }
                 }
             },
-            is_retryable_error,
+            // `ssh_exec` runs an arbitrary caller-supplied command, so it is
+            // never safe to replay. A timeout proves nothing about whether the
+            // remote command ran — it may well still be running — and the plain
+            // `is_retryable_error` treated one as retryable, silently running
+            // the command up to three times. `StandardTool` already derives
+            // this from annotations; this handler drives its own retry loop and
+            // so escaped that.
+            |e| is_retryable_error_for(e, false),
         )
         .await;
 

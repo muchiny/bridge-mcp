@@ -80,6 +80,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Confirm destructive tools without prompting.
+    ///
+    /// A tool annotated `destructiveHint` asks for confirmation on a terminal
+    /// and is refused when stdin is not one. This flag answers yes in advance,
+    /// which is what a script or a CI job needs; the choice is recorded in the
+    /// audit log.
+    #[arg(long, global = true)]
+    pub yes: bool,
+
     /// jq expression to apply to tool output (equivalent to `jq_filter=<expr>`).
     /// Explicit `jq_filter=...` in tool args takes precedence over this flag.
     /// Example: `--jq '.containers[].Names'`

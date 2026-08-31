@@ -189,6 +189,9 @@ impl ToolRegistry {
 
                 // Inject data reduction params based on output kind
                 inject_reduction_schema(&mut input_schema, handler.output_kind());
+                if handler.supports_elevation() {
+                    inject_privilege_schema(&mut input_schema);
+                }
 
                 Tool {
                     name: schema.name.to_string(),
@@ -325,6 +328,32 @@ pub fn inject_reduction_schema(schema: &mut Value, kind: crate::domain::output_k
 
     // RawText: nothing injected
     let _ = kind == OutputKind::RawText;
+}
+
+/// Advertise `sudo` / `sudo_user` on a tool whose pipeline applies them.
+///
+/// Kept apart from [`inject_reduction_schema`] because it keys off a different
+/// property of the tool — whether the host can elevate at all, not what shape
+/// its output takes.
+pub fn inject_privilege_schema(schema: &mut Value) {
+    let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    props.insert(
+        "sudo".to_string(),
+        json!({
+            "type": "boolean",
+            "description": "Run this tool's command with sudo (default: false).                 The whole command is wrapped, so redirections and pipes are elevated                 too. Requires passwordless sudo on the host: a sudo that asks for a                 password fails immediately rather than hanging."
+        }),
+    );
+    props.insert(
+        "sudo_user".to_string(),
+        json!({
+            "type": "string",
+            "description": "User to sudo to (default: root). Only meaningful with                 sudo=true. Letters, digits, '.', '_' and '-' only."
+        }),
+    );
 }
 
 /// Map a tool name to its group.
@@ -3315,6 +3344,46 @@ mod tests {
     #[test]
     fn test_tool_icons_uncurated_group_is_none() {
         assert!(tool_icons("ssh_pty_exec").is_none());
+    }
+
+    #[test]
+    fn inject_privilege_schema_advertises_both_params() {
+        let mut schema = json!({"properties": {"host": {"type": "string"}}});
+        inject_privilege_schema(&mut schema);
+
+        let props = schema["properties"].as_object().expect("properties");
+        assert_eq!(props["sudo"]["type"], "boolean");
+        assert_eq!(props["sudo_user"]["type"], "string");
+        assert!(props.contains_key("host"), "existing params must survive");
+    }
+
+    /// A Linux-guarded and an unguarded tool both elevate through the shared
+    /// pipeline; a Windows-only one has no `sudo` to reach.
+    #[test]
+    fn standard_tools_advertise_elevation_except_on_windows() {
+        let registry = create_filtered_registry(&all_enabled_tool_groups_config_for_test());
+
+        for name in [
+            "ssh_crictl_ps",
+            "ssh_service_restart",
+            "ssh_firewall_status",
+        ] {
+            let handler = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing"));
+            assert!(
+                handler.supports_elevation(),
+                "{name} runs the standard pipeline and must accept sudo"
+            );
+        }
+
+        let win = registry
+            .get("ssh_win_service_restart")
+            .expect("ssh_win_service_restart missing");
+        assert!(
+            !win.supports_elevation(),
+            "Windows hosts have no sudo; advertising it would be a lie"
+        );
     }
 
     #[cfg(not(feature = "jq"))]

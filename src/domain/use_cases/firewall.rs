@@ -15,9 +15,9 @@ fn shell_escape(s: &str) -> String {
 /// Generate a firewall tool detection prefix.
 #[must_use]
 pub fn firewall_detect() -> String {
-    "$(if command -v ufw &>/dev/null; then echo ufw; \
-     elif command -v firewall-cmd &>/dev/null; then echo firewall-cmd; \
-     elif command -v iptables &>/dev/null; then echo iptables; \
+    "$(if command -v ufw >/dev/null 2>&1; then echo ufw; \
+     elif command -v firewall-cmd >/dev/null 2>&1; then echo firewall-cmd; \
+     elif command -v iptables >/dev/null 2>&1; then echo iptables; \
      elif [ -x /usr/sbin/iptables ]; then echo /usr/sbin/iptables; \
      else echo 'No firewall tool found on host' >&2; echo false; fi)"
         .to_string()
@@ -125,9 +125,9 @@ impl FirewallCommandBuilder {
             Some("firewall-cmd") => String::from("firewall-cmd --state && firewall-cmd --list-all"),
             Some("iptables") => String::from("iptables -L -n -v --line-numbers"),
             _ => String::from(
-                "if command -v ufw &>/dev/null; then ufw status verbose; \
-                 elif command -v firewall-cmd &>/dev/null; then firewall-cmd --state && firewall-cmd --list-all; \
-                 elif command -v iptables &>/dev/null; then iptables -L -n -v --line-numbers; \
+                "if command -v ufw >/dev/null 2>&1; then ufw status verbose; \
+                 elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --state && firewall-cmd --list-all; \
+                 elif command -v iptables >/dev/null 2>&1; then iptables -L -n -v --line-numbers; \
                  elif [ -x /usr/sbin/iptables ]; then /usr/sbin/iptables -L -n -v --line-numbers; \
                  else echo 'No firewall tool found'; exit 127; fi",
             ),
@@ -150,9 +150,9 @@ impl FirewallCommandBuilder {
                 cmd
             }
             _ => String::from(
-                "if command -v ufw &>/dev/null; then ufw status numbered; \
-                 elif command -v firewall-cmd &>/dev/null; then firewall-cmd --list-all --zone=public; \
-                 elif command -v iptables &>/dev/null; then iptables -L -n -v --line-numbers; \
+                "if command -v ufw >/dev/null 2>&1; then ufw status numbered; \
+                 elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-all --zone=public; \
+                 elif command -v iptables >/dev/null 2>&1; then iptables -L -n -v --line-numbers; \
                  elif [ -x /usr/sbin/iptables ]; then /usr/sbin/iptables -L -n -v --line-numbers; \
                  else echo 'No firewall tool found'; exit 127; fi",
             ),
@@ -227,9 +227,9 @@ impl FirewallCommandBuilder {
             _ => {
                 let escaped_port = shell_escape(port);
                 format!(
-                    "if command -v ufw &>/dev/null; then ufw allow {escaped_port}/{proto}; \
-                     elif command -v firewall-cmd &>/dev/null; then firewall-cmd --permanent --add-port={escaped_port}/{proto} && firewall-cmd --reload; \
-                     elif command -v iptables &>/dev/null; then iptables -A INPUT -p {proto} --dport {escaped_port} -j ACCEPT; \
+                    "if command -v ufw >/dev/null 2>&1; then ufw allow {escaped_port}/{proto}; \
+                     elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={escaped_port}/{proto} && firewall-cmd --reload; \
+                     elif command -v iptables >/dev/null 2>&1; then iptables -A INPUT -p {proto} --dport {escaped_port} -j ACCEPT; \
                      elif [ -x /usr/sbin/iptables ]; then /usr/sbin/iptables -A INPUT -p {proto} --dport {escaped_port} -j ACCEPT; \
                      else echo 'No firewall tool found'; exit 127; fi"
                 )
@@ -301,9 +301,9 @@ impl FirewallCommandBuilder {
             _ => {
                 let escaped_port = shell_escape(port);
                 format!(
-                    "if command -v ufw &>/dev/null; then ufw deny {escaped_port}/{proto}; \
-                     elif command -v firewall-cmd &>/dev/null; then firewall-cmd --permanent --add-rich-rule='rule family=ipv4 port port={escaped_port} protocol={proto} reject' && firewall-cmd --reload; \
-                     elif command -v iptables &>/dev/null; then iptables -A INPUT -p {proto} --dport {escaped_port} -j DROP; \
+                    "if command -v ufw >/dev/null 2>&1; then ufw deny {escaped_port}/{proto}; \
+                     elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-rich-rule='rule family=ipv4 port port={escaped_port} protocol={proto} reject' && firewall-cmd --reload; \
+                     elif command -v iptables >/dev/null 2>&1; then iptables -A INPUT -p {proto} --dport {escaped_port} -j DROP; \
                      elif [ -x /usr/sbin/iptables ]; then /usr/sbin/iptables -A INPUT -p {proto} --dport {escaped_port} -j DROP; \
                      else echo 'No firewall tool found'; exit 127; fi"
                 )

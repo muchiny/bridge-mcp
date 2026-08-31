@@ -17,13 +17,16 @@ use crate::domain::use_cases::shell;
 use crate::error::{BridgeError, Result};
 use crate::mcp::CommandHistory;
 use crate::mcp::history::HistoryConfig;
+use crate::mcp::protocol::PROTOCOL_VERSION;
+use crate::mcp::request_meta::keys as meta_keys;
 use crate::ports::ExecutorRouter;
 use crate::ports::ToolContext;
 use crate::security::{
     AuditEvent, AuditLogger, CommandResult, CommandValidator, RateLimiter, Sanitizer,
 };
 use crate::ssh::{
-    SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error, with_retry_if,
+    SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error_for,
+    with_retry_if,
 };
 
 /// Try to forward a `tools/call` request to a running daemon over its
@@ -39,6 +42,47 @@ use crate::ssh::{
 ///
 /// The function intentionally swallows `NotFound` and `ConnectionRefused`
 /// errors: these indicate no daemon is running, not a fatal problem.
+/// Build the JSON-RPC `tools/call` the CLI forwards to a running daemon.
+///
+/// Split out of [`try_forward_to_daemon`] so the envelope can be asserted
+/// without a live socket: the bug this guards against was invisible to every
+/// existing test precisely because the request was built inline, mid-I/O.
+///
+/// The `_meta` envelope is NOT optional. 2026-07-28 deleted the
+/// connection-scoped handshake, so every client-to-server request carries the
+/// revision it speaks and the capabilities it has, and the server refuses
+/// `-32602` when either key is absent
+/// (`mcp::request_meta::missing_required_envelope_field`). Without this, every
+/// `bridge-mcp tool …` run with a daemon up returned that refusal instead of
+/// the tool's output.
+///
+/// `clientCapabilities` is `{}` on purpose: the CLI has no channel to answer an
+/// elicitation or serve a root, and capability lookup is fail-closed, so
+/// declaring none is the honest and the safe value.
+fn build_daemon_request(
+    request_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+            "_meta": {
+                meta_keys::PROTOCOL_VERSION: PROTOCOL_VERSION,
+                meta_keys::CLIENT_CAPABILITIES: serde_json::json!({}),
+                meta_keys::CLIENT_INFO: {
+                    "name": "bridge-mcp-cli",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            },
+        },
+    })
+}
+
 async fn try_forward_to_daemon(
     socket_path: &std::path::Path,
     tool_name: &str,
@@ -66,15 +110,7 @@ async fn try_forward_to_daemon(
     };
 
     let request_id = uuid::Uuid::new_v4().to_string();
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments,
-        },
-    });
+    let request = build_daemon_request(&request_id, tool_name, &arguments);
 
     let body = serde_json::to_string(&request).map_err(BridgeError::Json)?;
     stream
@@ -263,13 +299,24 @@ pub async fn run_list_tools(
         tools.retain(|t| tool_group(&t.name) == group_filter);
     }
 
-    // Filter by search keyword (matches name or description, case-insensitive)
+    // Filter and rank by search keyword, using the same tiers as
+    // `mcp_search_tools`: exact name, name prefix, name substring, description
+    // substring. Filtering alone left the list in name order, so
+    // `--search kubernetes` led with `ssh_docker_stats` — a description match —
+    // ahead of the 83 tools with the word in their name.
     if let Some(query) = search {
         let query_lower = query.to_lowercase();
-        tools.retain(|t| {
-            t.name.to_lowercase().contains(&query_lower)
-                || t.description.to_lowercase().contains(&query_lower)
-        });
+        let mut ranked: Vec<(u8, _)> = tools
+            .into_iter()
+            .filter_map(|t| {
+                crate::mcp::meta_tools::relevance_rank(&t.name, &t.description, &query_lower)
+                    .map(|rank| (rank, t))
+            })
+            .collect();
+        // `list_tools()` is name-sorted and `sort_by_key` is stable, so ties
+        // stay alphabetical.
+        ranked.sort_by_key(|(rank, _)| *rank);
+        tools = ranked.into_iter().map(|(_, t)| t).collect();
     }
 
     // Groups-only mode: show just group names with tool counts
@@ -354,7 +401,7 @@ pub async fn run_list_tools(
 }
 
 /// Validate the configuration file and report issues
-pub async fn run_validate(config: Arc<Config>) -> Result<()> {
+pub async fn run_validate(config: Arc<Config>, json_output: bool) -> Result<()> {
     use crate::mcp::registry::create_filtered_registry;
     use crate::security::CommandValidator;
 
@@ -400,7 +447,21 @@ pub async fn run_validate(config: Arc<Config>) -> Result<()> {
     let tool_count = registry.len();
 
     // Report
-    if issues.is_empty() && warnings.is_empty() {
+    if json_output {
+        let report = serde_json::json!({
+            "valid": issues.is_empty(),
+            "hosts": config.hosts.len(),
+            "tools": tool_count,
+            "security_mode": format!("{:?}", config.security.mode),
+            "errors": issues,
+            "warnings": warnings,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+    } else if issues.is_empty() && warnings.is_empty() {
         println!("Configuration is valid.");
         println!("  Hosts: {}", config.hosts.len());
         println!("  Tools: {tool_count}");
@@ -433,72 +494,98 @@ pub async fn run_validate(config: Arc<Config>) -> Result<()> {
 }
 
 /// Show differences between current and default configuration
-pub async fn run_config_diff(config: Arc<Config>) -> Result<()> {
+pub async fn run_config_diff(config: Arc<Config>, json_output: bool) -> Result<()> {
     use crate::config::{LimitsConfig, SecurityConfig};
 
     let default_security = SecurityConfig::default();
     let default_limits = LimitsConfig::default();
 
-    println!("=== Configuration Differences (current vs default) ===\n");
+    // Collected first, rendered second, so the text and JSON forms cannot
+    // drift apart the way they do when each branch re-derives the comparison.
+    let mut diffs = serde_json::Map::new();
+    let mut push = |key: &str, current: serde_json::Value, default: serde_json::Value| {
+        diffs.insert(
+            key.to_string(),
+            serde_json::json!({ "current": current, "default": default }),
+        );
+    };
 
-    // Compare security mode
     if config.security.mode != default_security.mode {
-        println!(
-            "security.mode: {:?} (default: {:?})",
-            config.security.mode, default_security.mode
+        push(
+            "security.mode",
+            format!("{:?}", config.security.mode).into(),
+            format!("{:?}", default_security.mode).into(),
         );
     }
-
-    // Compare limits
     if config.limits.command_timeout_seconds != default_limits.command_timeout_seconds {
-        println!(
-            "limits.command_timeout_seconds: {} (default: {})",
-            config.limits.command_timeout_seconds, default_limits.command_timeout_seconds
+        push(
+            "limits.command_timeout_seconds",
+            config.limits.command_timeout_seconds.into(),
+            default_limits.command_timeout_seconds.into(),
         );
     }
     if config.limits.max_concurrent_commands != default_limits.max_concurrent_commands {
-        println!(
-            "limits.max_concurrent_commands: {} (default: {})",
-            config.limits.max_concurrent_commands, default_limits.max_concurrent_commands
+        push(
+            "limits.max_concurrent_commands",
+            config.limits.max_concurrent_commands.into(),
+            default_limits.max_concurrent_commands.into(),
         );
     }
     if config.limits.rate_limit_per_second != default_limits.rate_limit_per_second {
-        println!(
-            "limits.rate_limit_per_second: {} (default: {})",
-            config.limits.rate_limit_per_second, default_limits.rate_limit_per_second
+        push(
+            "limits.rate_limit_per_second",
+            config.limits.rate_limit_per_second.into(),
+            default_limits.rate_limit_per_second.into(),
         );
     }
     if config.limits.max_output_chars != default_limits.max_output_chars {
-        println!(
-            "limits.max_output_chars: {} (default: {})",
-            config.limits.max_output_chars, default_limits.max_output_chars
+        push(
+            "limits.max_output_chars",
+            config.limits.max_output_chars.into(),
+            default_limits.max_output_chars.into(),
         );
     }
-
-    // Compare hosts
-    println!("\nhosts: {} configured", config.hosts.len());
-
-    // Compare blacklist
     if config.security.blacklist.len() != default_security.blacklist.len() {
-        println!(
-            "security.blacklist: {} patterns (default: {} patterns)",
-            config.security.blacklist.len(),
-            default_security.blacklist.len()
+        push(
+            "security.blacklist",
+            config.security.blacklist.len().into(),
+            default_security.blacklist.len().into(),
         );
     }
 
-    // Compare disabled tool groups
-    let disabled: Vec<_> = config
+    let disabled: Vec<&str> = config
         .tool_groups
         .groups
         .iter()
         .filter(|(_, enabled)| !**enabled)
         .map(|(name, _)| name.as_str())
         .collect();
+
+    if json_output {
+        let report = serde_json::json!({
+            "hosts": config.hosts.len(),
+            "differences": diffs,
+            "tool_groups_disabled": disabled,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+        return Ok(());
+    }
+
+    println!("=== Configuration Differences (current vs default) ===\n");
+    for (key, entry) in &diffs {
+        println!(
+            "{key}: {} (default: {})",
+            entry["current"], entry["default"]
+        );
+    }
+    println!("\nhosts: {} configured", config.hosts.len());
     if !disabled.is_empty() {
         println!("tool_groups.disabled: {disabled:?}");
     }
-
     println!("\n(Only non-default values are shown)");
 
     Ok(())
@@ -573,6 +660,7 @@ pub async fn run_exec(
     command: &str,
     timeout: u64,
     working_dir: Option<&str>,
+    json_output: bool,
 ) -> Result<()> {
     let ctx = create_context(Arc::clone(&config));
 
@@ -635,7 +723,9 @@ pub async fn run_exec(
                 }
             }
         },
-        is_retryable_error,
+        // `bridge-mcp exec` runs an arbitrary command; see `ssh_exec`. A
+        // timeout does not prove it never ran, so it is not replayed.
+        |e| is_retryable_error_for(e, false),
     )
     .await;
 
@@ -659,7 +749,20 @@ pub async fn run_exec(
     }
 
     // Print the output
-    println!("{}", response.output);
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "host": host,
+                "command": command,
+                "exit_code": response.exit_code,
+                "output": response.output,
+            }))
+            .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+    } else {
+        println!("{}", response.output);
+    }
 
     // Propagate remote exit code to CLI exit code
     if response.exit_code != 0 {
@@ -702,7 +805,53 @@ fn audit_status_lines(audit: &AuditConfig) -> Vec<String> {
 ///
 /// This function is infallible in practice but returns `Result` for
 /// consistency with other CLI commands.
-pub async fn run_status(config: Arc<Config>) -> Result<()> {
+pub async fn run_status(config: Arc<Config>, json_output: bool) -> Result<()> {
+    if json_output {
+        let hosts: serde_json::Map<String, serde_json::Value> = config
+            .hosts
+            .iter()
+            .map(|(alias, host)| {
+                (
+                    alias.clone(),
+                    serde_json::json!({
+                        "hostname": host.hostname,
+                        "port": host.port,
+                        "user": host.user,
+                        "auth": auth_type_name(&host.auth),
+                        "host_key_verification": format!("{:?}", host.host_key_verification),
+                        "proxy_jump": host.proxy_jump,
+                        "description": host.description,
+                    }),
+                )
+            })
+            .collect();
+
+        let report = serde_json::json!({
+            "security_mode": format!("{:?}", config.security.mode),
+            "whitelist": config.security.whitelist,
+            "blacklist": config.security.blacklist,
+            "hosts": hosts,
+            "limits": {
+                "command_timeout_seconds": config.limits.command_timeout_seconds,
+                "connection_timeout_seconds": config.limits.connection_timeout_seconds,
+                "max_output_bytes": config.limits.max_output_bytes,
+                "max_concurrent_commands": config.limits.max_concurrent_commands,
+                "retry_attempts": config.limits.retry_attempts,
+            },
+            "audit": {
+                "enabled": config.audit.enabled,
+                "path": config.audit.path.display().to_string(),
+                "written_by": "mcp-server-only",
+            },
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+        return Ok(());
+    }
+
     println!("Bridge MCP Status");
     println!("=====================\n");
 
@@ -795,6 +944,7 @@ pub async fn run_history(
     config: Arc<Config>,
     limit: usize,
     host_filter: Option<&str>,
+    json_output: bool,
 ) -> Result<()> {
     let ctx = create_context(config);
 
@@ -803,6 +953,35 @@ pub async fn run_history(
     } else {
         ctx.history.recent(limit)
     };
+
+    if json_output {
+        let rows: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "timestamp": e.timestamp.to_rfc3339(),
+                    "host": e.host,
+                    "command": e.command,
+                    "success": e.success,
+                    // `u32::MAX` is the sentinel for "never produced an exit
+                    // code" (the command errored before running). Emit null
+                    // rather than 4294967295, which a consumer would read as a
+                    // real status.
+                    "exit_code": (e.exit_code != u32::MAX).then_some(e.exit_code),
+                    "duration_ms": e.duration_ms,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "entries": rows,
+                "total": entries.len(),
+            }))
+            .map_err(|e| BridgeError::Config(e.to_string()))?
+        );
+        return Ok(());
+    }
 
     if entries.is_empty() {
         println!("No command history available.");
@@ -1186,6 +1365,7 @@ pub async fn run_tool(
     json_args: Option<&str>,
     json_output: bool,
     data_reduction: DataReductionFlags,
+    assume_yes: bool,
 ) -> Result<i32> {
     use crate::mcp::registry::{create_filtered_registry, inject_reduction_schema};
 
@@ -1205,12 +1385,39 @@ pub async fn run_tool(
             let mut schema: serde_json::Value =
                 serde_json::from_str(h.schema().input_schema).unwrap_or_default();
             inject_reduction_schema(&mut schema, h.output_kind());
+            if h.supports_elevation() {
+                crate::mcp::registry::inject_privilege_schema(&mut schema);
+            }
             serde_json::to_string(&schema).ok()
         });
         let schema_ref = enriched_schema.as_ref().and_then(|opt| opt.as_deref());
+        // Keys the tool actually declares, including the reduction params
+        // injected above. Empty when the schema could not be parsed, in which
+        // case validation is skipped rather than guessed at.
+        let known_keys: Vec<String> = schema_ref
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|schema| {
+                schema
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|props| props.keys().cloned().collect())
+            })
+            .unwrap_or_default();
+
         let mut map = serde_json::Map::new();
         for pair in kv_args {
             if let Some((key, value)) = pair.split_once('=') {
+                // An unknown key used to be accepted in silence, so a typo in
+                // `jq_filter` or `columns` produced a full, unreduced result
+                // that looked exactly like a working one.
+                if !known_keys.is_empty() && !known_keys.iter().any(|k| k == key) {
+                    let hint = nearest_key(key, &known_keys)
+                        .map_or_else(String::new, |k| format!(". Did you mean `{k}`?"));
+                    return Err(BridgeError::Config(format!(
+                        "Unknown argument `{key}` for tool `{tool_name}`{hint}\n\
+                         Run `bridge-mcp describe-tool {tool_name}` to list valid arguments."
+                    )));
+                }
                 let coerced = coerce_value(value, key, schema_ref);
                 map.insert(key.to_string(), coerced);
             } else {
@@ -1227,11 +1434,28 @@ pub async fn run_tool(
         ))
     };
 
+    // The destructive gate. This runs before either execution path, because
+    // which one serves a call is an accident of whether a daemon happens to be
+    // up — and that decided whether a destructive tool was refused or ran
+    // unchallenged. The daemon path is refused server-side (the CLI declares
+    // `clientCapabilities: {}`, and the check is fail-closed); the direct path
+    // called the registry and never met the gate at all. Same config, same
+    // command, opposite outcome, with the default being the unguarded one.
+    confirm_destructive(tool_name, args.as_ref(), assume_yes, &config)?;
+
     // Fast path: if the local daemon is running, forward this tool call
     // to it over the Unix socket. This reuses the daemon's shared SSH
     // connection pool and saves the ~95 ms handshake on every invocation
-    // after the first. Falls back to the stateless in-process path on
-    // any forwarding error (daemon absent, refused, timeout, etc.).
+    // after the first.
+    //
+    // The fallback is narrower than it looks: only a failure to REACH the
+    // daemon (absent socket, connection refused) returns `Ok(None)` and drops
+    // to the stateless path. A daemon that answers with a JSON-RPC *error*
+    // answers `Ok(Some(..))`, and that error is what the user sees. That is
+    // deliberate — a tool that failed on the daemon would fail in-process too,
+    // and silently re-running it would hide the first failure — but it is why
+    // a malformed request envelope surfaced as every `bridge-mcp tool …`
+    // returning `-32602` rather than as a quiet fallback.
     let daemon_socket = crate::daemon::default_socket_path();
     if daemon_socket.exists()
         && let Some(forwarded) = try_forward_to_daemon(
@@ -1246,7 +1470,16 @@ pub async fn run_tool(
 
     // Slow path: stateless in-process execution.
     let ctx = create_context(Arc::clone(&config));
-    let result = registry.execute(tool_name, args, &ctx).await?;
+    // Strip interactive App components, exactly as `McpServer` does before it
+    // answers a `tools/call`. This path calls the registry directly and so
+    // bypassed that filter: a terminal has nothing to render an App with, and
+    // serializing it made the blob the bulk of the output — on `ssh_storage_df`
+    // 3377 of 3950 bytes, and 412 bytes appended to a 6-byte answer that
+    // `jq_filter` had just reduced. `structured_content` survives, as there.
+    let result = registry
+        .execute(tool_name, args, &ctx)
+        .await?
+        .without_apps();
 
     let is_error = result.is_error.unwrap_or(false);
     let exit_code = i32::from(is_error);
@@ -1276,6 +1509,121 @@ pub async fn run_tool(
 }
 
 /// Coerce a string value to the appropriate JSON type based on the tool's input schema.
+/// Ask before running a tool annotated `destructiveHint`.
+///
+/// `security.require_elicitation_on_destructive` is enforced by the MCP server
+/// through an elicitation round-trip. A CLI process has no such channel, so the
+/// policy had no representation here at all: the direct path ran destructive
+/// tools unchallenged while the daemon path refused them, and which one served
+/// a given call depended only on whether a daemon happened to be running.
+///
+/// On a terminal the question is asked. Without one — a script, a CI job, a
+/// pipe — there is nobody to ask, so the call is refused unless `--yes` said in
+/// advance that it is intended. Refusing by default matches the server's
+/// fail-closed posture; `--yes` keeps the scripted case possible and explicit.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] when the operator declines, or when
+/// stdin is not a terminal and `--yes` was not given.
+fn confirm_destructive(
+    tool_name: &str,
+    args: Option<&serde_json::Value>,
+    assume_yes: bool,
+    config: &Config,
+) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+
+    if !config.security.require_elicitation_on_destructive {
+        return Ok(());
+    }
+    if crate::mcp::registry::tool_annotations(tool_name).destructive_hint != Some(true) {
+        return Ok(());
+    }
+
+    // Rendered for both the prompt and the refusal: whoever has to decide, or
+    // has to read why a script stopped, needs to see what would have run.
+    let rendered = args
+        .and_then(|a| serde_json::to_string(a).ok())
+        .unwrap_or_else(|| "{}".to_string());
+
+    if assume_yes {
+        // Recorded, not merely allowed: `--yes` is the point at which a human
+        // delegated the decision, and that belongs in the trail.
+        tracing::warn!(
+            tool = tool_name,
+            args = %rendered,
+            "destructive tool confirmed by --yes"
+        );
+        return Ok(());
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "`{tool_name}` is annotated destructive and stdin is not a terminal, \
+                 so there is nobody to confirm with. Pass --yes to confirm in advance, \
+                 or set security.require_elicitation_on_destructive: false to disable \
+                 this gate entirely."
+            ),
+        });
+    }
+
+    eprintln!("\n  DESTRUCTIVE: {tool_name}");
+    eprintln!("  {rendered}");
+    eprint!("  Proceed? [y/N] ");
+    let _ = std::io::stderr().flush();
+
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(BridgeError::Io)?;
+
+    if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!("`{tool_name}` was not confirmed"),
+        })
+    }
+}
+
+/// Levenshtein distance, capped implicitly by the short lengths involved.
+///
+/// Written out rather than pulled in: the only edit-distance need in the crate
+/// is suggesting an argument name, over strings a few characters long.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut cur = vec![0usize; b_chars.len() + 1];
+
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b_chars.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b_chars.len()]
+}
+
+/// The closest declared argument name to `key`, if one is close enough to be
+/// worth suggesting.
+///
+/// The threshold scales with the name's length so `hostt` -> `host` is offered
+/// while an unrelated word is not: suggesting a wrong name is worse than
+/// suggesting none, because it sends the reader looking in the wrong place.
+fn nearest_key<'a>(key: &str, candidates: &'a [String]) -> Option<&'a str> {
+    let budget = (key.len() / 3).max(1);
+    candidates
+        .iter()
+        .map(|c| (edit_distance(key, c), c.as_str()))
+        .filter(|(d, _)| *d <= budget)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
 fn coerce_value(value: &str, key: &str, schema_json: Option<&str>) -> serde_json::Value {
     // Try to extract the expected type from the JSON schema
     if let Some(prop_type) = schema_json
@@ -1331,7 +1679,9 @@ pub async fn run_describe_tool(
     tool_name: &str,
     json_output: bool,
 ) -> Result<()> {
-    use crate::mcp::registry::{create_filtered_registry, inject_reduction_schema, tool_group};
+    use crate::mcp::registry::{
+        create_filtered_registry, inject_reduction_schema, tool_annotations, tool_group,
+    };
 
     let registry = create_filtered_registry(&config.tool_groups);
     let handler = registry
@@ -1343,11 +1693,18 @@ pub async fn run_describe_tool(
     let schema = handler.schema();
     let group = tool_group(tool_name);
     let output_kind = handler.output_kind();
+    // `mcp_describe_tool` has always returned these; the CLI dropped them, so
+    // `describe-tool ssh_exec` gave no hint that it is annotated destructive.
+    // Knowing that before invoking is the whole point of the annotation.
+    let annotations = tool_annotations(tool_name);
 
     // Parse and enrich the schema with data-reduction params (jq_filter, columns, etc.)
     let mut input_schema: serde_json::Value =
         serde_json::from_str(schema.input_schema).unwrap_or_default();
     inject_reduction_schema(&mut input_schema, output_kind);
+    if handler.supports_elevation() {
+        crate::mcp::registry::inject_privilege_schema(&mut input_schema);
+    }
 
     if json_output {
         let obj = serde_json::json!({
@@ -1356,6 +1713,7 @@ pub async fn run_describe_tool(
             "description": schema.description,
             "output_kind": format!("{output_kind:?}"),
             "reduction_strategy": output_kind.strategy_hint(),
+            "annotations": annotations,
             "input_schema": input_schema,
         });
         let json =
@@ -1368,6 +1726,25 @@ pub async fn run_describe_tool(
         println!();
         println!("Output Kind: {output_kind:?}");
         println!("Reduction Strategy: {}", output_kind.strategy_hint());
+
+        let hint = |flag: Option<bool>| match flag {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unset",
+        };
+        println!(
+            "Annotations: destructive={} read-only={} idempotent={}",
+            hint(annotations.destructive_hint),
+            hint(annotations.read_only_hint),
+            hint(annotations.idempotent_hint),
+        );
+        if annotations.destructive_hint == Some(true) {
+            println!(
+                "  WARNING: destructive. Under `security.require_elicitation_on_destructive` \
+                 an MCP client is asked to confirm before this runs."
+            );
+        }
+
         println!("\nInput Schema:");
 
         // Pretty-print the schema, showing required fields and property types
@@ -1442,6 +1819,106 @@ mod tests {
     fn test_data_reduction_flags_is_empty_by_default() {
         let flags = DataReductionFlags::default();
         assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn edit_distance_matches_known_pairs() {
+        assert_eq!(edit_distance("host", "host"), 0);
+        assert_eq!(edit_distance("hostt", "host"), 1);
+        assert_eq!(edit_distance("jq_filtr", "jq_filter"), 1);
+        assert_eq!(edit_distance("", "host"), 4);
+        assert_eq!(edit_distance("host", ""), 4);
+    }
+
+    #[test]
+    fn nearest_key_suggests_a_close_typo() {
+        let keys = [
+            "host".to_string(),
+            "command".to_string(),
+            "jq_filter".to_string(),
+        ];
+        assert_eq!(nearest_key("hostt", &keys), Some("host"));
+        assert_eq!(nearest_key("jq_filtr", &keys), Some("jq_filter"));
+    }
+
+    /// A wrong suggestion is worse than none: it sends the reader looking in
+    /// the wrong place. Unrelated words must fall outside the budget.
+    #[test]
+    fn nearest_key_declines_when_nothing_is_close() {
+        let keys = [
+            "host".to_string(),
+            "command".to_string(),
+            "jq_filter".to_string(),
+        ];
+        assert_eq!(nearest_key("param_bidon", &keys), None);
+        assert_eq!(nearest_key("zzz", &keys), None);
+    }
+
+    /// A daemon-forwarded call MUST carry the `_meta` envelope.
+    ///
+    /// Regression guard for the 3.0.0 Modern-only cut: the CLI forwards
+    /// `tools/call` over the Unix socket, the server made the envelope
+    /// mandatory, and nothing updated the client — so with a daemon up, every
+    /// one of the 279 tools answered
+    /// `-32602 missing _meta["io.modelcontextprotocol/protocolVersion"]`
+    /// instead of running. Found by execution against a live daemon; no test
+    /// existed that could have caught it.
+    #[test]
+    fn daemon_request_carries_the_required_meta_envelope() {
+        let request = build_daemon_request("req-1", "ssh_exec", &serde_json::json!({"host": "pi"}));
+
+        let meta = request["params"]["_meta"]
+            .as_object()
+            .expect("params._meta must be an object");
+
+        assert_eq!(
+            meta.get(meta_keys::PROTOCOL_VERSION)
+                .and_then(serde_json::Value::as_str),
+            Some(PROTOCOL_VERSION),
+            "the forwarded request must declare the revision it speaks"
+        );
+        assert!(
+            meta.get(meta_keys::CLIENT_CAPABILITIES)
+                .is_some_and(serde_json::Value::is_object),
+            "clientCapabilities must be present; `{{}}` is the honest value for a \
+             CLI that cannot answer an elicitation, but absent is a `-32602`"
+        );
+        assert!(
+            meta.get(meta_keys::CLIENT_INFO)
+                .is_some_and(serde_json::Value::is_object),
+            "clientInfo must be present"
+        );
+    }
+
+    /// The envelope declares *no* capabilities, and that is deliberate.
+    ///
+    /// Capability lookup is fail-closed: claiming `elicitation` here would let
+    /// the destructive gate believe a CLI process can answer a confirmation it
+    /// has no channel to display.
+    #[test]
+    fn daemon_request_declares_no_client_capabilities() {
+        let request = build_daemon_request("req-2", "ssh_exec", &serde_json::Value::Null);
+
+        let caps = request["params"]["_meta"][meta_keys::CLIENT_CAPABILITIES]
+            .as_object()
+            .expect("clientCapabilities must be an object");
+
+        assert!(
+            caps.is_empty(),
+            "the CLI must not claim capabilities it cannot honour, got {caps:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_request_preserves_tool_name_and_arguments() {
+        let args = serde_json::json!({"host": "pi", "command": "echo hi"});
+        let request = build_daemon_request("req-3", "ssh_exec", &args);
+
+        assert_eq!(request["jsonrpc"], "2.0");
+        assert_eq!(request["id"], "req-3");
+        assert_eq!(request["method"], "tools/call");
+        assert_eq!(request["params"]["name"], "ssh_exec");
+        assert_eq!(request["params"]["arguments"], args);
     }
 
     #[cfg(feature = "jq")]
@@ -2170,7 +2647,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2227,7 +2704,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2257,7 +2734,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2281,7 +2758,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_status(Arc::new(config)).await;
+        let result = run_status(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -2308,7 +2785,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 10, None).await;
+        let result = run_history(Arc::new(config), 10, None, false).await;
         assert!(result.is_ok());
     }
 
@@ -2333,7 +2810,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 10, Some("nonexistent-host")).await;
+        let result = run_history(Arc::new(config), 10, Some("nonexistent-host"), false).await;
         assert!(result.is_ok());
     }
 
@@ -2358,7 +2835,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 0, None).await;
+        let result = run_history(Arc::new(config), 0, None, false).await;
         assert!(result.is_ok());
     }
 
@@ -2383,7 +2860,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_history(Arc::new(config), 1000, None).await;
+        let result = run_history(Arc::new(config), 1000, None, false).await;
         assert!(result.is_ok());
     }
 
@@ -2410,7 +2887,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_exec(Arc::new(config), "unknown-host", "ls", 30, None).await;
+        let result = run_exec(Arc::new(config), "unknown-host", "ls", 30, None, false).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -2477,7 +2954,7 @@ mod tests {
         };
 
         // Try to execute a command not in whitelist
-        let result = run_exec(Arc::new(config), "test", "rm -rf /", 30, None).await;
+        let result = run_exec(Arc::new(config), "test", "rm -rf /", 30, None, false).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -3053,6 +3530,86 @@ mod tests {
         }
     }
 
+    // ============== destructive gate Tests ==============
+    //
+    // The prompt branch needs a terminal on stdin, which a test harness does
+    // not have. Under `cargo test` stdin is never a TTY, so these exercise the
+    // three branches that decide without asking — which are also the three
+    // that decide what a script gets.
+
+    fn gate_config(require: bool) -> Config {
+        let mut config = Config::default();
+        config.security.require_elicitation_on_destructive = require;
+        config
+    }
+
+    #[test]
+    fn destructive_gate_refuses_without_a_terminal() {
+        let err = confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi", "command": "echo hi"})),
+            false,
+            &gate_config(true),
+        )
+        .expect_err("a destructive tool must not run unconfirmed off a terminal");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--yes"),
+            "the refusal must name the way forward, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn destructive_gate_lets_yes_through() {
+        confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi"})),
+            true,
+            &gate_config(true),
+        )
+        .expect("--yes is the scripted confirmation");
+    }
+
+    /// The gate is the CLI's half of `require_elicitation_on_destructive`, so
+    /// turning that policy off must turn the gate off with it — otherwise the
+    /// setting means one thing over MCP and another here.
+    #[test]
+    fn destructive_gate_honours_the_policy_switch() {
+        confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi"})),
+            false,
+            &gate_config(false),
+        )
+        .expect("with the policy off, nothing should be gated");
+    }
+
+    #[test]
+    fn destructive_gate_ignores_non_destructive_tools() {
+        confirm_destructive(
+            "ssh_metrics",
+            Some(&serde_json::json!({"host": "pi"})),
+            false,
+            &gate_config(true),
+        )
+        .expect("a read-only tool must never be gated");
+    }
+
+    /// Deletion, substitution and the empty-candidate list — the cases the
+    /// existing `edit_distance_matches_known_pairs` and `nearest_key_*` tests
+    /// above do not reach.
+    #[test]
+    fn edit_distance_counts_deletions_and_substitutions() {
+        assert_eq!(edit_distance("hos", "host"), 1);
+        assert_eq!(edit_distance("hoat", "host"), 1);
+    }
+
+    #[test]
+    fn nearest_key_handles_no_candidates() {
+        assert_eq!(nearest_key("host", &[]), None);
+    }
+
     // ============== coerce_value Tests ==============
 
     #[test]
@@ -3245,7 +3802,7 @@ mod tests {
         };
 
         // Should succeed (no hosts is a warning, not error)
-        let result = run_validate(Arc::new(config)).await;
+        let result = run_validate(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -3299,7 +3856,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_validate(Arc::new(config)).await;
+        let result = run_validate(Arc::new(config), false).await;
         assert!(result.is_err());
     }
 
@@ -3326,7 +3883,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_config_diff(Arc::new(config)).await;
+        let result = run_config_diff(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 
@@ -3355,7 +3912,7 @@ mod tests {
             awx: None,
         };
 
-        let result = run_config_diff(Arc::new(config)).await;
+        let result = run_config_diff(Arc::new(config), false).await;
         assert!(result.is_ok());
     }
 

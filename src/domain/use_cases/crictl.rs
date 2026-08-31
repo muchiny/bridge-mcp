@@ -31,8 +31,8 @@ pub fn crictl_detect_prefix(crictl_bin: Option<&str>) -> String {
     {
         return format!("{bin} ");
     }
-    "$(if command -v k3s &>/dev/null; then echo 'k3s crictl'; \
-     elif command -v crictl &>/dev/null; then \
+    "$(if command -v k3s >/dev/null 2>&1; then echo 'k3s crictl'; \
+     elif command -v crictl >/dev/null 2>&1; then \
      echo 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock'; \
      else echo 'k3s/crictl not installed on host' >&2; echo false; fi) "
         .to_string()

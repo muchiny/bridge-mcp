@@ -1,7 +1,10 @@
 //! Progressive-discovery meta-tools.
 //!
-//! 338 tools is enough to overflow the context window of a small client when
-//! `tools/list` is called eagerly. These three meta-tools let a client
+//! A few hundred tools is enough to overflow the context window of a small
+//! client when `tools/list` is called eagerly (the registry compiles 476, and
+//! a config typically enables a few hundred of them — the exact number is a
+//! deployment property, so it is deliberately not quoted here). These three
+//! meta-tools let a client
 //! discover the registry on demand: browse groups, search by keyword, then
 //! fetch the full schema only for the one tool it actually needs.
 //!
@@ -101,7 +104,7 @@ pub fn definitions() -> Vec<Tool> {
             description:
                 "Return the full schema and reduction strategy for a single tool. Use after \
                  `mcp_search_tools` to fetch the one schema you need; avoids the ~100 K-token \
-                 cost of loading all 338 schemas up front."
+                 cost of loading every enabled schema up front."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -233,9 +236,14 @@ fn list_groups(registry: &ToolRegistry) -> ToolCallResult {
 ///
 /// Tiers: exact name, name prefix, name substring, description substring. The
 /// MCP search path had no ranking at all and cut with `Vec::truncate`, so the
-/// best hit was routinely thrown away (audit G-14, 2026-08-19). The CLI path
-/// (`src/cli/runner.rs`) already sorted by name; this adds the tiers on top.
-fn relevance_rank(name: &str, description: &str, query_lower: &str) -> Option<u8> {
+/// best hit was routinely thrown away (audit G-14, 2026-08-19).
+///
+/// `pub(crate)` so `list-tools --search` ranks identically. It did not: the CLI
+/// filtered in name-sorted order only, so `--search kubernetes` led with
+/// `ssh_docker_stats` and `ssh_exec` — description matches — ahead of the 83
+/// tools whose names carry the word. Two search surfaces over one registry
+/// should not disagree about what "best match" means.
+pub(crate) fn relevance_rank(name: &str, description: &str, query_lower: &str) -> Option<u8> {
     let name_lower = name.to_lowercase();
     if name_lower == query_lower {
         return Some(0);
@@ -336,6 +344,9 @@ fn describe(args: Option<&Value>, registry: &ToolRegistry) -> ToolCallResult {
     let mut input_schema: Value =
         serde_json::from_str(schema.input_schema).unwrap_or_else(|_| json!({}));
     inject_reduction_schema(&mut input_schema, output_kind);
+    if handler.supports_elevation() {
+        super::registry::inject_privilege_schema(&mut input_schema);
+    }
 
     let payload = json!({
         "name": schema.name,

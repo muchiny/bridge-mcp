@@ -34,8 +34,8 @@ fn is_valid_binary_path(bin: &str) -> bool {
 #[must_use]
 pub fn docker_detect_prefix(docker_bin: Option<&str>) -> String {
     let Some(bin) = docker_bin else {
-        return "$(if command -v docker &>/dev/null; then echo docker; \
-         elif command -v podman &>/dev/null; then echo podman; \
+        return "$(if command -v docker >/dev/null 2>&1; then echo docker; \
+         elif command -v podman >/dev/null 2>&1; then echo podman; \
          else echo 'Docker/Podman not installed on host' >&2; echo false; fi) "
             .to_string();
     };
@@ -54,8 +54,8 @@ pub fn docker_detect_prefix(docker_bin: Option<&str>) -> String {
 #[must_use]
 pub fn docker_compose_detect_prefix(compose_bin: Option<&str>) -> String {
     let Some(bin) = compose_bin else {
-        return "$(if docker compose version &>/dev/null 2>&1; then echo 'docker compose'; \
-         elif command -v docker-compose &>/dev/null; then echo docker-compose; \
+        return "$(if docker compose version >/dev/null 2>&1 2>&1; then echo 'docker compose'; \
+         elif command -v docker-compose >/dev/null 2>&1; then echo docker-compose; \
          else echo 'docker compose / docker-compose not installed on host' >&2; echo false; fi) "
             .to_string();
     };

@@ -81,10 +81,10 @@ pub fn pkg_detect_prefix(pkg_manager: Option<&str>) -> String {
         // Invalid binary path, fall back to auto-detection
         return pkg_detect_prefix(None);
     }
-    "$(if command -v apt &>/dev/null; then echo apt; \
-     elif command -v dnf &>/dev/null; then echo dnf; \
-     elif command -v yum &>/dev/null; then echo yum; \
-     elif command -v apk &>/dev/null; then echo apk; \
+    "$(if command -v apt >/dev/null 2>&1; then echo apt; \
+     elif command -v dnf >/dev/null 2>&1; then echo dnf; \
+     elif command -v yum >/dev/null 2>&1; then echo yum; \
+     elif command -v apk >/dev/null 2>&1; then echo apk; \
      else echo 'No supported package manager found on host' >&2; echo false; fi)"
         .to_string()
 }
@@ -147,10 +147,10 @@ impl PackageCommandBuilder {
         if let Some(pkg) = package {
             format!("{pm} install -y {}", shell_escape(pkg))
         } else {
-            "if command -v apt &>/dev/null; then apt update && apt upgrade -y; \
-                 elif command -v dnf &>/dev/null; then dnf update -y; \
-                 elif command -v yum &>/dev/null; then yum update -y; \
-                 elif command -v apk &>/dev/null; then apk update && apk upgrade; \
+            "if command -v apt >/dev/null 2>&1; then apt update && apt upgrade -y; \
+                 elif command -v dnf >/dev/null 2>&1; then dnf update -y; \
+                 elif command -v yum >/dev/null 2>&1; then yum update -y; \
+                 elif command -v apk >/dev/null 2>&1; then apk update && apk upgrade; \
                  else echo 'ERROR: No package manager found'; exit 127; fi"
                 .to_string()
         }

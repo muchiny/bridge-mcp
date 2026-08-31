@@ -51,14 +51,21 @@ pub fn apply_jq_filter(input: &str, filter_expr: &str) -> Result<String> {
         path: (),
     };
 
-    // Parse the filter
+    // Parse the filter.
+    //
+    // Only the second half of each pair is reported. jaq pairs every error
+    // with the `File` it came from, and `{:?}` on the pair echoed the whole
+    // struct — `(File { code: ".this | is | not ( valid", path: () }, Lex(..))`
+    // — so the caller got their own filter read back at them, wrapped in Rust
+    // syntax, with the actual complaint buried at the end. The filter is
+    // quoted once, plainly, instead.
     let modules = loader.load(&arena, program).map_err(|errs| {
         let msg = errs
             .into_iter()
-            .map(|e| format!("{e:?}"))
+            .map(|(_file, e)| format!("{e:?}"))
             .collect::<Vec<_>>()
             .join("; ");
-        BridgeError::McpInvalidRequest(format!("jq filter parse error: {msg}"))
+        BridgeError::McpInvalidRequest(format!("jq filter parse error in `{filter_expr}`: {msg}"))
     })?;
 
     // Compile the filter

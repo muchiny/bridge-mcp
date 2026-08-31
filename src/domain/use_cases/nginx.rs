@@ -23,9 +23,9 @@ impl NginxCommandBuilder {
         match server {
             Some(s) => format!("systemctl status {} --no-pager", shell_escape(s)),
             None => String::from(
-                "if systemctl is-active nginx &>/dev/null; then systemctl status nginx --no-pager; \
-                 elif systemctl is-active apache2 &>/dev/null; then systemctl status apache2 --no-pager; \
-                 elif systemctl is-active httpd &>/dev/null; then systemctl status httpd --no-pager; \
+                "if systemctl is-active nginx >/dev/null 2>&1; then systemctl status nginx --no-pager; \
+                 elif systemctl is-active apache2 >/dev/null 2>&1; then systemctl status apache2 --no-pager; \
+                 elif systemctl is-active httpd >/dev/null 2>&1; then systemctl status httpd --no-pager; \
                  else echo 'No web server running'; fi",
             ),
         }

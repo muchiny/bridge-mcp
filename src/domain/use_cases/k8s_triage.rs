@@ -2,7 +2,7 @@
 //!
 //! Builds composite kubectl/jq pipelines for Kubernetes triage and health
 //! analysis. All pipelines guard for jq presence and use POSIX-safe
-//! redirection (`>/dev/null 2>&1` not `&>/dev/null`).
+//! redirection (`>/dev/null 2>&1` not `>/dev/null 2>&1`).
 
 use std::fmt::Write;
 
@@ -23,7 +23,7 @@ fn is_valid_binary_path(bin: &str) -> bool {
 
 /// Build the `K=...` shell variable head for kubectl binary detection.
 ///
-/// Uses `>/dev/null 2>&1` (POSIX-safe) instead of `&>/dev/null` to avoid
+/// Uses `>/dev/null 2>&1` (POSIX-safe) instead of `>/dev/null 2>&1` to avoid
 /// the command blacklist.
 fn kubectl_k_head(kubectl_bin: Option<&str>) -> String {
     if let Some(bin) = kubectl_bin
@@ -31,7 +31,7 @@ fn kubectl_k_head(kubectl_bin: Option<&str>) -> String {
     {
         return format!("K=\"{bin}\"; ");
     }
-    // POSIX-safe: uses >/dev/null 2>&1 not &>/dev/null
+    // POSIX-safe: uses >/dev/null 2>&1 not >/dev/null 2>&1
     "K=\"$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; \
      elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; \
      elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; \
@@ -548,9 +548,17 @@ mod tests {
         assert!(cmd.contains("jq not installed"), "cmd: {cmd}");
         assert!(cmd.contains("notReadyPods"), "cmd: {cmd}");
         assert!(cmd.contains("warningEvents"), "cmd: {cmd}");
+        // The command uses `>/dev/null 2>&1`, and that is correct.
+        //
+        // This assertion used to require its absence, on the belief that the
+        // form was blacklisted while `&>/dev/null` was not. Both contain
+        // `>/dev/` and both matched the old `>\s*/dev/` default pattern, so
+        // the bash-only form bought nothing and broke under dash. The default
+        // pattern now names device families instead, and the POSIX form is what
+        // portable shell code writes.
         assert!(
             !cmd.contains("&>/dev/null"),
-            "must not use &>/dev/null blacklisted: {cmd}"
+            "must not use the bash-only redirect: {cmd}"
         );
     }
 

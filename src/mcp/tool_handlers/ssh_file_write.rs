@@ -18,7 +18,7 @@ use crate::mcp::protocol::ToolCallResult;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::security::{AuditEvent, CommandResult as AuditCommandResult};
-use crate::ssh::{DEFAULT_CHUNK_SIZE, is_retryable_error, with_retry_if};
+use crate::ssh::{DEFAULT_CHUNK_SIZE, is_retryable_error_for, with_retry_if};
 
 use super::utils::{connect_with_jump, save_output_to_file, validate_path};
 
@@ -252,7 +252,10 @@ impl SshFileWriteHandler {
                     }
                 }
             },
-            is_retryable_error,
+            // A write that timed out may have landed. Replaying it is not
+            // safe, so only a failure to connect — which proves the write
+            // never started — is retried here.
+            |e| is_retryable_error_for(e, false),
         )
         .await;
 
