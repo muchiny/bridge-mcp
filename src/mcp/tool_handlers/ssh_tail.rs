@@ -18,6 +18,7 @@ use super::utils::shell_escape;
 
 /// Arguments for `ssh_tail` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshTailArgs {
     host: String,
     file: String,

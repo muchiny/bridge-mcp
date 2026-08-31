@@ -12,6 +12,7 @@ use crate::mcp_standard_tool;
 use super::utils::shell_escape;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshPostgresqlStatusArgs {
     host: String,
     db_user: Option<String>,

@@ -13,6 +13,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k8s_patch` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sPatchArgs {
     host: String,
     target: String,

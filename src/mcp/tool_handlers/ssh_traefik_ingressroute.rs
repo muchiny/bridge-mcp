@@ -14,6 +14,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_traefik_ingressroute` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshTraefikIngressrouteArgs {
     host: String,
     /// `IngressRoute` name.

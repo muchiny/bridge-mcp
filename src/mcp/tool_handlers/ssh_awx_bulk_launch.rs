@@ -31,6 +31,7 @@ struct BulkJob {
 
 /// Arguments for the `ssh_awx_bulk_launch` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxBulkLaunchArgs {
     /// Jobs to launch in a single atomic bulk request (must be non-empty).
     jobs: Vec<BulkJob>,

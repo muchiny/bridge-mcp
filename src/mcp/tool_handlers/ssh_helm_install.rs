@@ -18,6 +18,7 @@ use crate::ports::ToolContext;
 use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshHelmInstallArgs {
     host: String,
     release: String,

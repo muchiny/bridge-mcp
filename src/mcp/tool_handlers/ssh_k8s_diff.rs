@@ -12,6 +12,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k8s_diff` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sDiffArgs {
     host: String,
     manifest: String,

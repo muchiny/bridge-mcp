@@ -12,6 +12,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_crictl_inspect` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshCrictlInspectArgs {
     host: String,
     kind: String,

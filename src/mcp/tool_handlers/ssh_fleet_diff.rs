@@ -17,6 +17,7 @@ use crate::mcp_standard_tool;
 use crate::ports::ToolContext;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshFleetDiffArgs {
     host: String,
     command: String,

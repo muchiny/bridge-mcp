@@ -10,6 +10,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_crictl_exec` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshCrictlExecArgs {
     host: String,
     container_id: String,

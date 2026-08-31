@@ -15,6 +15,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for the `ssh_awx_adhoc_launch` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxAdhocLaunchArgs {
     /// Inventory ID to run the ad-hoc command against.
     inventory: u64,

@@ -13,6 +13,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k3s_addon_manifests` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK3sAddonManifestsArgs {
     host: String,
     /// Path to the K3s auto-deploy manifests directory (default: /var/lib/rancher/k3s/server/manifests).

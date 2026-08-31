@@ -12,6 +12,7 @@ use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_a
 use crate::mcp_standard_tool;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshWinPerfNetworkArgs {
     host: String,
     timeout_seconds: Option<u64>,

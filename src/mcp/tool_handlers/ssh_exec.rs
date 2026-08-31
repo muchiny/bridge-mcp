@@ -21,6 +21,7 @@ use super::utils::shell_escape;
 
 /// Arguments for `ssh_exec` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshExecArgs {
     host: String,
     command: String,

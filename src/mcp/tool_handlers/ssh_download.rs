@@ -21,6 +21,7 @@ use super::utils::{connect_with_jump, parse_transfer_mode_checked, validate_path
 
 /// Arguments for `ssh_download` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshDownloadArgs {
     host: String,
     remote_path: String,

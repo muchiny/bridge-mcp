@@ -13,6 +13,7 @@ use crate::mcp_standard_tool;
 use crate::ports::protocol::ToolCallResult;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshDiscoverHostsArgs {
     /// Target host name from configuration.
     host: String,

@@ -21,6 +21,7 @@ use crate::ssh::DEFAULT_CHUNK_SIZE;
 use super::utils::{connect_with_jump, validate_path};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshFilesWriteArgs {
     host: String,
     files: Vec<FileEntry>,

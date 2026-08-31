@@ -23,6 +23,7 @@ use crate::ssh::{DEFAULT_CHUNK_SIZE, is_retryable_error_for, with_retry_if};
 use super::utils::{connect_with_jump, save_output_to_file, validate_path};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshFileWriteArgs {
     host: String,
     path: String,

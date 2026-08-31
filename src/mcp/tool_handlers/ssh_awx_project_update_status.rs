@@ -19,6 +19,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 /// Arguments for `ssh_awx_project_update_status` tool.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshAwxProjectUpdateStatusArgs {
     project_update_id: u64,
     #[serde(default)]

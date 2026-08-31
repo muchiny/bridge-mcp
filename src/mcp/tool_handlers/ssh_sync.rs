@@ -20,6 +20,7 @@ use super::utils::{connect_with_jump, validate_path};
 
 /// Arguments for `ssh_sync` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshSyncArgs {
     host: String,
     source: String,

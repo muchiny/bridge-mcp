@@ -12,6 +12,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k8s_node_capacity` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sNodeCapacityArgs {
     host: String,
     #[serde(default)]

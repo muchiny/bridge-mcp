@@ -11,6 +11,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k3s_cert_rotate` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK3sCertRotateArgs {
     host: String,
     #[serde(default)]

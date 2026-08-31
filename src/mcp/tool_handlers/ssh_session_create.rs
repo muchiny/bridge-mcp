@@ -14,6 +14,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_session_create` tool
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshSessionCreateArgs {
     host: String,
     timeout_seconds: Option<u64>,

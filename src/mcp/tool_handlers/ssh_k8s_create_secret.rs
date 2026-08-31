@@ -33,6 +33,7 @@ pub struct SecretLiteralEntry {
 /// `RedactedSecret` and are structurally incapable of leaking through
 /// `format!("{args:?}")`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sCreateSecretArgs {
     host: String,
     name: String,

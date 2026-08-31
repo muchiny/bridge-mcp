@@ -28,6 +28,7 @@ fn default_true() -> bool {
 
 /// Arguments for the `ssh_k8s_drain` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sDrainArgs {
     host: String,
     node: String,

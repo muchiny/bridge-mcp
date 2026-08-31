@@ -16,6 +16,7 @@ use crate::mcp_standard_tool;
 
 /// Arguments for the `ssh_k8s_kubeconfig_generate` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshK8sKubeconfigGenerateArgs {
     host: String,
     service_account: String,

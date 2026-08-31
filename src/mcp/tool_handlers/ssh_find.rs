@@ -20,6 +20,7 @@ use super::utils::shell_escape;
 
 /// Arguments for the `ssh_find` tool.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshFindArgs {
     /// Target host name from configuration.
     host: String,
