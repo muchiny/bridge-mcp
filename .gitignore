@@ -139,3 +139,10 @@ __pycache__/
 
 # Planning scratch (superpowers plan output — not shipped project docs)
 docs/superpowers/
+
+# SonarQube scanner working directory (regenerated per run)
+.scannerwork/
+
+# Editor / tooling backups (the originals live in git)
+*.doctor-bak
+*.bak-[0-9]*
