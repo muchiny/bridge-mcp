@@ -3,4 +3,4 @@ source: tests/snapshot_commands.rs
 assertion_line: 104
 expression: "DockerCommandBuilder::build_ps_command(None, false, None, None)"
 ---
-$(if command -v docker &>/dev/null; then echo docker; elif command -v podman &>/dev/null; then echo podman; else echo 'Docker/Podman not installed on host' >&2; echo false; fi) ps
+$(if command -v docker >/dev/null 2>&1; then echo docker; elif command -v podman >/dev/null 2>&1; then echo podman; else echo 'Docker/Podman not installed on host' >&2; echo false; fi) ps

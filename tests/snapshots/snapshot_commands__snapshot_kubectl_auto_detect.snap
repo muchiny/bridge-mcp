@@ -1,6 +1,6 @@
 ---
 source: tests/snapshot_commands.rs
-assertion_line: 196
-expression: "KubernetesCommandBuilder::build_get_command(None, \"nodes\", None, None, false,\nNone, None, None, None,)"
+assertion_line: 211
+expression: "KubernetesCommandBuilder::build_get_command(None, \"nodes\", None, None, false,\nNone, None, None, None, false, false, false, None,)"
 ---
-$(if command -v kubectl &>/dev/null; then echo kubectl; elif command -v k3s &>/dev/null; then echo 'k3s kubectl'; elif command -v microk8s &>/dev/null; then echo 'microk8s kubectl'; else echo 'kubectl/k3s/microk8s not installed on host' >&2; echo false; fi) get 'nodes'
+$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo 'kubectl/k3s/microk8s not installed on host' >&2; echo false; fi) get 'nodes'

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use russh::client::{self, Config, Handle, Handler};
 use russh::keys::key::PrivateKeyWithHashAlg;
-use russh::keys::{PublicKey, load_secret_key};
+use russh::keys::{PublicKeyOrCertificate, load_secret_key};
 use russh::{ChannelMsg, Sig};
 use russh_sftp::client::SftpSession;
 use tokio::time::timeout;
@@ -122,6 +122,15 @@ fn hardened_preferred() -> russh::Preferred {
 
     russh::Preferred {
         kex: Cow::Borrowed(HARDENED_KEX),
+        // Empty: this advertises the OpenSSH host *certificate* variants
+        // (`*-cert-v01@openssh.com`) a client is willing to accept. Host-key
+        // verification here goes through `known_hosts::verify_host_key`, which
+        // validates a bare key against a pinned entry and has no notion of a
+        // CA-signed certificate. Advertising a certificate algorithm would
+        // invite a server to present one we cannot check — so the list stays
+        // empty and `check_server_key` refuses a certificate outright
+        // (russh 0.63 field, empty in `Preferred::DEFAULT` too).
+        host_key_certificates: Cow::Borrowed(&[]),
         // `Algorithm::Ed25519` is not a `const` value (it's an enum variant in
         // ssh-key), so we allocate the slice at call time. This is a one-shot
         // cost per connection.
@@ -189,15 +198,35 @@ impl ClientHandler {
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
+    /// russh 0.63 widened this to `PublicKeyOrCertificate`, so a server may now
+    /// present a CA-signed host certificate here rather than a bare key.
+    ///
+    /// A certificate is refused. `known_hosts::verify_host_key` pins a bare key
+    /// against a known-hosts entry and has no way to establish a CA's
+    /// trustworthiness, so "verified" would be a claim this code cannot make —
+    /// and returning `true` for something unverified is exactly the MITM hole
+    /// this function exists to close. `hardened_preferred` advertises no
+    /// certificate algorithms, so a conforming server will not send one; this
+    /// arm is the fail-closed backstop for one that does anyway.
     fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = std::result::Result<bool, Self::Error>> + Send {
+        let PublicKeyOrCertificate::PublicKey { key, .. } = server_public_key else {
+            tracing::error!(
+                host = %self.hostname,
+                "Server presented a host certificate; bridge-mcp verifies pinned \
+                 keys only and cannot validate a CA signature, so the connection \
+                 is refused"
+            );
+            return std::future::ready(Ok(false));
+        };
+
         std::future::ready(
             match known_hosts::verify_host_key(
                 &self.hostname,
                 self.port,
-                server_public_key,
+                key,
                 self.verification_mode,
             ) {
                 Ok(()) => Ok(true),

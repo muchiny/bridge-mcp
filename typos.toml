@@ -21,6 +21,11 @@ extend-ignore-identifiers-re = [
     # `ba` -> `by`/`be`. Pinned to the exact 16-hex span rather than allowing
     # `ba`, which would disable that correction everywhere.
     "00f067aa0ba902b7",
+    # A DELIBERATE typo, quoted as the illustration of the bug it caused:
+    # `jq_fitler=…` was accepted in silence and returned the full unreduced
+    # output, indistinguishable from a working call. Correcting it in the prose
+    # would remove the very thing the sentence is about.
+    "jq_fitler",
 ]
 
 [default.extend-words]
