@@ -832,6 +832,13 @@ impl SshClient {
         let mut exit_status: Option<u32> = None;
         let mut exit_signal: Option<u32> = None;
         let mut total_bytes = 0usize;
+        // Set when output ran past `max_output_bytes`. This used to be a hard
+        // error: a command producing more than the cap returned
+        // `SshOutputTooLarge`, the caller marked the connection failed, and the
+        // caller's own `max_output` / `save_output` never got a chance to run —
+        // so the one case truncation and pagination exist for was the one case
+        // that failed outright, and `save_output=<path>` wrote nothing.
+        let mut over_limit = false;
         let command_timeout = Duration::from_secs(limits.command_timeout_seconds);
 
         let result = timeout(command_timeout, async {
@@ -839,22 +846,24 @@ impl SshClient {
                 match channel.wait().await {
                     Some(ChannelMsg::Data { data }) => {
                         total_bytes += data.len();
-                        if total_bytes > limits.max_output_bytes {
-                            return Err(BridgeError::SshOutputTooLarge {
-                                limit_bytes: limits.max_output_bytes,
-                            });
+                        // Past the cap, keep reading but stop keeping. The
+                        // channel still has to be drained for the exit status,
+                        // and the bytes already held are the ones the caller
+                        // asked for.
+                        if total_bytes <= limits.max_output_bytes {
+                            stdout.extend_from_slice(&data);
+                        } else {
+                            over_limit = true;
                         }
-                        stdout.extend_from_slice(&data);
                     }
                     Some(ChannelMsg::ExtendedData { data, ext }) => {
                         if ext == 1 {
                             total_bytes += data.len();
-                            if total_bytes > limits.max_output_bytes {
-                                return Err(BridgeError::SshOutputTooLarge {
-                                    limit_bytes: limits.max_output_bytes,
-                                });
+                            if total_bytes <= limits.max_output_bytes {
+                                stderr.extend_from_slice(&data);
+                            } else {
+                                over_limit = true;
                             }
-                            stderr.extend_from_slice(&data);
                         }
                     }
                     Some(ChannelMsg::ExitStatus {
@@ -902,6 +911,20 @@ impl SshClient {
                 );
                 0
             });
+            if over_limit {
+                // In-band and last, so it survives whatever the caller does
+                // with the text and is visible at the end where the reader is
+                // already looking. `total_bytes` is what the command actually
+                // produced, not what was kept.
+                stdout.extend_from_slice(
+                    format!(
+                        "\n\n--- [output stopped at the {} byte transport limit; \
+                         the command produced {} bytes] ---\n",
+                        limits.max_output_bytes, total_bytes
+                    )
+                    .as_bytes(),
+                );
+            }
             Ok((stdout, stderr, exit_code))
         })
         .await;
