@@ -45,8 +45,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 use super::oauth::{OAuthConfig, OAuthMetadata, OAuthValidator, ProtectedResourceMetadata};
 
 use crate::mcp::protocol::{
-    JsonRpcError, JsonRpcMessage, JsonRpcResponse, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
-    WriterMessage,
+    JsonRpcError, JsonRpcResponse, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, WriterMessage,
 };
 use crate::mcp::request_meta::missing_required_envelope_field;
 use crate::mcp::server::McpServer;
@@ -678,8 +677,53 @@ async fn mcp_method_not_allowed() -> Response {
 async fn handle_post(
     State(state): State<Arc<HttpTransportState>>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    // Raw text, not `Json<Value>`. Going through `serde_json::Value` first
+    // silently keeps the LAST of any duplicate member, so
+    // `{"method":"tools/list","method":"tools/call"}` reached this handler as
+    // a plain `tools/call` — while stdio and the daemon socket, which
+    // deserialise straight into `JsonRpcMessage`, refused the same bytes with
+    // "duplicate field `method`". That is the array divergence again in a new
+    // costume, and it is worse: anything reading the first member (a proxy, an
+    // audit log, a policy layer) disagreed with what the server executed. The
+    // body is now read as bytes and handed to the SAME `parse_incoming` the
+    // other two transports use, so the answer cannot depend on which door the
+    // client knocked at.
+    raw_body: String,
 ) -> Response {
+    // `Json` used to enforce this; reading the body as text does not, so the
+    // check is explicit rather than lost.
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case("application/json")
+    {
+        warn!(%content_type, "Rejecting a POST that is not application/json");
+        return bad_request(
+            None,
+            JsonRpcError::invalid_request(
+                "the body of an MCP POST must be sent as `Content-Type: application/json`",
+            ),
+        );
+    }
+
+    // Parsed once for inspection only — the array guard, the header check and
+    // the `id` echoed on failure. The message the server acts on comes from
+    // `parse_incoming` below, reading the same raw text.
+    let body: Value = match serde_json::from_str(&raw_body) {
+        Ok(value) => value,
+        Err(e) => {
+            return bad_request(
+                None,
+                JsonRpcError::parse_error(format!("Invalid JSON: {e}")),
+            );
+        }
+    };
     // JSON-RPC batching was removed in 2025-06-18 and 2026-07-28 does not
     // bring it back: `JSONRPCMessage` is `JSONRPCRequest | JSONRPCNotification
     // | JSONRPCResponse`, three object types and no array form, and the word
@@ -728,13 +772,13 @@ async fn handle_post(
     // building an `IncomingMessage::Batch` — dead code, unreachable behind
     // that same guard, and the sort that reads as a supported feature to
     // anyone scanning the file.
-    let msg = match serde_json::from_value::<JsonRpcMessage>(body) {
+    // The same parser stdio and the daemon socket use, over the same raw
+    // bytes — not `from_value` over a `Value` that has already dropped
+    // duplicate members. One parser, one verdict, whatever the transport.
+    let msg = match crate::mcp::server::McpServer::parse_incoming(&raw_body) {
         Ok(msg) => msg,
         Err(e) => {
-            let resp = JsonRpcResponse::error(
-                None,
-                JsonRpcError::parse_error(format!("Invalid JSON-RPC: {e}")),
-            );
+            let resp = JsonRpcResponse::error(None, e);
             return Json(resp).into_response();
         }
     };
@@ -1195,6 +1239,86 @@ mod tests {
         let server = Arc::new(server);
         let router = build_router(Arc::clone(&server), HttpTransportConfig::default());
         (server, router)
+    }
+
+    /// Both doors must read the same bytes the same way.
+    ///
+    /// `serde_json::Value` keeps the LAST of two members with the same name,
+    /// so routing the body through `Json<Value>` made this POST a plain
+    /// `tools/call` while `parse_incoming` — used by stdio and the daemon
+    /// socket — refused it as a duplicate field. Anything that read the first
+    /// member disagreed with what the server ran.
+    #[tokio::test]
+    async fn a_duplicate_member_is_refused_on_http_as_it_is_on_stdio() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        const SMUGGLED: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"tools/call","params":{"name":"ssh_exec","arguments":{"command":"id"}},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}"#;
+
+        // The reference door.
+        let on_stdio = McpServer::parse_incoming(SMUGGLED);
+        assert!(
+            on_stdio.is_err(),
+            "stdio must refuse a duplicate member, got {on_stdio:?}"
+        );
+
+        // The HTTP door, on the same bytes.
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost")
+                    .header("content-type", "application/json")
+                    .header("MCP-Protocol-Version", "2026-07-28")
+                    .header("Mcp-Method", "tools/call")
+                    .header("Mcp-Name", "ssh_exec")
+                    .body(Body::from(SMUGGLED))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let message = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // Named, not merely "some error": with no Origin header this request
+        // is refused by the anti-DNS-rebinding guard long before the parser,
+        // and the test would pass without ever reaching the code it covers.
+        assert!(
+            message.contains("duplicate field"),
+            "HTTP must refuse it for the SAME reason stdio does, got {value}"
+        );
+    }
+
+    /// Reading the body as text lost the extractor's content-type check, so
+    /// it is asserted rather than assumed.
+    #[tokio::test]
+    async fn a_post_without_a_json_content_type_is_refused() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = build_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("origin", "http://localhost")
+                    .header("content-type", "text/plain")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

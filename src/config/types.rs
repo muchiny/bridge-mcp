@@ -548,7 +548,14 @@ const fn default_socks_port() -> u16 {
 /// (e.g. on hot-reload or process exit) and never leak through `Debug`,
 /// `Display`, or `Serialize`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+// `deny_unknown_fields` on an internally-tagged enum, because without it serde
+// IGNORES what it does not recognise — and every other struct in this file
+// refuses the unknown. So `auth: {type: key, path: ..., passphraze: X}` loaded
+// without a word, and the operator learned about the typo from
+// `SshKeyInvalid`, which accuses the key file. Struct variants only: `Agent`
+// and `Kerberos` are unit variants and still accept surplus keys, which would
+// take declaring them as `Agent {}` and breaking the YAML.
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum AuthConfig {
     Key {
         path: String,

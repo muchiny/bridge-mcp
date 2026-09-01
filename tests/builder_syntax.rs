@@ -176,7 +176,7 @@ fn kubectl_get_subshell_parses() {
 #[test]
 fn pkg_list_subshell_parses() {
     assert_runtime_form_parses(
-        &PackageCommandBuilder::build_list_command(None, None),
+        &PackageCommandBuilder::build_list_command(None, None).unwrap(),
         "pkg_list auto-detect",
     );
 }

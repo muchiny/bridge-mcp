@@ -104,6 +104,40 @@ fn merge_ssh_config_hosts(config: &mut Config) {
 }
 
 /// Validate the configuration
+/// Reject an entropy threshold no token could ever meet.
+///
+/// `EntropyDetector` decides with `entropy >= threshold`. Against NaN that
+/// comparison is ALWAYS false, so a NaN threshold leaves the detector enabled,
+/// running, and redacting nothing — fail-open, on the path that masks secrets
+/// out of command output. serde-saphyr parses `.nan` and `.inf` into a
+/// concrete `f64` without complaint, so this is the only place it is caught.
+/// Shannon entropy over bytes cannot exceed 8 bits, which makes the upper
+/// bound the same kind of check: a threshold above 8 can never be met either.
+fn validate_entropy_thresholds(sanitize: &crate::config::SanitizeConfig) -> Result<()> {
+    for (field, value) in [
+        (
+            "security.sanitize.entropy_threshold",
+            Some(sanitize.entropy_threshold),
+        ),
+        (
+            "security.sanitize.entropy_hex_threshold",
+            sanitize.entropy_hex_threshold,
+        ),
+    ] {
+        let Some(value) = value else { continue };
+        if !value.is_finite() || !(0.0..=8.0).contains(&value) {
+            return Err(BridgeError::ConfigInvalid {
+                field: field.to_string(),
+                reason: format!(
+                    "must be a finite number between 0 and 8 (Shannon entropy over bytes is \
+                     capped at 8 bits), got {value}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_config(config: &Config) -> Result<()> {
     // Must have at least one host
     if config.hosts.is_empty() {
@@ -112,6 +146,8 @@ fn validate_config(config: &Config) -> Result<()> {
             reason: "At least one host must be defined".to_string(),
         });
     }
+
+    validate_entropy_thresholds(&config.security.sanitize)?;
 
     // Validate each host
     for (name, host) in &config.hosts {
@@ -354,6 +390,43 @@ mod tests {
     use crate::config::HostKeyVerification;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// A NaN threshold left the entropy detector enabled and inert:
+    /// `entropy >= NaN` is false for every token, so nothing was ever
+    /// redacted. Fail-open, on the path whose whole job is masking secrets.
+    /// serde-saphyr parses `.nan` into a concrete `f64` without complaint, so
+    /// this is the only place it can be caught.
+    #[test]
+    fn a_threshold_that_cannot_be_met_is_refused() {
+        const HOST: &str = "hosts:\n  h:\n    hostname: example.com\n    user: root\n    auth:\n      type: agent\n";
+
+        for bad in [".nan", ".inf", "-.inf", "-1.0", "8.5"] {
+            let yaml = format!("{HOST}security:\n  sanitize:\n    entropy_threshold: {bad}\n");
+            let mut f = NamedTempFile::new().unwrap();
+            f.write_all(yaml.as_bytes()).unwrap();
+
+            let err =
+                load_config(f.path()).expect_err("a threshold no token can meet must be refused");
+            assert!(
+                err.to_string().contains("entropy_threshold"),
+                "threshold {bad} must be named in the error, got: {err}"
+            );
+        }
+
+        // The hex threshold is optional, and gets the same treatment.
+        let yaml = format!("{HOST}security:\n  sanitize:\n    entropy_hex_threshold: .nan\n");
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(yaml.as_bytes()).unwrap();
+        load_config(f.path()).expect_err("the hex threshold must be checked too");
+
+        // And ordinary values still load, or the guard is just an outage.
+        let yaml = format!(
+            "{HOST}security:\n  sanitize:\n    entropy_threshold: 4.5\n    entropy_hex_threshold: 3.1\n"
+        );
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(yaml.as_bytes()).unwrap();
+        load_config(f.path()).expect("ordinary thresholds must load");
+    }
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
