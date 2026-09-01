@@ -136,7 +136,7 @@ fn fenced(content: &str, info: &str) -> String {
 /// schema and `confirm` field are carried over from the
 /// `ElicitationService::confirm_destructive_with_plan` this replaced; the
 /// layout is not, because both client-controlled values now go through
-/// [`fenced`] rather than being pasted into a fixed three-tick block.
+/// `fenced` rather than being pasted into a fixed three-tick block.
 #[must_use]
 pub fn confirm_destructive_request(
     tool_name: &str,
