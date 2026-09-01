@@ -426,3 +426,10 @@ path = "fuzz_targets/fuzz_sampling_params.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_network_equipment_builder"
+path = "fuzz_targets/fuzz_network_equipment_builder.rs"
+test = false
+doc = false
+bench = false

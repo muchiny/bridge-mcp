@@ -113,12 +113,25 @@ jobs:
           # Security-critical targets get extra time
           SECURITY_TARGETS="fuzz_command_validator fuzz_sanitizer fuzz_shell_escape fuzz_security_config"
 
+          # Command-builder targets get the shell dictionary AND 300s.
+          #
+          # Without a dictionary libFuzzer has to discover `$(` by mutating
+          # bytes at random, which it will not do in 30 seconds. Measured on
+          # fuzz_network_equipment_builder: with the dict, removing the
+          # identifier validation is caught in seconds; the tokens are what
+          # makes the difference, not the wall clock.
+          BUILDER_TARGETS="fuzz_network_equipment_builder"
+          DICT_ARG="-dict=fuzz/dicts/shell.dict"
+
           if [ -n "$SPECIFIC_TARGET" ]; then
             echo "::group::Fuzzing $SPECIFIC_TARGET for ${DEFAULT_DURATION}s"
             # Same crash bookkeeping as the all-targets branch below: this used
             # to be `|| true`, so a crash found via workflow_dispatch was
             # silently discarded and never filed an issue.
-            cargo +nightly fuzz run "$SPECIFIC_TARGET" -- -max_total_time="$DEFAULT_DURATION" 2>&1 || {
+            DICT=""
+            if echo "$BUILDER_TARGETS" | grep -qw "$SPECIFIC_TARGET"; then DICT="$DICT_ARG"; fi
+            # shellcheck disable=SC2086 # DICT is one flag or empty, deliberately unquoted
+            cargo +nightly fuzz run "$SPECIFIC_TARGET" -- $DICT -max_total_time="$DEFAULT_DURATION" 2>&1 || {
               echo "::error::Crash found in $SPECIFIC_TARGET"
               CRASHES_FOUND=true
             }
@@ -126,11 +139,17 @@ jobs:
           else
             for target in $(cargo +nightly fuzz list); do
               DURATION="$DEFAULT_DURATION"
+              DICT=""
               if echo "$SECURITY_TARGETS" | grep -qw "$target"; then
                 DURATION=60
               fi
+              if echo "$BUILDER_TARGETS" | grep -qw "$target"; then
+                DURATION=300
+                DICT="$DICT_ARG"
+              fi
               echo "::group::Fuzzing $target for ${DURATION}s"
-              cargo +nightly fuzz run "$target" -- -max_total_time="$DURATION" 2>&1 || {
+              # shellcheck disable=SC2086 # DICT is one flag or empty, deliberately unquoted
+              cargo +nightly fuzz run "$target" -- $DICT -max_total_time="$DURATION" 2>&1 || {
                 echo "::error::Crash found in $target"
                 CRASHES_FOUND=true
               }

