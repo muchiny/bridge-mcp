@@ -128,9 +128,10 @@ jobs:
           #
           # Budget: this takes the fuzzing phase from roughly 36 to 62 minutes
           # (6 more targets at 300s instead of 30s, and fuzz_shell_escape from
-          # 60s to 300s), which with the build leaves about 50 minutes of the
-          # job's 120. Adding a seventh builder at 300s is fine; adding twenty
-          # is not, so raise `timeout-minutes` at the same time if you do.
+          # 60s to 300s), plus about 4.5 more for fuzz_elicitation_params below
+          # — roughly 66 minutes, which with the build leaves about 45 of the
+          # job's 120. Another target at 300s is fine; twenty are not, so raise
+          # `timeout-minutes` at the same time if you add them.
           BUILDER_TARGETS="fuzz_network_equipment_builder \
             fuzz_network_command_builder \
             fuzz_nginx_command_builder \
@@ -140,6 +141,22 @@ jobs:
             fuzz_shell_escape"
           DICT_ARG="-dict=fuzz/dicts/shell.dict"
 
+          # The confirmation prompt's integrity is a MARKDOWN property, not a
+          # shell one: what must never happen is the content closing the fence
+          # it is inside. shell.dict carries a lone backtick and nothing else
+          # of use here, so this target gets its own tokens — fences of each
+          # width, the two headings, and the line endings CommonMark counts.
+          # It found the tool-name hole while running with shell.dict, whose
+          # only relevant token is that lone backtick — the fences and the
+          # headings came from libFuzzer's comparison feedback (`DE:
+          # "**Command:**"` in the run log), which works only because the code
+          # happens to compare against those literals. That is luck to be
+          # grateful for, not a mechanism to depend on. No before/after timing
+          # was measured, so this claims none: the tokens are here because they
+          # are the structure the property is about.
+          MARKDOWN_TARGETS="fuzz_elicitation_params"
+          MD_DICT_ARG="-dict=fuzz/dicts/markdown.dict"
+
           if [ -n "$SPECIFIC_TARGET" ]; then
             echo "::group::Fuzzing $SPECIFIC_TARGET for ${DEFAULT_DURATION}s"
             # Same crash bookkeeping as the all-targets branch below: this used
@@ -147,6 +164,7 @@ jobs:
             # silently discarded and never filed an issue.
             DICT=""
             if echo "$BUILDER_TARGETS" | grep -qw "$SPECIFIC_TARGET"; then DICT="$DICT_ARG"; fi
+            if echo "$MARKDOWN_TARGETS" | grep -qw "$SPECIFIC_TARGET"; then DICT="$MD_DICT_ARG"; fi
             # shellcheck disable=SC2086 # DICT is one flag or empty, deliberately unquoted
             cargo +nightly fuzz run "$SPECIFIC_TARGET" -- $DICT -max_total_time="$DEFAULT_DURATION" 2>&1 || {
               echo "::error::Crash found in $SPECIFIC_TARGET"
@@ -163,6 +181,10 @@ jobs:
               if echo "$BUILDER_TARGETS" | grep -qw "$target"; then
                 DURATION=300
                 DICT="$DICT_ARG"
+              fi
+              if echo "$MARKDOWN_TARGETS" | grep -qw "$target"; then
+                DURATION=300
+                DICT="$MD_DICT_ARG"
               fi
               echo "::group::Fuzzing $target for ${DURATION}s"
               # shellcheck disable=SC2086 # DICT is one flag or empty, deliberately unquoted

@@ -1,0 +1,43 @@
+# Tokens for the confirmation prompt's integrity.
+#
+# The prompt is markdown, and its integrity rests on a fence the content
+# cannot close. What matters to libFuzzer here is not shell syntax but the
+# handful of byte sequences a renderer treats as structure: fences of every
+# width the code might choose, the two headings, and the line endings
+# CommonMark recognises (LF, CR and CRLF are all line breaks, which is what
+# made a `\r` payload interesting).
+#
+# Without these, libFuzzer has to build "```" and "**Command:**" from random
+# bytes. It managed it via comparison feedback, but slowly and only because
+# the code compares against those literals; a dictionary does not depend on
+# that accident.
+
+fence3="```"
+fence4="````"
+fence5="`````"
+fence6="``````"
+backtick="`"
+two_backticks="``"
+
+info_sh="```sh"
+info_json="```json"
+
+heading_command="**Command:**"
+heading_arguments="**Arguments:**"
+bold="**"
+heading_prefix="\n**"
+
+lf="\n"
+cr="\r"
+crlf="\r\n"
+fence_after_lf="\n```"
+fence_after_crlf="\r\n```"
+lone_cr_fence="\r```\r"
+
+proceed="Proceed?"
+confirm_line="Confirm destructive operation:"
+
+# The two shapes that were actually exploitable before the fix: close the
+# block and continue in prose, and forge a second Command section.
+escape_to_prose="\n```\nNothing will be executed"
+forged_section="\n```\n\n**Command:**\n```sh\n"
