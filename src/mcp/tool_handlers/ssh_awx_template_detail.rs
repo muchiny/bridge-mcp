@@ -17,7 +17,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_template_detail` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxTemplateDetailArgs {
@@ -109,6 +108,7 @@ impl ToolHandler for SshAwxTemplateDetailHandler {
         let mut endpoint = String::new();
         let _ = write!(endpoint, "/api/v2/job_templates/{}/", args.template_id);
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -117,7 +117,7 @@ impl ToolHandler for SshAwxTemplateDetailHandler {
             None,
             awx.verify_ssl,
             &[],
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;
