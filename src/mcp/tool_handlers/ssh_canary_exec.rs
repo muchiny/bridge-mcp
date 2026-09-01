@@ -21,7 +21,16 @@ use crate::ports::ToolContext;
 pub struct SshCanaryExecArgs {
     host: String,
     #[serde(default)]
-    #[allow(dead_code)]
+    // A memo field, as the tool description tells the client: this tool runs
+    // solely on `host`.
+    //
+    // `allow` and not `expect`: the field IS read by this module's tests, so
+    // `dead_code` fires under `--lib` only; an `expect` is "unfulfilled" in
+    // the test build and fails clippy.
+    #[allow(
+        dead_code,
+        reason = "documented as a memo field; this tool runs only on `host`"
+    )]
     hosts: Option<String>,
     command: String,
     #[serde(default)]

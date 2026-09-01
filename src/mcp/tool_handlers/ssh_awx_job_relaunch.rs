@@ -35,7 +35,6 @@ impl RelaunchHosts {
 }
 
 /// Arguments for the `ssh_awx_job_relaunch` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxJobRelaunchArgs {

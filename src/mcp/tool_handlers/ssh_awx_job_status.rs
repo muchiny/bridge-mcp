@@ -16,7 +16,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_job_status` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxJobStatusArgs {
@@ -103,6 +102,7 @@ impl ToolHandler for SshAwxJobStatusHandler {
         let mut endpoint = String::new();
         let _ = write!(endpoint, "/api/v2/jobs/{}/", args.job_id);
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -111,7 +111,7 @@ impl ToolHandler for SshAwxJobStatusHandler {
             None,
             awx.verify_ssl,
             &[],
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;

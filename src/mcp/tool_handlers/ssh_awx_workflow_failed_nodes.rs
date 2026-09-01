@@ -17,7 +17,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_workflow_failed_nodes` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxWorkflowFailedNodesArgs {
@@ -113,6 +112,7 @@ impl ToolHandler for SshAwxWorkflowFailedNodesHandler {
 
         let query_params: Vec<(&str, &str)> = vec![("page_size", "200")];
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -121,7 +121,7 @@ impl ToolHandler for SshAwxWorkflowFailedNodesHandler {
             None,
             awx.verify_ssl,
             &query_params,
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;
