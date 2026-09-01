@@ -14,7 +14,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_status` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxStatusArgs {
@@ -81,7 +80,7 @@ impl ToolHandler for SshAwxStatusHandler {
             param: "arguments".to_string(),
         })?;
         let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut raw)?;
-        let _args: SshAwxStatusArgs = serde_json::from_value(raw)
+        let args: SshAwxStatusArgs = serde_json::from_value(raw)
             .map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 
         let awx = ctx.config.awx.as_ref().ok_or_else(|| {
@@ -90,6 +89,7 @@ impl ToolHandler for SshAwxStatusHandler {
             )
         })?;
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -98,7 +98,7 @@ impl ToolHandler for SshAwxStatusHandler {
             None,
             awx.verify_ssl,
             &[],
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;

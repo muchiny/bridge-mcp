@@ -38,7 +38,6 @@ impl ApprovalStatus {
 }
 
 /// Arguments for the `ssh_awx_approvals` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxApprovalsArgs {
@@ -136,6 +135,7 @@ impl ToolHandler for SshAwxApprovalsHandler {
         let mut query_params: Vec<(&str, &str)> = vec![("page_size", &page_size_str)];
         query_params.push(("status", args.status.as_str()));
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -144,7 +144,7 @@ impl ToolHandler for SshAwxApprovalsHandler {
             None,
             awx.verify_ssl,
             &query_params,
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;

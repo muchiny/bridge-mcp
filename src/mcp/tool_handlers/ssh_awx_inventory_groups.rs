@@ -16,7 +16,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_inventory_groups` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxInventoryGroupsArgs {
@@ -122,6 +121,7 @@ impl ToolHandler for SshAwxInventoryGroupsHandler {
         let page_size_str = args.page_size.unwrap_or(50).to_string();
         let query_params: Vec<(&str, &str)> = vec![("page_size", &page_size_str)];
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -130,7 +130,7 @@ impl ToolHandler for SshAwxInventoryGroupsHandler {
             None,
             awx.verify_ssl,
             &query_params,
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;

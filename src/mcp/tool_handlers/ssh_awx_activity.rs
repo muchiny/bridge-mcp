@@ -15,7 +15,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_activity` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxActivityArgs {
@@ -130,6 +129,7 @@ impl ToolHandler for SshAwxActivityHandler {
         }
         query_params.push(("order_by", "-timestamp"));
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -138,7 +138,7 @@ impl ToolHandler for SshAwxActivityHandler {
             None,
             awx.verify_ssl,
             &query_params,
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;

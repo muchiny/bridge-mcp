@@ -14,7 +14,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for the `ssh_awx_workflow_cancel` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxWorkflowCancelArgs {

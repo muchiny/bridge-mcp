@@ -24,7 +24,6 @@ const ALLOWED_KINDS: &[&str] = &[
 ];
 
 /// Arguments for `ssh_awx_resolve` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxResolveArgs {
@@ -141,6 +140,7 @@ impl ToolHandler for SshAwxResolveHandler {
         let query_params: Vec<(&str, &str)> = vec![(filter_key, &args.name)];
 
         let endpoint = format!("/api/v2/{}/", args.kind);
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -149,7 +149,7 @@ impl ToolHandler for SshAwxResolveHandler {
             None,
             awx.verify_ssl,
             &query_params,
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;

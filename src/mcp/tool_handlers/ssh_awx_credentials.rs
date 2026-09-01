@@ -15,7 +15,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for `ssh_awx_credentials` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxCredentialsArgs {
@@ -123,6 +122,7 @@ impl ToolHandler for SshAwxCredentialsHandler {
             query_params.push(("credential_type", &credential_type_str));
         }
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -131,7 +131,7 @@ impl ToolHandler for SshAwxCredentialsHandler {
             None,
             awx.verify_ssl,
             &query_params,
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;
