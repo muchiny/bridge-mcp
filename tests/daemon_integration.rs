@@ -16,6 +16,32 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+/// Wait until the daemon actually ACCEPTS connections.
+///
+/// `socket.exists()` is not a readiness probe. The socket file appears at
+/// `bind()`, while `connect()` only succeeds after `listen()`. Under CPU
+/// starvation that window opens, and these tests failed with
+/// `Os { code: 111, ConnectionRefused }` roughly one run in three — measured 3
+/// failures in 60 runs under 40x load, and reproduced on `main` as well as on
+/// feature branches.
+///
+/// That flake was not merely noise: `cargo mutants` refuses to test a single
+/// mutant against a red baseline (`cargo test failed in an unmutated tree`), so
+/// one intermittent test blocked all mutation testing.
+///
+/// Connecting is the only thing that proves a connect will work. The accepted
+/// connection is dropped immediately; the daemon treats that as an EOF and
+/// cleans the session up, which is the same path a client closing early takes.
+async fn wait_until_accepting(socket: &std::path::Path) -> bool {
+    for _ in 0..50 {
+        if UnixStream::connect(socket).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
 use bridge_mcp::Config;
 use bridge_mcp::config::{
     AuditConfig, HttpTransportConfig, LimitsConfig, SecurityConfig, SessionConfig,
@@ -74,16 +100,10 @@ async fn test_daemon_lifecycle_start_call_stop() {
         }
     });
 
-    // Wait for the daemon to bind the socket. Poll up to 2 seconds.
-    let mut ready = false;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if socket.exists() {
-            ready = true;
-            break;
-        }
-    }
-    assert!(ready, "daemon failed to bind socket within 2s");
+    assert!(
+        wait_until_accepting(&socket).await,
+        "daemon did not accept a connection within 5s"
+    );
 
     // Status must now report Running.
     let running = daemon::daemon_status(&socket).expect("status read");
@@ -202,16 +222,10 @@ async fn a_json_array_is_refused_on_the_daemon_socket() {
         }
     });
 
-    // Wait for bind.
-    let mut ready = false;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if socket.exists() {
-            ready = true;
-            break;
-        }
-    }
-    assert!(ready, "daemon failed to bind socket within 2s");
+    assert!(
+        wait_until_accepting(&socket).await,
+        "daemon did not accept a connection within 5s"
+    );
 
     // The exact frame the superseded test asserted was dispatched.
     let mut client = UnixStream::connect(&socket).await.expect("connect");
@@ -300,16 +314,7 @@ async fn test_daemon_parse_error_response_sent_for_bad_json() {
         }
     });
 
-    // Wait for bind.
-    let mut ready = false;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if socket.exists() {
-            ready = true;
-            break;
-        }
-    }
-    assert!(ready);
+    assert!(wait_until_accepting(&socket).await);
 
     let mut client = UnixStream::connect(&socket).await.expect("connect");
     // Line 1: garbage JSON.
