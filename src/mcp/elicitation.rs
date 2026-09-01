@@ -317,6 +317,33 @@ mod tests {
         );
     }
 
+    /// The prompt-level test above counts raw substrings, which is not what a
+    /// renderer counts — so it passes even when the inline path is handed a
+    /// name carrying a backtick. `cargo mutants` said so: replacing the `&&`
+    /// in `named` with `||` re-opens the hole and that test stayed green.
+    ///
+    /// This one states the property of the inline path directly, with no
+    /// markdown reading in the middle: a name is rendered inline ONLY if it
+    /// cannot open a fence.
+    #[test]
+    fn only_a_name_that_cannot_open_a_fence_is_rendered_inline() {
+        for hostile in ["evil\n``````", "a`b", "`", "\n", "", "x\ny", "a\r```"] {
+            let rendered = super::named(hostile);
+            assert!(
+                !rendered.starts_with('`'),
+                "{hostile:?} took the inline path and can escape it: {rendered:?}"
+            );
+        }
+        // And the ordinary shapes are not driven into a fence for nothing.
+        for plain in ["ssh_exec", "win_service-config", "a.b", "X9", "k3s"] {
+            assert_eq!(
+                super::named(plain),
+                format!("`{plain}`"),
+                "a well-formed name must stay inline"
+            );
+        }
+    }
+
     /// A real tool name keeps the shape operators are used to.
     #[test]
     fn an_ordinary_tool_name_stays_inline() {
