@@ -120,7 +120,24 @@ jobs:
           # fuzz_network_equipment_builder: with the dict, removing the
           # identifier validation is caught in seconds; the tokens are what
           # makes the difference, not the wall clock.
-          BUILDER_TARGETS="fuzz_network_equipment_builder"
+          # Every target whose invariant is about what a caller's value does
+          # to a command line belongs here, not just the first one written.
+          # These five went from `let _ = builder(...)` — which sees a panic
+          # and nothing else — to asserting that the caller contributes no
+          # shell syntax, so the dictionary is now what makes them useful.
+          #
+          # Budget: this takes the fuzzing phase from roughly 36 to 62 minutes
+          # (6 more targets at 300s instead of 30s, and fuzz_shell_escape from
+          # 60s to 300s), which with the build leaves about 50 minutes of the
+          # job's 120. Adding a seventh builder at 300s is fine; adding twenty
+          # is not, so raise `timeout-minutes` at the same time if you do.
+          BUILDER_TARGETS="fuzz_network_equipment_builder \
+            fuzz_network_command_builder \
+            fuzz_nginx_command_builder \
+            fuzz_firewall_command_builder \
+            fuzz_process_command_builder \
+            fuzz_package_command_builder \
+            fuzz_shell_escape"
           DICT_ARG="-dict=fuzz/dicts/shell.dict"
 
           if [ -n "$SPECIFIC_TARGET" ]; then
