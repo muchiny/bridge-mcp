@@ -208,9 +208,14 @@ outdated:
 quality: fmt-check lint typos machete
 
 # Full CI check (quick). Mirrors the required ci.yml checks
-# (Format/Clippy/Tests/Deny/Typos); CI additionally runs coverage (70%),
+# (Format/Clippy/Tests/Docs/Deny/Typos); CI additionally runs coverage (70%),
 # feature-powerset and markdownlint.
-ci: fmt-check lint test audit deny typos
+#
+# `doc-check` is in this list because Docs is a REQUIRED check in ci.yml and
+# was not: `make ci` passed on a doc comment that linked a public item to a
+# private one, and the red arrived on the PR instead. A pre-commit gate that
+# omits a required check is the false green it exists to prevent.
+ci: fmt-check lint test doc-check audit deny typos
 
 # Full CI check (comprehensive - replaces GitHub Actions)
 ci-full: fmt-check lint lint-stable test audit typos hack geiger doc-check

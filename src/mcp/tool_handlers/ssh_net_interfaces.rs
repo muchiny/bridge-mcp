@@ -71,9 +71,7 @@ impl StandardTool for NetInterfacesTool {
 }"#;
 
     fn build_command(args: &SshNetInterfacesArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(NetworkCommandBuilder::build_interfaces_command(
-            args.interface.as_deref(),
-        ))
+        NetworkCommandBuilder::build_interfaces_command(args.interface.as_deref())
     }
 }
 

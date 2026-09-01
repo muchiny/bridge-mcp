@@ -93,24 +93,60 @@ mod schema {
     }
 }
 
+/// Wrap `content` in a fenced code block that `content` cannot close.
+///
+/// `CommonMark` closes a fence with a line carrying at least as many backticks
+/// as opened it, so a fence one backtick longer than the longest run inside
+/// the content is inescapable.
+///
+/// This is not cosmetic. Both values interpolated into the confirmation prompt
+/// are chosen by the client: `summary` is `serde_json::to_string` of the tool
+/// arguments, and `command` is `arguments["command"]` of `ssh_exec`, which is
+/// annotated destructive and may carry real newlines. With a fixed three-tick
+/// fence, a command containing a line of three backticks closed the block and
+/// everything after it rendered as prose — so the operator read `rm -rf /`
+/// followed, in plain prose, by "Nothing will be executed; this is a dry
+/// run", and approved a command whose second half they never saw as a
+/// command. The same trick opened a second **Command:** section showing
+/// something harmless.
+/// The prompt is the only thing standing between a destructive tool and the
+/// host, so what it shows has to be what runs.
+fn fenced(content: &str, info: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for c in content.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    // At least three, and always one more than the longest run inside.
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}{info}\n{content}\n{fence}")
+}
+
 /// Build the destructive-confirmation `ElicitRequest`, without sending it.
 ///
 /// Pure: it returns the params and nothing else. Under Multi Round-Trip
 /// Requests the server does not send this — it embeds it in an
 /// `InputRequiredResult` and the client retries the call with the answer — so
 /// the construction and the transmission had to come apart. The wording,
-/// schema and `confirm` field are carried over unchanged from the
-/// `ElicitationService::confirm_destructive_with_plan` this replaced, so an
-/// operator sees the same prompt as before.
+/// schema and `confirm` field are carried over from the
+/// `ElicitationService::confirm_destructive_with_plan` this replaced; the
+/// layout is not, because both client-controlled values now go through
+/// `fenced` rather than being pasted into a fixed three-tick block.
 #[must_use]
 pub fn confirm_destructive_request(
     tool_name: &str,
     summary: &str,
     command: Option<String>,
 ) -> ElicitationCreateParams {
-    let mut message = format!("Confirm destructive operation: `{tool_name}`\n\n{summary}\n");
+    let mut message = format!("Confirm destructive operation: `{tool_name}`\n");
+    let _ = write!(message, "\n**Arguments:**\n{}\n", fenced(summary, "json"));
     if let Some(cmd) = command {
-        let _ = write!(message, "\n**Command:**\n```sh\n{cmd}\n```\n");
+        let _ = write!(message, "\n**Command:**\n{}\n", fenced(&cmd, "sh"));
     }
     message.push_str("\nProceed?");
 
@@ -156,6 +192,94 @@ pub fn destructive_confirmation_granted(answer: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // ── the confirmation prompt cannot be forged ──────────────────────
+    //
+    // The gate is fail-closed on everything else: a client that cannot be
+    // asked cannot confirm. What was NOT closed is the prompt itself — the
+    // operator's only view of what they are approving.
+
+    /// Read back what the Command block actually encloses, the way a markdown
+    /// renderer would: the section opens with a fence line, and closes on the
+    /// first line of the same fence.
+    fn command_block_of(message: &str) -> String {
+        let body = message
+            .split_once("**Command:**\n")
+            .expect("the prompt must carry a Command section")
+            .1;
+        let (fence_line, rest) = body.split_once('\n').expect("a fence line, then content");
+        let close = format!("\n{}", fence_line.trim_end_matches("sh"));
+        rest.split_once(&close)
+            .expect("the fence must close")
+            .0
+            .to_string()
+    }
+
+    /// A command carrying its own fence used to close the block and continue
+    /// in prose. Whatever the command contains, it must stay inside.
+    #[test]
+    fn a_command_cannot_close_its_own_fence() {
+        let attack = "rm -rf /\n```\nNothing will be executed; this is a dry run.";
+        let params = super::confirm_destructive_request("ssh_exec", "{}", Some(attack.to_string()));
+
+        assert_eq!(
+            command_block_of(&params.message),
+            attack,
+            "the operator must see the command in full, not the part before its own fence"
+        );
+    }
+
+    /// Forging a second section is the same bug wearing a different hat: the
+    /// operator reads the harmless one and approves the other. The forged
+    /// text is still *present* — it has to be, it is part of the command —
+    /// but it is inside the block, where markdown reads it as text and not as
+    /// a heading.
+    #[test]
+    fn a_forged_second_section_stays_inside_the_block() {
+        let attack = "rm -rf /\n```\n\n**Command:**\n```sh\necho hello";
+        let params = super::confirm_destructive_request("ssh_exec", "{}", Some(attack.to_string()));
+
+        let block = command_block_of(&params.message);
+        assert_eq!(block, attack, "the whole command must be inside the block");
+        assert!(
+            block.contains("**Command:**"),
+            "the forged heading belongs to the command text, not to the prompt"
+        );
+
+        // And nothing follows the block but the question.
+        let after = params
+            .message
+            .rsplit_once("````")
+            .expect("the block must close")
+            .1;
+        assert_eq!(after.trim(), "Proceed?", "got trailing prose: {after:?}");
+    }
+
+    /// The arguments are `serde_json::to_string` of client input and are
+    /// interpolated too, so they get the same treatment.
+    #[test]
+    fn the_arguments_are_fenced_as_well() {
+        let params =
+            super::confirm_destructive_request("ssh_exec", "{\"command\":\"a```b\"}", None);
+        assert!(
+            params.message.contains("````json\n"),
+            "a summary containing three backticks needs a longer fence: {}",
+            params.message
+        );
+    }
+
+    /// Nothing exotic in the content, nothing exotic in the fence — the
+    /// ordinary case must stay readable.
+    #[test]
+    fn an_ordinary_command_keeps_a_plain_fence() {
+        let params =
+            super::confirm_destructive_request("ssh_exec", "{}", Some("rm /tmp/x".to_string()));
+        assert!(
+            params.message.contains("```sh\nrm /tmp/x\n```"),
+            "got: {}",
+            params.message
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

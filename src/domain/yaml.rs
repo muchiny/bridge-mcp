@@ -57,6 +57,17 @@ pub(crate) const MAX_NODES: usize = 10_000;
 /// cap as the input itself.
 fn hardened_options() -> serde_saphyr::Options {
     serde_saphyr::options! {
+        // No source snippet in the error. saphyr renders three lines of the
+        // input around the fault, rustc-style, which is helpful right up to
+        // the moment the neighbouring line is `password:` or `sudo_password:`
+        // — and a config file puts them within three lines of each other by
+        // construction. The message goes to stderr, at startup (main) and on
+        // every failed hot-reload (config watcher), so it lands in the MCP
+        // client's log in plaintext. The Sanitizer cannot mask it either: its
+        // `known_secrets` come from a Config that LOADED, which by definition
+        // does not exist here. Line and column survive, and they are what the
+        // operator actually needs.
+        with_snippet: false,
         budget: serde_saphyr::budget! {
             max_reader_input_bytes: Some(MAX_YAML_BYTES),
             max_anchors: MAX_ANCHORS,

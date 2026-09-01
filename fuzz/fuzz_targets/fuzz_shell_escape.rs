@@ -1,36 +1,34 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use bridge_mcp::mcp::shell_escape;
+use bridge_mcp_fuzz::shell_words;
+use libfuzzer_sys::fuzz_target;
 
+// What `shell_escape` owes its callers is not a shape but an outcome: the
+// string the caller passed is the string the remote program receives.
+//
+// The previous version of this target checked the shape — starts and ends with
+// a quote, no bare quote in the middle. Those hold for an escape that drops
+// characters, doubles them, or truncates at the first NUL, and every builder in
+// the crate would still be wrong. So the assertion here reads the escaped text
+// back the way a shell would (`shell_words`, an independent parser, not the
+// inverse of this function) and demands the original.
 fuzz_target!(|data: &str| {
-    // Fuzz the shell_escape function
     let escaped = shell_escape(data);
 
-    // Invariants that must always hold:
-    // 1. Result should start and end with single quotes
-    assert!(escaped.starts_with('\''), "Must start with quote");
-    assert!(escaped.ends_with('\''), "Must end with quote");
+    let Some(words) = shell_words(&escaped) else {
+        panic!("escaping {data:?} produced shell syntax rather than one word: {escaped:?}");
+    };
 
-    // 2. Result should never be empty (at minimum "''")
-    assert!(escaped.len() >= 2, "Must have at least 2 chars");
-
-    // 3. No unescaped single quotes in the middle.
-    //
-    // This used to compute `inner` and then do nothing with it, on the grounds
-    // that the check was "complex to verify" — which cost a compiler warning
-    // and bought no coverage. It is not complex: POSIX escaping replaces every
-    // `'` in the input with the four-character sequence `'\''`, so once those
-    // sequences are removed no bare quote may remain. That is the single
-    // property the whole escape depends on, and it is worth asserting.
-    //
-    // Slicing by byte is safe here: both ends are the ASCII quote asserted
-    // above, so neither index can land inside a multi-byte character.
-    let inner = &escaped[1..escaped.len() - 1];
-    for fragment in inner.split("'\\''") {
-        assert!(
-            !fragment.contains('\''),
-            "bare single quote outside an escape sequence: {escaped:?}"
-        );
-    }
+    assert_eq!(
+        words.len(),
+        1,
+        "escaping {data:?} produced {} words instead of one: {escaped:?} -> {words:?}",
+        words.len()
+    );
+    assert_eq!(
+        words[0], data,
+        "escaping {data:?} did not round-trip: {escaped:?} reads back as {:?}",
+        words[0]
+    );
 });

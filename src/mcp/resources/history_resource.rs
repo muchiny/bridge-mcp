@@ -162,24 +162,59 @@ fn parse_relative_duration(s: &str) -> std::result::Result<DateTime<Utc>, String
         return Err(format!("negative duration in '{s}'"));
     }
 
+    // `Duration::days` and friends are the PANICKING constructors, and
+    // `DateTime - TimeDelta` panics on overflow too. The magnitude was never
+    // bounded: the sign and the unit were checked, the number was not. So
+    // `resources/read {"uri": "history://recent?since=100000000d"}` — a string
+    // a client sends, and a model can produce by accident — aborted the
+    // process, because the release profile sets `panic = "abort"`. The daemon
+    // socket serves every client from one process, so one malformed URI from
+    // one client took down the bridge for all of them.
     let duration = match unit {
-        's' => Duration::seconds(num),
-        'm' => Duration::minutes(num),
-        'h' => Duration::hours(num),
-        'd' => Duration::days(num),
+        's' => Duration::try_seconds(num),
+        'm' => Duration::try_minutes(num),
+        'h' => Duration::try_hours(num),
+        'd' => Duration::try_days(num),
         other => {
             return Err(format!(
                 "unknown unit '{other}' in '{s}' (expected s/m/h/d)"
             ));
         }
-    };
+    }
+    .ok_or_else(|| format!("duration too large in '{s}'"))?;
 
-    Ok(Utc::now() - duration)
+    Utc::now()
+        .checked_sub_signed(duration)
+        .ok_or_else(|| format!("duration out of range in '{s}'"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A magnitude nobody bounded reached chrono's panicking constructors.
+    /// With `panic = "abort"` in the release profile and one process serving
+    /// every daemon client, that is a remote kill from a query string.
+    #[test]
+    fn an_enormous_duration_is_an_error_not_a_panic() {
+        for hostile in [
+            "100000000d",    // overflows the subtraction
+            "200000000000d", // overflows TimeDelta itself
+            "9223372036854775807s",
+            "9223372036854775807m",
+            "9223372036854775807h",
+        ] {
+            parse_relative_duration(hostile)
+                .expect_err("an unrepresentable duration must be refused, not abort the process");
+        }
+    }
+
+    #[test]
+    fn ordinary_durations_still_parse() {
+        for ok in ["30s", "15m", "6h", "7d", "0s"] {
+            parse_relative_duration(ok).unwrap_or_else(|e| panic!("{ok} must parse: {e}"));
+        }
+    }
     use crate::ports::mock::create_test_context;
 
     #[test]

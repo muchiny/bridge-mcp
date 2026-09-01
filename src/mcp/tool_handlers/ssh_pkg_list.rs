@@ -80,10 +80,10 @@ impl StandardTool for PkgListTool {
     const OS_GUARD: Option<OsType> = Some(OsType::Linux);
 
     fn build_command(args: &SshPkgListArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(PackageCommandBuilder::build_list_command(
+        PackageCommandBuilder::build_list_command(
             args.pkg_manager.as_deref(),
             args.filter.as_deref(),
-        ))
+        )
     }
 }
 

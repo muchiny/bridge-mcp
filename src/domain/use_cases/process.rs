@@ -116,7 +116,13 @@ impl ProcessCommandBuilder {
         count: Option<u32>,
     ) -> String {
         let sort = sort_by.unwrap_or("%cpu");
-        let n = count.unwrap_or(20) + 1; // +1 for header
+        // Capped, not just wrapped. `+ 1` on `Some(u32::MAX)` panics in
+        // debug and wraps to 0 in release — where `overflow-checks` is off —
+        // so a caller asking for every process got `head -n 0` and no output
+        // at all, which reads as "no processes" rather than as a bad request.
+        // The ceiling is well past any real process table; the floor stays at
+        // zero, where `head -n 1` prints the header and nothing else.
+        let n = count.unwrap_or(20).min(100_000) + 1; // +1 for header
 
         let mut cmd = String::from("ps aux");
 
@@ -136,6 +142,28 @@ impl ProcessCommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `+ 1` on `u32::MAX` wrapped to 0 in release, and `head -n 0` prints
+    /// nothing — a silent empty answer to a valid-looking request.
+    #[test]
+    fn an_enormous_count_does_not_ask_for_zero_rows() {
+        for count in [u32::MAX, u32::MAX - 1, 1_000_000] {
+            let cmd = ProcessCommandBuilder::build_top_command(None, None, Some(count));
+            assert!(
+                !cmd.contains("head -n 0"),
+                "count {count} must not collapse to an empty listing: {cmd}"
+            );
+        }
+        // And zero rows asked for is still one row of header, not none.
+        let cmd = ProcessCommandBuilder::build_top_command(None, None, Some(0));
+        assert!(!cmd.contains("head -n 0"), "got: {cmd}");
+    }
+
+    #[test]
+    fn an_ordinary_count_is_untouched() {
+        let cmd = ProcessCommandBuilder::build_top_command(None, None, Some(20));
+        assert!(cmd.contains("head -n 21"), "got: {cmd}");
+    }
 
     // ── build_list_command ──────────────────────────────────────────
 

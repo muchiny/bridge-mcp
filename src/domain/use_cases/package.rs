@@ -20,6 +20,14 @@ pub fn validate_package_name(name: &str) -> Result<()> {
             reason: "Package name cannot be empty".to_string(),
         });
     }
+    if name.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid package name '{name}': a leading hyphen makes it an option to the \
+                 package manager rather than a package."
+            ),
+        });
+    }
     if name
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | ':' | '~' | '='))
@@ -42,6 +50,14 @@ pub fn validate_search_query(query: &str) -> Result<()> {
     if query.is_empty() {
         return Err(BridgeError::CommandDenied {
             reason: "Search query cannot be empty".to_string(),
+        });
+    }
+    if query.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid search query '{query}': a leading hyphen makes it an option to the \
+                 tool that receives it rather than a pattern."
+            ),
         });
     }
     if query
@@ -96,19 +112,31 @@ impl PackageCommandBuilder {
     /// Build a command to list installed packages.
     ///
     /// Constructs manager-appropriate list command.
-    #[must_use]
-    pub fn build_list_command(pkg_manager: Option<&str>, filter: Option<&str>) -> String {
+    ///
+    /// `filter` is passed to `grep` as `-e {pattern}`, never bare. Bare, it
+    /// landed in grep's OPTION position, and shell-escaping does not help
+    /// there: `grep -i '-rf/etc/hostname'` is one shell word, and getopt
+    /// unbundles it into `-r` plus `-f/etc/hostname` — a recursive read of the
+    /// SSH user's home directory, echoed into the tool's output. Measured
+    /// against GNU grep 3.12. `ssh_pkg_list` is annotated `read_only`, so
+    /// nothing asks the operator first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] if `filter` is not a valid
+    /// search pattern.
+    pub fn build_list_command(pkg_manager: Option<&str>, filter: Option<&str>) -> Result<String> {
         let pm = pkg_detect_prefix(pkg_manager);
-        if let Some(f) = filter {
-            format!(
-                "({pm} list --installed 2>/dev/null || dpkg -l 2>/dev/null || rpm -qa 2>/dev/null) | grep -i {}",
-                shell_escape(f)
-            )
-        } else {
-            format!(
+        let Some(f) = filter else {
+            return Ok(format!(
                 "{pm} list --installed 2>/dev/null || dpkg -l 2>/dev/null || rpm -qa 2>/dev/null"
-            )
-        }
+            ));
+        };
+        validate_search_query(f)?;
+        Ok(format!(
+            "({pm} list --installed 2>/dev/null || dpkg -l 2>/dev/null || rpm -qa 2>/dev/null) | grep -i -e {}",
+            shell_escape(f)
+        ))
     }
 
     /// Build a command to search for packages.
@@ -117,7 +145,7 @@ impl PackageCommandBuilder {
     #[must_use]
     pub fn build_search_command(pkg_manager: Option<&str>, query: &str) -> String {
         let pm = pkg_detect_prefix(pkg_manager);
-        format!("{pm} search {}", shell_escape(query))
+        format!("{pm} search -- {}", shell_escape(query))
     }
 
     /// Build a command to install a package.
@@ -126,7 +154,7 @@ impl PackageCommandBuilder {
     #[must_use]
     pub fn build_install_command(pkg_manager: Option<&str>, package: &str) -> String {
         let pm = pkg_detect_prefix(pkg_manager);
-        format!("{pm} install -y {}", shell_escape(package))
+        format!("{pm} install -y -- {}", shell_escape(package))
     }
 
     /// Build a command to remove/uninstall a package.
@@ -135,7 +163,7 @@ impl PackageCommandBuilder {
     #[must_use]
     pub fn build_remove_command(pkg_manager: Option<&str>, package: &str) -> String {
         let pm = pkg_detect_prefix(pkg_manager);
-        format!("{pm} remove -y {}", shell_escape(package))
+        format!("{pm} remove -y -- {}", shell_escape(package))
     }
 
     /// Build a command to update packages.
@@ -145,7 +173,7 @@ impl PackageCommandBuilder {
     pub fn build_update_command(pkg_manager: Option<&str>, package: Option<&str>) -> String {
         let pm = pkg_detect_prefix(pkg_manager);
         if let Some(pkg) = package {
-            format!("{pm} install -y {}", shell_escape(pkg))
+            format!("{pm} install -y -- {}", shell_escape(pkg))
         } else {
             "if command -v apt >/dev/null 2>&1; then apt update && apt upgrade -y; \
                  elif command -v dnf >/dev/null 2>&1; then dnf update -y; \
@@ -178,40 +206,40 @@ mod tests {
 
     #[test]
     fn test_list_command() {
-        let cmd = PackageCommandBuilder::build_list_command(Some("apt"), None);
+        let cmd = PackageCommandBuilder::build_list_command(Some("apt"), None).unwrap();
         assert!(cmd.starts_with("apt list"));
     }
 
     #[test]
     fn test_list_command_with_filter() {
-        let cmd = PackageCommandBuilder::build_list_command(Some("apt"), Some("nginx"));
-        assert!(cmd.contains("grep -i 'nginx'"));
+        let cmd = PackageCommandBuilder::build_list_command(Some("apt"), Some("nginx")).unwrap();
+        assert!(cmd.contains("grep -i -e 'nginx'"));
     }
 
     #[test]
     fn test_list_filter_wraps_in_parentheses() {
-        let cmd = PackageCommandBuilder::build_list_command(None, Some("curl"));
+        let cmd = PackageCommandBuilder::build_list_command(None, Some("curl")).unwrap();
         // Parentheses ensure grep applies to the entire fallback chain, not just rpm
         assert!(cmd.starts_with('('));
-        assert!(cmd.contains(") | grep -i 'curl'"));
+        assert!(cmd.contains(") | grep -i -e 'curl'"));
     }
 
     #[test]
     fn test_list_no_parentheses_without_filter() {
-        let cmd = PackageCommandBuilder::build_list_command(None, None);
+        let cmd = PackageCommandBuilder::build_list_command(None, None).unwrap();
         assert!(!cmd.starts_with('('));
     }
 
     #[test]
     fn test_search_command() {
         let cmd = PackageCommandBuilder::build_search_command(Some("apt"), "nginx");
-        assert_eq!(cmd, "apt search 'nginx'");
+        assert_eq!(cmd, "apt search -- 'nginx'");
     }
 
     #[test]
     fn test_install_command() {
         let cmd = PackageCommandBuilder::build_install_command(Some("apt"), "nginx");
-        assert_eq!(cmd, "apt install -y 'nginx'");
+        assert_eq!(cmd, "apt install -y -- 'nginx'");
     }
 
     #[test]
@@ -224,7 +252,7 @@ mod tests {
     #[test]
     fn test_update_command_specific() {
         let cmd = PackageCommandBuilder::build_update_command(Some("apt"), Some("nginx"));
-        assert_eq!(cmd, "apt install -y 'nginx'");
+        assert_eq!(cmd, "apt install -y -- 'nginx'");
     }
 
     // ============== Remove Command ==============
@@ -232,26 +260,26 @@ mod tests {
     #[test]
     fn test_remove_command() {
         let cmd = PackageCommandBuilder::build_remove_command(Some("apt"), "nginx");
-        assert_eq!(cmd, "apt remove -y 'nginx'");
+        assert_eq!(cmd, "apt remove -y -- 'nginx'");
     }
 
     #[test]
     fn test_remove_command_dnf() {
         let cmd = PackageCommandBuilder::build_remove_command(Some("dnf"), "httpd");
-        assert_eq!(cmd, "dnf remove -y 'httpd'");
+        assert_eq!(cmd, "dnf remove -y -- 'httpd'");
     }
 
     #[test]
     fn test_remove_command_auto_detect() {
         let cmd = PackageCommandBuilder::build_remove_command(None, "nginx");
         assert!(cmd.contains("command -v apt"));
-        assert!(cmd.contains("remove -y 'nginx'"));
+        assert!(cmd.contains("remove -y -- 'nginx'"));
     }
 
     #[test]
     fn test_remove_injection_in_package() {
         let cmd = PackageCommandBuilder::build_remove_command(Some("apt"), "nginx; rm -rf /");
-        assert_eq!(cmd, "apt remove -y 'nginx; rm -rf /'");
+        assert_eq!(cmd, "apt remove -y -- 'nginx; rm -rf /'");
     }
 
     // ============== Shell Injection Prevention ==============
@@ -259,20 +287,43 @@ mod tests {
     #[test]
     fn test_install_injection_in_package() {
         let cmd = PackageCommandBuilder::build_install_command(Some("apt"), "nginx; rm -rf /");
-        assert_eq!(cmd, "apt install -y 'nginx; rm -rf /'");
+        assert_eq!(cmd, "apt install -y -- 'nginx; rm -rf /'");
     }
 
     #[test]
     fn test_search_injection_in_query() {
         let cmd = PackageCommandBuilder::build_search_command(Some("apt"), "nginx$(whoami)");
-        assert_eq!(cmd, "apt search 'nginx$(whoami)'");
+        assert_eq!(cmd, "apt search -- 'nginx$(whoami)'");
     }
 
+    /// The filter used to be escaped and passed through. Escaping made it
+    /// one shell word, which was never the question — the question was what
+    /// `grep` does with that word. It is refused outright now.
     #[test]
     fn test_list_injection_in_filter() {
-        let cmd =
-            PackageCommandBuilder::build_list_command(Some("apt"), Some("nginx | cat /etc/passwd"));
-        assert!(cmd.contains("grep -i 'nginx | cat /etc/passwd'"));
+        PackageCommandBuilder::build_list_command(Some("apt"), Some("nginx | cat /etc/passwd"))
+            .expect_err("a filter carrying shell text must be refused");
+    }
+
+    /// The measured attack: `-rf<file>` unbundles into `-r` plus
+    /// `-f<file>`, so a package-list call became a recursive read of the SSH
+    /// user's home. Two independent gates now stop it — the leading hyphen is
+    /// refused, and `-e` would put it in pattern position anyway.
+    #[test]
+    fn a_filter_cannot_become_a_grep_option() {
+        for hostile in ["-rf/etc/hostname", "-r", "--include=*.pem", "-e"] {
+            PackageCommandBuilder::build_list_command(Some("apt"), Some(hostile))
+                .expect_err("a filter that grep would read as an option must be refused");
+        }
+
+        // Second gate, independent of the first: an ACCEPTED filter still
+        // reaches grep in pattern position. Losing either one alone must
+        // fail this test.
+        let cmd = PackageCommandBuilder::build_list_command(Some("apt"), Some("nginx")).unwrap();
+        assert!(
+            cmd.contains("grep -i -e 'nginx'"),
+            "the filter must be an argument of -e, never a bare word: {cmd}"
+        );
     }
 
     #[test]
@@ -286,44 +337,44 @@ mod tests {
     #[test]
     fn test_search_command_dnf() {
         let cmd = PackageCommandBuilder::build_search_command(Some("dnf"), "httpd");
-        assert_eq!(cmd, "dnf search 'httpd'");
+        assert_eq!(cmd, "dnf search -- 'httpd'");
     }
 
     #[test]
     fn test_search_command_yum() {
         let cmd = PackageCommandBuilder::build_search_command(Some("yum"), "httpd");
-        assert_eq!(cmd, "yum search 'httpd'");
+        assert_eq!(cmd, "yum search -- 'httpd'");
     }
 
     #[test]
     fn test_search_command_apk() {
         let cmd = PackageCommandBuilder::build_search_command(Some("apk"), "nginx");
-        assert_eq!(cmd, "apk search 'nginx'");
+        assert_eq!(cmd, "apk search -- 'nginx'");
     }
 
     #[test]
     fn test_install_command_dnf() {
         let cmd = PackageCommandBuilder::build_install_command(Some("dnf"), "httpd");
-        assert_eq!(cmd, "dnf install -y 'httpd'");
+        assert_eq!(cmd, "dnf install -y -- 'httpd'");
     }
 
     #[test]
     fn test_install_command_yum() {
         let cmd = PackageCommandBuilder::build_install_command(Some("yum"), "httpd");
-        assert_eq!(cmd, "yum install -y 'httpd'");
+        assert_eq!(cmd, "yum install -y -- 'httpd'");
     }
 
     #[test]
     fn test_install_command_apk() {
         let cmd = PackageCommandBuilder::build_install_command(Some("apk"), "nginx");
-        assert_eq!(cmd, "apk install -y 'nginx'");
+        assert_eq!(cmd, "apk install -y -- 'nginx'");
     }
 
     // ============== Auto-Detect Tests ==============
 
     #[test]
     fn test_list_command_auto_detect() {
-        let cmd = PackageCommandBuilder::build_list_command(None, None);
+        let cmd = PackageCommandBuilder::build_list_command(None, None).unwrap();
         assert!(cmd.contains("command -v apt"));
     }
 
@@ -331,14 +382,14 @@ mod tests {
     fn test_search_command_auto_detect() {
         let cmd = PackageCommandBuilder::build_search_command(None, "nginx");
         assert!(cmd.contains("command -v apt"));
-        assert!(cmd.contains("search 'nginx'"));
+        assert!(cmd.contains("search -- 'nginx'"));
     }
 
     #[test]
     fn test_install_command_auto_detect() {
         let cmd = PackageCommandBuilder::build_install_command(None, "nginx");
         assert!(cmd.contains("command -v apt"));
-        assert!(cmd.contains("install -y 'nginx'"));
+        assert!(cmd.contains("install -y -- 'nginx'"));
     }
 
     // ============== Edge Cases ==============
@@ -351,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_list_no_filter_no_grep() {
-        let cmd = PackageCommandBuilder::build_list_command(Some("apt"), None);
+        let cmd = PackageCommandBuilder::build_list_command(Some("apt"), None).unwrap();
         assert!(!cmd.contains("grep"));
     }
 
@@ -370,7 +421,7 @@ mod tests {
     #[test]
     fn test_update_specific_dnf() {
         let cmd = PackageCommandBuilder::build_update_command(Some("dnf"), Some("httpd"));
-        assert_eq!(cmd, "dnf install -y 'httpd'");
+        assert_eq!(cmd, "dnf install -y -- 'httpd'");
     }
 
     #[test]
@@ -407,19 +458,19 @@ mod tests {
     #[test]
     fn test_update_yum_specific_package() {
         let cmd = PackageCommandBuilder::build_update_command(Some("yum"), Some("httpd"));
-        assert_eq!(cmd, "yum install -y 'httpd'");
+        assert_eq!(cmd, "yum install -y -- 'httpd'");
     }
 
     #[test]
     fn test_update_apk_specific_package() {
         let cmd = PackageCommandBuilder::build_update_command(Some("apk"), Some("nginx"));
-        assert_eq!(cmd, "apk install -y 'nginx'");
+        assert_eq!(cmd, "apk install -y -- 'nginx'");
     }
 
     #[test]
     fn test_install_empty_package_name() {
         let cmd = PackageCommandBuilder::build_install_command(Some("apt"), "");
-        assert_eq!(cmd, "apt install -y ''");
+        assert_eq!(cmd, "apt install -y -- ''");
     }
 
     // ============== Package Name Validation ==============
