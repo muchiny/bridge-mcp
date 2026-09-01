@@ -290,6 +290,110 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  # The 24 shards each upload a `mutants.out/`, and nothing ever put them back
+  # together — so the crate has been mutation-tested weekly for months without
+  # anyone being able to name a single surviving mutant. A score split into 24
+  # artefacts is not a score.
+  #
+  # This job merges them into one list. That list is the input to the local
+  # repair loop: at ~61s per mutant on a developer machine, sweeping to FIND
+  # survivors is unaffordable (3012 mutants is ~51 hours), while fixing the ones
+  # CI already found is an afternoon.
+  mutation-score:
+    name: Mutation score
+    runs-on: ubuntu-latest
+    needs: [mutation-testing]
+    if: always() && needs.mutation-testing.result != 'skipped'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Download every shard report
+        uses: actions/download-artifact@v6
+        with:
+          pattern: mutation-report-shard-*
+          path: shards/
+
+      - name: Merge and publish
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, pathlib, collections
+
+          tot = collections.Counter()
+          survivors, shards_seen, shards_bad = [], 0, []
+
+          for out in sorted(pathlib.Path("shards").glob("*/outcomes.json")):
+              shard = out.parent.name
+              try:
+                  d = json.loads(out.read_text())
+              except Exception as e:
+                  shards_bad.append(f"{shard} ({e})")
+                  continue
+              shards_seen += 1
+              for k in ("total_mutants", "caught", "missed", "timeout", "unviable"):
+                  tot[k] += d.get(k) or 0
+              # `missed.txt` is the human-readable twin of the missed outcomes;
+              # read the JSON so a partial shard cannot silently contribute an
+              # empty file that looks like "nothing survived".
+              for o in d.get("outcomes", []):
+                  if o.get("summary") == "MissedMutant":
+                      sc = o.get("scenario") or {}
+                      m = sc.get("Mutant") if isinstance(sc, dict) else None
+                      if m:
+                          survivors.append(
+                              f"{m.get('file','?')}:{m.get('line','?')} {m.get('function','?')} — {m.get('description','?')}"
+                          )
+
+          tested = tot["caught"] + tot["missed"]
+          score = (100.0 * tot["caught"] / tested) if tested else 0.0
+
+          print("## Mutation score")
+          print()
+          print(f"**{score:.1f}%** — {tot['caught']} caught / {tested} tested")
+          print()
+          print("| | |")
+          print("|---|---|")
+          print(f"| shards merged | {shards_seen} / 24 |")
+          print(f"| mutants generated | {tot['total_mutants']} |")
+          print(f"| caught | {tot['caught']} |")
+          print(f"| **survived** | **{tot['missed']}** |")
+          print(f"| timed out | {tot['timeout']} |")
+          print(f"| unviable | {tot['unviable']} |")
+          print()
+
+          # A shard that hit its 150m budget exits 0 with a ::warning:: and
+          # still uploads a partial report. Saying "24/24" when some were
+          # partial would overstate the coverage of this number.
+          if shards_seen < 24:
+              print(f"> Only {shards_seen} shard reports were readable. "
+                    "The figures above cover those shards ONLY — treat the "
+                    "score as a floor, not a measurement.")
+              print()
+          if shards_bad:
+              print("> Unreadable: " + ", ".join(shards_bad))
+              print()
+
+          if survivors:
+              print("<details><summary>Surviving mutants — the repair work list</summary>")
+              print()
+              for line in sorted(survivors):
+                  print(f"- `{line}`")
+              print()
+              print("</details>")
+          else:
+              print("No surviving mutants in the merged shards.")
+
+          pathlib.Path("survivors.txt").write_text("\n".join(sorted(survivors)) + "\n")
+          PY
+
+      - name: Upload the survivor list
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-survivors
+          path: survivors.txt
+          if-no-files-found: warn
+          retention-days: 90
+
   # Nothing watches a scheduled run: the previous two weekly Security runs went
   # red (RUSTSEC-2026-0204 + a yanked crate) and nobody was told. Fuzz already
   # files an issue on crash; this does the same for the whole workflow, and
