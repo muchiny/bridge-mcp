@@ -369,7 +369,9 @@ jobs:
             cat coverage/summary.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          report --cobertura --output-path coverage/cobertura.xml --fail-under-lines 70
+          # 96.4% measured 2026-09-01; 93 leaves three points of slack.
+          # Keep in step with COVERAGE_MIN in the Makefile.
+          report --cobertura --output-path coverage/cobertura.xml --fail-under-lines 93
 
       - name: Stop test SSH container
         if: always()
