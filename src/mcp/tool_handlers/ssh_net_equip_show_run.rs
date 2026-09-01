@@ -87,10 +87,7 @@ impl StandardTool for NetEquipShowRunTool {
             .equipment_type
             .as_deref()
             .map_or(EquipmentType::Generic, EquipmentType::from_str_loose);
-        Ok(NetworkEquipmentCommandBuilder::build_show_run_command(
-            eq_type,
-            args.section.as_deref(),
-        ))
+        NetworkEquipmentCommandBuilder::build_show_run_command(eq_type, args.section.as_deref())
     }
 }
 
