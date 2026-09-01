@@ -179,3 +179,172 @@ mod tests {
         assert!(leaked.is_err(), "a bare operator must fail the oracle");
     }
 }
+
+/// A command split into what the shell reads as *syntax* and what it reads as
+/// *text*.
+///
+/// [`shell_words`] answers the question for a builder that emits a single
+/// command. Most builders here emit a pipeline — `ls -la 'X' 2>/dev/null || ls
+/// -la /etc/nginx/conf.d/ || echo 'none'` — where operators are deliberate and
+/// `shell_words` correctly refuses. For those, the property is not "no
+/// operators" but "no operator the CALLER put there", which needs the two
+/// halves separated.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ShellShape {
+    /// The command with every maximal run of literal text replaced by `\0`.
+    ///
+    /// Two commands built from different inputs must have the SAME skeleton:
+    /// that is precisely the statement that neither input contributed syntax.
+    pub skeleton: String,
+    /// The literal runs, in order, with quoting and escaping resolved — what
+    /// the invoked program actually receives.
+    pub literals: Vec<String>,
+}
+
+/// Scan `command` the way `/bin/sh` does, separating syntax from text.
+///
+/// Returns `None` when the command cannot be scanned at all — an unterminated
+/// quote or a trailing backslash — which is itself a failure worth reporting,
+/// since no builder should emit one.
+#[must_use]
+pub fn shell_shape(command: &str) -> Option<ShellShape> {
+    let mut skeleton = String::new();
+    let mut literals = Vec::new();
+    let mut cur = String::new();
+    let mut in_literal = false;
+    let mut chars = command.chars().peekable();
+
+    // Close the current literal run, if any, and mark it in the skeleton.
+    macro_rules! flush {
+        () => {
+            if in_literal {
+                literals.push(std::mem::take(&mut cur));
+                skeleton.push('\0');
+                in_literal = false;
+            }
+        };
+    }
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_literal = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        None => return None,
+                        Some(q) => cur.push(q),
+                    }
+                }
+            }
+            '"' => {
+                in_literal = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        // An expansion inside double quotes is syntax, not
+                        // text: the shell will run or substitute it.
+                        Some(e @ ('$' | '`')) => {
+                            flush!();
+                            skeleton.push(e);
+                        }
+                        Some('\\') => match chars.next() {
+                            Some(e) => {
+                                in_literal = true;
+                                cur.push(e);
+                            }
+                            None => return None,
+                        },
+                        None => return None,
+                        Some(q) => cur.push(q),
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some(e) => {
+                    in_literal = true;
+                    cur.push(e);
+                }
+                None => return None,
+            },
+            // Everything the shell acts on rather than passes along.
+            ';' | '|' | '&' | '<' | '>' | '(' | ')' | '`' | '$' | '\n' | '\r' | ' ' | '\t' => {
+                flush!();
+                skeleton.push(c);
+            }
+            other => {
+                in_literal = true;
+                cur.push(other);
+            }
+        }
+    }
+    flush!();
+
+    Some(ShellShape {
+        skeleton,
+        literals,
+    })
+}
+
+/// Assert that swapping `benign` for `hostile` changed the command's text and
+/// nothing else.
+///
+/// This is the property a builder that emits a pipeline owes its caller. The
+/// operators in the output are the builder's own and are meant to be there;
+/// what must never happen is the CALLER adding one. Comparing skeletons says
+/// exactly that, and says it without the target needing to know which
+/// operators the builder legitimately emits.
+///
+/// # Panics
+///
+/// Panics when either command is unscannable, or when the skeletons differ.
+pub fn assert_same_shell_skeleton(benign_cmd: &str, hostile_cmd: &str, context: &str) {
+    let (Some(benign), Some(hostile)) = (shell_shape(benign_cmd), shell_shape(hostile_cmd)) else {
+        panic!("{context}: emitted a command line sh cannot parse: {hostile_cmd:?}");
+    };
+    assert_eq!(
+        benign.skeleton, hostile.skeleton,
+        "{context}: the input changed the SHELL SKELETON, so it contributed syntax.\n  \
+         benign : {benign_cmd:?}\n  hostile: {hostile_cmd:?}"
+    );
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn a_pipeline_keeps_its_own_operators() {
+        let shape = shell_shape("ls -la '/etc/nginx' 2>/dev/null || echo 'none'").unwrap();
+        assert_eq!(shape.skeleton, "\0 \0 \0 \0>\0 || \0 \0");
+        assert_eq!(
+            shape.literals,
+            vec!["ls", "-la", "/etc/nginx", "2", "/dev/null", "echo", "none"]
+        );
+    }
+
+    /// The whole point: a quoted hostile value must not move the skeleton.
+    #[test]
+    fn a_quoted_hostile_value_does_not_change_the_skeleton() {
+        assert_same_shell_skeleton(
+            "ls -la 'safe' 2>/dev/null",
+            "ls -la '; rm -rf /' 2>/dev/null",
+            "quoted",
+        );
+    }
+
+    /// And an unquoted one must.
+    #[test]
+    fn an_unquoted_hostile_value_does_change_the_skeleton() {
+        let caught = std::panic::catch_unwind(|| {
+            assert_same_shell_skeleton("ls -la safe", "ls -la ; rm -rf /", "bare");
+        });
+        assert!(caught.is_err(), "a bare operator must move the skeleton");
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_unscannable() {
+        assert!(shell_shape("ls 'oops").is_none());
+        assert!(shell_shape("ls \\").is_none());
+    }
+}
