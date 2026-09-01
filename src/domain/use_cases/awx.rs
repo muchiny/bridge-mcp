@@ -279,11 +279,120 @@ impl AwxCommandBuilder {
         }
         Ok(())
     }
+
+    /// Resolve the per-call API timeout, falling back to the configured one.
+    ///
+    /// Twenty-three AWX tools advertised `timeout_seconds` in their schema,
+    /// deserialized it, and passed `awx.api_timeout` to the builder regardless —
+    /// so setting it did nothing, and `#[allow(dead_code)]` on the args struct
+    /// is what kept the compiler from saying so.
+    ///
+    /// The bounds are the ones those schemas already publish
+    /// (`"minimum": 1, "maximum": 3600`). Out-of-range values are REFUSED rather
+    /// than clamped: silently running with a timeout the caller did not ask for
+    /// is the same class of quiet wrongness this fix exists to remove.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::McpInvalidRequest`] when the value is 0 or above
+    /// 3600.
+    pub fn resolve_timeout(requested: Option<u64>, configured: u32) -> Result<u32> {
+        let Some(t) = requested else {
+            return Ok(configured);
+        };
+        if t == 0 || t > 3600 {
+            return Err(BridgeError::McpInvalidRequest(format!(
+                "timeout_seconds must be between 1 and 3600, got {t}"
+            )));
+        }
+        // Bounded above by 3600, so the cast cannot truncate.
+        Ok(u32::try_from(t).unwrap_or(configured))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_timeout_falls_back_to_config_when_absent() {
+        assert_eq!(AwxCommandBuilder::resolve_timeout(None, 30).unwrap(), 30);
+    }
+
+    #[test]
+    fn resolve_timeout_honours_a_requested_value() {
+        assert_eq!(
+            AwxCommandBuilder::resolve_timeout(Some(120), 30).unwrap(),
+            120
+        );
+        assert_eq!(AwxCommandBuilder::resolve_timeout(Some(1), 30).unwrap(), 1);
+        assert_eq!(
+            AwxCommandBuilder::resolve_timeout(Some(3600), 30).unwrap(),
+            3600
+        );
+    }
+
+    /// The resolved timeout must reach the command, not merely be computed.
+    ///
+    /// Every AWX handler had a test asserting
+    /// `assert_eq!(args.timeout_seconds, Some(60))` — which passes whether the
+    /// value is used or dropped on the floor. Twenty-three of them dropped it,
+    /// and those tests stayed green for the entire life of the bug. This one
+    /// asserts the effect: `--max-time` carries what the caller asked for.
+    #[test]
+    fn a_resolved_timeout_reaches_the_curl_command() {
+        let requested = AwxCommandBuilder::resolve_timeout(Some(120), 30).unwrap();
+        let cmd = AwxCommandBuilder::build_api_call_checked(
+            "https://awx.example",
+            "tok",
+            "/api/v2/ping/",
+            HttpMethod::Get,
+            None,
+            true,
+            &[],
+            requested,
+        );
+
+        assert!(
+            cmd.contains("--max-time 120"),
+            "requested timeout must reach the command: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--max-time 30"),
+            "the configured default must not win: {cmd}"
+        );
+    }
+
+    /// And the configured default still applies when nothing is requested.
+    #[test]
+    fn the_configured_timeout_is_used_when_none_is_requested() {
+        let resolved = AwxCommandBuilder::resolve_timeout(None, 30).unwrap();
+        let cmd = AwxCommandBuilder::build_api_call_checked(
+            "https://awx.example",
+            "tok",
+            "/api/v2/ping/",
+            HttpMethod::Get,
+            None,
+            true,
+            &[],
+            resolved,
+        );
+        assert!(cmd.contains("--max-time 30"), "{cmd}");
+    }
+
+    /// Refused, not clamped. Running with a timeout the caller did not ask for
+    /// is the quiet wrongness this whole change removes.
+    #[test]
+    fn resolve_timeout_refuses_out_of_range_instead_of_clamping() {
+        for bad in [0u64, 3601, u64::MAX] {
+            let err = AwxCommandBuilder::resolve_timeout(Some(bad), 30)
+                .expect_err("out-of-range must be refused");
+            assert!(
+                err.to_string().contains("3600"),
+                "the refusal must state the bound: {err}"
+            );
+        }
+    }
 
     #[test]
     fn test_build_api_call_get() {

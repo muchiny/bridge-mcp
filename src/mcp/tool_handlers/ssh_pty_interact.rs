@@ -19,7 +19,18 @@ pub struct SshPtyInteractArgs {
     /// Target host name from configuration.
     host: String,
     /// Session identifier (for future session management).
-    #[allow(dead_code)]
+    // Accepted for forward compatibility and required by the schema, but
+    // deliberately unused: this tool stores no session state, and its
+    // description says so to the client.
+    //
+    // `allow` and not `expect`: the field IS read, by this module's own tests,
+    // so `dead_code` fires under `--lib` and not under `--all-targets`. An
+    // `expect` is therefore "unfulfilled" in the test build and fails clippy.
+    // The attribute cannot express "dead in lib, live in tests".
+    #[allow(
+        dead_code,
+        reason = "documented as accepted-but-ignored; no session state is stored"
+    )]
     session_id: String,
     /// Input to send to the session.
     input: String,

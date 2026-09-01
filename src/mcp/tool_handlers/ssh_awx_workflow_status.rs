@@ -14,7 +14,6 @@ use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 /// Arguments for the `ssh_awx_workflow_status` tool.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SshAwxWorkflowStatusArgs {
@@ -105,6 +104,7 @@ impl ToolHandler for SshAwxWorkflowStatusHandler {
 
         let endpoint = format!("/api/v2/workflow_jobs/{}/", args.workflow_job_id);
 
+        let timeout = AwxCommandBuilder::resolve_timeout(args.timeout_seconds, awx.api_timeout)?;
         let cmd = AwxCommandBuilder::build_api_call_checked(
             &awx.url,
             &awx.token,
@@ -113,7 +113,7 @@ impl ToolHandler for SshAwxWorkflowStatusHandler {
             None,
             awx.verify_ssl,
             &[],
-            awx.api_timeout,
+            timeout,
         );
 
         let host = &awx.ssh_host;
