@@ -2,6 +2,38 @@
 
 .PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install
 
+# ---------------------------------------------------------------------------
+# Guards around optional tooling.
+#
+# The idiom this replaces — `command -v X && X || echo "not installed"` —
+# swallowed the tool's FAILURE, not just its absence. Reproduced on a witness:
+# a `cargo deny` reporting a critical advisory and exiting 1 came out as
+# "neither cargo-deny nor cargo-audit installed, skipping", recipe exit 0. And
+# `audit` is in `ci`, the documented proof-of-completion before every commit —
+# so `make ci` could go green on an open vulnerability. `coverage-check` had
+# the same shape, which meant the coverage gate could not fail at all.
+#
+#   $(call need,TOOL,HINT)  absent -> FAIL. For gates that would otherwise
+#                           claim success without having checked anything.
+#                           Its `exit 1` fails the line, which aborts the recipe.
+#
+# There is deliberately no `want` macro. Make runs each recipe line in its OWN
+# shell, so a guard line ending in `exit 0` only ends THAT line — make then runs
+# the next line, tool absent or not. The guard and the command must share one
+# shell, so optional tooling uses the explicit `if/else` block below (the same
+# shape the `typos` target has always used).
+#
+# Neither form masks a failure: once the tool runs, its exit code is the recipe's.
+need = command -v $(1) >/dev/null 2>&1 || { echo "$(1) not installed. $(2)"; exit 1; }
+
+# Minimum line coverage enforced by `coverage-check`.
+#
+# Measured 2026-09-01: 96,41% (all targets), 96,14% (--lib). The gate was at
+# 70, which would have let 26 points rot unnoticed — and it could not fail
+# anyway, see the `need`/`want` note above. 93 leaves three points of slack for
+# noise without being decorative. Keep in step with ci.yml's coverage job.
+COVERAGE_MIN ?= 93
+
 # Default target
 all: check lint test
 
@@ -78,7 +110,14 @@ doc-check:
 
 # Security audit (requires cargo-audit: cargo install cargo-audit)
 audit:
-	@command -v cargo-deny >/dev/null 2>&1 && cargo deny check advisories || (command -v cargo-audit >/dev/null 2>&1 && cargo-audit audit || echo "neither cargo-deny nor cargo-audit installed, skipping")
+	@if command -v cargo-deny >/dev/null 2>&1; then \
+		cargo deny check advisories; \
+	elif command -v cargo-audit >/dev/null 2>&1; then \
+		cargo-audit audit; \
+	else \
+		echo "neither cargo-deny nor cargo-audit installed. cargo install cargo-deny"; \
+		exit 1; \
+	fi
 
 # License and dependency check
 deny:
@@ -154,11 +193,16 @@ typos:
 
 # Check for unused dependencies
 machete:
-	@command -v cargo-machete >/dev/null 2>&1 && cargo machete || echo "cargo-machete not installed, skipping"
+	@$(call need,cargo-machete,cargo install cargo-machete)
+	cargo machete
 
 # Check for outdated dependencies
 outdated:
-	@command -v cargo-outdated >/dev/null 2>&1 && cargo outdated || echo "cargo-outdated not installed, skipping"
+	@if command -v cargo-outdated >/dev/null 2>&1; then \
+		cargo outdated; \
+	else \
+		echo "cargo-outdated not installed, skipping. cargo install cargo-outdated"; \
+	fi
 
 # Full quality check (all linters)
 quality: fmt-check lint typos machete
@@ -179,21 +223,34 @@ setup:
 	@echo "Installing cargo tools..."
 	cargo install cargo-nextest cargo-deny cargo-audit cargo-watch cargo-machete cargo-outdated typos-cli cargo-semver-checks cargo-hack cargo-insta cargo-geiger cargo-cyclonedx cargo-llvm-cov cross --locked
 	@echo "Installing pre-commit (requires Python)..."
-	@command -v pip >/dev/null 2>&1 && pip install --user pre-commit && pre-commit install || echo "pip not found, skipping pre-commit"
+	@if command -v pip >/dev/null 2>&1; then \
+		pip install --user pre-commit && pre-commit install; \
+	else \
+		echo "pip not found, skipping pre-commit"; \
+	fi
 	@echo "Installing markdownlint (requires Node.js)..."
-	@command -v npm >/dev/null 2>&1 && npm install -g markdownlint-cli || echo "npm not found, skipping markdownlint"
+	@if command -v npm >/dev/null 2>&1; then \
+		npm install -g markdownlint-cli; \
+	else \
+		echo "npm not found, skipping markdownlint"; \
+	fi
 	@echo ""
 	@echo "Setup complete! Run 'make check' to verify."
 
 # Code coverage report (requires cargo-llvm-cov: cargo install cargo-llvm-cov)
 # WSL NOTE: full-crate coverage is heavy; locally we scope to --lib.
 coverage:
-	@command -v cargo-llvm-cov >/dev/null 2>&1 && cargo llvm-cov --lib --html --output-dir coverage && echo "Coverage report: coverage/html/index.html" || echo "cargo-llvm-cov not installed, run: cargo install cargo-llvm-cov"
+	@if command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		cargo llvm-cov --lib --html --output-dir coverage && echo "Coverage report: coverage/html/index.html"; \
+	else \
+		echo "cargo-llvm-cov not installed, skipping. cargo install cargo-llvm-cov"; \
+	fi
 
 # Code coverage with minimum threshold (fail if below).
-# Threshold must match ci.yml's coverage job (--fail-under-lines 70).
+# Threshold must match ci.yml's coverage job (--fail-under-lines).
 coverage-check:
-	@command -v cargo-llvm-cov >/dev/null 2>&1 && cargo llvm-cov --lib --summary-only --fail-under-lines 70 || echo "cargo-llvm-cov not installed, run: cargo install cargo-llvm-cov"
+	@$(call need,cargo-llvm-cov,cargo install cargo-llvm-cov)
+	cargo llvm-cov --lib --summary-only --fail-under-lines $(COVERAGE_MIN)
 
 # WSL-safe mutation settings (crash post-mortem 2026-07-04):
 # - TMPDIR=/var/tmp — WSL /tmp is a RAM-backed tmpfs; cargo-mutants builds its
@@ -204,16 +261,28 @@ MUTANTS_SAFE = TMPDIR=/var/tmp NEXTEST_TEST_THREADS=2 cargo mutants -j 1
 
 # Mutation testing (security module only - fast)
 mutants:
-	@command -v cargo-mutants >/dev/null 2>&1 && $(MUTANTS_SAFE) --re '^src/security/' || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
+	@if command -v cargo-mutants >/dev/null 2>&1; then \
+		$(MUTANTS_SAFE) --re '^src/security/'; \
+	else \
+		echo "cargo-mutants not installed, skipping. cargo install --locked cargo-mutants"; \
+	fi
 
 # Mutation testing (database + domain modules)
 mutants-db:
-	@command -v cargo-mutants >/dev/null 2>&1 && $(MUTANTS_SAFE) --re '^src/domain/' || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
+	@if command -v cargo-mutants >/dev/null 2>&1; then \
+		$(MUTANTS_SAFE) --re '^src/domain/'; \
+	else \
+		echo "cargo-mutants not installed, skipping. cargo install --locked cargo-mutants"; \
+	fi
 
 # Mutation testing of a single file: make mutants-file FILE=src/domain/output_cache.rs
 mutants-file:
 	@test -n "$(FILE)" || (echo "Usage: make mutants-file FILE=src/path/to/file.rs" && exit 1)
-	@command -v cargo-mutants >/dev/null 2>&1 && $(MUTANTS_SAFE) --file "$(FILE)" || echo "cargo-mutants not installed, run: cargo install --locked cargo-mutants"
+	@if command -v cargo-mutants >/dev/null 2>&1; then \
+		$(MUTANTS_SAFE) --file "$(FILE)"; \
+	else \
+		echo "cargo-mutants not installed, skipping. cargo install --locked cargo-mutants"; \
+	fi
 
 # Full-project mutation is CI-only (weekly 8-shard job in security.yml +
 # per-PR --in-diff job in ci.yml). Running it locally OOMs the WSL VM.
@@ -224,7 +293,11 @@ mutants-full:
 
 # Extra runtime checks on dependencies (requires cargo-careful + nightly)
 careful:
-	@command -v cargo-careful >/dev/null 2>&1 && cargo +nightly careful test || echo "cargo-careful not installed, run: cargo install cargo-careful"
+	@if command -v cargo-careful >/dev/null 2>&1; then \
+		cargo +nightly careful test; \
+	else \
+		echo "cargo-careful not installed, skipping. cargo install cargo-careful"; \
+	fi
 
 # Run benchmarks
 bench:
@@ -280,37 +353,51 @@ geiger:
 
 # Check for semver-breaking API changes (requires cargo-semver-checks)
 semver-checks:
-	@command -v cargo-semver-checks >/dev/null 2>&1 && cargo semver-checks || echo "cargo-semver-checks not installed, run: cargo install cargo-semver-checks --locked"
+	@if command -v cargo-semver-checks >/dev/null 2>&1; then \
+		cargo semver-checks; \
+	else \
+		echo "cargo-semver-checks not installed, skipping. cargo install cargo-semver-checks"; \
+	fi
 
 # Check all feature combinations compile (requires cargo-hack)
 hack:
-	@command -v cargo-hack >/dev/null 2>&1 && cargo hack check --feature-powerset --no-dev-deps || echo "cargo-hack not installed, run: cargo install cargo-hack --locked"
+	@$(call need,cargo-hack,cargo install cargo-hack)
+	cargo hack check --feature-powerset --no-dev-deps
 
 # Generate Software Bill of Materials (requires cargo-cyclonedx)
 sbom:
-	@command -v cargo-cyclonedx >/dev/null 2>&1 && cargo cyclonedx --format json --output-cdx || echo "cargo-cyclonedx not installed, run: cargo install cargo-cyclonedx --locked"
+	@if command -v cargo-cyclonedx >/dev/null 2>&1; then \
+		cargo cyclonedx --format json --output-cdx; \
+	else \
+		echo "cargo-cyclonedx not installed, skipping. cargo install cargo-cyclonedx"; \
+	fi
 
 # Cross-compile for a specific target (requires cross: cargo install cross)
 release-target:
 	@test -n "$(TARGET)" || (echo "Usage: make release-target TARGET=x86_64-unknown-linux-gnu" && exit 1)
-	@command -v cross >/dev/null 2>&1 && cross build --release --target $(TARGET) || cargo build --release --target $(TARGET)
+	@# Falling back to plain cargo when cross is ABSENT is deliberate. The old
+	@# form also fell back when cross FAILED (docker down, image missing),
+	@# turning a toolchain outage into a silently different build.
+	@if command -v cross >/dev/null 2>&1; then \
+		cross build --release --target $(TARGET); \
+	else \
+		echo "cross not installed, falling back to cargo build --target $(TARGET)"; \
+		cargo build --release --target $(TARGET); \
+	fi
 
 # Cross-compile all release targets
 release-all:
 	@echo "Building release binaries..."
 	@mkdir -p releases
 	cargo build --release --target x86_64-unknown-linux-gnu
-	@command -v cross >/dev/null 2>&1 && cross build --release --target aarch64-unknown-linux-gnu || echo "cross not installed, skipping arm64"
-	@command -v cross >/dev/null 2>&1 && cross build --release --target x86_64-apple-darwin || echo "cross not installed, skipping macos-x86_64"
-	@command -v cross >/dev/null 2>&1 && cross build --release --target aarch64-apple-darwin || echo "cross not installed, skipping macos-arm64"
-	@command -v cross >/dev/null 2>&1 && cross build --release --target x86_64-pc-windows-gnu || echo "cross not installed, skipping windows"
-	@echo "Packaging..."
-	@test -f target/x86_64-unknown-linux-gnu/release/bridge-mcp && cd target/x86_64-unknown-linux-gnu/release && tar czf ../../../releases/bridge-mcp-linux-x86_64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-linux-x86_64.tar.gz > bridge-mcp-linux-x86_64.tar.gz.sha256 || true
-	@test -f target/aarch64-unknown-linux-gnu/release/bridge-mcp && cd target/aarch64-unknown-linux-gnu/release && tar czf ../../../releases/bridge-mcp-linux-arm64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-linux-arm64.tar.gz > bridge-mcp-linux-arm64.tar.gz.sha256 || true
-	@test -f target/x86_64-apple-darwin/release/bridge-mcp && cd target/x86_64-apple-darwin/release && tar czf ../../../releases/bridge-mcp-macos-x86_64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-macos-x86_64.tar.gz > bridge-mcp-macos-x86_64.tar.gz.sha256 || true
-	@test -f target/aarch64-apple-darwin/release/bridge-mcp && cd target/aarch64-apple-darwin/release && tar czf ../../../releases/bridge-mcp-macos-arm64.tar.gz bridge-mcp && cd ../../../releases && sha256sum bridge-mcp-macos-arm64.tar.gz > bridge-mcp-macos-arm64.tar.gz.sha256 || true
-	@test -f target/x86_64-pc-windows-gnu/release/bridge-mcp.exe && cd target/x86_64-pc-windows-gnu/release && zip -j ../../../releases/bridge-mcp-windows-x86_64.zip bridge-mcp.exe && cd ../../../releases && sha256sum bridge-mcp-windows-x86_64.zip > bridge-mcp-windows-x86_64.zip.sha256 || true
-	@echo "Release artifacts in releases/"
+	@if command -v cross >/dev/null 2>&1; then \
+		cross build --release --target aarch64-unknown-linux-gnu; \
+		cross build --release --target x86_64-apple-darwin; \
+		cross build --release --target aarch64-apple-darwin; \
+		cross build --release --target x86_64-pc-windows-gnu; \
+	else \
+		echo "cross not installed, skipping. cargo install cross"; \
+	fi
 
 # Build Docker image locally
 docker-build:
@@ -318,7 +405,11 @@ docker-build:
 
 # Build and scan Docker image with Trivy
 docker-scan: docker-build
-	@command -v trivy >/dev/null 2>&1 && trivy image --severity CRITICAL,HIGH bridge-mcp:local || echo "trivy not installed, skipping scan"
+	@if command -v trivy >/dev/null 2>&1; then \
+		trivy image --severity CRITICAL,HIGH bridge-mcp:local; \
+	else \
+		echo "trivy not installed, skipping. https://aquasecurity.github.io/trivy"; \
+	fi
 
 # Check for outdated and unused dependencies (report-only complement to
 # Dependabot, which opens the actual update PRs — see .github/dependabot.yml)
@@ -430,7 +521,7 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  coverage         - Generate HTML coverage report (cargo-llvm-cov, --lib)"
-	@echo "  coverage-check   - Coverage with minimum threshold (--fail-under-lines 70)"
+	@echo "  coverage-check   - Coverage with minimum threshold (COVERAGE_MIN=$(COVERAGE_MIN))"
 	@echo "  mutants          - Mutation testing (security module, WSL-safe)"
 	@echo "  mutants-db       - Mutation testing (domain modules, WSL-safe)"
 	@echo "  mutants-file     - Mutation testing of one file (FILE=src/...)"
