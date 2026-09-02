@@ -1137,19 +1137,110 @@ pub struct SamplingCreateMessageResult {
 ///
 /// Used by the main loop to distinguish client requests from client responses
 /// to server-initiated requests (elicitation, sampling).
-#[derive(Debug, Clone, Deserialize)]
+///
+/// [`Deserialize`] is hand-written — see the impl below — so that a JSON
+/// SEQUENCE cannot fill this struct by position. Everything else about the
+/// deserialisation is still `serde_derive`'s.
+#[derive(Debug, Clone)]
 pub struct JsonRpcMessage {
     pub jsonrpc: String,
-    #[serde(default)]
     pub id: Option<Value>,
-    #[serde(default)]
     pub method: Option<String>,
-    #[serde(default)]
     pub params: Option<Value>,
-    #[serde(default)]
     pub result: Option<Value>,
-    #[serde(default)]
     pub error: Option<JsonRpcErrorData>,
+}
+
+/// Accept a JSON-RPC message object, and refuse a JSON sequence.
+///
+/// The derived `Deserialize` accepted BOTH. Given
+/// `["2.0",1,"tools/call",{"name":"ssh_exec","arguments":{"command":"id"}}]`
+/// it filled the six fields by position and produced a complete, dispatchable
+/// tool call. The only thing refusing that array was the textual
+/// `starts_with('[')` guard in [`crate::McpServer::parse_incoming`], so ANY
+/// route to this type that did not pass through that one function — a cache,
+/// a logger, a future middleware deserialising from a `Value` — reopened it.
+/// Found by `fuzz_jsonrpc_parse`. Closing it at the level of the type means
+/// the guard becomes defence in depth instead of the whole defence.
+///
+/// The refusal itself is [`serde::de::Visitor::visit_seq`]'s DEFAULT method,
+/// obtained by not implementing it: it answers `invalid_type(Seq, &self)`,
+/// which is why `ObjectOnly::expecting` is the message a client sees.
+///
+/// # Why the generated visitor is still doing the work
+///
+/// Everything below `deserialize_map` is `serde_derive`'s. `Wire` carries the
+/// same six fields and the same `#[serde(default)]`s, and
+/// [`serde::de::value::MapAccessDeserializer`] hands it the raw
+/// [`serde::de::MapAccess`] without buffering — so `duplicate_field`,
+/// `missing_field`, the `Option<Option<T>>` slots that make
+/// `{"id":null,"id":null}` a duplicate, and escaped keys all remain the
+/// generator's property rather than becoming this file's to maintain.
+///
+/// That matters because the duplicate-member refusal is load-bearing. Every
+/// rewrite that goes through `serde_json::Map` or `Value` loses it — a map
+/// keeps the LAST of two members with the same name — and losing it reopens
+/// the stdio/HTTP divergence closed in #171, where
+/// `{"method":"tools/list","method":"tools/call"}` was refused at one door and
+/// dispatched at the other. `src/mcp/transport/http.rs` asserts the literal
+/// string `"duplicate field"`; it comes from here.
+///
+/// Also rejected, for the record: a `Value` intermediate and an `is_object`
+/// newtype (both lose the duplicate, the second also parses twice),
+/// `#[serde(untagged)]` (buffers into `Content`, same loss),
+/// `deny_unknown_fields` (orthogonal, and would reject the root `_meta` that
+/// 2026-07-28 puts the protocol revision in), and validating after the fact
+/// (once the struct is built, nothing distinguishes a positional fill).
+impl<'de> Deserialize<'de> for JsonRpcMessage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::value::MapAccessDeserializer;
+        use serde::de::{MapAccess, Visitor};
+
+        #[derive(Deserialize)]
+        struct Wire {
+            jsonrpc: String,
+            #[serde(default)]
+            id: Option<Value>,
+            #[serde(default)]
+            method: Option<String>,
+            #[serde(default)]
+            params: Option<Value>,
+            #[serde(default)]
+            result: Option<Value>,
+            #[serde(default)]
+            error: Option<JsonRpcErrorData>,
+        }
+
+        /// No `visit_seq`: that omission IS the fix.
+        struct ObjectOnly;
+
+        impl<'de> Visitor<'de> for ObjectOnly {
+            type Value = Wire;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a single JSON-RPC message object")
+            }
+
+            fn visit_map<A>(self, map: A) -> std::result::Result<Wire, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                Wire::deserialize(MapAccessDeserializer::new(map))
+            }
+        }
+
+        deserializer.deserialize_map(ObjectOnly).map(|w| Self {
+            jsonrpc: w.jsonrpc,
+            id: w.id,
+            method: w.method,
+            params: w.params,
+            result: w.result,
+            error: w.error,
+        })
+    }
 }
 
 /// Error data from a client response to a server-initiated request.
@@ -2897,5 +2988,168 @@ mod tests {
         // reverse-DNS namespace we own, matching server.json's package name.
         assert_eq!(BUILD_META_KEY, "io.github.muchiny/build");
         assert!(!BUILD_META_KEY.starts_with("io.modelcontextprotocol/"));
+    }
+
+    // ====== JsonRpcMessage: an object, and only an object (LOT A) ======
+
+    /// The property the hand-written `Deserialize` exists to keep, asserted
+    /// BEFORE the one it was written to add.
+    ///
+    /// A duplicate member is refused by `serde_derive`'s generated
+    /// `visit_map`, not by anything in this file. Every rewrite that reaches
+    /// `JsonRpcMessage` through `serde_json::Map` or `Value` loses it — a
+    /// `Map` keeps the LAST of two members with the same name — and that loss
+    /// is exactly the stdio/HTTP divergence closed in #171: stdio answered
+    /// -32700 while HTTP dispatched `tools/call`, so a proxy, an audit log or
+    /// a policy layer reading the FIRST member disagreed with what the server
+    /// ran. `src/mcp/transport/http.rs` asserts the literal string
+    /// `"duplicate field"`; this test says why that string carries weight.
+    #[test]
+    fn a_duplicate_member_is_still_refused_by_the_generated_visitor() {
+        const SMUGGLED: &str =
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"tools/call"}"#;
+
+        let err = serde_json::from_str::<JsonRpcMessage>(SMUGGLED)
+            .expect_err("two `method` members are not one message");
+        assert!(
+            err.to_string().contains("duplicate field `method`"),
+            "the refusal must still name the duplicate: {err}"
+        );
+
+        // The `Option<Option<T>>` case, which is the one a "simplification"
+        // silently breaks: collapsing the generated `Option<Option<Value>>`
+        // slot to `Option<Value>` still catches every duplicate EXCEPT two
+        // nulls, and a test written only against `method` stays green.
+        let err =
+            serde_json::from_str::<JsonRpcMessage>(r#"{"jsonrpc":"2.0","id":null,"id":null}"#)
+                .expect_err("two `id` members are not one message, null or not");
+        assert!(
+            err.to_string().contains("duplicate field `id`"),
+            "a duplicate that is null twice must be refused too: {err}"
+        );
+    }
+
+    /// A positional array is no longer a message — at the level of the TYPE.
+    ///
+    /// `["2.0",1,"tools/call",{"name":"ssh_exec","arguments":{"command":"id"}}]`
+    /// used to deserialise into a complete, dispatchable `tools/call`, because
+    /// the DERIVED `Deserialize` fills a struct from a JSON sequence by
+    /// position. Only the textual `[` guard in `McpServer::parse_incoming`
+    /// stood between that array and dispatch, so any route to
+    /// `JsonRpcMessage` that did not pass through that one function reopened
+    /// it. Found by `fuzz_jsonrpc_parse`.
+    ///
+    /// Both doors are checked: `from_str` (stdio, the daemon socket and HTTP,
+    /// via `parse_incoming`) and `from_value` (anything that lands on a
+    /// `Value` first — a cache, a logger, a future middleware).
+    #[test]
+    fn a_positional_array_is_not_a_message() {
+        const ARRAY: &str =
+            r#"["2.0",1,"tools/call",{"name":"ssh_exec","arguments":{"command":"id"}}]"#;
+
+        let err = serde_json::from_str::<JsonRpcMessage>(ARRAY)
+            .expect_err("a sequence must not fill this struct by position");
+        // The refusal must SAY what it wanted. `ObjectOnly::expecting` is the
+        // only thing that puts a shape into `invalid type: sequence, expected
+        // …`, and a client told merely "invalid type" has to guess. Asserted
+        // because `cargo mutants` killed nothing here: blanking `expecting`
+        // left every other test in this file green.
+        assert!(
+            err.to_string().contains("a single JSON-RPC message object"),
+            "the refusal must name the shape it wanted: {err}"
+        );
+
+        let as_value: Value = serde_json::from_str(ARRAY).expect("it is valid JSON");
+        let err = serde_json::from_value::<JsonRpcMessage>(as_value)
+            .expect_err("nor may it through a Value");
+        assert!(
+            err.to_string().contains("a single JSON-RPC message object"),
+            "the Value door must name it too: {err}"
+        );
+
+        // The empty array and the wrapped-object array — the two shapes a
+        // client that still believes in batching sends.
+        serde_json::from_str::<JsonRpcMessage>("[]").expect_err("nor an empty sequence");
+        serde_json::from_str::<JsonRpcMessage>(r#"[{"jsonrpc":"2.0","id":1}]"#)
+            .expect_err("nor a batch of one");
+    }
+
+    /// Refusing the sequence must not cost the missing-field diagnostics: they
+    /// are what tells a client WHICH member it forgot, and they come from the
+    /// same generated visitor as the duplicate check.
+    #[test]
+    fn a_message_missing_a_required_member_still_names_it() {
+        let err = serde_json::from_str::<JsonRpcMessage>("{}").expect_err("`jsonrpc` is required");
+        assert!(
+            err.to_string().contains("missing field `jsonrpc`"),
+            "got: {err}"
+        );
+
+        // Nested, through `JsonRpcErrorData` — the inner derive is untouched
+        // and must stay that way.
+        let err = serde_json::from_str::<JsonRpcMessage>(r#"{"jsonrpc":"2.0","error":{"code":1}}"#)
+            .expect_err("an error object without a message is not one");
+        assert!(
+            err.to_string().contains("missing field `message`"),
+            "got: {err}"
+        );
+    }
+
+    /// What the refusal must NOT take with it.
+    ///
+    /// The array is refused at the top level only. A JSON array is a perfectly
+    /// ordinary value for `params` (JSON-RPC 2.0 §4.2 positional parameters)
+    /// and for `id`, and `_meta` at the root is where 2026-07-28 puts the
+    /// protocol revision and the client identity — a `deny_unknown_fields`
+    /// here would reject every conforming request this server receives.
+    #[test]
+    fn arrays_inside_and_unknown_members_at_the_root_stay_legitimate() {
+        let msg: JsonRpcMessage = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":[1,2],"method":"tools/list","params":["a","b"],
+                "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}"#,
+        )
+        .expect("arrays in `id`/`params` and a root `_meta` are all legal");
+
+        assert_eq!(msg.jsonrpc, "2.0");
+        assert_eq!(msg.method.as_deref(), Some("tools/list"));
+        assert_eq!(msg.id, Some(json!([1, 2])));
+        assert_eq!(msg.params, Some(json!(["a", "b"])));
+    }
+
+    /// The members are read by NAME, not by position — the whole point of the
+    /// hand-written impl. Order must not matter, and nothing may be invented.
+    #[test]
+    fn members_are_read_by_name_in_any_order() {
+        let msg: JsonRpcMessage =
+            serde_json::from_str(r#"{"result":{"ok":true},"id":7,"jsonrpc":"2.0"}"#)
+                .expect("a response in an unusual member order is still a response");
+
+        assert_eq!(msg.jsonrpc, "2.0");
+        assert_eq!(msg.id, Some(json!(7)));
+        assert_eq!(msg.result, Some(json!({"ok": true})));
+        assert!(msg.method.is_none(), "no `method` was sent");
+        assert!(msg.params.is_none(), "no `params` were sent");
+        assert!(msg.error.is_none(), "no `error` was sent");
+    }
+
+    /// A `null` id is not an id. JSON-RPC 2.0 §5 uses Null for "the id could
+    /// not be determined", and `route_incoming_message` keys on
+    /// `id.is_some()`; `fuzz_jsonrpc_parse` asserts this exact equivalence.
+    #[test]
+    fn a_null_id_deserialises_to_none() {
+        let msg: JsonRpcMessage =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":null,"method":"x"}"#).expect("legal");
+        assert!(msg.id.is_none(), "null is absence, not a value");
+    }
+
+    /// Not an object, not a message — whatever the scalar.
+    #[test]
+    fn a_scalar_is_not_a_message() {
+        for text in ["null", "true", "3", r#""tools/call""#] {
+            assert!(
+                serde_json::from_str::<JsonRpcMessage>(text).is_err(),
+                "{text} is not a JSON-RPC message object"
+            );
+        }
     }
 }
