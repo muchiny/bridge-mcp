@@ -127,6 +127,33 @@ fn fenced(content: &str, info: &str) -> String {
     format!("{fence}{info}\n{content}\n{fence}")
 }
 
+/// Render the tool's name for the prompt's first line.
+///
+/// A registered tool name is `[a-z0-9_]+` and inline code reads well for one,
+/// so the common case keeps the shape it had. But this function is public and
+/// the prompt's integrity should not rest on a guarantee its callers happen to
+/// provide and nobody wrote down: a name carrying a backtick and a line break
+/// opens a fence on the very first line and swallows everything after it —
+/// the **Arguments:** and **Command:** headings included — so a renderer shows
+/// the operator a document that is not this prompt at all. Found by
+/// `fuzz_elicitation_params`, which reported zero Command headings where there
+/// must be exactly one.
+///
+/// Today `check_destructive_elicitation` only reaches here for a name the
+/// registry knows, so nothing client-controlled arrives. That is a property of
+/// one caller, not of this function.
+fn named(tool_name: &str) -> String {
+    let plain = !tool_name.is_empty()
+        && tool_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if plain {
+        format!("`{tool_name}`")
+    } else {
+        format!("\n{}", fenced(tool_name, ""))
+    }
+}
+
 /// Build the destructive-confirmation `ElicitRequest`, without sending it.
 ///
 /// Pure: it returns the params and nothing else. Under Multi Round-Trip
@@ -143,7 +170,7 @@ pub fn confirm_destructive_request(
     summary: &str,
     command: Option<String>,
 ) -> ElicitationCreateParams {
-    let mut message = format!("Confirm destructive operation: `{tool_name}`\n");
+    let mut message = format!("Confirm destructive operation: {}\n", named(tool_name));
     let _ = write!(message, "\n**Arguments:**\n{}\n", fenced(summary, "json"));
     if let Some(cmd) = command {
         let _ = write!(message, "\n**Command:**\n{}\n", fenced(&cmd, "sh"));
@@ -263,6 +290,69 @@ mod tests {
         assert!(
             params.message.contains("````json\n"),
             "a summary containing three backticks needs a longer fence: {}",
+            params.message
+        );
+    }
+
+    /// The prompt's first line interpolated the tool name as inline code. A
+    /// name carrying a backtick and a line break opened a fence there and
+    /// swallowed the rest of the prompt — headings and all — so a renderer
+    /// showed a document that was not this prompt.
+    #[test]
+    fn a_tool_name_cannot_swallow_the_prompt() {
+        let attack = "evil\n``````";
+        let params = super::confirm_destructive_request(attack, "{}", Some("rm -rf /".to_string()));
+
+        assert_eq!(
+            params.message.matches("\n**Command:**\n").count(),
+            1,
+            "the Command heading must survive a hostile tool name: {}",
+            params.message
+        );
+        assert_eq!(
+            command_block_of(&params.message),
+            "rm -rf /",
+            "and it must still enclose the command: {}",
+            params.message
+        );
+    }
+
+    /// The prompt-level test above counts raw substrings, which is not what a
+    /// renderer counts — so it passes even when the inline path is handed a
+    /// name carrying a backtick. `cargo mutants` said so: replacing the `&&`
+    /// in `named` with `||` re-opens the hole and that test stayed green.
+    ///
+    /// This one states the property of the inline path directly, with no
+    /// markdown reading in the middle: a name is rendered inline ONLY if it
+    /// cannot open a fence.
+    #[test]
+    fn only_a_name_that_cannot_open_a_fence_is_rendered_inline() {
+        for hostile in ["evil\n``````", "a`b", "`", "\n", "", "x\ny", "a\r```"] {
+            let rendered = super::named(hostile);
+            assert!(
+                !rendered.starts_with('`'),
+                "{hostile:?} took the inline path and can escape it: {rendered:?}"
+            );
+        }
+        // And the ordinary shapes are not driven into a fence for nothing.
+        for plain in ["ssh_exec", "win_service-config", "a.b", "X9", "k3s"] {
+            assert_eq!(
+                super::named(plain),
+                format!("`{plain}`"),
+                "a well-formed name must stay inline"
+            );
+        }
+    }
+
+    /// A real tool name keeps the shape operators are used to.
+    #[test]
+    fn an_ordinary_tool_name_stays_inline() {
+        let params = super::confirm_destructive_request("ssh_exec", "{}", None);
+        assert!(
+            params
+                .message
+                .starts_with("Confirm destructive operation: `ssh_exec`"),
+            "got: {}",
             params.message
         );
     }

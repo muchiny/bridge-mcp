@@ -3652,6 +3652,38 @@ mod tests {
         AuditConfig, HttpTransportConfig, LimitsConfig, SecurityConfig, SessionConfig,
         SshConfigDiscovery, ToolGroupsConfig,
     };
+
+    /// The textual `[` guard in `parse_incoming` is not belt-and-braces: it is
+    /// the only thing refusing a positional array, because the derived
+    /// `Deserialize` for `JsonRpcMessage` fills the struct from a JSON
+    /// sequence by position. Found by `fuzz_jsonrpc_parse`.
+    ///
+    /// If you remove the guard, or reach `JsonRpcMessage` by some route that
+    /// does not pass through this function, the array below becomes a
+    /// dispatchable `tools/call` on `ssh_exec`. That is what this test is for:
+    /// not to admire the guard, but to say out loud what it is holding back.
+    #[test]
+    fn a_positional_array_is_a_whole_tool_call_and_only_the_guard_refuses_it() {
+        const ARRAY: &str =
+            r#"["2.0",1,"tools/call",{"name":"ssh_exec","arguments":{"command":"id"}}]"#;
+
+        // What the TYPE does with it, guard bypassed.
+        let unguarded: JsonRpcMessage =
+            serde_json::from_str(ARRAY).expect("the derive accepts a positional array");
+        assert_eq!(
+            unguarded.method.as_deref(),
+            Some("tools/call"),
+            "if this ever starts failing, JsonRpcMessage learned to refuse a              sequence and the guard became defence in depth — good news, update this test"
+        );
+
+        // What the SERVER does with it.
+        let err = McpServer::parse_incoming(ARRAY).expect_err("the guard must refuse an array");
+        assert_eq!(err.code, -32600, "got: {err:?}");
+
+        // Leading whitespace does not slip past it.
+        McpServer::parse_incoming(&format!("  \n\t{ARRAY}"))
+            .expect_err("the guard trims before it looks");
+    }
     use crate::mcp::transport::{SessionReader, SessionWriter};
     use serde_json::json;
     use std::collections::HashMap;
