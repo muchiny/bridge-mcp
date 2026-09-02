@@ -146,6 +146,11 @@ jobs:
           # (`fuzz_relative_duration`, at the 30s default) and two promotions to
           # SECURITY_TARGETS below — about 6 minutes in all, so roughly 72 of
           # the job's 120.
+          #
+          # Then eight targets were deleted for measuring `serde_json` rather
+          # than this crate, giving 4 minutes back (8 x 30s) and leaving roughly
+          # 68. That is headroom to spend on a target that asserts something,
+          # not a saving to bank.
           BUILDER_TARGETS="fuzz_network_equipment_builder \
             fuzz_network_command_builder \
             fuzz_nginx_command_builder \

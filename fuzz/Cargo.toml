@@ -107,12 +107,6 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "fuzz_transfer_mode"
-path = "fuzz_targets/fuzz_transfer_mode.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "fuzz_tool_params"
@@ -128,12 +122,6 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "fuzz_rate_limiter"
-path = "fuzz_targets/fuzz_rate_limiter.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "fuzz_char_boundary"
@@ -142,12 +130,6 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "fuzz_audit_serialize"
-path = "fuzz_targets/fuzz_audit_serialize.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "fuzz_security_config"
@@ -226,26 +208,8 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "fuzz_task_params"
-path = "fuzz_targets/fuzz_task_params.rs"
-test = false
-doc = false
-bench = false
 
-[[bin]]
-name = "fuzz_initialize_params"
-path = "fuzz_targets/fuzz_initialize_params.rs"
-test = false
-doc = false
-bench = false
 
-[[bin]]
-name = "fuzz_prompts_get_params"
-path = "fuzz_targets/fuzz_prompts_get_params.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "fuzz_resource_uri"
@@ -261,12 +225,6 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "fuzz_task_store"
-path = "fuzz_targets/fuzz_task_store.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "fuzz_output_cache"
@@ -436,12 +394,6 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "fuzz_sampling_params"
-path = "fuzz_targets/fuzz_sampling_params.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "fuzz_network_equipment_builder"
