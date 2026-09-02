@@ -1163,17 +1163,18 @@ pub struct JsonRpcMessage {
 /// Found by `fuzz_jsonrpc_parse`. Closing it at the level of the type means
 /// the guard becomes defence in depth instead of the whole defence.
 ///
-/// The refusal itself is [`serde::de::Visitor::visit_seq`]'s DEFAULT method, obtained by
-/// not implementing it: it answers `invalid_type(Seq, &self)`, which is why
-/// `ObjectOnly::expecting` is the message a client sees.
+/// The refusal itself is [`serde::de::Visitor::visit_seq`]'s DEFAULT method,
+/// obtained by not implementing it: it answers `invalid_type(Seq, &self)`,
+/// which is why `ObjectOnly::expecting` is the message a client sees.
 ///
 /// # Why the generated visitor is still doing the work
 ///
 /// Everything below `deserialize_map` is `serde_derive`'s. `Wire` carries the
 /// same six fields and the same `#[serde(default)]`s, and
-/// [`serde::de::value::MapAccessDeserializer`] hands it the raw [`serde::de::MapAccess`] without buffering
-/// — so `duplicate_field`, `missing_field`, the `Option<Option<T>>` slots that
-/// make `{"id":null,"id":null}` a duplicate, and escaped keys all remain the
+/// [`serde::de::value::MapAccessDeserializer`] hands it the raw
+/// [`serde::de::MapAccess`] without buffering — so `duplicate_field`,
+/// `missing_field`, the `Option<Option<T>>` slots that make
+/// `{"id":null,"id":null}` a duplicate, and escaped keys all remain the
 /// generator's property rather than becoming this file's to maintain.
 ///
 /// That matters because the duplicate-member refusal is load-bearing. Every
@@ -3046,11 +3047,25 @@ mod tests {
         const ARRAY: &str =
             r#"["2.0",1,"tools/call",{"name":"ssh_exec","arguments":{"command":"id"}}]"#;
 
-        serde_json::from_str::<JsonRpcMessage>(ARRAY)
+        let err = serde_json::from_str::<JsonRpcMessage>(ARRAY)
             .expect_err("a sequence must not fill this struct by position");
+        // The refusal must SAY what it wanted. `ObjectOnly::expecting` is the
+        // only thing that puts a shape into `invalid type: sequence, expected
+        // …`, and a client told merely "invalid type" has to guess. Asserted
+        // because `cargo mutants` killed nothing here: blanking `expecting`
+        // left every other test in this file green.
+        assert!(
+            err.to_string().contains("a single JSON-RPC message object"),
+            "the refusal must name the shape it wanted: {err}"
+        );
 
         let as_value: Value = serde_json::from_str(ARRAY).expect("it is valid JSON");
-        serde_json::from_value::<JsonRpcMessage>(as_value).expect_err("nor may it through a Value");
+        let err = serde_json::from_value::<JsonRpcMessage>(as_value)
+            .expect_err("nor may it through a Value");
+        assert!(
+            err.to_string().contains("a single JSON-RPC message object"),
+            "the Value door must name it too: {err}"
+        );
 
         // The empty array and the wrapped-object array — the two shapes a
         // client that still believes in batching sends.
