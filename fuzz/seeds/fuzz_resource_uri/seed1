@@ -1,0 +1,1 @@
+log://prod/var/log/syslog?lines=50

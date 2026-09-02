@@ -1,0 +1,6 @@
+hostname: e
+user: u
+sudo_password: s
+proxy_jump: bastion
+auth:
+  type: agent

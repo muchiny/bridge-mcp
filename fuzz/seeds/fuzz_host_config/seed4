@@ -1,0 +1,6 @@
+hostname: e
+user: u
+auth:
+  type: password
+  password: p
+  passphraze: x

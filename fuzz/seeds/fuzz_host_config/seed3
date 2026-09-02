@@ -1,0 +1,6 @@
+hostname: e
+user: u
+port: 2222
+host_key_verification: off
+auth:
+  type: agent

@@ -1,0 +1,5 @@
+hostname: e
+user: u
+shell: powershell
+auth:
+  type: agent

@@ -111,7 +111,13 @@ jobs:
           SPECIFIC_TARGET: ${{ inputs.target }}
         run: |
           # Security-critical targets get extra time
-          SECURITY_TARGETS="fuzz_command_validator fuzz_sanitizer fuzz_shell_escape fuzz_security_config"
+          # `fuzz_yaml_config` and `fuzz_host_config` joined the moment they
+          # stopped calling saphyr bare: one asserts that a parse error never
+          # echoes a `password:` from the config it failed on, the other that an
+          # omitted host key policy stays Strict. Both are security answers, and
+          # 30s is not enough to reach them from an empty corpus.
+          SECURITY_TARGETS="fuzz_command_validator fuzz_sanitizer fuzz_shell_escape \
+            fuzz_security_config fuzz_yaml_config fuzz_host_config"
 
           # Command-builder targets get the shell dictionary AND 300s.
           #
@@ -132,13 +138,22 @@ jobs:
           # — roughly 66 minutes, which with the build leaves about 45 of the
           # job's 120. Another target at 300s is fine; twenty are not, so raise
           # `timeout-minutes` at the same time if you add them.
+          #
+          # `fuzz_resource_uri` joined on that criterion and not by theme: a
+          # `file://` or `log://` path is interpolated into `cat {path}` and
+          # `tail -n {n} {path}`, so what it asserts IS what a caller's value
+          # does to a command line. It also gains a target
+          # (`fuzz_relative_duration`, at the 30s default) and two promotions to
+          # SECURITY_TARGETS below — about 6 minutes in all, so roughly 72 of
+          # the job's 120.
           BUILDER_TARGETS="fuzz_network_equipment_builder \
             fuzz_network_command_builder \
             fuzz_nginx_command_builder \
             fuzz_firewall_command_builder \
             fuzz_process_command_builder \
             fuzz_package_command_builder \
-            fuzz_shell_escape"
+            fuzz_shell_escape \
+            fuzz_resource_uri"
           DICT_ARG="-dict=fuzz/dicts/shell.dict"
 
           # The confirmation prompt's integrity is a MARKDOWN property, not a

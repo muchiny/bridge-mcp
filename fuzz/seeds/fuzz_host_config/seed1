@@ -1,0 +1,4 @@
+hostname: e.internal
+user: deploy
+auth:
+  type: agent

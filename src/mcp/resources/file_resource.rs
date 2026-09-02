@@ -19,16 +19,35 @@ const MAX_PATH_LEN: usize = 1024;
 /// Resource handler for remote files
 pub struct FileResourceHandler;
 
-/// Parsed file URI components
-struct FileUri {
-    host: String,
-    path: String,
+/// Parsed file URI components.
+///
+/// `path` is the value that reaches [`file_read_command`] — the ONE thing a
+/// fuzz target must be handed rather than re-derive from the URI text. Every
+/// oracle in this project that re-derived a parser's output from its input has
+/// been wrong at least once; the parser is the authority on what it kept.
+#[doc(hidden)]
+pub struct FileUri {
+    pub host: String,
+    pub path: String,
 }
 
 /// Parse a file URI into its components.
 ///
 /// Format: `file://{host}/{path}`
-fn parse_file_uri(uri: &str) -> Result<FileUri> {
+///
+/// Note that this does NOT split a query string off the path, unlike
+/// [`parse_log_uri`](crate::parse_log_uri): `file://h/a?b=c` reads a file
+/// literally named `/a?b=c`. That asymmetry is deliberate — there is no
+/// parameter for a `cat` to take — and it is why a fuzz oracle shared between
+/// the two schemes would be red on healthy code.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::McpInvalidRequest`] when the URI does not start with
+/// `file://`, carries no `/` after the host, has an empty host, or yields a
+/// path over `MAX_PATH_LEN`.
+#[doc(hidden)]
+pub fn parse_file_uri(uri: &str) -> Result<FileUri> {
     let rest = uri
         .strip_prefix("file://")
         .ok_or_else(|| BridgeError::McpInvalidRequest(format!("Invalid file URI: {uri}")))?;
@@ -53,6 +72,23 @@ fn parse_file_uri(uri: &str) -> Result<FileUri> {
         host: host.to_string(),
         path: full_path,
     })
+}
+
+/// Build the `cat` command that reads `path`.
+///
+/// Extracted from `FileResourceHandler::read` so a fuzz target can reach the
+/// command WITHOUT a `ToolContext`: `read` needs one, whose mock is
+/// `#[cfg(test)]`, opens a real SSH connection, and never hands back the
+/// command it built. Production calls this same function, so the target
+/// measures the string that actually runs rather than a copy of it that could
+/// drift.
+///
+/// `path` is interpolated through [`shell_escape`]; that call is the whole
+/// safety property, and `fuzz_resource_uri` exists to assert it.
+#[doc(hidden)]
+#[must_use]
+pub fn file_read_command(path: &str) -> String {
+    format!("cat {}", shell_escape(path))
 }
 
 /// Guess MIME type from file extension
@@ -112,7 +148,7 @@ impl ResourceHandler for FileResourceHandler {
                 })?;
 
         // Use cat to read file content
-        let command = format!("cat {}", shell_escape(&parsed.path));
+        let command = file_read_command(&parsed.path);
 
         // Validate command
         ctx.execute_use_case.validate(&command)?;
@@ -258,5 +294,28 @@ mod tests {
         assert_eq!(guess_mime("/app/script.zsh"), "text/x-shellscript");
         assert_eq!(guess_mime("/app/main.py"), "text/x-python");
         assert_eq!(guess_mime("/app/unknown.xyz"), "text/plain");
+    }
+
+    /// The `cat` line, spelled out.
+    ///
+    /// `cargo mutants` replaced the whole body with `"xyzzy".into()` and every
+    /// test in this file stayed green: extracting the builder out of `read`
+    /// gave the fuzz target something to call, and left the unit suite with
+    /// nothing asserting what it produces. The fuzzer covers it nightly; this
+    /// covers it on every PR.
+    #[test]
+    fn the_cat_command_is_the_path_quoted_and_nothing_else() {
+        assert_eq!(file_read_command("/etc/hosts"), "cat '/etc/hosts'");
+    }
+
+    /// The escape is the safety property, so it is asserted on a path that
+    /// needs it rather than on one that does not.
+    #[test]
+    fn a_hostile_path_is_one_quoted_word_to_cat() {
+        assert_eq!(
+            file_read_command("/tmp/a'; id #"),
+            r"cat '/tmp/a'\''; id #'",
+            "a `;` reaching the shell here is a command injection, not a filename"
+        );
     }
 }

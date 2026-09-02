@@ -1,0 +1,6 @@
+hostname: e
+user: u
+protocol: ssh
+auth:
+  type: key
+  path: /k
