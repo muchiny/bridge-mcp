@@ -3653,30 +3653,31 @@ mod tests {
         SshConfigDiscovery, ToolGroupsConfig,
     };
 
-    /// The textual `[` guard in `parse_incoming` is not belt-and-braces: it is
-    /// the only thing refusing a positional array, because the derived
-    /// `Deserialize` for `JsonRpcMessage` fills the struct from a JSON
-    /// sequence by position. Found by `fuzz_jsonrpc_parse`.
+    /// The textual `[` guard in `parse_incoming` is now defence in depth, and
+    /// this test is what keeps it that way.
     ///
-    /// If you remove the guard, or reach `JsonRpcMessage` by some route that
-    /// does not pass through this function, the array below becomes a
-    /// dispatchable `tools/call` on `ssh_exec`. That is what this test is for:
-    /// not to admire the guard, but to say out loud what it is holding back.
+    /// It used to be the ONLY thing refusing a positional array: the derived
+    /// `Deserialize` for `JsonRpcMessage` filled the struct from a JSON
+    /// sequence by position, so the array below was a complete, dispatchable
+    /// `tools/call` on `ssh_exec` to anything that reached the type without
+    /// passing through this one function. Found by `fuzz_jsonrpc_parse`, and
+    /// closed by the hand-written `Deserialize` in `src/mcp/protocol.rs`.
+    ///
+    /// Both halves are asserted because they fail independently: the type
+    /// refuses the SHAPE, the guard answers `-32600` rather than `-32700`, and
+    /// a client told its JSON was malformed when it was not goes looking in
+    /// the wrong place.
     #[test]
-    fn a_positional_array_is_a_whole_tool_call_and_only_the_guard_refuses_it() {
+    fn a_positional_array_is_refused_by_the_type_and_by_the_guard() {
         const ARRAY: &str =
             r#"["2.0",1,"tools/call",{"name":"ssh_exec","arguments":{"command":"id"}}]"#;
 
-        // What the TYPE does with it, guard bypassed.
-        let unguarded: JsonRpcMessage =
-            serde_json::from_str(ARRAY).expect("the derive accepts a positional array");
-        assert_eq!(
-            unguarded.method.as_deref(),
-            Some("tools/call"),
-            "if this ever starts failing, JsonRpcMessage learned to refuse a              sequence and the guard became defence in depth — good news, update this test"
-        );
+        // What the TYPE does with it, guard bypassed. This is the assertion
+        // that used to read the other way round.
+        serde_json::from_str::<JsonRpcMessage>(ARRAY)
+            .expect_err("a sequence must not fill JsonRpcMessage by position");
 
-        // What the SERVER does with it.
+        // What the SERVER does with it: an invalid request, not a parse error.
         let err = McpServer::parse_incoming(ARRAY).expect_err("the guard must refuse an array");
         assert_eq!(err.code, -32600, "got: {err:?}");
 
