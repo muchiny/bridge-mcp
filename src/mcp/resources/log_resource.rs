@@ -348,4 +348,27 @@ mod tests {
             e => panic!("Expected UnknownHost, got: {e:?}"),
         }
     }
+
+    /// The `tail -n` line, spelled out.
+    ///
+    /// `cargo mutants` replaced the whole body with `String::new()` AND with
+    /// `"xyzzy".into()`, and every test in this file stayed green both times —
+    /// see the matching comment in `file_resource.rs`.
+    #[test]
+    fn the_tail_command_carries_the_count_and_the_quoted_path() {
+        assert_eq!(
+            log_tail_command(50, "/var/log/syslog"),
+            "tail -n 50 '/var/log/syslog'"
+        );
+    }
+
+    /// `lines` is a `u64` and cannot carry syntax; the path can.
+    #[test]
+    fn a_hostile_path_is_one_quoted_word_to_tail() {
+        assert_eq!(
+            log_tail_command(100, "/tmp/a'; id #"),
+            r"tail -n 100 '/tmp/a'\''; id #'",
+            "a `;` reaching the shell here is a command injection, not a filename"
+        );
+    }
 }

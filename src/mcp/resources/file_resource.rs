@@ -295,4 +295,27 @@ mod tests {
         assert_eq!(guess_mime("/app/main.py"), "text/x-python");
         assert_eq!(guess_mime("/app/unknown.xyz"), "text/plain");
     }
+
+    /// The `cat` line, spelled out.
+    ///
+    /// `cargo mutants` replaced the whole body with `"xyzzy".into()` and every
+    /// test in this file stayed green: extracting the builder out of `read`
+    /// gave the fuzz target something to call, and left the unit suite with
+    /// nothing asserting what it produces. The fuzzer covers it nightly; this
+    /// covers it on every PR.
+    #[test]
+    fn the_cat_command_is_the_path_quoted_and_nothing_else() {
+        assert_eq!(file_read_command("/etc/hosts"), "cat '/etc/hosts'");
+    }
+
+    /// The escape is the safety property, so it is asserted on a path that
+    /// needs it rather than on one that does not.
+    #[test]
+    fn a_hostile_path_is_one_quoted_word_to_cat() {
+        assert_eq!(
+            file_read_command("/tmp/a'; id #"),
+            r"cat '/tmp/a'\''; id #'",
+            "a `;` reaching the shell here is a command injection, not a filename"
+        );
+    }
 }
