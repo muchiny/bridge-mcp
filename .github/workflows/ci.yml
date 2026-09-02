@@ -90,7 +90,7 @@ jobs:
   # green for six weeks while fuzzing nothing.
   #
   # This is the cheap half of that check, on every PR: stable, no nightly, no
-  # sanitizer, no fuzzing — just "do the 58 targets still typecheck against
+  # sanitizer, no fuzzing — just "do the 50 targets still typecheck against
   # the current API". It catches signature drift the day it lands instead of
   # six weeks later.
   fuzz-harness:

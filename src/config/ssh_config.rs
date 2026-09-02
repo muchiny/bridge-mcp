@@ -55,11 +55,12 @@ pub fn parse_ssh_config_content(content: &str, exclude: &[String]) -> HashMap<St
 
         if key.eq_ignore_ascii_case("Host") {
             // Finalize previous host block
-            if let Some(alias) = current_alias.take()
-                && let Some(host_config) = current_host.to_host_config(&global_defaults)
-            {
-                hosts.insert(alias, host_config);
-            }
+            finalize(
+                &mut hosts,
+                current_alias.take(),
+                &current_host,
+                &global_defaults,
+            );
 
             // Start new host block
             let alias = value.to_string();
@@ -93,14 +94,41 @@ pub fn parse_ssh_config_content(content: &str, exclude: &[String]) -> HashMap<St
     }
 
     // Finalize last host block
-    if let Some(alias) = current_alias
+    finalize(&mut hosts, current_alias, &current_host, &global_defaults);
+
+    hosts
+}
+
+/// Close one `Host` block, unless it is the `*` marker.
+///
+/// There are two places a block ends — the next `Host` line, and the end of the
+/// file — and they used to be two copies of this logic. Only the second
+/// excluded `"*"`, so a config whose `Host *` block set `HostName` and was
+/// followed by ANY further `Host` line yielded a discovered host literally named
+/// `*`: `merge_ssh_config_hosts` then put it in `config.hosts`, where it is
+/// selectable by name and connects wherever the global default pointed.
+/// `HostName %h` under `Host *` is a real idiom, so this was reachable from an
+/// ordinary `~/.ssh/config`.
+///
+/// `*` is a MARKER, never a host. It exists only so the loop knows the
+/// directives it is reading belong in `global_defaults`. Found by
+/// `fuzz_ssh_config_parser` once the target had seeds; the assertion that
+/// caught it had been sitting there unreached.
+///
+/// One function rather than two call sites doing the same thing, so the guard
+/// cannot go missing from one of them again.
+fn finalize(
+    hosts: &mut HashMap<String, HostConfig>,
+    alias: Option<String>,
+    current: &PartialHost,
+    defaults: &PartialHost,
+) {
+    if let Some(alias) = alias
         && alias != "*"
-        && let Some(host_config) = current_host.to_host_config(&global_defaults)
+        && let Some(host_config) = current.to_host_config(defaults)
     {
         hosts.insert(alias, host_config);
     }
-
-    hosts
 }
 
 /// Intermediate representation during parsing
@@ -221,10 +249,16 @@ fn apply_directive(host: &mut PartialHost, key: &str, value: &str) {
     match key.to_ascii_lowercase().as_str() {
         "hostname" => host.hostname = Some(value.to_string()),
         "port" => {
-            if let Ok(port) = value.parse() {
-                host.port = Some(port);
-            } else {
-                warn!(value = %value, "Invalid port number in SSH config");
+            // `0` parses as a `u16` and is not a destination port: TCP reserves
+            // it, and a host carrying it can never connect. Without this the
+            // file treated the two kinds of invalid differently — `Port
+            // notanumber` warned and fell back to 22, `Port 0` was accepted in
+            // silence and failed later with an error accusing the network.
+            // Found by `fuzz_ssh_config_parser` once the target had seeds; the
+            // `port > 0` assertion had been sitting there unreached.
+            match value.parse::<u16>() {
+                Ok(port) if port != 0 => host.port = Some(port),
+                _ => warn!(value = %value, "Invalid port number in SSH config"),
             }
         }
         "user" => host.user = Some(value.to_string()),
@@ -529,5 +563,60 @@ Host myserver
         };
         let defaults = PartialHost::default();
         assert!(host.to_host_config(&defaults).is_none());
+    }
+
+    /// `Host *` is a marker, and a marker is not a host.
+    ///
+    /// A block ends in two places — at the next `Host` line and at the end of
+    /// the file — and only the second used to exclude `"*"`. So this config
+    /// produced a discovered host literally named `*`, pointing at whatever the
+    /// global default said, which `merge_ssh_config_hosts` then made selectable
+    /// by name. `HostName %h` under `Host *` is a real idiom, so an ordinary
+    /// `~/.ssh/config` reached it.
+    ///
+    /// The trailing `Host prod` is what makes this test what it is: without a
+    /// second `Host` line the buggy branch never runs, and the test passes
+    /// against the defect.
+    #[test]
+    fn a_wildcard_block_followed_by_another_host_is_not_itself_a_host() {
+        let content = "Host *\n  HostName fallback.internal\n  User deploy\n\nHost prod\n  HostName 10.0.0.1\n";
+        let hosts = parse_ssh_config_content(content, &[]);
+
+        assert!(
+            !hosts.contains_key("*"),
+            "the global-defaults marker became a host: {:?}",
+            hosts.keys().collect::<Vec<_>>()
+        );
+
+        // And the defaults it carried still reach the real host, so the fix
+        // removes the entry without removing the mechanism.
+        let prod = hosts.get("prod").expect("prod is a real host");
+        assert_eq!(prod.hostname, "10.0.0.1");
+        assert_eq!(prod.user, "deploy", "User came from the `Host *` block");
+    }
+
+    /// The same block at the END of the file, which was already correct — kept
+    /// so the two paths are pinned together and cannot drift apart again.
+    #[test]
+    fn a_trailing_wildcard_block_is_not_a_host_either() {
+        let hosts = parse_ssh_config_content("Host *\n  HostName fallback.internal\n", &[]);
+        assert!(
+            hosts.is_empty(),
+            "got {:?}",
+            hosts.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// `Port 0` is not a port, and must be treated as the invalid value it is.
+    ///
+    /// It parses as a `u16`, which is the whole trap: the file's other invalid
+    /// port (`Port notanumber`) warns and falls back to 22, while this one used
+    /// to be accepted in silence and produce a host that can never connect —
+    /// failing later with an error that accuses the network.
+    #[test]
+    fn a_zero_port_falls_back_like_any_other_invalid_port() {
+        let content = "Host myserver\n  HostName 10.0.0.1\n  User admin\n  Port 0\n";
+        let hosts = parse_ssh_config_content(content, &[]);
+        assert_eq!(hosts["myserver"].port, 22, "0 must fall back, not stick");
     }
 }
