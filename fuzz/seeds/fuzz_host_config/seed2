@@ -1,0 +1,5 @@
+hostname: w.internal
+user: admin
+os_type: windows
+auth:
+  type: agent

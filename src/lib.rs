@@ -70,6 +70,8 @@ pub use security::{AuditLogger, Sanitizer};
 #[doc(hidden)]
 pub use config::{HostConfig, SecurityConfig};
 #[doc(hidden)]
+pub use config::{SanitizeConfig, validate_config};
+#[doc(hidden)]
 pub use domain::output_truncator::{ceil_char_boundary, floor_char_boundary, truncate_output};
 #[doc(hidden)]
 pub use domain::use_cases::ansible::AnsibleCommandBuilder;
@@ -85,6 +87,14 @@ pub use mcp::protocol::{JsonRpcRequest, ToolCallParams};
 pub use security::{AuditEvent, CommandResult, CommandValidator, RateLimiter};
 #[doc(hidden)]
 pub use ssh::TransferMode;
+// Resource URI parsers and the command builders they feed, for
+// `fuzz_resource_uri`. See `mcp/resources/mod.rs` for why `read` itself
+// cannot serve.
+#[doc(hidden)]
+pub use mcp::resources::{
+    FileUri, LogUri, file_read_command, log_tail_command, parse_file_uri, parse_log_uri,
+    parse_relative_duration,
+};
 // Protocol types for fuzzing (MCP Tasks + Completions + Logging + Elicitation + Sampling)
 //
 // `ElicitationCreateParams` and `SamplingCreateMessageParams` are `Serialize`

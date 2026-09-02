@@ -27,12 +27,18 @@ path = "src/lib.rs"
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
-# Must track the root crate's version: `fuzz_yaml_config` calls
-# `serde_saphyr::from_str` against ITS OWN dependency, not through
-# `bridge_mcp`, so a drift here means the nightly fuzzing exercises a parser
-# the product does not ship. It had drifted to 0.0.18 while production ran
-# 0.0.29, which the jump to 1.x made visible.
-serde-saphyr = "1.0"
+# `serde-saphyr` is deliberately NOT a dependency here.
+#
+# It used to be one, pinned to track the root crate, because `fuzz_yaml_config`,
+# `fuzz_security_config` and `fuzz_host_config` called `serde_saphyr::from_str`
+# against THIS crate's copy rather than through `bridge_mcp`. That is the wrong
+# door twice over: it skips `domain::yaml::hardened_options()` — the anti-DoS
+# budget and `with_snippet: false` — and it makes the harness's own version a
+# thing that can drift from the product's.
+#
+# All three now go through `bridge_mcp::domain::yaml::parse_yaml`, which is the
+# only door production uses. Do not re-add this: a direct call cannot see the
+# defects those targets exist to guard.
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [dependencies.bridge-mcp]
@@ -244,6 +250,13 @@ bench = false
 [[bin]]
 name = "fuzz_resource_uri"
 path = "fuzz_targets/fuzz_resource_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_relative_duration"
+path = "fuzz_targets/fuzz_relative_duration.rs"
 test = false
 doc = false
 bench = false

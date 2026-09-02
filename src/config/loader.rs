@@ -138,7 +138,21 @@ fn validate_entropy_thresholds(sanitize: &crate::config::SanitizeConfig) -> Resu
     Ok(())
 }
 
-fn validate_config(config: &Config) -> Result<()> {
+/// Reject a configuration the bridge must not run with.
+///
+/// Exposed for `fuzz_security_config`, which needs the CALL SITE and not just
+/// the individual checks: the defect worth guarding is
+/// `validate_entropy_thresholds` no longer being invoked here, and a target
+/// calling that function directly could not see it go missing.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::ConfigInvalid`] (or [`BridgeError::SshKeyNotFound`])
+/// naming the offending field. Note that this touches the FILESYSTEM for
+/// `auth: {type: key}` hosts, so a caller wanting a pure decision should use
+/// another auth method.
+#[doc(hidden)]
+pub fn validate_config(config: &Config) -> Result<()> {
     // Must have at least one host
     if config.hosts.is_empty() {
         return Err(BridgeError::ConfigInvalid {

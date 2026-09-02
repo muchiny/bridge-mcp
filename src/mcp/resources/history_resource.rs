@@ -139,7 +139,15 @@ fn parse_query(query: Option<&str>) -> HashMap<String, String> {
 ///
 /// Supported unit suffixes (single character): `s`, `m`, `h`, `d`.
 /// Returns `Err(String)` with a human-readable message on malformed input.
-fn parse_relative_duration(s: &str) -> std::result::Result<DateTime<Utc>, String> {
+///
+/// # Errors
+///
+/// Returns `Err` for an empty string, a missing or unparsable number, a
+/// negative value, an unknown unit, or a magnitude that overflows `TimeDelta`
+/// or the subtraction from now. It must never panic — see the comment on the
+/// `Duration::try_*` constructors below.
+#[doc(hidden)]
+pub fn parse_relative_duration(s: &str) -> std::result::Result<DateTime<Utc>, String> {
     if s.is_empty() {
         return Err("empty duration".to_string());
     }

@@ -20,17 +20,34 @@ const MAX_PATH_LEN: usize = 1024;
 /// Resource handler for remote log files
 pub struct LogResourceHandler;
 
-/// Parsed log URI components
-struct LogUri {
-    host: String,
-    path: String,
-    lines: u64,
+/// Parsed log URI components.
+///
+/// `path` and `lines` are the two values that reach [`log_tail_command`] — the
+/// things a fuzz target must be handed rather than re-derive from the URI
+/// text, since the parser is the authority on what it kept.
+#[doc(hidden)]
+pub struct LogUri {
+    pub host: String,
+    pub path: String,
+    pub lines: u64,
 }
 
 /// Parse a log URI into its components.
 ///
 /// Format: `log://{host}/{path}?lines={n}`
-fn parse_log_uri(uri: &str) -> Result<LogUri> {
+///
+/// Unlike [`parse_file_uri`](crate::parse_file_uri), this DOES cut the path at
+/// the first `?`, because `lines` is a real parameter here. The two schemes
+/// therefore disagree about `h/a?b=c`, which is why a fuzz oracle shared
+/// between them would be red on healthy code.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::McpInvalidRequest`] when the URI does not start with
+/// `log://`, carries no `/` after the host, has an empty host, or yields a
+/// path over `MAX_PATH_LEN`.
+#[doc(hidden)]
+pub fn parse_log_uri(uri: &str) -> Result<LogUri> {
     let rest = uri
         .strip_prefix("log://")
         .ok_or_else(|| BridgeError::McpInvalidRequest(format!("Invalid log URI: {uri}")))?;
@@ -77,6 +94,23 @@ fn parse_log_uri(uri: &str) -> Result<LogUri> {
     })
 }
 
+/// Build the `tail` command that reads the last `lines` lines of `path`.
+///
+/// Extracted from `LogResourceHandler::read` for the same reason as
+/// [`file_read_command`](crate::file_read_command): `read` needs a
+/// `ToolContext` whose mock is `#[cfg(test)]`, opens a real SSH connection,
+/// and never hands back the command it built. Production calls this function,
+/// so a fuzz target measures the string that actually runs.
+///
+/// `lines` is a `u64` and cannot carry shell syntax; `path` can, and is
+/// interpolated through [`shell_escape`]. That call is the whole safety
+/// property, and `fuzz_resource_uri` exists to assert it.
+#[doc(hidden)]
+#[must_use]
+pub fn log_tail_command(lines: u64, path: &str) -> String {
+    format!("tail -n {lines} {}", shell_escape(path))
+}
+
 #[async_trait]
 impl ResourceHandler for LogResourceHandler {
     fn scheme(&self) -> &'static str {
@@ -112,7 +146,7 @@ impl ResourceHandler for LogResourceHandler {
                 })?;
 
         // Build tail command
-        let command = format!("tail -n {} {}", parsed.lines, shell_escape(&parsed.path));
+        let command = log_tail_command(parsed.lines, &parsed.path);
 
         // Validate command
         ctx.execute_use_case.validate(&command)?;
