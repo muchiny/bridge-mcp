@@ -94,6 +94,43 @@ reading it. Every item below was reproduced before the fix and measured after.
 - `limits.max_concurrent_commands` does not apply to CLI invocations, which are
   one process each.
 
+### Fuzz lot D1 — the four remaining mute targets (2026-09-03)
+
+Four targets that asserted only "did not panic" now assert a property, and one
+of them found a defect on its first seed.
+
+- **`completion/complete` reported the page size as the total, and could never
+  say the list was cut.** `DefaultCompletionProvider::complete_hosts`
+  truncated to `MAX_COMPLETIONS` before `handle_completions_complete` counted,
+  so `total` maxed out at 100 and `has_more = total > 100` was false by
+  construction. A client completing `host` against a 150-host config was told
+  there were exactly 100 and that nothing had been withheld — a page that
+  reads as a complete inventory. The truncation was one rule written in two
+  layers with only the inner one in force; it now lives only in the handler,
+  which is also where `total` and `hasMore` are filled in. Wire-visible: a
+  client with more than 100 matching hosts now sees the real `total` and
+  `hasMore: true`.
+
+- **`fuzz_regex_redos` is renamed `fuzz_whitelist_grant`.** The `regex` crate
+  does not backtrack, so the ReDoS the old name promised cannot happen and the
+  target measured nothing. It now asserts what the call site decides: a
+  whitelist pattern the engine refuses grants nothing, an empty whitelist
+  grants nothing in strict and standard mode, an empty command is refused in
+  every mode, and adding a pattern only ever widens the grant.
+
+- **`fuzz_tool_params`** builds a `params` object and asserts each wire key
+  reaches the field it names — through `from_value`, the door
+  `handle_tools_call` uses, not `from_str`, which disagrees with it on
+  duplicate keys. **`fuzz_parse_metrics`** renders a constrained record in the
+  exact format of the command it parses and compares against the values as
+  written in the text, which pins every column index in `parse_cpu`,
+  `parse_memory`, `parse_disk` and `parse_load`.
+  **`fuzz_completions_params`** drives `handle_request` itself.
+
+- `fuzz_whitelist_grant` and `fuzz_completions_params` join `SECURITY_TARGETS`
+  in `fuzz.yml` (60s rather than 30s): the first compiles a regex per
+  iteration and runs two orders of magnitude slower than a parser target.
+
 ## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision

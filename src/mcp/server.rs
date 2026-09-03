@@ -20,7 +20,7 @@ use crate::ports::{MrtrSlot, ToolContext};
 use crate::security::{AuditLogger, AuditWriterTask, CommandValidator, RateLimiter, Sanitizer};
 use crate::ssh::SessionManager;
 
-use super::completion_provider::DefaultCompletionProvider;
+use super::completion_provider::{DefaultCompletionProvider, MAX_COMPLETIONS};
 use super::logger::McpLogger;
 use super::progress::ProgressReporter;
 use super::protocol::{JsonRpcMessage, RootEntry, RootsListResult};
@@ -3612,9 +3612,16 @@ impl McpServer {
                 .unwrap_or_default(),
         };
 
+        // The single capping point. `total` is how many completions EXIST for
+        // this prefix and `hasMore` says whether any were withheld, so both
+        // have to be read off the full list — which is why
+        // `DefaultCompletionProvider` no longer truncates. When it did, this
+        // `total` was the page size, `has_more` could not become true, and a
+        // client with 150 matching hosts was told there were 100 and that the
+        // list was complete.
         let total = values.len();
-        let has_more = total > 100;
-        let values: Vec<String> = values.into_iter().take(100).collect();
+        let has_more = total > MAX_COMPLETIONS;
+        let values: Vec<String> = values.into_iter().take(MAX_COMPLETIONS).collect();
 
         JsonRpcResponse::success_or_serialize_error(
             id,
@@ -7824,34 +7831,45 @@ rbac:
     /// Build a server whose config has exactly one host, so the
     /// per-host resource templates are non-empty.
     fn create_test_server_with_host(alias: &str) -> McpServer {
+        create_test_server_with_hosts(std::slice::from_ref(&alias.to_string()))
+    }
+
+    /// A server whose config carries exactly `aliases`, in any number.
+    ///
+    /// Separate from the single-host helper because the completion page cap is
+    /// only observable above 100 hosts, and a per-alias literal would be a
+    /// hundred and fifty copies of the same `HostConfig`.
+    fn create_test_server_with_hosts(aliases: &[String]) -> McpServer {
         let mut config = test_config();
-        config.hosts.insert(
-            alias.to_string(),
-            crate::config::HostConfig {
-                hostname: "test.example.com".to_string(),
-                port: 22,
-                user: "tester".to_string(),
-                auth: crate::config::AuthConfig::Agent,
-                description: None,
-                host_key_verification: crate::config::HostKeyVerification::default(),
-                proxy_jump: None,
-                socks_proxy: None,
-                sudo_password: None,
-                tags: Vec::new(),
-                os_type: crate::config::OsType::default(),
-                shell: None,
-                retry: None,
-                protocol: crate::config::Protocol::default(),
-                #[cfg(feature = "winrm")]
-                winrm_use_tls: None,
-                #[cfg(feature = "winrm")]
-                winrm_accept_invalid_certs: None,
-                #[cfg(feature = "winrm")]
-                winrm_operation_timeout_secs: None,
-                #[cfg(feature = "winrm")]
-                winrm_max_envelope_size: None,
-            },
-        );
+        for alias in aliases {
+            config.hosts.insert(
+                alias.clone(),
+                crate::config::HostConfig {
+                    hostname: "test.example.com".to_string(),
+                    port: 22,
+                    user: "tester".to_string(),
+                    auth: crate::config::AuthConfig::Agent,
+                    description: None,
+                    host_key_verification: crate::config::HostKeyVerification::default(),
+                    proxy_jump: None,
+                    socks_proxy: None,
+                    sudo_password: None,
+                    tags: Vec::new(),
+                    os_type: crate::config::OsType::default(),
+                    shell: None,
+                    retry: None,
+                    protocol: crate::config::Protocol::default(),
+                    #[cfg(feature = "winrm")]
+                    winrm_use_tls: None,
+                    #[cfg(feature = "winrm")]
+                    winrm_accept_invalid_certs: None,
+                    #[cfg(feature = "winrm")]
+                    winrm_operation_timeout_secs: None,
+                    #[cfg(feature = "winrm")]
+                    winrm_max_envelope_size: None,
+                },
+            );
+        }
         let (server, _audit_task) = McpServer::new(config);
         server
     }
@@ -9189,6 +9207,134 @@ rbac:
             vec!["dev", "staging", "production"],
             "completion/complete must return DefaultCompletionProvider's real \
              values, not an empty/fallback array; got: {result}"
+        );
+    }
+
+    /// `total` counts the completions that EXIST; `hasMore` says whether any
+    /// were withheld. Both were unreachable: `complete_hosts` truncated to
+    /// `MAX_COMPLETIONS` before the handler counted, so `total` was the page
+    /// size, `total > 100` was false by construction, and a client with 150
+    /// matching hosts was told there were exactly 100 and that nothing had
+    /// been held back — the one answer that makes a page look like a complete
+    /// inventory.
+    ///
+    /// The cause was one truncation duplicated across two layers with only the
+    /// inner one in force. The fix is a single capping point in the handler,
+    /// not a second correction bolted onto the provider.
+    ///
+    /// Found by `fuzz_completions_params` on its first seed.
+    #[tokio::test]
+    async fn test_completion_total_counts_matches_not_the_page() {
+        let aliases: Vec<String> = (0..150).map(|i| format!("node-{i:03}")).collect();
+        let server = create_test_server_with_hosts(&aliases);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completion/complete".to_string(),
+            params: Some(params_declaring_nothing(json!({
+                "ref": { "type": "ref/prompt", "name": "system-health" },
+                "argument": { "name": "host", "value": "node-" }
+            }))),
+        };
+
+        let response = server.handle_request(request).await;
+
+        assert!(response.error.is_none(), "error: {:?}", response.error);
+        let completion = &response.result.unwrap()["completion"];
+        assert_eq!(
+            completion["total"], 150,
+            "`total` is how many completions exist for the prefix, not how \
+             many fit in one page: {completion}"
+        );
+        assert_eq!(
+            completion["hasMore"], true,
+            "50 of the 150 matches were withheld, so the client must be told: \
+             {completion}"
+        );
+        assert_eq!(
+            completion["values"].as_array().map(Vec::len),
+            Some(MAX_COMPLETIONS),
+            "the page is still capped: {completion}"
+        );
+        assert_eq!(
+            completion["values"][0], "node-000",
+            "the page is the FIRST `MAX_COMPLETIONS` of the sorted answer: \
+             {completion}"
+        );
+    }
+
+    /// EXACTLY `MAX_COMPLETIONS` matches. `hasMore` answers "were any
+    /// withheld", so at the cap the answer is no: every match fits.
+    ///
+    /// Its own test because it is the only case `> ` and `>=` disagree on, and
+    /// a suite that tests 150 and 3 cannot tell them apart — `cargo mutants`
+    /// said so, surviving `replace > with >=` while the rest of this file was
+    /// green. `>=` would tell a client to page for a 101st completion that
+    /// does not exist.
+    #[tokio::test]
+    async fn test_completion_at_exactly_the_cap_withholds_nothing() {
+        // `node-0…` selects node-000 through node-099: MAX_COMPLETIONS
+        // exactly, out of 150 hosts.
+        let aliases: Vec<String> = (0..150).map(|i| format!("node-{i:03}")).collect();
+        let server = create_test_server_with_hosts(&aliases);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completion/complete".to_string(),
+            params: Some(params_declaring_nothing(json!({
+                "ref": { "type": "ref/prompt", "name": "system-health" },
+                "argument": { "name": "host", "value": "node-0" }
+            }))),
+        };
+
+        let response = server.handle_request(request).await;
+
+        let completion = &response.result.unwrap()["completion"];
+        assert_eq!(
+            completion["total"], MAX_COMPLETIONS,
+            "the prefix selects exactly the cap: {completion}"
+        );
+        assert!(
+            completion.get("hasMore").is_none(),
+            "all {MAX_COMPLETIONS} matches fit, so nothing was withheld and \
+             `hasMore` must be absent: {completion}"
+        );
+        assert_eq!(
+            completion["values"].as_array().map(Vec::len),
+            Some(MAX_COMPLETIONS),
+            "{completion}"
+        );
+    }
+
+    /// The other side of the same boundary: at or below the cap, nothing is
+    /// withheld and `hasMore` must stay absent rather than become `false` —
+    /// the result type omits it entirely when there is no more.
+    #[tokio::test]
+    async fn test_completion_under_the_cap_withholds_nothing() {
+        let aliases: Vec<String> = (0..3).map(|i| format!("node-{i:03}")).collect();
+        let server = create_test_server_with_hosts(&aliases);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "completion/complete".to_string(),
+            params: Some(params_declaring_nothing(json!({
+                "ref": { "type": "ref/resource", "uri": "metrics://prod" },
+                "argument": { "name": "host", "value": "node-" }
+            }))),
+        };
+
+        let response = server.handle_request(request).await;
+
+        let completion = &response.result.unwrap()["completion"];
+        assert_eq!(completion["total"], 3, "{completion}");
+        assert!(
+            completion.get("hasMore").is_none(),
+            "nothing was withheld, so `hasMore` must be absent: {completion}"
+        );
+        assert_eq!(
+            completion["values"],
+            json!(["node-000", "node-001", "node-002"]),
+            "{completion}"
         );
     }
 

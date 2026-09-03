@@ -116,8 +116,20 @@ jobs:
           # echoes a `password:` from the config it failed on, the other that an
           # omitted host key policy stays Strict. Both are security answers, and
           # 30s is not enough to reach them from an empty corpus.
+          #
+          # `fuzz_whitelist_grant` and `fuzz_completions_params` joined for the
+          # same reason. The first asks whether a whitelist pattern the regex
+          # engine REFUSED can still grant a command; every iteration compiles
+          # a pattern, so it runs two orders of magnitude slower than a parser
+          # target (37 915 executions in 61s locally against ~800 000) and 30s
+          # buys correspondingly little. The second drives the whole
+          # `completion/complete` dispatch against a 150-host config to ask
+          # whether the answer can name a host the prefix does not select.
+          # +60s total on a phase already near 66 minutes, which is the
+          # cheapest promotion available: `BUILDER_TARGETS` costs 270s each.
           SECURITY_TARGETS="fuzz_command_validator fuzz_sanitizer fuzz_shell_escape \
-            fuzz_security_config fuzz_yaml_config fuzz_host_config"
+            fuzz_security_config fuzz_yaml_config fuzz_host_config \
+            fuzz_whitelist_grant fuzz_completions_params"
 
           # Command-builder targets get the shell dictionary AND 300s.
           #
