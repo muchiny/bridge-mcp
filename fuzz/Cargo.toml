@@ -101,8 +101,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_regex_redos"
-path = "fuzz_targets/fuzz_regex_redos.rs"
+name = "fuzz_whitelist_grant"
+path = "fuzz_targets/fuzz_whitelist_grant.rs"
 test = false
 doc = false
 bench = false

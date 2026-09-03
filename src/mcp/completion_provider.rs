@@ -7,8 +7,16 @@ use crate::error::Result;
 use crate::ports::ToolContext;
 use crate::ports::completions::CompletionProvider;
 
-/// Maximum number of completion values returned.
-const MAX_COMPLETIONS: usize = 100;
+/// Maximum number of completion values one response may carry.
+///
+/// Applied in ONE place — `handle_completions_complete`, which is also where
+/// `total` and `hasMore` are filled in. It used to be applied here too, and
+/// that is the whole defect: a provider that truncates before the handler
+/// counts makes `total` the size of the PAGE rather than the size of the
+/// answer, and `has_more = total > 100` unreachable by construction. A client
+/// asking with an empty prefix against 150 hosts was told there were 100 and
+/// that nothing had been withheld.
+pub(crate) const MAX_COMPLETIONS: usize = 100;
 
 /// Default completion provider that reads from config.
 pub struct DefaultCompletionProvider;
@@ -54,6 +62,10 @@ impl CompletionProvider for DefaultCompletionProvider {
 }
 
 /// Complete host names from config, filtered by prefix.
+///
+/// Returns EVERY match, sorted. Paging is the caller's job: this function has
+/// no way to tell the caller that it withheld something, so a truncation here
+/// is indistinguishable from a short answer.
 fn complete_hosts(prefix: &str, ctx: &ToolContext) -> Vec<String> {
     let mut hosts: Vec<String> = ctx
         .config
@@ -63,7 +75,6 @@ fn complete_hosts(prefix: &str, ctx: &ToolContext) -> Vec<String> {
         .cloned()
         .collect();
     hosts.sort();
-    hosts.truncate(MAX_COMPLETIONS);
     hosts
 }
 
