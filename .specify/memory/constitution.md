@@ -88,7 +88,7 @@ est deja haute. Chaque ajout doit etre chirurgical.
 
 ## Contraintes Techniques
 
-- **Langage** : Rust, edition 2024, MSRV 1.94
+- **Langage** : Rust, edition 2024, MSRV 1.98
 - **Runtime async** : `tokio` (full features)
 - **CLI** : `clap` 4 (derive API, feature-gated)
 - **SSH** : `russh` 0.58 + `russh-sftp` 2.1

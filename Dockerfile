@@ -5,7 +5,7 @@
 # the image's own compiler — so if this tag drifts below the MSRV, rustup
 # silently downloads the pinned version on every build and the pin here is
 # inert. Matching versions keeps the pin honest and the build offline.
-FROM rust:1.94-alpine AS builder
+FROM rust:1.98-alpine AS builder
 
 RUN apk add --no-cache musl-dev pkgconfig
 

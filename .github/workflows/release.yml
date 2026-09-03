@@ -18,7 +18,7 @@ permissions: {}
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: bridge-mcp
-  # rust-toolchain.toml pins 1.94.0 and outranks the `rustup default` set by
+  # rust-toolchain.toml pins 1.98.0 and outranks the `rustup default` set by
   # dtolnay/rust-toolchain, so shipped binaries were built with the MSRV
   # compiler even though every step here asks for @stable. Release on stable,
   # explicitly, and let the MSRV job in ci.yml own MSRV verification.

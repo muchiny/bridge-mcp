@@ -2,7 +2,7 @@
 name = "bridge-mcp-macros"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.98"
 description = "Proc-macro helpers for the bridge-mcp crate (tool auto-registration)"
 license = "MIT"
 publish = false

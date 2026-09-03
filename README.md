@@ -969,7 +969,7 @@ make ci-full            # Full CI (ci + hack + geiger)
 make dxt                # Build DXT package for Claude Desktop
 ```
 
-Rust edition 2024, MSRV 1.94+. `#![forbid(unsafe_code)]`. 9500+ tests.
+Rust edition 2024, MSRV 1.98+. `#![forbid(unsafe_code)]`. 9500+ tests.
 
 **Adding a new tool — 3 steps:** annotate the struct with `#[mcp_tool]` (or
 `#[mcp_standard_tool]`), add the `mod` + `pub use` line, and (only if
