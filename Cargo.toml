@@ -5,7 +5,7 @@ members = [".", "crates/bridge-mcp-macros"]
 name = "bridge-mcp"
 version = "3.0.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.98"
 description = "MCP server that bridges Claude Code to air-gapped environments via SSH"
 authors = ["muchiny"]
 license = "MIT"
@@ -130,9 +130,9 @@ tokio-stream = { version = "0.1", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # WinRM adapter (optional) — wraps winrm-rs for WS-Man/SOAP over HTTPS
-winrm-rs = { version = "1.1", optional = true }
+winrm-rs = { version = "1.2", optional = true }
 # PSRP adapter (optional) — PowerShell Remoting Protocol via psrp-rs
-psrp-rs = { version = "1.0", optional = true, default-features = false }
+psrp-rs = { version = "2.0", optional = true, default-features = false }
 
 # HTTP client — used by Azure adapter (reqwest is also a transitive dep of winrm-rs)
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }

@@ -19,12 +19,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # rust-toolchain.toml pins channel 1.94.0, and a toolchain file OUTRANKS the
-  # `rustup default` that dtolnay/rust-toolchain sets — so without an explicit
-  # RUSTUP_TOOLCHAIN every job silently ran 1.94.0 no matter which channel it
-  # asked for (the MSRV job was a duplicate of Tests, and Nightly Compatibility
-  # tested 1.94.0 three times). Only `+toolchain` and RUSTUP_TOOLCHAIN beat the
-  # file; jobs that need a different channel override this at job level.
+  # rust-toolchain.toml pins the MSRV channel (1.98.0 since 2026-09-03), and a
+  # toolchain file OUTRANKS the `rustup default` that dtolnay/rust-toolchain
+  # sets — so without an explicit RUSTUP_TOOLCHAIN every job silently ran the
+  # pinned compiler no matter which channel it asked for. When that was found,
+  # the pin was 1.94.0: the MSRV job was a duplicate of Tests, and Nightly
+  # Compatibility tested 1.94.0 three times. Only `+toolchain` and
+  # RUSTUP_TOOLCHAIN beat the file; jobs that need a different channel override
+  # this at job level.
   RUSTUP_TOOLCHAIN: stable
 
 jobs:
@@ -149,13 +151,13 @@ jobs:
         run: make verify-install BIN=target/debug/bridge-mcp
 
   msrv:
-    name: MSRV (1.94)
+    name: MSRV (1.98)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     timeout-minutes: 30
     env:
-      RUSTUP_TOOLCHAIN: "1.94"
+      RUSTUP_TOOLCHAIN: "1.98"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -164,7 +166,7 @@ jobs:
       # declared MSRV so `rust-version` in Cargo.toml can't silently regress.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.94"
+          toolchain: "1.98"
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv

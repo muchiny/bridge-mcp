@@ -80,7 +80,7 @@ daemon-stop:
 daemon-status:
 	./target/release/bridge-mcp daemon status
 
-# Run clippy linter (MSRV toolchain — rust-toolchain.toml pins 1.94.0)
+# Run clippy linter (MSRV toolchain — rust-toolchain.toml pins 1.98.0)
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings
 

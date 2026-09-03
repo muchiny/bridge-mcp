@@ -94,6 +94,48 @@ reading it. Every item below was reproduced before the fix and measured after.
 - `limits.max_concurrent_commands` does not apply to CLI invocations, which are
   one process each.
 
+### Toolchain — MSRV raised 1.94 -> 1.98 (2026-09-03)
+
+- **MSRV is now 1.98.0**, and `rust-toolchain.toml` pins the same. Forced, not
+  chosen: `winrm-rs` 1.2.0 declares `rust-version = "1.98.0"` and cargo refuses
+  the dependency outright on an older compiler. 1.2.0 is where
+  RUSTSEC-2026-0190 / -0185 / -0098 are fixed, so staying on 1.1.2 meant
+  carrying three advisories.
+
+  Consumers on 1.94-1.97 must upgrade their toolchain. `Cargo.toml`,
+  `crates/bridge-mcp-macros/Cargo.toml`, `rust-toolchain.toml`, the
+  `MSRV (1.94)` CI job (now `MSRV (1.98)`), the `Dockerfile` base image,
+  `README.md` and the constitution all follow.
+
+  **Stated plainly, because it is a real loss:** 1.98.0 is the current stable,
+  so the MSRV guard is temporarily vacuous — the MSRV job and the Clippy job
+  now compile with the same rustc, and a 1.98-only feature would pass both.
+  The guard returns the first time stable moves past 1.98.
+
+- `winrm-rs` 1.1.2 -> 1.2.0 and **`psrp-rs` 1.0.0 -> 2.0.0**. Both are
+  security releases:
+
+  - `psrp-rs` 2.0.0 caps CLIXML nesting at `MAX_NESTING_DEPTH` (64). The
+    parser is recursive and the document comes from the REMOTE host, so ~10 KiB
+    of nested `<Obj><MS>` overflowed the stack and **aborted the process** — a
+    stack overflow is not a catchable panic, so `#![forbid(unsafe_code)]`
+    bought nothing. It also replaces the recursive `known_hosts` glob matcher,
+    where a pattern like `*a*a*a*a*b` hung the trust decision itself, and
+    refuses OpenSSH host certificates under every policy but `AcceptAny`.
+  - `winrm-rs` 1.2.0 carries RUSTSEC-2026-0190 / -0185 / -0098.
+
+  `psrp-rs` 2.0.0's one breaking change — `SshConfig` becomes
+  `#[non_exhaustive]` with a builder — does not reach this crate: the psrp
+  adapter goes through `WinrmPsrpTransport` and never constructs an
+  `SshConfig`. `PsrpError`'s variant set is unchanged between 1.0.0 and 2.0.0,
+  so the mapping in `src/error.rs` still routes every condition, and the new
+  CLIXML depth refusal arrives as `PsrpError::Clixml` with its message intact.
+
+- `wnaf` 0.14.0 -> 0.14.1, unrelated to the above and carried here only because
+  `cargo deny` turns red without it. 0.14.0 was yanked upstream on 2026-09-03;
+  it reaches this tree through `russh` -> `p256`/`p384`/`p521` ->
+  `primeorder`, and was already on `main`.
+
 ### Fuzz lot D1 — the four remaining mute targets (2026-09-03)
 
 Four targets that asserted only "did not panic" now assert a property, and one
