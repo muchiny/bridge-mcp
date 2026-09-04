@@ -64,6 +64,12 @@ reading it. Every item below was reproduced before the fix and measured after.
 - The jq parse error echoed the caller's own filter back inside Rust struct
   syntax (`(File { code: …, path: () }, Lex(…))`).
 
+- **The build stamp went stale on a dependency bump.** `build.rs` re-ran on
+  `src/` and git metadata only, so editing `Cargo.toml` / `Cargo.lock` left
+  `BUILD_REV` without its `-dirty` suffix — caught by
+  `test_build_rev_matches_live_head_or_is_unknown` on the first such bump.
+  Both manifests are now watched.
+
 ### Added
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
@@ -303,6 +309,15 @@ role and the AD cmdlets, absent on that server.
   connection to the WinRM port and failed with `SSH connection failed:
   Disconnected`. `ssh_ls`, `ssh_upload` and `ssh_download` now answer
   `ConfigInvalid` naming the host's protocol.
+- **`winrm-rs` 1.2.0 -> 1.2.1, `psrp-rs` 2.0.0 -> 2.0.1**, both pinned as
+  minimums. They carry the other half of the runspace leak: `winrm-rs` 1.2.0
+  addressed every shell Delete to the `cmd` plugin, so closing a PSRP pool
+  answered `InvalidSelectors` and left the PowerShell shell running (28
+  orphans measured after one campaign), and a failed `disconnect` in either
+  crate destroyed the caller's only handle to the live shell. `winrm-rs`
+  1.2.1 also completes CredSSP against Server 2025. The `[patch.crates-io]`
+  used while those releases were pending is gone; the lockfile resolves both
+  from the registry.
 
 ## [3.0.0] - 2026-08-26
 
