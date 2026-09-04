@@ -83,13 +83,56 @@ pub fn shell_escape_for(s: &str, shell: ShellType) -> String {
     crate::domain::use_cases::shell::escape(s, shell)
 }
 
+/// Refuse a POSIX-only tool on a Windows host.
+///
+/// The `file_ops` and `directory` builders emit `find`, `printf`, `stat` and
+/// friends, none of which exist on Windows. Without this the tool shipped a
+/// shell script Windows cannot run: over `WinRM` it came back as a PowerShell
+/// `CommandNotFoundException`, and over PSRP the error record failed the whole
+/// pipeline. Handlers built on `StandardTool` express the same rule with
+/// `OS_GUARD`; this is the equivalent for the hand-written ones.
+pub fn reject_posix_only_on_windows(
+    host_config: &HostConfig,
+    tool_name: &str,
+) -> Option<crate::mcp::protocol::ToolCallResult> {
+    if host_config.os_type == crate::config::OsType::Windows {
+        return Some(crate::mcp::protocol::ToolCallResult::error(format!(
+            "Tool '{tool_name}' is not available on Windows hosts — its command \
+             is POSIX-only. Use the Windows-specific tools instead."
+        )));
+    }
+    None
+}
+
 /// Connect to a host, resolving jump host if configured.
+///
+/// SSH only. Callers are the SFTP-backed handlers (`ssh_ls`, `ssh_upload`,
+/// `ssh_download`), which need the SFTP subsystem and therefore cannot run
+/// over a non-SSH protocol adapter. Without this guard a host configured as
+/// `protocol: winrm` opened a raw SSH connection to the `WinRM` port and failed
+/// with `SSH connection failed: Disconnected`, which reads like a broken host
+/// rather than a tool that does not apply.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::ConfigInvalid`] when the host does not speak SSH.
 pub async fn connect_with_jump(
     host_name: &str,
     host_config: &HostConfig,
     limits: &LimitsConfig,
     config: &Config,
 ) -> Result<SshClient> {
+    if host_config.protocol != crate::config::Protocol::Ssh {
+        return Err(BridgeError::ConfigInvalid {
+            field: "protocol".to_string(),
+            reason: format!(
+                "host '{host_name}' uses protocol {:?}; SFTP-based tools \
+                 (ssh_ls, ssh_upload, ssh_download) require protocol: ssh",
+                host_config.protocol
+            ),
+        });
+    }
+
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
         config
             .hosts
@@ -1397,5 +1440,40 @@ muchini  2411977  0.0  0.0   2772  1664 ?        S    22:06   0:00 [kworker]\n";
         let cols = &["a", "b", "c", "d"];
         let p = parse_fixed_columns("x y\n", cols, false, false).expect("parse");
         assert_eq!(p.rows[0], vec!["x", "y", "", ""]);
+    }
+
+    // ============== reject_posix_only_on_windows ==============
+
+    fn host_with_os(os_type: &str) -> HostConfig {
+        let json = format!(
+            r#"{{"hostname":"h","user":"u","auth":{{"type":"agent"}},"os_type":"{os_type}"}}"#
+        );
+        serde_json::from_str(&json).expect("a minimal host config deserializes")
+    }
+
+    /// The builders behind `ssh_find`, `ssh_file_write` and `ssh_file_stat`
+    /// emit `find`, `printf` and `stat`; a Windows host must be refused before
+    /// any of that is sent, and the refusal must name the tool.
+    #[test]
+    fn reject_posix_only_on_windows_refuses_a_windows_host() {
+        let refusal = reject_posix_only_on_windows(&host_with_os("windows"), "ssh_find")
+            .expect("a Windows host must be refused");
+        assert_eq!(refusal.is_error, Some(true));
+        let crate::mcp::protocol::ToolContent::Text { text } = &refusal.content[0] else {
+            panic!("expected a text refusal");
+        };
+        assert!(
+            text.contains("ssh_find"),
+            "refusal must name the tool: {text}"
+        );
+        assert!(
+            text.contains("Windows"),
+            "refusal must name the platform: {text}"
+        );
+    }
+
+    #[test]
+    fn reject_posix_only_on_windows_lets_a_linux_host_through() {
+        assert!(reject_posix_only_on_windows(&host_with_os("linux"), "ssh_find").is_none());
     }
 }

@@ -125,12 +125,22 @@ impl WindowsRegistryCommandBuilder {
 
     /// Build command to set a registry value.
     ///
-    /// Constructs: `Set-ItemProperty -Path '{path}' -Name '{name}' -Value '{value}'
+    /// The key is created first when it does not exist. `Set-ItemProperty`
+    /// alone fails on a missing key — `Cannot find path '...' because it does
+    /// not exist` — which made the tool unusable for anything but an existing
+    /// key, and left `reg_export` and `reg_delete` with nothing to act on.
+    /// `New-Item -Force` is idempotent on a key that is already there, and
+    /// matches what `reg add` does.
+    ///
+    /// Constructs: `New-Item -Path '{path}' -Force | Out-Null;
+    /// Set-ItemProperty -Path '{path}' -Name '{name}' -Value '{value}'
     /// [-Type {type}]`
     #[must_use]
     pub fn set_value(path: &str, name: &str, value: &str, value_type: Option<&str>) -> String {
         let mut cmd = format!(
-            "Set-ItemProperty -Path {} -Name {} -Value {}",
+            "New-Item -Path {} -Force | Out-Null; \
+             Set-ItemProperty -Path {} -Name {} -Value {}",
+            ps_escape(path),
             ps_escape(path),
             ps_escape(name),
             ps_escape(value),
@@ -291,7 +301,23 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r"Set-ItemProperty -Path 'HKLM:\SOFTWARE\MyApp' -Name 'Setting' -Value 'enabled'"
+            r"New-Item -Path 'HKLM:\SOFTWARE\MyApp' -Force | Out-Null; Set-ItemProperty -Path 'HKLM:\SOFTWARE\MyApp' -Name 'Setting' -Value 'enabled'"
+        );
+    }
+
+    /// `Set-ItemProperty` cannot create a missing key, so the key has to be
+    /// made first or the whole set/export/delete chain has nothing to act on.
+    #[test]
+    fn test_set_value_creates_the_key_first() {
+        let cmd = WindowsRegistryCommandBuilder::set_value(
+            r"HKLM:\SOFTWARE\New\Key",
+            "Setting",
+            "1",
+            None,
+        );
+        assert!(
+            cmd.starts_with(r"New-Item -Path 'HKLM:\SOFTWARE\New\Key' -Force"),
+            "the key must be created before the property is set, got: {cmd}"
         );
     }
 

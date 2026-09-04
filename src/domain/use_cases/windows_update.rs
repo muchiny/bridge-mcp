@@ -83,18 +83,34 @@ impl WindowsUpdateCommandBuilder {
 
     /// Build a command to search for updates matching a query.
     ///
-    /// The query is wrapped in wildcards (`*query*`) for partial matching.
+    /// The query matches anywhere in the title.
     ///
-    /// Constructs: `Get-WindowsUpdate -Title '*{query}*'
+    /// `Get-WindowsUpdate -Title` takes a **regex**, not a glob. Wrapping the
+    /// query in `*` produced `*Security*`, which the .NET regex engine
+    /// rejects outright — `parsing "*Security*" - Quantifier {x,y} following
+    /// nothing` — so every search failed. The query is escaped as a regex
+    /// literal and wrapped in `.*` instead.
+    ///
+    /// Constructs: `Get-WindowsUpdate -Title '.*{query}.*'
     /// | Select-Object KB,Title,Size | Format-Table -AutoSize`
     #[must_use]
     pub fn build_search_command(query: &str) -> String {
-        let wildcard_query = format!("*{query}*");
+        let escaped: String = query
+            .chars()
+            .flat_map(|c| {
+                if r"\^$.|?*+()[]{}".contains(c) {
+                    vec!['\\', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
+        let pattern = format!(".*{escaped}.*");
         format!(
             "Get-WindowsUpdate -Title {} \
              | Select-Object KB,Title,Size \
              | Format-Table -AutoSize",
-            ps_escape(&wildcard_query),
+            ps_escape(&pattern),
         )
     }
 
@@ -276,46 +292,63 @@ mod tests {
     #[test]
     fn test_search_command() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("Security");
-        assert!(cmd.contains("Get-WindowsUpdate -Title '*Security*'"));
+        assert!(cmd.contains("Get-WindowsUpdate -Title '.*Security.*'"));
         assert!(cmd.contains("Select-Object KB,Title,Size"));
         assert!(cmd.contains("Format-Table -AutoSize"));
+    }
+
+    /// `-Title` is a regex. A glob there is not just ineffective, it is a
+    /// parse error on the server: `*Security*` made the .NET engine reject
+    /// the whole pattern. Regex metacharacters in the query must arrive
+    /// escaped, not interpreted.
+    #[test]
+    fn test_search_command_escapes_regex_metacharacters() {
+        let cmd = WindowsUpdateCommandBuilder::build_search_command("C++ (x86)");
+        assert!(
+            cmd.contains(r".*C\+\+ \(x86\).*"),
+            "metacharacters must be escaped, got: {cmd}"
+        );
+        assert!(!cmd.contains("'*"), "no bare glob may reach -Title: {cmd}");
     }
 
     #[test]
     fn test_search_command_with_spaces() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("Cumulative Update");
-        assert!(cmd.contains("'*Cumulative Update*'"));
+        assert!(cmd.contains("'.*Cumulative Update.*'"));
     }
 
     #[test]
     fn test_search_command_injection() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("test'; whoami; '");
         // Single quotes are doubled by PowerShell escaping
-        assert!(cmd.contains("'*test''; whoami; ''*'"));
+        assert!(cmd.contains("'.*test''; whoami; ''.*'"));
     }
 
     #[test]
     fn test_search_command_dollar_sign() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("$env:test");
-        assert!(cmd.contains("'*$env:test*'"));
+        // `$` is a regex anchor, so it is escaped too — which incidentally
+        // also neutralises PowerShell expansion a second time.
+        assert!(cmd.contains(r"'.*\$env:test.*'"));
     }
 
     #[test]
     fn test_search_command_pipe() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("test|Out-File");
-        assert!(cmd.contains("'*test|Out-File*'"));
+        assert!(cmd.contains(r"'.*test\|Out-File.*'"));
     }
 
     #[test]
     fn test_search_command_backtick() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("test`n");
-        assert!(cmd.contains("'*test`n*'"));
+        // A backtick is not a regex metacharacter, so it passes through.
+        assert!(cmd.contains("'.*test`n.*'"));
     }
 
     #[test]
     fn test_search_command_empty_query() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("");
-        assert!(cmd.contains("'**'"));
+        assert!(cmd.contains("'.*.*'"));
     }
 
     // ── build_reboot_status_command ─────────────────────────────────
@@ -337,7 +370,7 @@ mod tests {
     #[test]
     fn test_dollar_variable_neutralized_in_search() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("$env:COMPUTERNAME");
-        assert!(cmd.contains("'*$env:COMPUTERNAME*'"));
+        assert!(cmd.contains(r"'.*\$env:COMPUTERNAME.*'"));
     }
 
     #[test]
@@ -349,7 +382,7 @@ mod tests {
     #[test]
     fn test_pipe_neutralized_in_search() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("test|bad");
-        assert!(cmd.contains("'*test|bad*'"));
+        assert!(cmd.contains(r"'.*test\|bad.*'"));
     }
 
     // ── Edge Cases ──────────────────────────────────────────────────
@@ -363,8 +396,8 @@ mod tests {
     }
 
     #[test]
-    fn test_search_wraps_in_wildcards() {
+    fn test_search_wraps_in_regex_any() {
         let cmd = WindowsUpdateCommandBuilder::build_search_command("test");
-        assert!(cmd.contains("'*test*'"));
+        assert!(cmd.contains("'.*test.*'"));
     }
 }

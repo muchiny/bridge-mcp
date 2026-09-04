@@ -91,10 +91,22 @@ impl PsrpConnection {
         // Run the PowerShell script with all 7 streams
         let result = psrp_rs::Pipeline::new(&wrapped)
             .run_all_streams(&mut pool)
-            .await?;
+            .await;
 
-        // Close the pool (releases server-side runspace)
-        pool.close().await?;
+        // Close the pool (releases server-side runspace) before propagating a
+        // pipeline error — `?` here used to skip the close, so every failing
+        // command left a live runspace on the server. They accumulate until
+        // `MaxShellsPerUser` (30 by default) and then every later Create
+        // fails with `InternalError`, which looks like a broken host.
+        //
+        // The close itself is best-effort: the server may already have torn
+        // the shell down after CommandState/Done, in which case Delete
+        // answers `InvalidSelectors: the shell was not found`. Propagating
+        // that discarded a pipeline that had already produced its output.
+        if let Err(e) = pool.close().await {
+            debug!(host = %self.host_name, error = %e, "PSRP pool close failed (ignored)");
+        }
+        let result = result?;
 
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -139,9 +151,13 @@ impl PsrpConnection {
 
         let result = psrp_rs::Pipeline::new(&wrapped)
             .run_all_streams_with_cancel(&mut pool, cancel)
-            .await?;
+            .await;
 
-        pool.close().await?;
+        // Close before propagating — see the note in `exec`.
+        if let Err(e) = pool.close().await {
+            debug!(host = %self.host_name, error = %e, "PSRP pool close failed (ignored)");
+        }
+        let result = result?;
 
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = start.elapsed().as_millis() as u64;

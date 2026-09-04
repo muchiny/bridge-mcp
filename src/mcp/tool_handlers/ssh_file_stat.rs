@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use crate::config::HostConfig;
+use crate::config::{HostConfig, OsType};
 use crate::domain::use_cases::file_ops::FileOpsCommandBuilder;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -32,6 +32,11 @@ impl StandardTool for FileStatTool {
     type Args = SshFileStatArgs;
 
     const NAME: &'static str = "ssh_file_stat";
+
+    /// POSIX-only: the builder shells out to `stat -c` and `file -b`, neither
+    /// of which exists on Windows, and joins them with `&&`, which PowerShell
+    /// 4.0 cannot parse either.
+    const OS_GUARD: Option<OsType> = Some(OsType::Linux);
 
     const DESCRIPTION: &'static str = "Get detailed file information on a remote host using stat. \
         Returns permissions, owner, group, size, modification time, and file type as text. \

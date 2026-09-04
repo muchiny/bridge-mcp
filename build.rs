@@ -27,6 +27,10 @@ fn main() {
         }
     }
     println!("cargo::rerun-if-changed=src");
+    // A dependency bump dirties the tree without touching `src`, and it is
+    // precisely the kind of change a build stamp must not lie about.
+    println!("cargo::rerun-if-changed=Cargo.toml");
+    println!("cargo::rerun-if-changed=Cargo.lock");
     println!("cargo::rerun-if-env-changed=BRIDGE_MCP_BUILD_REV");
 
     // Distro packagers building from an exported tarball can pin the value.

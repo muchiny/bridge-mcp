@@ -64,6 +64,12 @@ reading it. Every item below was reproduced before the fix and measured after.
 - The jq parse error echoed the caller's own filter back inside Rust struct
   syntax (`(File { code: …, path: () }, Lex(…))`).
 
+- **The build stamp went stale on a dependency bump.** `build.rs` re-ran on
+  `src/` and git metadata only, so editing `Cargo.toml` / `Cargo.lock` left
+  `BUILD_REV` without its `-dirty` suffix — caught by
+  `test_build_rev_matches_live_head_or_is_unknown` on the first such bump.
+  Both manifests are now watched.
+
 ### Added
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
@@ -249,6 +255,69 @@ of them found a defect on its first seed.
 - `fuzz_whitelist_grant` and `fuzz_completions_params` join `SECURITY_TARGETS`
   in `fuzz.yml` (60s rather than 30s): the first compiles a regex per
   iteration and runs two orders of magnitude slower than a parser target.
+
+### Windows interop campaign (2026-09-04)
+
+Found by running the `winrm` and `psrp` adapters against live Windows Server
+2012 R2 and 2025 hosts rather than by reading them. Reference scores after the
+fixes, on Server 2025: WinRM Basic, NTLM and NTLM over HTTPS 54/60 each, PSRP
+49/60. The six misses shared by the WinRM transports are the refusals below —
+POSIX-only tools on a Windows host — and the five PSRP-only ones are the Hyper-V
+role and the AD cmdlets, absent on that server.
+
+- **A failed PSRP pipeline leaked its runspace, and a successful one could be
+  thrown away by its own cleanup.** `exec` and `exec_with_cancel` applied `?`
+  to the pipeline result before `pool.close()` ran, so every failing command
+  left a live shell on the server. Those accumulate until `MaxShellsPerUser`
+  (30 by default), after which every Create answers `InternalError` and the
+  host looks broken. The close now runs first, and is best-effort: after
+  `CommandState/Done` the server may already have torn the shell down, in
+  which case Delete answers `InvalidSelectors: the shell was not found`, and
+  propagating that discarded output the pipeline had already produced — on
+  Server 2012 R2 every PSRP call failed this way.
+
+- **POSIX-only tools refuse a Windows host instead of shipping it a shell
+  script.** `ssh_find`, `ssh_file_write` and `ssh_file_stat` emit `find`,
+  `printf`, `stat -c … && file -b`; over WinRM that came back as a PowerShell
+  `CommandNotFoundException`, over PSRP the error record failed the whole
+  pipeline. `ssh_file_stat` is a `StandardTool` and now carries `OS_GUARD`;
+  the two hand-written handlers share `reject_posix_only_on_windows`.
+
+- **`ssh_reg_set` creates the key.** `Set-ItemProperty` fails on a missing
+  key — `Cannot find path '…' because it does not exist` — so the
+  set → export → delete chain fell over at its first step on any key not
+  already present. The command now runs `New-Item -Force | Out-Null` first,
+  which is idempotent on an existing key and matches what `reg add` does.
+
+- **`ssh_win_update_search` failed on every query.** `Get-WindowsUpdate
+  -Title` takes a regex, not a glob; the `*query*` wrapper produced
+  `*Security*`, which the .NET engine rejects outright — `Quantifier {x,y}
+  following nothing`. Regex metacharacters in the query are now escaped and
+  the pattern is wrapped in `.*`, so a query still matches anywhere in the
+  title.
+
+- **`export LC_ALL=C;` is prefixed to POSIX shells only.** `export` is not a
+  cmd.exe or PowerShell verb, so on a Windows host every standard tool
+  answered `export : The term 'export' is not recognized` — noise plus exit 1
+  over WinRM, a hard `pipeline failed` over PSRP. Windows output is already
+  locale-stable for the cmdlets the builders use.
+- **The WinRM and PSRP pools used the config alias as the network target.**
+  A host declared as `win2012:` with `hostname: 10.0.0.5` was dialled as
+  `http://win2012:5985/wsman`; both pools now hand `host_config.hostname` to
+  the connection.
+- **SFTP tools refuse a non-SSH host.** `connect_with_jump` opened a raw SSH
+  connection to the WinRM port and failed with `SSH connection failed:
+  Disconnected`. `ssh_ls`, `ssh_upload` and `ssh_download` now answer
+  `ConfigInvalid` naming the host's protocol.
+- **`winrm-rs` 1.2.0 -> 1.2.1, `psrp-rs` 2.0.0 -> 2.0.1**, both pinned as
+  minimums. They carry the other half of the runspace leak: `winrm-rs` 1.2.0
+  addressed every shell Delete to the `cmd` plugin, so closing a PSRP pool
+  answered `InvalidSelectors` and left the PowerShell shell running (28
+  orphans measured after one campaign), and a failed `disconnect` in either
+  crate destroyed the caller's only handle to the live shell. `winrm-rs`
+  1.2.1 also completes CredSSP against Server 2025. The `[patch.crates-io]`
+  used while those releases were pending is gone; the lockfile resolves both
+  from the registry.
 
 ## [3.0.0] - 2026-08-26
 

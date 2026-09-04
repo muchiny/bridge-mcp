@@ -444,7 +444,17 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // commands (`if`, `for`, `{...}`); a bare `LC_ALL=C cmd` prefix
         // only works for simple commands and parses as a syntax error
         // when followed by a shell reserved word.
-        let command = format!("export LC_ALL=C; {command}");
+        //
+        // POSIX shells only. `export` is not a cmd.exe or PowerShell verb, so
+        // on a Windows host the prefix made every standard tool emit
+        // `export : The term 'export' is not recognized` — noise plus a
+        // non-zero exit over WinRM, and a hard `pipeline failed` over PSRP,
+        // where an error record fails the whole pipeline. Windows output is
+        // already locale-stable for the cmdlets these builders use.
+        let command = match host_config.effective_shell() {
+            crate::config::ShellType::Posix => format!("export LC_ALL=C; {command}"),
+            crate::config::ShellType::Cmd | crate::config::ShellType::PowerShell => command,
+        };
 
         // Step 11: Execute with retry and cancellation support.
         //

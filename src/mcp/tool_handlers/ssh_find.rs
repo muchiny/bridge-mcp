@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use crate::domain::output_truncator::truncate_output_with_cache;
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::tool_handlers::utils::reject_posix_only_on_windows;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::ssh::{is_retryable_error, with_retry_if};
@@ -153,6 +154,10 @@ impl ToolHandler for SshFindHandler {
                 .ok_or_else(|| BridgeError::UnknownHost {
                     host: args.host.clone(),
                 })?;
+
+        if let Some(refusal) = reject_posix_only_on_windows(host_config, "ssh_find") {
+            return Ok(refusal);
+        }
 
         let command = build_find_command(&args);
 
