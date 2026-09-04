@@ -290,6 +290,20 @@ role and the AD cmdlets, absent on that server.
   the pattern is wrapped in `.*`, so a query still matches anywhere in the
   title.
 
+- **`export LC_ALL=C;` is prefixed to POSIX shells only.** `export` is not a
+  cmd.exe or PowerShell verb, so on a Windows host every standard tool
+  answered `export : The term 'export' is not recognized` — noise plus exit 1
+  over WinRM, a hard `pipeline failed` over PSRP. Windows output is already
+  locale-stable for the cmdlets the builders use.
+- **The WinRM and PSRP pools used the config alias as the network target.**
+  A host declared as `win2012:` with `hostname: 10.0.0.5` was dialled as
+  `http://win2012:5985/wsman`; both pools now hand `host_config.hostname` to
+  the connection.
+- **SFTP tools refuse a non-SSH host.** `connect_with_jump` opened a raw SSH
+  connection to the WinRM port and failed with `SSH connection failed:
+  Disconnected`. `ssh_ls`, `ssh_upload` and `ssh_download` now answer
+  `ConfigInvalid` naming the host's protocol.
+
 ## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
