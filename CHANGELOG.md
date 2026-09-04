@@ -277,6 +277,12 @@ role and the AD cmdlets, absent on that server.
   pipeline. `ssh_file_stat` is a `StandardTool` and now carries `OS_GUARD`;
   the two hand-written handlers share `reject_posix_only_on_windows`.
 
+- **`ssh_reg_set` creates the key.** `Set-ItemProperty` fails on a missing
+  key — `Cannot find path '…' because it does not exist` — so the
+  set → export → delete chain fell over at its first step on any key not
+  already present. The command now runs `New-Item -Force | Out-Null` first,
+  which is idempotent on an existing key and matches what `reg add` does.
+
 ## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
