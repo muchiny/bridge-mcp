@@ -129,6 +129,13 @@ impl ToolHandler for SshFileWriteHandler {
                     host: args.host.clone(),
                 })?;
 
+        if let Some(refusal) = crate::mcp::tool_handlers::utils::reject_posix_only_on_windows(
+            host_config,
+            "ssh_file_write",
+        ) {
+            return Ok(refusal);
+        }
+
         // Step 3: Rate limit
         if ctx.rate_limiter.check(&args.host).is_err() {
             return Ok(ToolCallResult::error(format!(

@@ -270,6 +270,13 @@ role and the AD cmdlets, absent on that server.
   propagating that discarded output the pipeline had already produced — on
   Server 2012 R2 every PSRP call failed this way.
 
+- **POSIX-only tools refuse a Windows host instead of shipping it a shell
+  script.** `ssh_find`, `ssh_file_write` and `ssh_file_stat` emit `find`,
+  `printf`, `stat -c … && file -b`; over WinRM that came back as a PowerShell
+  `CommandNotFoundException`, over PSRP the error record failed the whole
+  pipeline. `ssh_file_stat` is a `StandardTool` and now carries `OS_GUARD`;
+  the two hand-written handlers share `reject_posix_only_on_windows`.
+
 ## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
