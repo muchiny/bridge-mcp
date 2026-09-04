@@ -97,7 +97,7 @@ impl PsrpPool {
                 if let Some(entry) = w.get_mut(host_name) {
                     entry.last_used = Instant::now();
                 }
-                return Ok(PsrpConnection::from_parts(host_name, client));
+                return Ok(PsrpConnection::from_parts(&host_config.hostname, client));
             }
         }
 
@@ -117,7 +117,7 @@ impl PsrpPool {
         }
 
         info!(host = %host_name, "PsrpPool miss — created new WinrmClient for PSRP");
-        Ok(PsrpConnection::from_parts(host_name, client))
+        Ok(PsrpConnection::from_parts(&host_config.hostname, client))
     }
 
     /// Remove a cached entry (called on connection failure).

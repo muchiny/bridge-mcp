@@ -122,6 +122,17 @@ pub async fn connect_with_jump(
     limits: &LimitsConfig,
     config: &Config,
 ) -> Result<SshClient> {
+    if host_config.protocol != crate::config::Protocol::Ssh {
+        return Err(BridgeError::ConfigInvalid {
+            field: "protocol".to_string(),
+            reason: format!(
+                "host '{host_name}' uses protocol {:?}; SFTP-based tools \
+                 (ssh_ls, ssh_upload, ssh_download) require protocol: ssh",
+                host_config.protocol
+            ),
+        });
+    }
+
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
         config
             .hosts

@@ -100,7 +100,7 @@ impl WinRmPool {
                 if let Some(entry) = w.get_mut(host_name) {
                     entry.last_used = Instant::now();
                 }
-                return Ok(WinRmConnection::from_parts(host_name, client));
+                return Ok(WinRmConnection::from_parts(&host_config.hostname, client));
             }
         }
 
@@ -120,7 +120,7 @@ impl WinRmPool {
         }
 
         info!(host = %host_name, "WinRmPool miss — created new WinrmClient");
-        Ok(WinRmConnection::from_parts(host_name, client))
+        Ok(WinRmConnection::from_parts(&host_config.hostname, client))
     }
 
     /// Drop a cached client for `host_name` (called on connection failure).
