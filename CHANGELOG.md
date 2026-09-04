@@ -250,6 +250,26 @@ of them found a defect on its first seed.
   in `fuzz.yml` (60s rather than 30s): the first compiles a regex per
   iteration and runs two orders of magnitude slower than a parser target.
 
+### Windows interop campaign (2026-09-04)
+
+Found by running the `winrm` and `psrp` adapters against live Windows Server
+2012 R2 and 2025 hosts rather than by reading them. Reference scores after the
+fixes, on Server 2025: WinRM Basic, NTLM and NTLM over HTTPS 54/60 each, PSRP
+49/60. The six misses shared by the WinRM transports are the refusals below —
+POSIX-only tools on a Windows host — and the five PSRP-only ones are the Hyper-V
+role and the AD cmdlets, absent on that server.
+
+- **A failed PSRP pipeline leaked its runspace, and a successful one could be
+  thrown away by its own cleanup.** `exec` and `exec_with_cancel` applied `?`
+  to the pipeline result before `pool.close()` ran, so every failing command
+  left a live shell on the server. Those accumulate until `MaxShellsPerUser`
+  (30 by default), after which every Create answers `InternalError` and the
+  host looks broken. The close now runs first, and is best-effort: after
+  `CommandState/Done` the server may already have torn the shell down, in
+  which case Delete answers `InvalidSelectors: the shell was not found`, and
+  propagating that discarded output the pipeline had already produced — on
+  Server 2012 R2 every PSRP call failed this way.
+
 ## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
