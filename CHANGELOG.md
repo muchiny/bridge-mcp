@@ -94,6 +94,83 @@ reading it. Every item below was reproduced before the fix and measured after.
 - `limits.max_concurrent_commands` does not apply to CLI invocations, which are
   one process each.
 
+### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
+
+Twenty command-builder fuzz targets asserted only the PROGRAM NAME —
+`assert!(cmd.contains("docker"))`, `…("systemctl")`, `…("git")`. That is a
+string the builder writes itself in every branch, whatever the caller passed,
+so **no input could ever fail it**. A builder that pastes its argument into a
+shell line in bare does not panic and does not drop the program name; it
+produces a dangerous command and the target stays green. 136 such assertions
+were replaced by 104 that say what the caller's value did to the command, plus
+15 that assert an input-independent command is at least parseable.
+
+### Security — found by lot D2
+
+- **Command injection in `ssh_ad_user_list`.**
+  `ActiveDirectoryCommandBuilder::build_user_list_command` interpolated
+  `ps_escape(filter)` inside a PowerShell **double-quoted** string
+  (`-Filter "Name -like '*{}*'"`). `ps_escape` produces a single-quoted string,
+  and inside double quotes those quotes are inert characters while `$` and the
+  backtick are expanded — so a filter of `$(Get-Content C:\secret)` was
+  evaluated by the remote shell before `Get-ADUser` saw it. The handler was
+  also the only AD tool that never called `validate_ad_identity`; its two
+  siblings, `ssh_ad_user_info` and `ssh_ad_group_members`, both did. The check
+  now lives in the builder — the single place that constructs the command —
+  rather than being added to the one handler that forgot it.
+
+  The nesting was wrong for benign input too: the template already quotes the
+  value, so `john` became `Name -like '*'john'*'` with stray quotes. Three unit
+  tests asserted exactly that shape, and one asserted the doubled quotes of an
+  injection attempt as though doubling were the defence. All rewritten.
+
+  **Breaking (lib API):** `build_user_list_command` returns `Result<String>`.
+
+  Found by `fuzz_active_directory_builder` on the input `$`, during the
+  false-positive gate — before any counter-proof was applied.
+
+- **`WindowsServiceCommandBuilder::build_config_command` documented a defence
+  it does not provide.** Same shape — the WMI filter sits inside a
+  double-quoted PowerShell string — and the comment claimed that doubling
+  single quotes "prevents injection in the WMI filter clause". It does not: a
+  name carrying `"` closes the string early. **Not reachable in production** —
+  all seven `ssh_win_service_*` handlers call `validate_service_name` first,
+  which refuses `"`, `$` and the backtick. The precondition is now stated
+  where the builder is, and `fuzz_windows_service_builder` models the real
+  path by gating on the validator. Found on `S%3W3\"%3`.
+
+### Added — fuzz oracles
+
+- **A PowerShell oracle in `fuzz/src/lib.rs`**: `powershell_words`,
+  `powershell_shape`, `assert_survives_as_one_word_ps`,
+  `assert_same_powershell_skeleton`, and `assert_arrives_as_text{,_ps}`.
+  Eight of the twenty builders escape through
+  `shell::escape(s, ShellType::PowerShell)`, which doubles the quote
+  (`it's` -> `'it''s'`) where POSIX closes and reopens it (`'it'\''s'`). The
+  POSIX reader parses the PowerShell form as two adjacent words and yields
+  `its`, silently dropping the apostrophe — so reusing it would have been red
+  on healthy code for every value containing a quote. The counter-proof on
+  `fuzz_iis_builder` caught the removal of `ps_escape` on a **backtick**, a
+  character the POSIX reader does not treat as syntax.
+
+- `assert_arrives_as_text` — `assert_survives_as_one_word` generalised to the
+  builders that emit pipelines, which is most of them. It also records a
+  measured correction: the plan this work follows held that
+  `assert_same_shell_skeleton` was unusable when a value may contain a NUL,
+  "because `\0` is `shell_shape`'s own skeleton marker". It is not — the
+  skeleton only ever receives a `\0` from `flush!`, one per literal run, while
+  a NUL in the input lands in `literals`. A regression test pins it.
+
+### CI — fuzz budget
+
+- The shell dictionary is **decoupled from the 300-second tier**. It used to be
+  welded to `BUILDER_TARGETS`, so a target could only get the tokens by also
+  getting 300s — which made these twenty unaffordable (20 x 270s = +90 min on a
+  phase already at 69 of the job's 120). They take the dictionary at the
+  60-second tier instead: **79 minutes total, 41 to spare**. The workflow's own
+  comment already said why that is the right trade: "the tokens are what makes
+  the difference, not the wall clock".
+
 ### Toolchain — MSRV raised 1.94 -> 1.98 (2026-09-03)
 
 - **MSRV is now 1.98.0**, and `rust-toolchain.toml` pins the same. Forced, not

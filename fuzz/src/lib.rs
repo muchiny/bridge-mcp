@@ -313,6 +313,46 @@ pub fn assert_same_shell_skeleton(benign_cmd: &str, hostile_cmd: &str, context: 
 mod shape_tests {
     use super::*;
 
+/// A NUL in the caller's value does NOT corrupt a skeleton comparison.
+    ///
+    /// Worth pinning because the plan this work follows says the opposite —
+    /// it records `assert_same_shell_skeleton` as unusable when the value may
+    /// contain a NUL, "because `\0` is `shell_shape`'s own skeleton marker".
+    /// Measured here, it is not: the two NULs never meet. The skeleton only
+    /// ever receives a `\0` from `flush!`, one per literal RUN, while a NUL in
+    /// the input falls through to `other => cur.push(other)` and lands in
+    /// `literals`. So the skeletons still match and the value still comes back
+    /// whole.
+    ///
+    /// This is what lets the twenty command-builder targets use the skeleton
+    /// oracle for the pipelines they emit, instead of being restricted to
+    /// [`assert_survives_as_one_word`], which refuses any operator at all.
+    #[test]
+    fn a_nul_in_the_value_does_not_move_the_skeleton() {
+        // POSIX escape of a value containing a NUL.
+        let esc = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let benign = format!("cat {} 2>/dev/null || echo 'none'", esc("safe"));
+        let hostile = format!("cat {} 2>/dev/null || echo 'none'", esc("a\0b"));
+        let b = shell_shape(&benign).expect("benign scannable");
+        let h = shell_shape(&hostile).expect("hostile scannable");
+        assert_eq!(
+            b.skeleton, h.skeleton,
+            "a NUL in the value moved the skeleton"
+        );
+        let only = format!("cat {} 2>/dev/null || echo 'none'", esc("\0"));
+        assert_eq!(
+            b.skeleton,
+            shell_shape(&only).unwrap().skeleton,
+            "a lone NUL moved it"
+        );
+        assert!(
+            h.literals.iter().any(|l| l == "a\0b"),
+            "the value did not come back whole: {:?}",
+            h.literals
+        );
+    }
+
+
     #[test]
     fn a_pipeline_keeps_its_own_operators() {
         let shape = shell_shape("ls -la '/etc/nginx' 2>/dev/null || echo 'none'").unwrap();
@@ -346,5 +386,441 @@ mod shape_tests {
     fn an_unterminated_quote_is_unscannable() {
         assert!(shell_shape("ls 'oops").is_none());
         assert!(shell_shape("ls \\").is_none());
+    }
+}
+
+// ===========================================================================
+// PowerShell
+// ===========================================================================
+//
+// Everything above reads `/bin/sh`. Eight of this crate's command builders do
+// not target `/bin/sh` — `active_directory`, `hyperv`, `iis`,
+// `scheduled_task`, `windows_event`, `windows_firewall`, `windows_registry`
+// and `windows_service` all escape through
+// `shell::escape(s, ShellType::PowerShell)`.
+//
+// The two shells differ on exactly one rule, and it is the one that matters
+// here. POSIX closes the quote to embed a quote:
+//
+// ```text
+// POSIX      : it's  ->  'it'\''s'
+// PowerShell : it's  ->  'it''s'
+// ```
+//
+// Handing the second to [`shell_words`] yields `["its"]` — it reads `'it'` as
+// a finished word and `'s'` as a continuation, silently dropping the
+// apostrophe. So the POSIX oracle would report "did not survive as one word"
+// for every value containing a quote, on HEALTHY code, which is the failure
+// this project has already paid for three times: an assertion that is red on
+// working code teaches its reader to ignore red.
+//
+// These are separate functions rather than a `shell` parameter threaded
+// through the ones above, deliberately. Six targets already depend on the
+// POSIX pair; a shared scanner that had to answer for both dialects would put
+// their behaviour one refactor away from the Windows rules, and nothing in the
+// type system would notice.
+
+/// Split a `PowerShell` command into words, or `None` when a control operator
+/// appears outside quotes.
+///
+/// The mirror of [`shell_words`] for `pwsh`. Differences from POSIX, all of
+/// them consequences of PowerShell's own grammar rather than choices:
+///
+/// * inside single quotes, `''` is a literal quote — there is no backslash
+///   escape at all, and a backslash is an ordinary character (which is what
+///   makes `'C:\Windows'` work);
+/// * the escape character outside and inside double quotes is the BACKTICK,
+///   not the backslash;
+/// * `@` and `,` are operators (`@{...}`, `@(...)`, and the comma that builds
+///   an array in `Select-Object Name,Status`).
+#[must_use]
+pub fn powershell_words(input: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut has_word = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if has_word {
+                    words.push(std::mem::take(&mut cur));
+                    has_word = false;
+                }
+            }
+            // Control operators and expansions: not a plain word list.
+            ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '(' | ')' | '{' | '}' | '@' | ','
+            | '$' => return None,
+            // Single quotes: everything literal, `''` is one quote.
+            '\'' => {
+                has_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => {
+                            if chars.peek() == Some(&'\'') {
+                                chars.next();
+                                cur.push('\'');
+                            } else {
+                                break;
+                            }
+                        }
+                        None => return None,
+                        Some(q) => cur.push(q),
+                    }
+                }
+            }
+            // Double quotes: expansions are syntax, backtick escapes.
+            '"' => {
+                has_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('$') => return None,
+                        Some('`') => match chars.next() {
+                            Some(e) => cur.push(e),
+                            None => return None,
+                        },
+                        None => return None,
+                        Some(q) => cur.push(q),
+                    }
+                }
+            }
+            // Backtick quotes the next character, whatever it is.
+            '`' => {
+                has_word = true;
+                match chars.next() {
+                    Some(e) => cur.push(e),
+                    None => return None,
+                }
+            }
+            other => {
+                has_word = true;
+                cur.push(other);
+            }
+        }
+    }
+
+    if has_word {
+        words.push(cur);
+    }
+    Some(words)
+}
+
+/// Scan a `PowerShell` command the way `pwsh` does, separating syntax from
+/// text. The mirror of [`shell_shape`].
+#[must_use]
+pub fn powershell_shape(command: &str) -> Option<ShellShape> {
+    let mut skeleton = String::new();
+    let mut literals = Vec::new();
+    let mut cur = String::new();
+    let mut in_literal = false;
+    let mut chars = command.chars().peekable();
+
+    macro_rules! flush {
+        () => {
+            if in_literal {
+                literals.push(std::mem::take(&mut cur));
+                skeleton.push('\0');
+                in_literal = false;
+            }
+        };
+    }
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_literal = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => {
+                            if chars.peek() == Some(&'\'') {
+                                chars.next();
+                                cur.push('\'');
+                            } else {
+                                break;
+                            }
+                        }
+                        None => return None,
+                        Some(q) => cur.push(q),
+                    }
+                }
+            }
+            '"' => {
+                in_literal = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        // An expansion inside double quotes is syntax.
+                        Some('$') => {
+                            flush!();
+                            skeleton.push('$');
+                        }
+                        Some('`') => match chars.next() {
+                            Some(e) => {
+                                in_literal = true;
+                                cur.push(e);
+                            }
+                            None => return None,
+                        },
+                        None => return None,
+                        Some(q) => cur.push(q),
+                    }
+                }
+            }
+            '`' => match chars.next() {
+                Some(e) => {
+                    in_literal = true;
+                    cur.push(e);
+                }
+                None => return None,
+            },
+            ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '@' | ',' | '$' | '\n'
+            | '\r' | ' ' | '\t' => {
+                flush!();
+                skeleton.push(c);
+            }
+            other => {
+                in_literal = true;
+                cur.push(other);
+            }
+        }
+    }
+    flush!();
+
+    Some(ShellShape {
+        skeleton,
+        literals,
+    })
+}
+
+/// [`assert_survives_as_one_word`], for a `PowerShell` command line.
+///
+/// # Panics
+///
+/// Panics when `command` is not a plain word list, or when no word equals
+/// `needle`.
+pub fn assert_survives_as_one_word_ps(command: &str, needle: &str, context: &str) {
+    let Some(words) = powershell_words(command) else {
+        panic!(
+            "{context}: input {needle:?} produced a PowerShell command carrying \
+             syntax; built: {command:?}"
+        );
+    };
+    assert!(
+        words.iter().any(|w| w == needle),
+        "{context}: input {needle:?} did not survive as one word; \
+         got words {words:?} from {command:?}"
+    );
+}
+
+/// [`assert_same_shell_skeleton`], for a `PowerShell` command line.
+///
+/// # Panics
+///
+/// Panics when either command is unscannable, or when the skeletons differ.
+pub fn assert_same_powershell_skeleton(benign_cmd: &str, hostile_cmd: &str, context: &str) {
+    let (Some(benign), Some(hostile)) = (
+        powershell_shape(benign_cmd),
+        powershell_shape(hostile_cmd),
+    ) else {
+        panic!("{context}: emitted a PowerShell line pwsh cannot parse: {hostile_cmd:?}");
+    };
+    assert_eq!(
+        benign.skeleton, hostile.skeleton,
+        "{context}: the input changed the SHELL SKELETON, so it contributed syntax.\n  \
+         benign : {benign_cmd:?}\n  hostile: {hostile_cmd:?}"
+    );
+}
+
+/// Assert that `needle` reached `command` as TEXT: whole, inside one literal
+/// run, having contributed no shell syntax.
+///
+/// This is [`assert_survives_as_one_word`] generalised to the builders that
+/// emit pipelines, and it is the oracle the twenty command-builder targets
+/// use. Three properties in one comparison:
+///
+/// * the command is scannable at all — an unterminated quote is its own
+///   defect, and no builder should emit one;
+/// * `needle` appears inside a single literal run, so it did not get split by
+///   an operator, a space, or a quote boundary. A builder that pastes
+///   `a; rm -rf /` in bare puts the `;` in the SKELETON and leaves `a` and
+///   `rm` in different runs, so no run can contain the needle;
+/// * and it is `contains`, not equality, on purpose: a value legitimately
+///   lands inside a larger word (`--filter=name=VALUE`, `*VALUE*`), and
+///   demanding a whole word there would be red on healthy code. Nothing is
+///   lost — an operator still splits the run whatever surrounds it.
+///
+/// Refusal is always acceptable: a builder that returns `Err` for a hostile
+/// value never reaches here. The fuzzer is looking for values that get
+/// THROUGH.
+///
+/// # Panics
+///
+/// Panics when `command` cannot be scanned, or when no literal run contains
+/// `needle`.
+pub fn assert_arrives_as_text(command: &str, needle: &str, context: &str) {
+    let Some(shape) = shell_shape(command) else {
+        panic!("{context}: emitted a command line sh cannot parse: {command:?}");
+    };
+    assert!(
+        shape.literals.iter().any(|l| l.contains(needle)),
+        "{context}: input {needle:?} did not arrive as text — no literal run \
+         contains it, so it was split by syntax the caller supplied.\n  \
+         built    : {command:?}\n  skeleton : {:?}\n  literals : {:?}",
+        shape.skeleton,
+        shape.literals
+    );
+}
+
+/// [`assert_arrives_as_text`], for a `PowerShell` command line.
+///
+/// # Panics
+///
+/// Panics when `command` cannot be scanned, or when no literal run contains
+/// `needle`.
+pub fn assert_arrives_as_text_ps(command: &str, needle: &str, context: &str) {
+    let Some(shape) = powershell_shape(command) else {
+        panic!("{context}: emitted a PowerShell line pwsh cannot parse: {command:?}");
+    };
+    assert!(
+        shape.literals.iter().any(|l| l.contains(needle)),
+        "{context}: input {needle:?} did not arrive as text — no literal run \
+         contains it, so it was split by syntax the caller supplied.\n  \
+         built    : {command:?}\n  skeleton : {:?}\n  literals : {:?}",
+        shape.skeleton,
+        shape.literals
+    );
+}
+
+#[cfg(test)]
+mod arrival_tests {
+    use super::*;
+
+    #[test]
+    fn an_escaped_value_arrives_whole() {
+        assert_arrives_as_text("git log --author='a; id' -n 10", "a; id", "posix");
+        assert_arrives_as_text_ps("Get-Service -Name 'a; id' | Format-List", "a; id", "ps");
+    }
+
+    #[test]
+    fn a_value_inside_a_larger_word_still_arrives() {
+        assert_arrives_as_text("docker ps --filter 'name=a; id'", "a; id", "embedded");
+    }
+
+    #[test]
+    fn a_bare_value_is_caught() {
+        let caught = std::panic::catch_unwind(|| {
+            assert_arrives_as_text("git log --author=a; id -n 10", "a; id", "bare");
+        });
+        assert!(caught.is_err(), "a bare operator must fail the oracle");
+        let caught_ps = std::panic::catch_unwind(|| {
+            assert_arrives_as_text_ps("Get-Service -Name a; id", "a; id", "bare");
+        });
+        assert!(caught_ps.is_err(), "a bare operator must fail the PowerShell oracle");
+    }
+
+    /// The PowerShell doubling rule, end to end through the arrival oracle.
+    #[test]
+    fn a_powershell_quote_arrives_whole() {
+        // `shell::escape("it's", PowerShell)` == `'it''s'`
+        assert_arrives_as_text_ps("Get-Service -Name 'it''s'", "it's", "quote");
+    }
+}
+
+#[cfg(test)]
+mod powershell_tests {
+    use super::*;
+
+    /// The rule the whole module exists for: `''` is one literal quote, and
+    /// the POSIX reader gets it wrong.
+    #[test]
+    fn a_doubled_quote_is_one_quote() {
+        // Exactly what `shell::escape(s, ShellType::PowerShell)` emits.
+        assert_eq!(
+            powershell_words("'it''s'").as_deref(),
+            Some(&["it's".to_string()][..])
+        );
+        // And the POSIX reader silently drops it — this is the false positive
+        // that would have been shipped by reusing `shell_words` here.
+        assert_eq!(
+            shell_words("'it''s'").as_deref(),
+            Some(&["its".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn a_trailing_quote_survives() {
+        // `shell::escape("a'", PowerShell)` == `'a'''`
+        assert_eq!(
+            powershell_words("'a'''").as_deref(),
+            Some(&["a'".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn a_backslash_is_an_ordinary_character() {
+        assert_eq!(
+            powershell_words(r"'C:\Windows\Temp'").as_deref(),
+            Some(&[r"C:\Windows\Temp".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn a_bare_operator_is_refused() {
+        assert!(powershell_words("Get-Service | Format-List").is_none());
+        assert!(powershell_words("Stop-Service -Name x; id").is_none());
+        assert!(powershell_words("echo $(id)").is_none());
+        assert!(powershell_words("Select-Object Name,Status").is_none());
+        assert!(powershell_words("@{a=1}").is_none());
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_refused() {
+        assert!(powershell_words("Get-Service 'oops").is_none());
+        assert!(powershell_words("Get-Service \"oops").is_none());
+        assert!(powershell_words("Get-Service `").is_none());
+    }
+
+    #[test]
+    fn a_pipeline_keeps_its_own_operators() {
+        let shape =
+            powershell_shape("Get-Service -Name 'x' | Select-Object Name,Status").unwrap();
+        assert_eq!(shape.skeleton, "\0 \0 \0 | \0 \0,\0");
+        assert_eq!(
+            shape.literals,
+            vec!["Get-Service", "-Name", "x", "Select-Object", "Name", "Status"]
+        );
+    }
+
+    /// A hostile value stays inside its quotes and moves nothing.
+    #[test]
+    fn a_quoted_hostile_value_does_not_change_the_skeleton() {
+        assert_same_powershell_skeleton(
+            "Stop-Service -Name 'safe' -Force",
+            "Stop-Service -Name '; Remove-Item C:\\ -Recurse' -Force",
+            "quoted",
+        );
+    }
+
+    /// And an unquoted one must.
+    #[test]
+    fn an_unquoted_hostile_value_does_change_the_skeleton() {
+        let caught = std::panic::catch_unwind(|| {
+            assert_same_powershell_skeleton(
+                "Stop-Service -Name safe",
+                "Stop-Service -Name ; Remove-Item C:\\",
+                "bare",
+            );
+        });
+        assert!(caught.is_err(), "a bare operator must move the skeleton");
+    }
+
+    #[test]
+    fn one_word_survival_is_detected_both_ways() {
+        assert_survives_as_one_word_ps("Get-Service -Name 'eth0'", "eth0", "ok");
+        let leaked = std::panic::catch_unwind(|| {
+            assert_survives_as_one_word_ps("Get-Service -Name eth0; id", "eth0; id", "leak");
+        });
+        assert!(leaked.is_err(), "a bare operator must fail the oracle");
     }
 }

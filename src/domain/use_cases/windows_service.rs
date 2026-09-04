@@ -143,9 +143,21 @@ impl WindowsServiceCommandBuilder {
     #[must_use]
     pub fn build_config_command(name: &str) -> String {
         let escaped = ps_escape(name);
-        // For the WMI filter, we need the raw name inside the CIM filter string.
-        // We escape single quotes by doubling them to prevent injection in the
-        // WMI filter clause.
+        // PRECONDITION: `name` has passed [`validate_service_name`]. Every
+        // caller in this crate does that first, and this builder is not safe
+        // without it.
+        //
+        // The doubling below is NOT sufficient on its own, and the comment it
+        // replaces claimed otherwise ("escape single quotes by doubling them
+        // to prevent injection in the WMI filter clause"). The WMI filter sits
+        // inside a PowerShell DOUBLE-quoted string, so a name carrying `"`
+        // closes that string before WMI ever sees the value, and `$` or a
+        // backtick would be expanded there. Doubling quotes addresses neither.
+        // `validate_service_name` refuses all of them, which is what actually
+        // holds this position.
+        //
+        // Found by `fuzz_windows_service_builder` on `S%3W3\"%3`, running the
+        // builder directly; unreachable through the handlers.
         let wmi_safe = name.replace('\'', "''");
         format!(
             "Get-Service -Name {escaped} | Select-Object *; \

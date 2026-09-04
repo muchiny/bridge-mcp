@@ -74,9 +74,7 @@ impl StandardTool for AdUserListTool {
         crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshAdUserListArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(ActiveDirectoryCommandBuilder::build_user_list_command(
-            args.filter.as_deref(),
-        ))
+        ActiveDirectoryCommandBuilder::build_user_list_command(args.filter.as_deref())
     }
 
     fn post_process(
@@ -262,7 +260,44 @@ mod tests {
         let args: SshAdUserListArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = AdUserListTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        // Was `assert!(!cmd.is_empty())`, which `cargo mutants` walked
+        // straight through: `Ok("xyzzy".into())` is not empty either, so
+        // nothing proved this handler reaches the real builder at all.
+        // That matters more than a score here -- `build_command` is the
+        // only place the filter validation is wired to the tool.
+        assert!(cmd.starts_with("Get-ADUser -Filter *"), "{cmd}");
+        assert!(cmd.contains("Sort-Object SamAccountName"), "{cmd}");
+    }
+
+    /// The filter reaches `build_user_list_command`, which validates it.
+    ///
+    /// Before the fix the filter was `ps_escape`d into a PowerShell
+    /// DOUBLE-quoted string, where `$` and the backtick are expanded and
+    /// the single quotes are inert -- so `$(...)` in a filter was evaluated
+    /// by the remote shell. This handler was the one AD tool that never
+    /// called `validate_ad_identity`; its two siblings did.
+    #[test]
+    fn test_build_command_refuses_a_hostile_filter() {
+        let host = test_host_config();
+        for hostile in ["$(hostname)", "a'b", "x\"y", "`n"] {
+            let args: SshAdUserListArgs =
+                serde_json::from_value(json!({"host": "s", "filter": hostile})).unwrap();
+            assert!(
+                AdUserListTool::build_command(&args, &host).is_err(),
+                "filter {hostile:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_command_accepts_a_plain_filter() {
+        let host = test_host_config();
+        let args: SshAdUserListArgs =
+            serde_json::from_value(json!({"host": "s", "filter": "john.doe"})).unwrap();
+        let cmd = AdUserListTool::build_command(&args, &host).unwrap();
+        // One pair of quotes, not two: the template quotes the value and
+        // the builder no longer adds a second pair of its own.
+        assert!(cmd.contains("Name -like '*john.doe*'"), "{cmd}");
     }
 
     #[test]
