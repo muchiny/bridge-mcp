@@ -49,22 +49,51 @@ impl ActiveDirectoryCommandBuilder {
     ///
     /// If `filter` is provided, constructs a `Name -like '*{filter}*'` filter.
     /// Otherwise, lists all users.
-    #[must_use]
-    pub fn build_user_list_command(filter: Option<&str>) -> String {
+    ///
+    /// The filter goes through [`validate_ad_identity`], like every other
+    /// caller-supplied identity in this module, and is then interpolated RAW.
+    ///
+    /// It used to be interpolated as `ps_escape(f)` instead, and that was an
+    /// injection rather than a defence. `ps_escape` produces a single-quoted
+    /// PowerShell string, but this template drops it INSIDE A DOUBLE-QUOTED
+    /// one — and PowerShell expands `$name` and `$(...)` inside double
+    /// quotes. The single quotes were inert characters, so a filter of
+    /// `$(Get-Content C:\secret)` was substituted by the remote shell before
+    /// `Get-ADUser` ever saw it. `ps_escape` doubles quotes and touches
+    /// neither `$` nor the backtick, because it is written for the
+    /// single-quoted context its two sibling builders use
+    /// (`-Identity {ps_escape(user)}`), where those characters are literal.
+    ///
+    /// The nesting was also wrong for benign input: the template already
+    /// quotes the value (`'*{}*'`), so `bob` became `'*'bob'*'` — stray quotes
+    /// inside the AD filter. Validating instead of escaping fixes both, and
+    /// matches `ssh_ad_user_info` and `ssh_ad_group_members`, which already
+    /// called `validate_ad_identity`. `ssh_ad_user_list` did not — the same
+    /// one-place-missing-the-guard shape as the `Host *` defect in #177 — so
+    /// the check lives HERE, in the one function that builds the command,
+    /// rather than being added to the one handler that forgot it.
+    ///
+    /// Found by `fuzz_active_directory_builder`, on the input `$`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] if the filter is not a valid AD
+    /// identity.
+    pub fn build_user_list_command(filter: Option<&str>) -> Result<String> {
         if let Some(f) = filter {
-            format!(
-                "Get-ADUser -Filter \"Name -like '*{}*'\" \
+            validate_ad_identity(f)?;
+            Ok(format!(
+                "Get-ADUser -Filter \"Name -like '*{f}*'\" \
                  -Properties DisplayName,Enabled,LastLogonDate | \
                  Select-Object SamAccountName,DisplayName,Enabled,LastLogonDate | \
-                 Sort-Object SamAccountName | Format-Table -AutoSize",
-                ps_escape(f)
-            )
+                 Sort-Object SamAccountName | Format-Table -AutoSize"
+            ))
         } else {
-            "Get-ADUser -Filter * \
+            Ok("Get-ADUser -Filter * \
              -Properties DisplayName,Enabled,LastLogonDate | \
              Select-Object SamAccountName,DisplayName,Enabled,LastLogonDate | \
              Sort-Object SamAccountName | Format-Table -AutoSize"
-                .to_string()
+                .to_string())
         }
     }
 
@@ -206,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_user_list_no_filter() {
-        let cmd = ActiveDirectoryCommandBuilder::build_user_list_command(None);
+        let cmd = ActiveDirectoryCommandBuilder::build_user_list_command(None).unwrap();
         assert!(cmd.starts_with("Get-ADUser -Filter *"));
         assert!(cmd.contains("DisplayName,Enabled,LastLogonDate"));
         assert!(cmd.contains("Select-Object SamAccountName,DisplayName,Enabled,LastLogonDate"));
@@ -216,8 +245,12 @@ mod tests {
 
     #[test]
     fn test_user_list_with_filter() {
-        let cmd = ActiveDirectoryCommandBuilder::build_user_list_command(Some("john"));
-        assert!(cmd.contains("Name -like '*'john'*'"));
+        let cmd = ActiveDirectoryCommandBuilder::build_user_list_command(Some("john")).unwrap();
+        // No stray quotes. This used to assert `Name -like '*'john'*'` --
+        // the template already quotes the value and `ps_escape` added a
+        // second pair, so the AD filter carried quotes nobody meant to
+        // send. The test encoded the defect as the expectation.
+        assert!(cmd.contains("Name -like '*john*'"), "{cmd}");
         assert!(cmd.contains("DisplayName,Enabled,LastLogonDate"));
         assert!(cmd.contains("Sort-Object SamAccountName"));
         assert!(cmd.contains("Format-Table -AutoSize"));
@@ -225,9 +258,32 @@ mod tests {
 
     #[test]
     fn test_user_list_filter_with_special_chars() {
-        let cmd = ActiveDirectoryCommandBuilder::build_user_list_command(Some("it's"));
-        // PowerShell escaping doubles single quotes
-        assert!(cmd.contains("'it''s'"));
+        // Was: "PowerShell escaping doubles single quotes", asserting
+        // `'it''s'` came through. Doubling is the correct escape for a
+        // SINGLE-quoted context; this template is double-quoted, where
+        // those quotes are inert characters. A quote is refused now.
+        assert!(ActiveDirectoryCommandBuilder::build_user_list_command(Some("it's")).is_err());
+    }
+
+    /// The input `fuzz_active_directory_builder` failed on, and the reason
+    /// the builder changed: inside PowerShell DOUBLE quotes, `$` is live.
+    /// `ps_escape` doubles quotes and touches neither `$` nor the backtick,
+    /// so the filter reached the remote shell as an expression to evaluate.
+    #[test]
+    fn test_user_list_filter_refuses_powershell_expansion() {
+        for hostile in [
+            "$",
+            "$(Get-Content C:\\secret)",
+            "$env:USERNAME",
+            "`n",
+            "a\"b",
+        ] {
+            assert!(
+                ActiveDirectoryCommandBuilder::build_user_list_command(Some(hostile)).is_err(),
+                "filter {hostile:?} must be refused: it lands inside a \
+                 double-quoted PowerShell string, where the shell expands it"
+            );
+        }
     }
 
     // ── build_user_info_command ──────────────────────────────────────
@@ -327,10 +383,12 @@ mod tests {
 
     #[test]
     fn test_user_list_filter_injection() {
-        let cmd =
-            ActiveDirectoryCommandBuilder::build_user_list_command(Some("'; Remove-Item *; '"));
-        // Single quotes are doubled by PowerShell escaping
-        assert!(cmd.contains("'''; Remove-Item *; '''"));
+        // Was: assert the quotes came back doubled, as though that were
+        // the defence. It was not -- see `build_user_list_command`.
+        assert!(
+            ActiveDirectoryCommandBuilder::build_user_list_command(Some("'; Remove-Item *; '"))
+                .is_err()
+        );
     }
 
     // ── Edge Cases ───────────────────────────────────────────────────
@@ -376,7 +434,9 @@ mod tests {
 
     #[test]
     fn test_user_list_empty_filter() {
-        let cmd = ActiveDirectoryCommandBuilder::build_user_list_command(Some(""));
-        assert!(cmd.contains("Name -like '*''*'"));
+        // `validate_ad_identity` refuses an empty identity, and an empty
+        // filter means `Name -like '**'` -- every user, which the `None`
+        // branch already says honestly.
+        assert!(ActiveDirectoryCommandBuilder::build_user_list_command(Some("")).is_err());
     }
 }

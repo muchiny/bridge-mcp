@@ -173,6 +173,42 @@ jobs:
             fuzz_resource_uri"
           DICT_ARG="-dict=fuzz/dicts/shell.dict"
 
+          # The shell dictionary, DECOUPLED from the 300s tier.
+          #
+          # It used to be welded to `BUILDER_TARGETS`: a target could only get
+          # the tokens by also getting 300 seconds. That coupling is what made
+          # the twenty remaining command builders unaffordable — 20 x 270s is
+          # +90 minutes on a phase already at 69 of the job's 120, so 159
+          # minutes and over the cap.
+          #
+          # Measured, and the comment above says it first: "the tokens are
+          # what makes the difference, not the wall clock". So these twenty
+          # take the dictionary at the 60s security tier instead: +10 minutes,
+          # 79 total, 41 to spare. If one of them starts finding things and
+          # deserves 300s, promote it into BUILDER_TARGETS one at a time and
+          # re-do this arithmetic — the file already warns that twenty at once
+          # is not affordable without raising `timeout-minutes`.
+          DICT_ONLY_TARGETS="fuzz_active_directory_builder \
+            fuzz_ansible_command_builder \
+            fuzz_certificate_command_builder \
+            fuzz_cron_command_builder \
+            fuzz_db_command_builder \
+            fuzz_docker_command_builder \
+            fuzz_git_command_builder \
+            fuzz_helm_command_builder \
+            fuzz_hyperv_builder \
+            fuzz_iis_builder \
+            fuzz_k8s_command_builder \
+            fuzz_redis_command_builder \
+            fuzz_scheduled_task_builder \
+            fuzz_systemd_command_builder \
+            fuzz_terraform_command_builder \
+            fuzz_vault_command_builder \
+            fuzz_windows_event_builder \
+            fuzz_windows_firewall_builder \
+            fuzz_windows_registry_builder \
+            fuzz_windows_service_builder"
+
           # The confirmation prompt's integrity is a MARKDOWN property, not a
           # shell one: what must never happen is the content closing the fence
           # it is inside. shell.dict carries a lone backtick and nothing else
@@ -196,6 +232,7 @@ jobs:
             # silently discarded and never filed an issue.
             DICT=""
             if echo "$BUILDER_TARGETS" | grep -qw "$SPECIFIC_TARGET"; then DICT="$DICT_ARG"; fi
+            if echo "$DICT_ONLY_TARGETS" | grep -qw "$SPECIFIC_TARGET"; then DICT="$DICT_ARG"; fi
             if echo "$MARKDOWN_TARGETS" | grep -qw "$SPECIFIC_TARGET"; then DICT="$MD_DICT_ARG"; fi
             # shellcheck disable=SC2086 # DICT is one flag or empty, deliberately unquoted
             cargo +nightly fuzz run "$SPECIFIC_TARGET" -- $DICT -max_total_time="$DEFAULT_DURATION" 2>&1 || {
@@ -209,6 +246,10 @@ jobs:
               DICT=""
               if echo "$SECURITY_TARGETS" | grep -qw "$target"; then
                 DURATION=60
+              fi
+              if echo "$DICT_ONLY_TARGETS" | grep -qw "$target"; then
+                DURATION=60
+                DICT="$DICT_ARG"
               fi
               if echo "$BUILDER_TARGETS" | grep -qw "$target"; then
                 DURATION=300

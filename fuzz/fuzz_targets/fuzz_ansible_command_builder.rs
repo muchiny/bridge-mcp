@@ -2,8 +2,30 @@
 
 use std::collections::HashMap;
 
+use bridge_mcp_fuzz::assert_arrives_as_text;
 use libfuzzer_sys::fuzz_target;
 use bridge_mcp::AnsibleCommandBuilder;
+
+// This target used to assert only the PROGRAM NAME: `assert!(cmd.contains(
+// "--list"))`. That is a string the builder writes itself, in every branch,
+// whatever the caller passed — so NO INPUT COULD EVER FAIL IT. A builder that
+// pastes `data` into the command line in bare does not panic and does not drop
+// the program name; it produces a dangerous command and the target stays
+// green. An echo, not a property.
+//
+// What it asserts now: whatever the builder ACCEPTED arrives in the command as
+// TEXT — inside one literal run, having contributed no shell syntax. Refusal
+// is always fine; the fuzzer is looking for values that get THROUGH.
+//
+// `assert_arrives_as_text` rather than `assert_survives_as_one_word`: these
+// builders emit pipelines and `&&` chains of their own, and an oracle that
+// refuses every operator would be red on healthy code. It is `contains` on the
+// literal run rather than equality because a value legitimately lands inside a
+// larger word (`--filter=name=VALUE`); an operator still splits the run either
+// way, which is what the assertion is for.
+//
+// Run with the dictionary or this explores very little:
+// `cargo +nightly fuzz run fuzz_ansible_command_builder -- -dict=fuzz/dicts/shell.dict`
 
 fuzz_target!(|data: &str| {
     // Fuzz all 3 AnsibleCommandBuilder methods with arbitrary strings.
@@ -30,8 +52,7 @@ fuzz_target!(|data: &str| {
         Some(data),          // vault_password_file
         Some(data),          // vault_id
     );
-    assert!(cmd.contains("ansible-playbook"),
-        "playbook must contain 'ansible-playbook': {cmd}");
+    assert_arrives_as_text(&cmd, data, "playbook");
 
     // 2. build_inventory_command
     let cmd = AnsibleCommandBuilder::build_inventory_command(
@@ -43,8 +64,7 @@ fuzz_target!(|data: &str| {
         true,       // yaml
         true,       // vars
     );
-    assert!(cmd.contains("ansible-inventory"),
-        "inventory must contain 'ansible-inventory': {cmd}");
+    assert_arrives_as_text(&cmd, data, "inventory");
 
     // Test default action (no list/graph/host)
     let cmd = AnsibleCommandBuilder::build_inventory_command(
@@ -75,6 +95,5 @@ fuzz_target!(|data: &str| {
     let cmd = AnsibleCommandBuilder::build_adhoc_command(
         data, "ping", None, None, false, None, None, None, None, false, None, None,
     );
-    assert!(cmd.contains("-m 'ping'"),
-        "adhoc ping must contain -m 'ping'");
+    assert_arrives_as_text(&cmd, data, "adhoc ping");
 });

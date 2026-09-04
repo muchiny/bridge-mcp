@@ -1,7 +1,29 @@
 #![no_main]
 
+use bridge_mcp_fuzz::assert_arrives_as_text;
 use libfuzzer_sys::fuzz_target;
 use bridge_mcp::KubernetesCommandBuilder;
+
+// This target used to assert only the PROGRAM NAME: `assert!(cmd.contains(
+// "the program name"))`. That is a string the builder writes itself, in every branch,
+// whatever the caller passed — so NO INPUT COULD EVER FAIL IT. A builder that
+// pastes `data` into the command line in bare does not panic and does not drop
+// the program name; it produces a dangerous command and the target stays
+// green. An echo, not a property.
+//
+// What it asserts now: whatever the builder ACCEPTED arrives in the command as
+// TEXT — inside one literal run, having contributed no shell syntax. Refusal
+// is always fine; the fuzzer is looking for values that get THROUGH.
+//
+// `assert_arrives_as_text` rather than `assert_survives_as_one_word`: these
+// builders emit pipelines and `&&` chains of their own, and an oracle that
+// refuses every operator would be red on healthy code. It is `contains` on the
+// literal run rather than equality because a value legitimately lands inside a
+// larger word (`--filter=name=VALUE`); an operator still splits the run either
+// way, which is what the assertion is for.
+//
+// Run with the dictionary or this explores very little:
+// `cargo +nightly fuzz run fuzz_k8s_command_builder -- -dict=fuzz/dicts/shell.dict`
 
 fuzz_target!(|data: &str| {
     // Fuzz all 9 KubernetesCommandBuilder methods with arbitrary strings.
@@ -24,7 +46,7 @@ fuzz_target!(|data: &str| {
         false,        // show_kind
         None,         // chunk_size
     );
-    assert!(cmd.contains("kubectl"), "get must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "get");
 
     // 2. build_logs_command
     let cmd = KubernetesCommandBuilder::build_logs_command(
@@ -42,7 +64,7 @@ fuzz_target!(|data: &str| {
         false,        // prefix
         None,         // since_time
     );
-    assert!(cmd.contains("kubectl"), "logs must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "logs");
 
     // 3. build_describe_command
     let cmd = KubernetesCommandBuilder::build_describe_command(
@@ -53,7 +75,7 @@ fuzz_target!(|data: &str| {
         None,       // label_selector
         false,      // all_namespaces
     );
-    assert!(cmd.contains("kubectl"), "describe must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "describe");
 
     // 4. build_apply_command
     let cmd = KubernetesCommandBuilder::build_apply_command(
@@ -64,7 +86,7 @@ fuzz_target!(|data: &str| {
         true,       // force
         true,       // server_side
     );
-    assert!(cmd.contains("kubectl"), "apply must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "apply");
 
     // 5. build_delete_command
     let cmd = KubernetesCommandBuilder::build_delete_command(
@@ -79,7 +101,7 @@ fuzz_target!(|data: &str| {
         false,      // all
         None,       // field_selector
     );
-    assert!(cmd.contains("kubectl"), "delete must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "delete");
 
     // 6. build_rollout_command
     let cmd = KubernetesCommandBuilder::build_rollout_command(
@@ -92,7 +114,7 @@ fuzz_target!(|data: &str| {
         None,       // timeout
         None,       // label_selector
     );
-    assert!(cmd.contains("kubectl"), "rollout must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "rollout");
 
     // 7. build_scale_command
     let cmd = KubernetesCommandBuilder::build_scale_command(
@@ -101,7 +123,7 @@ fuzz_target!(|data: &str| {
         3,          // replicas
         Some(data), // namespace
     );
-    assert!(cmd.contains("kubectl"), "scale must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "scale");
 
     // 8. build_exec_command
     let cmd = KubernetesCommandBuilder::build_exec_command(
@@ -113,7 +135,7 @@ fuzz_target!(|data: &str| {
         None,       // argv
         false,      // stdin
     );
-    assert!(cmd.contains("kubectl"), "exec must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "exec");
 
     // 9. build_top_command
     let cmd = KubernetesCommandBuilder::build_top_command(
@@ -124,12 +146,11 @@ fuzz_target!(|data: &str| {
         Some(data), // sort_by
         true,       // containers
     );
-    assert!(cmd.contains("kubectl"), "top must contain 'kubectl': {cmd}");
+    assert_arrives_as_text(&cmd, data, "top");
 
     // Also test with auto-detect (None kubectl_bin)
     let cmd = KubernetesCommandBuilder::build_get_command(
         None, data, None, None, false, None, None, None, None, false, false, false, None,
     );
-    assert!(cmd.contains("kubectl") || cmd.contains("k3s") || cmd.contains("microk8s"),
-        "auto-detect must reference kubectl/k3s/microk8s");
+    assert_arrives_as_text(&cmd, data, "auto-detect");
 });
