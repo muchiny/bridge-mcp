@@ -283,6 +283,13 @@ role and the AD cmdlets, absent on that server.
   already present. The command now runs `New-Item -Force | Out-Null` first,
   which is idempotent on an existing key and matches what `reg add` does.
 
+- **`ssh_win_update_search` failed on every query.** `Get-WindowsUpdate
+  -Title` takes a regex, not a glob; the `*query*` wrapper produced
+  `*Security*`, which the .NET engine rejects outright — `Quantifier {x,y}
+  following nothing`. Regex metacharacters in the query are now escaped and
+  the pattern is wrapped in `.*`, so a query still matches anywhere in the
+  title.
+
 ## [3.0.0] - 2026-08-26
 
 **bridge-mcp is now a Modern-only MCP server.** It speaks MCP revision
