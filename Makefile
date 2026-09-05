@@ -142,13 +142,18 @@ clean:
 # leaves whatever mode was already there, so a previously-installed binary with
 # a wrong mode silently keeps it. install(1) replaces the file atomically and
 # sets the mode explicitly.
+#
+# The two checks run against target/release/bridge-mcp BEFORE the copy, not
+# against the installed one after it. Checking afterwards still overwrote a
+# working deployment with the broken build and only then failed the recipe, so
+# the "FAIL" left the user worse off than not running the target at all.
 install: release
 	@mkdir -p ~/.local/bin
+	@target/release/bridge-mcp validate >/dev/null 2>&1 \
+		|| { echo "install: FAIL - fresh binary cannot load the local config (missing winrm/psrp feature?); nothing installed"; exit 1; }
+	@target/release/bridge-mcp describe-tool ssh_k8s_get 2>/dev/null | grep -q jq_filter \
+		|| { echo "install: FAIL - fresh binary does not advertise jq_filter (missing jq feature?); nothing installed"; exit 1; }
 	install -m 0755 target/release/bridge-mcp ~/.local/bin/bridge-mcp
-	@~/.local/bin/bridge-mcp validate >/dev/null 2>&1 \
-		|| { echo "install: FAIL - installed binary cannot load the local config (missing winrm/psrp feature?)"; exit 1; }
-	@~/.local/bin/bridge-mcp describe-tool ssh_k8s_get 2>/dev/null | grep -q jq_filter \
-		|| { echo "install: FAIL - installed binary does not advertise jq_filter (missing jq feature?)"; exit 1; }
 	@echo "install: OK - $$(~/.local/bin/bridge-mcp --version)"
 
 # Behavioural fingerprint probes: does the INSTALLED binary actually contain
