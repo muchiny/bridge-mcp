@@ -71,6 +71,7 @@ pub struct Sanitizer {
 struct SanitizePattern {
     regex: Regex,
     replacement: String,
+    secret_group: Option<usize>,
 }
 
 /// Pattern definition for easier initialization
@@ -80,6 +81,32 @@ struct PatternDef {
     description: &'static str,
     /// Category for filtering (e.g., "github", "aws", "generic")
     category: &'static str,
+    /// Capture group that holds the candidate secret. `None` replaces on
+    /// every match (strong keys such as `password=`); `Some(n)` replaces
+    /// only when [`plausible_secret`] accepts group `n` (weak keys such as
+    /// `secret:` / `token:`, where `secret: {`, `credential: 5` and
+    /// `secretName: tls` are the common false positives).
+    secret_group: Option<usize>,
+}
+
+/// Does a captured value look like a secret, rather than structure, an id,
+/// a word or a literal? Mirrors gitleaks' `generic-api-key` constraints: a
+/// minimum length, and a letters-only allowlist (`_ . -` count as letters,
+/// so identifiers such as `argocd-repo-server-tls` or `deploy-key.pem` pass
+/// through), plus digits-only (ids, ports) and boolean/null literals.
+pub(crate) fn plausible_secret(candidate: &str) -> bool {
+    let s = candidate.trim_matches(|c| c == '"' || c == '\'');
+    if s.len() < 8 {
+        return false;
+    }
+    if matches!(s, "true" | "false" | "null" | "None" | "none" | "nil") {
+        return false;
+    }
+    let letters_only = s
+        .chars()
+        .all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '.' | '-'));
+    let digits_only = s.chars().all(|c| c.is_ascii_digit());
+    !(letters_only || digits_only)
 }
 
 impl Sanitizer {
@@ -237,6 +264,7 @@ impl Sanitizer {
                     patterns.push(SanitizePattern {
                         regex,
                         replacement: def.replacement.to_string(),
+                        secret_group: def.secret_group,
                     });
                 }
                 Err(e) => {
@@ -266,6 +294,7 @@ impl Sanitizer {
                     patterns.push(SanitizePattern {
                         regex,
                         replacement: custom_pattern.replacement.clone(),
+                        secret_group: None,
                     });
                     debug!(
                         pattern = %custom_pattern.pattern,
@@ -462,36 +491,42 @@ impl Sanitizer {
                 replacement: "[GITHUB_PAT_REDACTED]",
                 description: "GitHub Personal Access Token",
                 category: "github",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"gho_[A-Za-z0-9]{36}",
                 replacement: "[GITHUB_OAUTH_TOKEN_REDACTED]",
                 description: "GitHub OAuth Token",
                 category: "github",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"ghu_[A-Za-z0-9]{36}",
                 replacement: "[GITHUB_USER_TOKEN_REDACTED]",
                 description: "GitHub User-to-Server Token",
                 category: "github",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"ghs_[A-Za-z0-9]{36}",
                 replacement: "[GITHUB_SERVER_TOKEN_REDACTED]",
                 description: "GitHub Server-to-Server Token",
                 category: "github",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"ghr_[A-Za-z0-9]{36}",
                 replacement: "[GITHUB_REFRESH_TOKEN_REDACTED]",
                 description: "GitHub Refresh Token",
                 category: "github",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
                 replacement: "[GITHUB_FINE_GRAINED_PAT_REDACTED]",
                 description: "GitHub Fine-grained PAT",
                 category: "github",
+                secret_group: None,
             },
             // GitLab
             PatternDef {
@@ -499,6 +534,7 @@ impl Sanitizer {
                 replacement: "[GITLAB_PAT_REDACTED]",
                 description: "GitLab Personal Access Token",
                 category: "gitlab",
+                secret_group: None,
             },
             // Slack tokens
             PatternDef {
@@ -506,12 +542,14 @@ impl Sanitizer {
                 replacement: "[SLACK_TOKEN_REDACTED]",
                 description: "Slack token",
                 category: "slack",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
                 replacement: "[SLACK_WEBHOOK_REDACTED]",
                 description: "Slack webhook URL",
                 category: "slack",
+                secret_group: None,
             },
             // Discord
             PatternDef {
@@ -519,6 +557,7 @@ impl Sanitizer {
                 replacement: "[DISCORD_WEBHOOK_REDACTED]",
                 description: "Discord webhook URL",
                 category: "discord",
+                secret_group: None,
             },
             // OpenAI
             PatternDef {
@@ -526,6 +565,7 @@ impl Sanitizer {
                 replacement: "[OPENAI_API_KEY_REDACTED]",
                 description: "OpenAI API Key",
                 category: "openai",
+                secret_group: None,
             },
             // AWS Access Key ID (specific format AKIA...)
             PatternDef {
@@ -533,6 +573,7 @@ impl Sanitizer {
                 replacement: "[AWS_ACCESS_KEY_REDACTED]",
                 description: "AWS Access Key ID",
                 category: "aws",
+                secret_group: None,
             },
             // K3s tokens
             PatternDef {
@@ -540,12 +581,14 @@ impl Sanitizer {
                 replacement: "[K3S_TOKEN_REDACTED]",
                 description: "K3s server token",
                 category: "k3s",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"K[0-9a-f]{10,}::[a-z]+:[A-Za-z0-9]+",
                 replacement: "[K3S_NODE_TOKEN_REDACTED]",
                 description: "K3s node token",
                 category: "k3s",
+                secret_group: None,
             },
             // JWT tokens (generic format eyJ...)
             PatternDef {
@@ -553,6 +596,7 @@ impl Sanitizer {
                 replacement: "[JWT_TOKEN_REDACTED]",
                 description: "Generic JWT token",
                 category: "jwt",
+                secret_group: None,
             },
             // Opaque (non-JWT) Authorization: Bearer tokens.
             // MUST come AFTER the JWT pattern above: the engine applies matched
@@ -570,6 +614,7 @@ impl Sanitizer {
                 replacement: "Bearer [BEARER_TOKEN_REDACTED]",
                 description: "Opaque Authorization Bearer token",
                 category: "generic",
+                secret_group: None,
             },
             // Authorization: Basic <base64(user:pass)> — anchored on the
             // header name to avoid matching prose like "basic understanding"
@@ -579,6 +624,7 @@ impl Sanitizer {
                 replacement: "Authorization: Basic [BASIC_AUTH_REDACTED]",
                 description: "HTTP Basic Authorization header",
                 category: "generic",
+                secret_group: None,
             },
             // Anthropic API keys (specific prefix sk-ant-*)
             PatternDef {
@@ -586,6 +632,7 @@ impl Sanitizer {
                 replacement: "[ANTHROPIC_API_KEY_REDACTED]",
                 description: "Anthropic API Key",
                 category: "openai",
+                secret_group: None,
             },
             // Stripe keys
             PatternDef {
@@ -593,18 +640,21 @@ impl Sanitizer {
                 replacement: "[STRIPE_SECRET_KEY_REDACTED]",
                 description: "Stripe Secret Key",
                 category: "generic",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"pk_live_[A-Za-z0-9]{24,}",
                 replacement: "[STRIPE_PUBLISHABLE_KEY_REDACTED]",
                 description: "Stripe Publishable Key",
                 category: "generic",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"rk_live_[A-Za-z0-9]{24,}",
                 replacement: "[STRIPE_RESTRICTED_KEY_REDACTED]",
                 description: "Stripe Restricted Key",
                 category: "generic",
+                secret_group: None,
             },
             // npm tokens (specific prefix npm_)
             PatternDef {
@@ -612,6 +662,7 @@ impl Sanitizer {
                 replacement: "[NPM_TOKEN_REDACTED]",
                 description: "npm Access Token",
                 category: "generic",
+                secret_group: None,
             },
             // PyPI tokens (specific prefix pypi-)
             PatternDef {
@@ -619,6 +670,7 @@ impl Sanitizer {
                 replacement: "[PYPI_TOKEN_REDACTED]",
                 description: "PyPI API Token",
                 category: "generic",
+                secret_group: None,
             },
             // NVIDIA API Key
             PatternDef {
@@ -626,6 +678,7 @@ impl Sanitizer {
                 replacement: "[NVIDIA_API_KEY_REDACTED]",
                 description: "NVIDIA API Key",
                 category: "openai",
+                secret_group: None,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 2: CERTIFICATES & KEYS (multi-line patterns)
@@ -635,24 +688,28 @@ impl Sanitizer {
                 replacement: "[PRIVATE_KEY_REDACTED]",
                 description: "RSA Private Key",
                 category: "certificates",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"-----BEGIN\s+OPENSSH\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+OPENSSH\s+PRIVATE\s+KEY-----",
                 replacement: "[OPENSSH_PRIVATE_KEY_REDACTED]",
                 description: "OpenSSH Private Key",
                 category: "certificates",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"-----BEGIN\s+EC\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+EC\s+PRIVATE\s+KEY-----",
                 replacement: "[EC_PRIVATE_KEY_REDACTED]",
                 description: "EC Private Key",
                 category: "certificates",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----[\s\S]*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----",
                 replacement: "[PGP_PRIVATE_KEY_REDACTED]",
                 description: "PGP Private Key",
                 category: "certificates",
+                secret_group: None,
             },
             // PKCS#8 Private Key (generic, covers DSA, ECDSA, Ed25519, etc.)
             PatternDef {
@@ -660,6 +717,7 @@ impl Sanitizer {
                 replacement: "[PKCS8_PRIVATE_KEY_REDACTED]",
                 description: "PKCS#8 Private Key",
                 category: "certificates",
+                secret_group: None,
             },
             // Ansible Vault encrypted content
             PatternDef {
@@ -667,6 +725,7 @@ impl Sanitizer {
                 replacement: "[ANSIBLE_VAULT_ENCRYPTED_REDACTED]",
                 description: "Ansible Vault encrypted content",
                 category: "ansible",
+                secret_group: None,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 3: TOOL-SPECIFIC PATTERNS (Kubeconfig, Docker, etc.)
@@ -678,18 +737,21 @@ impl Sanitizer {
                 replacement: "client-certificate-data: [REDACTED]",
                 description: "Kubeconfig client certificate",
                 category: "kubeconfig",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)client-key-data:\s*[A-Za-z0-9+/=]+",
                 replacement: "client-key-data: [REDACTED]",
                 description: "Kubeconfig client key",
                 category: "kubeconfig",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)certificate-authority-data:\s*[A-Za-z0-9+/=]+",
                 replacement: "certificate-authority-data: [REDACTED]",
                 description: "Kubeconfig CA certificate",
                 category: "kubeconfig",
+                secret_group: None,
             },
             // Docker
             PatternDef {
@@ -697,12 +759,14 @@ impl Sanitizer {
                 replacement: r#""auth": "[REDACTED]""#,
                 description: "Docker config auth",
                 category: "docker",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r#"(?i)docker\s+login\s+[^\n]*-p\s*['"]?[^\s'"]+['"]?"#,
                 replacement: "docker login [CREDENTIALS REDACTED]",
                 description: "Docker login command with password",
                 category: "docker",
+                secret_group: None,
             },
             // Database connection strings
             PatternDef {
@@ -710,6 +774,7 @@ impl Sanitizer {
                 replacement: "$1://[CREDENTIALS]@",
                 description: "Database connection strings",
                 category: "database",
+                secret_group: None,
             },
             // Generic scheme://user:password@ — covers git clone over HTTPS,
             // webhook URLs, any non-DB scheme (audit 2026-07-05 finding 6).
@@ -719,6 +784,7 @@ impl Sanitizer {
                 replacement: "$1://$2:[REDACTED]@",
                 description: "Generic URL embedded credentials",
                 category: "generic",
+                secret_group: None,
             },
             // Terraform sensitive values
             PatternDef {
@@ -726,6 +792,7 @@ impl Sanitizer {
                 replacement: r#""sensitive_value": "[REDACTED]""#,
                 description: "Terraform sensitive values",
                 category: "generic",
+                secret_group: None,
             },
             // Terraform HCL-style secrets (key = "value" with quotes)
             PatternDef {
@@ -733,6 +800,7 @@ impl Sanitizer {
                 replacement: r#"$1 = "[REDACTED]""#,
                 description: "Terraform HCL secrets with quoted values",
                 category: "generic",
+                secret_group: None,
             },
             // Vault KV tabular output (key followed by 2+ spaces and value)
             PatternDef {
@@ -740,6 +808,7 @@ impl Sanitizer {
                 replacement: "$1  [REDACTED]",
                 description: "Vault KV tabular output secrets",
                 category: "hashicorp",
+                secret_group: None,
             },
             // Redis CONFIG GET requirepass
             PatternDef {
@@ -747,6 +816,7 @@ impl Sanitizer {
                 replacement: "\"requirepass\"\n\"[REDACTED]\"",
                 description: "Redis CONFIG GET requirepass",
                 category: "database",
+                secret_group: None,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 4: VARIABLE-BASED PATTERNS (NAME=value format)
@@ -759,12 +829,14 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "AWS credentials",
                 category: "aws",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)aws[_-]?session[_-]?token\s*[=:]\s*[^\s\n]+",
                 replacement: "aws_session_token=[REDACTED]",
                 description: "AWS Session Token",
                 category: "aws",
+                secret_group: None,
             },
             // Docker compose / environment variables (specific DB names)
             PatternDef {
@@ -772,6 +844,7 @@ impl Sanitizer {
                 replacement: "$1_$2=[REDACTED]",
                 description: "Docker compose database passwords",
                 category: "database",
+                secret_group: None,
             },
             // Database URLs
             PatternDef {
@@ -779,12 +852,14 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "Database URL environment variables",
                 category: "database",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)(DB|DATABASE)[_-]?(PASSWORD|PASS)\s*[=:]\s*[^\s\n]+",
                 replacement: "$1_PASSWORD=[REDACTED]",
                 description: "Database password variables",
                 category: "database",
+                secret_group: None,
             },
             // Ansible
             PatternDef {
@@ -792,24 +867,28 @@ impl Sanitizer {
                 replacement: "vault_password=[REDACTED]",
                 description: "Ansible Vault password",
                 category: "ansible",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)ansible[_-]?become[_-]?pass(word)?\s*[=:]\s*[^\s\n]+",
                 replacement: "ansible_become_password=[REDACTED]",
                 description: "Ansible become password",
                 category: "ansible",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)--vault-password-file\s+[^\s]+",
                 replacement: "--vault-password-file [REDACTED]",
                 description: "Ansible vault password file path",
                 category: "ansible",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)ansible[_-]?ssh[_-]?pass\s*[=:]\s*[^\s\n]+",
                 replacement: "ansible_ssh_pass=[REDACTED]",
                 description: "Ansible SSH password",
                 category: "ansible",
+                secret_group: None,
             },
             // GitLab CI tokens
             PatternDef {
@@ -817,6 +896,7 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "GitLab CI tokens",
                 category: "gitlab",
+                secret_group: None,
             },
             // Cloud providers
             PatternDef {
@@ -824,18 +904,21 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "Azure credentials",
                 category: "azure",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)(GOOGLE_APPLICATION_CREDENTIALS|GCP_SERVICE_ACCOUNT|GCLOUD_SERVICE_KEY)\s*[=:]\s*[^\s\n]+",
                 replacement: "$1=[REDACTED]",
                 description: "GCP credentials",
                 category: "gcp",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)(DIGITALOCEAN_TOKEN|DO_TOKEN)\s*[=:]\s*[^\s\n]+",
                 replacement: "$1=[REDACTED]",
                 description: "DigitalOcean token",
                 category: "generic",
+                secret_group: None,
             },
             // HashiCorp
             PatternDef {
@@ -843,12 +926,14 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "HashiCorp Vault token",
                 category: "hashicorp",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)CONSUL_HTTP_TOKEN\s*[=:]\s*[^\s\n]+",
                 replacement: "CONSUL_HTTP_TOKEN=[REDACTED]",
                 description: "Consul HTTP token",
                 category: "hashicorp",
+                secret_group: None,
             },
             // Docker registry
             PatternDef {
@@ -856,6 +941,7 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "Docker registry password",
                 category: "docker",
+                secret_group: None,
             },
             // SSH
             PatternDef {
@@ -863,6 +949,7 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "SSH password/passphrase",
                 category: "generic",
+                secret_group: None,
             },
             // SMTP/Mail
             PatternDef {
@@ -870,6 +957,7 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "SMTP/Mail password",
                 category: "generic",
+                secret_group: None,
             },
             // Package managers
             PatternDef {
@@ -877,12 +965,14 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "NPM token",
                 category: "generic",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)(pypi[_-]?token|PYPI_TOKEN)\s*[=:]\s*[^\s\n]+",
                 replacement: "$1=[REDACTED]",
                 description: "PyPI token",
                 category: "generic",
+                secret_group: None,
             },
             // AI APIs
             PatternDef {
@@ -890,6 +980,7 @@ impl Sanitizer {
                 replacement: "$1=[REDACTED]",
                 description: "Anthropic API Key",
                 category: "openai", // Grouped with AI APIs
+                secret_group: None,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 5: GENERIC PATTERNS (catch-all, must be last!)
@@ -902,6 +993,7 @@ impl Sanitizer {
                 replacement: r#""$1": "[REDACTED]""#,
                 description: "Quoted JSON/YAML secret keys",
                 category: "generic",
+                secret_group: None,
             },
             // Quoted values with spaces: password: "mon secret" — must run
             // BEFORE the bare [^\s\n]+ generic below, which would otherwise
@@ -912,24 +1004,28 @@ impl Sanitizer {
                 replacement: r#"$1="[REDACTED]""#,
                 description: "Generic secrets with quoted values",
                 category: "generic",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)(password|passwd|pwd)\s*[=:]\s*[^\s\n]+",
                 replacement: "$1=[REDACTED]",
                 description: "Generic password patterns",
                 category: "generic",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)(api[_-]?key|auth[_-]?token)\s*[=:\s]\s*[A-Za-z0-9_\-\.]{8,}",
                 replacement: "$1=[REDACTED]",
                 description: "Generic API keys and auth tokens",
                 category: "generic",
+                secret_group: None,
             },
             PatternDef {
                 pattern: r"(?i)(secret|credential)\s*[=:]\s*[^\s\n]+",
                 replacement: "$1=[REDACTED]",
                 description: "Generic secrets",
                 category: "generic",
+                secret_group: None,
             },
             // Note: Generic "token" pattern removed to avoid catching specific tokens
             // like GITHUB_TOKEN=ghp_... which should be handled by specific patterns above
@@ -1042,12 +1138,28 @@ impl Sanitizer {
         let matched_indices: Vec<usize> = self.detection_set.matches(text).into_iter().collect();
 
         for idx in matched_indices {
-            if let Some(pattern) = self.patterns.get(idx) {
-                result = pattern
+            let Some(pattern) = self.patterns.get(idx) else {
+                continue;
+            };
+            result = match pattern.secret_group {
+                None => pattern
                     .regex
                     .replace_all(&result, pattern.replacement.as_str())
-                    .into_owned();
-            }
+                    .into_owned(),
+                Some(group) => pattern
+                    .regex
+                    .replace_all(&result, |caps: &regex::Captures<'_>| {
+                        let candidate = caps.get(group).map_or("", |m| m.as_str());
+                        if plausible_secret(candidate) {
+                            let mut expanded = String::new();
+                            caps.expand(&pattern.replacement, &mut expanded);
+                            expanded
+                        } else {
+                            caps[0].to_string()
+                        }
+                    })
+                    .into_owned(),
+            };
         }
 
         result
@@ -2349,5 +2461,60 @@ users:
         let input = "DATABASE: mysql://root:hunter2@db.local:3306/app";
         let result = sanitizer.sanitize(input);
         assert!(!result.contains("hunter2"), "db password leaked: {result}");
+    }
+
+    #[test]
+    fn plausible_secret_rejects_structure_ids_words_and_literals() {
+        for candidate in [
+            "{",
+            "[",
+            "5",
+            "12345678901",
+            "true",
+            "null",
+            "None",
+            "argocd-repo-server-tls",
+            "enabled",
+            "short7!",
+        ] {
+            assert!(
+                !plausible_secret(candidate),
+                "{candidate:?} is not a secret"
+            );
+        }
+    }
+
+    #[test]
+    fn plausible_secret_accepts_key_shaped_values() {
+        for candidate in [
+            "s3cr3t-V4lue_9",
+            "AKxq81mZp0Lw4Rt",
+            "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+            "\"wJalrXUtnFEMI/K7MDENG\"",
+            "Z2hwX2FiYzEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xtbm9w",
+        ] {
+            assert!(
+                plausible_secret(candidate),
+                "{candidate:?} looks like a secret"
+            );
+        }
+    }
+
+    #[test]
+    fn gated_pattern_leaves_implausible_capture_alone() {
+        let defs = [PatternDef {
+            pattern: r"(?i)\b(secret)[ \t]*[=:][ \t]*([^\s\x22'{}\[\],;]+)",
+            replacement: "$1=[REDACTED]",
+            description: "test gated",
+            category: "generic",
+            secret_group: Some(2),
+        }];
+        let s =
+            Sanitizer::from_pattern_defs_with_custom(&defs, &[], true, EntropyDetector::disabled());
+        assert_eq!(s.sanitize("secret: enabled").as_ref(), "secret: enabled");
+        assert_eq!(
+            s.sanitize("secret: s3cr3t-V4lue_9").as_ref(),
+            "secret=[REDACTED]"
+        );
     }
 }
