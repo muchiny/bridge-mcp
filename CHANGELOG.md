@@ -70,6 +70,14 @@ reading it. Every item below was reproduced before the fix and measured after.
   `test_build_rev_matches_live_head_or_is_unknown` on the first such bump.
   Both manifests are now watched.
 
+### Changed
+
+- **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
+  Create envelope, so Windows grants the shell the disconnect capability it had been
+  refusing — the whole `psrp-rs` disconnect/reconnect path had never run against a
+  real server, only against `MockTransport`. 2.0.2 makes reconnect resume an
+  existing-client pool instead of replaying the handshake.
+
 ### Added
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
