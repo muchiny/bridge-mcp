@@ -1,0 +1,22 @@
+{
+    "id": 4711,
+    "type": "job",
+    "name": "Deploy web",
+    "status": "successful",
+    "credential": 5,
+    "summary_fields": {
+        "credentials": [
+            {
+                "id": 5,
+                "name": "deploy-key",
+                "kind": "ssh",
+                "cloud": false
+            }
+        ],
+        "inventory": {
+            "id": 2,
+            "name": "prod"
+        }
+    },
+    "extra_vars": "{\"release\": \"1.4.2\"}"
+}
