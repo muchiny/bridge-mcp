@@ -1605,7 +1605,7 @@ Done";
         // `[`/`]` so it correctly leaves the already-redacted, bracket-
         // wrapped marker alone — the raw key is still gone either way.
         assert!(
-            output.contains("REDACTED"),
+            output.contains("[ANTHROPIC_API_KEY_REDACTED]"),
             "Anthropic API key should be redacted, got: {output}"
         );
         assert!(
