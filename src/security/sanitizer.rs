@@ -98,13 +98,19 @@ struct PatternDef {
 /// container) and takes almost anything non-whitespace in between, so
 /// `aB3,x9Zq!k` is one scalar and `5,` yields `5`.
 ///
-/// The middle also stops at a brace, for the same reason the first and last
-/// positions reject one: a brace is structure, and a bare scalar never
-/// contains one. Without that, compact JSON with no space after the colon
-/// (`{"data":{"password":hunter2},"other":"keep"}`) let the value run past
-/// `}` and swallow every sibling field to the end of the line. Brackets stay
-/// legal in the middle — only at the ends are they structure — because a
-/// value an earlier pattern has already partly redacted carries a marker
+/// The middle also stops at a brace or a double quote, for the same reason the
+/// first and last positions reject one: both are structure, and a bare scalar
+/// never contains either. Without that, compact JSON — which has no space
+/// after the colon, and is what AWX and `jq -c` return — let the value run
+/// past the end of its own leaf and swallow every sibling field on the line:
+/// `{"credential":5,"name":"deploy-key"}` captured `5,"name":"deploy-key`,
+/// which is plausible enough to redact the whole object, and
+/// `{"cmd":"--password=hunter2","x":"y"}` captured `hunter2","x":"y`.
+///
+/// An apostrophe, a comma, a semicolon and a bracket stay legal in the middle.
+/// The first three occur inside real secrets (`don't-tell-anyone`,
+/// `aB3,x9Zq!k`). Brackets are needed because a value an earlier pattern has
+/// already partly redacted carries a marker
 /// (`DATABASE_URL=mysql://[CREDENTIALS]@host/db`) and must still be consumed
 /// whole.
 ///
@@ -112,7 +118,7 @@ struct PatternDef {
 /// group 1 the value is group 2, so `secret_group: Some(2)` stays valid.
 macro_rules! scalar_value {
     () => {
-        r#"("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|["']?[^\s"'{}\[\],;](?:[^\s{}]*[^\s"'{}\[\],;])?)"#
+        r#"("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|["']?[^\s"'{}\[\],;](?:[^\s"{}]*[^\s"'{}\[\],;])?)"#
     };
 }
 
@@ -2793,12 +2799,27 @@ users:
                 "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
                 "AWS_ACCESS_KEY_ID=[AWS_ACCESS_KEY_REDACTED]",
             ),
-            // A compact JSON object has no space after the colon, so the bare
-            // value must stop at the closing brace or it swallows every
-            // sibling field to the end of the line.
+            // A compact JSON object — what AWX and `jq -c` return — has no
+            // space after the colon, so the bare value must stop at the
+            // closing brace and at the quote that ends its own leaf, or it
+            // swallows every sibling field to the end of the line.
             (
                 r#"{"data":{"password":hunter2},"other":"keep"}"#,
                 r#"{"data":{"password": "[REDACTED]"},"other":"keep"}"#,
+            ),
+            // A credential ID next to a sibling key: without the quote in the
+            // exclusion the value read `5,"name":"deploy-key`, which IS
+            // plausible, so the gate passed and the whole object went.
+            (
+                r#"{"credential":5,"name":"deploy-key"}"#,
+                r#"{"credential":5,"name":"deploy-key"}"#,
+            ),
+            // A keyed value inside a JSON string leaf: the strong bare-key
+            // pattern matches within the leaf, and must stop at the quote that
+            // closes it rather than eating the next key.
+            (
+                r#"{"cmd":"--password=hunter2","x":"y"}"#,
+                r#"{"cmd":"--password=[REDACTED]","x":"y"}"#,
             ),
             // Space-separated CLI flag (audit IMPORTANT #3).
             (
