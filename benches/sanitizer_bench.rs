@@ -33,6 +33,17 @@ fn generate_sensitive_output(size: usize) -> String {
         .collect()
 }
 
+fn generate_kubectl_json(pods: usize) -> String {
+    let pod = r#"{"metadata":{"name":"pod-N","namespace":"argocd"},"spec":{"volumes":[{"name":"tls","secret":{"defaultMode":420,"secretName":"tls"}}]},"status":{"phase":"Running"}}"#;
+    let items: Vec<String> = (0..pods)
+        .map(|i| pod.replace("pod-N", &format!("pod-{i}")))
+        .collect();
+    format!(
+        "{{\"apiVersion\":\"v1\",\"items\":[{}],\"kind\":\"List\"}}",
+        items.join(",")
+    )
+}
+
 fn benchmark_sanitization(c: &mut Criterion) {
     let sanitizer = create_sanitizer();
 
@@ -64,6 +75,11 @@ fn benchmark_sanitization(c: &mut Criterion) {
     });
     c.bench_function("sanitize: sensitive 1MB (pattern replacement)", |b| {
         b.iter(|| sanitizer.sanitize(black_box(&sensitive_large)));
+    });
+
+    let kubectl = generate_kubectl_json(1_500); // ~300 KB, the argocd -A shape
+    c.bench_function("sanitize_kubectl_json_300k", |b| {
+        b.iter(|| sanitizer.sanitize(black_box(&kubectl)));
     });
 }
 
