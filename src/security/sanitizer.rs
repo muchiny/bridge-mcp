@@ -768,7 +768,7 @@ impl Sanitizer {
             },
             // Vault KV tabular output (key followed by 2+ spaces and value)
             PatternDef {
-                pattern: r"(?im)^(password|secret|token|api[_-]?key)\s{2,}\S+",
+                pattern: r"(?im)^(password|secret|token|api[_-]?key)[ \t]{2,}\S+",
                 replacement: "$1  [REDACTED]",
                 description: "Vault KV tabular output secrets",
                 category: "hashicorp",
@@ -789,14 +789,14 @@ impl Sanitizer {
 
             // AWS
             PatternDef {
-                pattern: r"(?i)(aws[_-]?(access[_-]?key[_-]?id|secret[_-]?access[_-]?key))\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(aws[_-]?(access[_-]?key[_-]?id|secret[_-]?access[_-]?key))[ \t]*[=:][ \t]*([^\s"'{}\[\],;]+)"#,
                 replacement: "$1=[REDACTED]",
                 description: "AWS credentials",
                 category: "aws",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)aws[_-]?session[_-]?token\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)aws[_-]?session[_-]?token[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "aws_session_token=[REDACTED]",
                 description: "AWS Session Token",
                 category: "aws",
@@ -804,7 +804,7 @@ impl Sanitizer {
             },
             // Docker compose / environment variables (specific DB names)
             PatternDef {
-                pattern: r"(?i)(MYSQL|POSTGRES|MONGO|REDIS|RABBITMQ|MARIADB)[_-]?(PASSWORD|ROOT_PASSWORD|PASS)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(MYSQL|POSTGRES|MONGO|REDIS|RABBITMQ|MARIADB)[_-]?(PASSWORD|ROOT_PASSWORD|PASS)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1_$2=[REDACTED]",
                 description: "Docker compose database passwords",
                 category: "database",
@@ -812,14 +812,14 @@ impl Sanitizer {
             },
             // Database URLs
             PatternDef {
-                pattern: r"(?i)(DATABASE_URL|DB_URL|REDIS_URL|MONGO_URL)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(DATABASE_URL|DB_URL|REDIS_URL|MONGO_URL)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1=[REDACTED]",
                 description: "Database URL environment variables",
                 category: "database",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)(DB|DATABASE)[_-]?(PASSWORD|PASS)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(DB|DATABASE)[_-]?(PASSWORD|PASS)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1_PASSWORD=[REDACTED]",
                 description: "Database password variables",
                 category: "database",
@@ -827,14 +827,14 @@ impl Sanitizer {
             },
             // Ansible
             PatternDef {
-                pattern: r"(?i)vault[_-]?pass(word)?\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)vault[_-]?pass(word)?[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "vault_password=[REDACTED]",
                 description: "Ansible Vault password",
                 category: "ansible",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)ansible[_-]?become[_-]?pass(word)?\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)ansible[_-]?become[_-]?pass(word)?[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "ansible_become_password=[REDACTED]",
                 description: "Ansible become password",
                 category: "ansible",
@@ -848,7 +848,7 @@ impl Sanitizer {
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)ansible[_-]?ssh[_-]?pass\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)ansible[_-]?ssh[_-]?pass[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "ansible_ssh_pass=[REDACTED]",
                 description: "Ansible SSH password",
                 category: "ansible",
@@ -856,7 +856,7 @@ impl Sanitizer {
             },
             // GitLab CI tokens
             PatternDef {
-                pattern: r"(?i)(GITLAB_TOKEN|CI_JOB_TOKEN)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(GITLAB_TOKEN|CI_JOB_TOKEN)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1=[REDACTED]",
                 description: "GitLab CI tokens",
                 category: "gitlab",
@@ -864,14 +864,14 @@ impl Sanitizer {
             },
             // Cloud providers
             PatternDef {
-                pattern: r"(?i)(AZURE_CLIENT_SECRET|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(AZURE_CLIENT_SECRET|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1=[REDACTED]",
                 description: "Azure credentials",
                 category: "azure",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)(GOOGLE_APPLICATION_CREDENTIALS|GCP_SERVICE_ACCOUNT|GCLOUD_SERVICE_KEY)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(GOOGLE_APPLICATION_CREDENTIALS|GCP_SERVICE_ACCOUNT|GCLOUD_SERVICE_KEY)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1=[REDACTED]",
                 description: "GCP credentials",
                 category: "gcp",
@@ -879,14 +879,14 @@ impl Sanitizer {
             },
             // HashiCorp
             PatternDef {
-                pattern: r"(?i)(VAULT_TOKEN|vault_token)\s*[=:]\s*[hs]\.[A-Za-z0-9]+",
+                pattern: r"(?i)(VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*[hs]\.[A-Za-z0-9]+",
                 replacement: "$1=[REDACTED]",
                 description: "HashiCorp Vault token",
                 category: "hashicorp",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)CONSUL_HTTP_TOKEN\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)CONSUL_HTTP_TOKEN[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "CONSUL_HTTP_TOKEN=[REDACTED]",
                 description: "Consul HTTP token",
                 category: "hashicorp",
@@ -894,7 +894,7 @@ impl Sanitizer {
             },
             // Docker registry
             PatternDef {
-                pattern: r"(?i)(docker[_-]?password|registry[_-]?password)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(docker[_-]?password|registry[_-]?password)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1=[REDACTED]",
                 description: "Docker registry password",
                 category: "docker",
@@ -902,7 +902,7 @@ impl Sanitizer {
             },
             // AI APIs
             PatternDef {
-                pattern: r"(?i)(ANTHROPIC_API_KEY|CLAUDE_API_KEY)\s*[=:]\s*[^\s\n]+",
+                pattern: r#"(?i)(ANTHROPIC_API_KEY|CLAUDE_API_KEY)[ \t]*[=:][ \t]*[^\s"'{}\[\],;]+"#,
                 replacement: "$1=[REDACTED]",
                 description: "Anthropic API Key",
                 category: "openai", // Grouped with AI APIs
@@ -1597,8 +1597,15 @@ Done";
         let sanitizer = Sanitizer::with_defaults();
         let input = "ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmn";
         let output = sanitizer.sanitize(input);
+        // The specific sk-ant-api* Tier 1 pattern fires first and leaves
+        // "[ANTHROPIC_API_KEY_REDACTED]" behind; the keyed Tier 5 pattern
+        // used to re-match that bracketed marker too (its old value class
+        // `[^\s\n]+` doesn't exclude `[`/`]`) and stack a second
+        // "=[REDACTED]" on top. The structure-safe value class now excludes
+        // `[`/`]` so it correctly leaves the already-redacted, bracket-
+        // wrapped marker alone — the raw key is still gone either way.
         assert!(
-            output.contains("[REDACTED]"),
+            output.contains("REDACTED"),
             "Anthropic API key should be redacted, got: {output}"
         );
         assert!(
@@ -2554,6 +2561,33 @@ users:
                     def.pattern
                 );
             }
+        }
+    }
+
+    #[test]
+    fn no_builtin_pattern_crosses_a_line_break() {
+        let s = Sanitizer::with_defaults();
+        for input in [
+            "password\n\nnext_line_value",
+            "aws_secret_access_key:\n  fromSecret: x",
+            "token\n  = value",
+        ] {
+            assert_eq!(
+                s.sanitize(input).as_ref(),
+                input,
+                "{input:?} must not be touched"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_patterns_never_use_whitespace_class_around_a_separator() {
+        for def in Sanitizer::default_pattern_defs() {
+            assert!(
+                !def.pattern.contains(r"\s*[=:]") && !def.pattern.contains(r"\s*=\s*"),
+                "{}: use [ \\t]* around separators, \\s* matches a newline",
+                def.description
+            );
         }
     }
 }
