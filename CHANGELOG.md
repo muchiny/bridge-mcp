@@ -29,6 +29,20 @@ reading it. Every item below was reproduced before the fix and measured after.
 
 ### Fixed
 
+- **`ssh_k8s_get output=yaml` came back as a table, `yq_filter` failed on every
+  helm chart, and `limit` was ignored in four situations.** The MCP Apps table
+  hook of `ssh_k8s_get`, `ssh_helm_list` and `ssh_helm_history` re-rendered every
+  non-JSON output as TSV (`apiVersion: v1` became `APIVERSION: V1`); it now runs
+  only for the formats kubectl/helm print as a table. `yq_filter` parsed a
+  single document while `helm template` always emits a `---` stream; it now runs
+  per document. `limit` now caps filter results (one per line), a JSON object's
+  single top-level array (`items`, `results`), a YAML stream's documents and a
+  YAML list's items — and an Auto tool whose output is YAML never goes through
+  the table parser. `Auto` tools accept `yq_filter`. The 43 custom handlers
+  reject a reduction param their output kind cannot use, as the standard
+  pipeline does, and feed the reduction metrics. Found by probing the reduction
+  params against a live K3s host on 2026-09-06.
+
 - **Sanitizer no longer corrupts structured output.** Two generic patterns
   rewrote structure, not values: `"secret": {` became `"secret": "[REDACTED]"`
   with the object's members left dangling (every kubectl pod with a secret
