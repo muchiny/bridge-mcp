@@ -22,7 +22,8 @@ use crate::mcp::request_meta::keys as meta_keys;
 use crate::ports::ExecutorRouter;
 use crate::ports::ToolContext;
 use crate::security::{
-    AuditEvent, AuditLogger, CommandResult, CommandValidator, RateLimiter, Sanitizer,
+    AuditEvent, AuditLogger, AuditWriterTask, CommandResult, CommandValidator, RateLimiter,
+    Sanitizer,
 };
 use crate::ssh::{
     SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error_for,
@@ -591,8 +592,12 @@ pub async fn run_config_diff(config: Arc<Config>, json_output: bool) -> Result<(
     Ok(())
 }
 
-/// Create a `ToolContext` from configuration
-fn create_context(config: Arc<Config>) -> ToolContext {
+/// Create a `ToolContext` from configuration, together with the audit
+/// writer task the context's audit logger sends to (if audit logging is
+/// enabled). The caller must drain the writer — see [`finish_audit`] —
+/// before the process exits, or every event sent through the returned
+/// context's audit logger is silently dropped when it goes out of scope.
+fn create_context_with_audit(config: Arc<Config>) -> (ToolContext, Option<AuditWriterTask>) {
     let validator = Arc::new(CommandValidator::new(&config.security));
     let known_secrets = config.collect_secret_values();
     let sanitizer = Arc::new(
@@ -602,20 +607,11 @@ fn create_context(config: Arc<Config>) -> ToolContext {
         )
         .with_known_secrets(&known_secrets),
     );
-    // For CLI mode, we don't spawn the audit writer task (short-lived process).
-    //
-    // KNOWN GAP (audit 2026-08-13): the consequence is that `audit.path`
-    // receives nothing at all from CLI invocations — every event is dropped by
-    // `let _ = send(...)` once the writer half goes out of scope here. Only the
-    // tracing sink below sees them. Closing this properly means returning the
-    // task from `create_context`, then dropping the logger and joining the
-    // writer before the process exits, across all six production call sites.
-    //
     // Wire the sanitizer so event.command is masked on the tracing sink too
     // (audit 2026-07-05 finding 1 — MCP mode already does this in server.rs).
     let audit_sanitizer =
         Sanitizer::from_config(&config.security.sanitize).with_known_secrets(&known_secrets);
-    let (audit_logger, _audit_task) =
+    let (audit_logger, audit_task) =
         AuditLogger::new_with_sanitizer(&config.audit, audit_sanitizer)
             .unwrap_or_else(|_| (AuditLogger::disabled(), None));
     let audit_logger = Arc::new(audit_logger);
@@ -632,7 +628,7 @@ fn create_context(config: Arc<Config>) -> ToolContext {
 
     let session_manager = Arc::new(SessionManager::new(config.sessions.clone()));
 
-    ToolContext::new(
+    let ctx = ToolContext::new(
         config,
         validator,
         sanitizer,
@@ -642,7 +638,30 @@ fn create_context(config: Arc<Config>) -> ToolContext {
         execute_use_case,
         rate_limiter,
         session_manager,
-    )
+    );
+
+    (ctx, audit_task)
+}
+
+/// Context for tests and for paths that produce no audit event.
+fn create_context(config: Arc<Config>) -> ToolContext {
+    create_context_with_audit(config).0
+}
+
+/// Let the audit writer drain before the process exits. The writer stops
+/// when the last `AuditLogger` sender is dropped, and the context (directly
+/// and through `execute_use_case`) holds them all, so the context is
+/// consumed here on purpose. A writer that cannot finish in two seconds is
+/// abandoned with a warning rather than hanging the CLI.
+async fn finish_audit(ctx: ToolContext, writer: Option<tokio::task::JoinHandle<()>>) {
+    drop(ctx);
+    if let Some(handle) = writer
+        && tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .is_err()
+    {
+        tracing::warn!("audit writer did not drain within 2s; events may be lost");
+    }
 }
 
 /// Execute a command on a remote host
@@ -1466,17 +1485,29 @@ pub async fn run_tool(
     }
 
     // Slow path: stateless in-process execution.
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_tool_in_context(&registry, tool_name, args, &ctx, json_output).await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
+
+/// The in-process execution `run_tool` used to inline, split out so every
+/// early return passes through `finish_audit`.
+async fn run_tool_in_context(
+    registry: &crate::mcp::registry::ToolRegistry,
+    tool_name: &str,
+    args: Option<serde_json::Value>,
+    ctx: &ToolContext,
+    json_output: bool,
+) -> Result<i32> {
     // Strip interactive App components, exactly as `McpServer` does before it
     // answers a `tools/call`. This path calls the registry directly and so
     // bypassed that filter: a terminal has nothing to render an App with, and
     // serializing it made the blob the bulk of the output — on `ssh_storage_df`
     // 3377 of 3950 bytes, and 412 bytes appended to a 6-byte answer that
     // `jq_filter` had just reduced. `structured_content` survives, as there.
-    let result = registry
-        .execute(tool_name, args, &ctx)
-        .await?
-        .without_apps();
+    let result = registry.execute(tool_name, args, ctx).await?.without_apps();
 
     let is_error = result.is_error.unwrap_or(false);
     let exit_code = i32::from(is_error);
@@ -1771,6 +1802,82 @@ mod tests {
         assert!(
             ctx.audit_logger.has_sanitizer(),
             "CLI audit logger must sanitize event.command (audit 2026-07-05 finding 1)"
+        );
+    }
+
+    /// A `Config::default()` with one host inserted under `name`, for tests
+    /// that need `run_tool` to reach the slow (in-process) path and dispatch
+    /// a real tool against it.
+    fn test_config_with_host(name: &str, hostname: &str) -> Config {
+        let mut config = Config::default();
+        config.hosts.insert(
+            name.to_string(),
+            HostConfig {
+                hostname: hostname.to_string(),
+                port: 22,
+                user: "test".to_string(),
+                auth: AuthConfig::Agent,
+                description: None,
+                host_key_verification: HostKeyVerification::Strict,
+                proxy_jump: None,
+                socks_proxy: None,
+                sudo_password: None,
+                tags: Vec::new(),
+                os_type: OsType::Linux,
+                shell: None,
+                retry: None,
+                protocol: crate::config::Protocol::default(),
+                #[cfg(feature = "winrm")]
+                winrm_use_tls: None,
+                #[cfg(feature = "winrm")]
+                winrm_accept_invalid_certs: None,
+                #[cfg(feature = "winrm")]
+                winrm_operation_timeout_secs: None,
+                #[cfg(feature = "winrm")]
+                winrm_max_envelope_size: None,
+            },
+        );
+        config
+    }
+
+    #[tokio::test]
+    async fn run_tool_persists_the_audit_event_of_a_cli_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let mut config = test_config_with_host("h", "127.0.0.1");
+        config.audit.enabled = true;
+        config.audit.path = audit_path.clone();
+        // Standard mode denies anything not on an (empty) whitelist before a
+        // command is ever attempted — permissive mode lets `validate()` pass
+        // so this test exercises the connection path instead.
+        config.security.mode = crate::config::SecurityMode::Permissive;
+        // Bound the connection attempt: a closed port on 127.0.0.1 gets no
+        // RST in this sandbox's network stack, so it would otherwise hang
+        // for the full default 10s timeout, times up to 3 retries.
+        config.limits.connection_timeout_seconds = 1;
+        config.limits.retry_attempts = 0;
+        if let Some(host) = config.hosts.get_mut("h") {
+            host.port = 1; // reserved, unused: guarantees a connection failure
+        }
+        // `ssh_exec`'s blacklist-denial path (`log_denied`) does NOT carry
+        // the tool name or "ssh_exec" anywhere in the event — only its
+        // connection-failure path (`log_failure`, whose event carries the
+        // literal `event_type: "ssh_exec"` for every tool) does. So this
+        // exercises a failed connection, not a blacklist denial.
+        let _ = run_tool(
+            Arc::new(config),
+            "ssh_exec",
+            &["host=h".to_string(), "command=echo hi".to_string()],
+            None,
+            false,
+            DataReductionFlags::default(),
+            true,
+        )
+        .await;
+        let log = std::fs::read_to_string(&audit_path).expect("audit.log exists");
+        assert!(
+            log.contains("ssh_exec"),
+            "the CLI run must persist its audit event, got {log:?}"
         );
     }
 
