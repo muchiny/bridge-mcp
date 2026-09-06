@@ -6,7 +6,6 @@
 
 use serde::Deserialize;
 
-#[cfg(not(feature = "jq"))]
 use crate::error::BridgeError;
 use crate::error::Result;
 
@@ -54,7 +53,11 @@ impl DataReductionArgs {
     /// When the binary is built WITHOUT the `jq` feature and the caller
     /// supplied `jq_filter`, `yq_filter`, or `output_format`, returns
     /// `BridgeError::McpInvalidRequest` instead of silently ignoring the
-    /// param — the model must not believe its filter was applied.
+    /// param — the model must not believe its filter was applied. Also
+    /// errors when `limit` is present and `0`: the schema declares
+    /// `"minimum": 1`, and every `cap_*` helper treats `0` as "keep
+    /// nothing" rather than "no limit", so a silent pass-through would
+    /// return an empty result with nothing to say why.
     pub fn extract(value: &mut serde_json::Value) -> Result<Self> {
         let Some(obj) = value.as_object_mut() else {
             return Ok(Self::default());
@@ -89,7 +92,14 @@ impl DataReductionArgs {
             })
         });
 
-        let limit = obj.remove("limit").and_then(|v| v.as_u64());
+        let limit = match obj.remove("limit").and_then(|v| v.as_u64()) {
+            Some(0) => {
+                return Err(BridgeError::McpInvalidRequest(
+                    "limit must be at least 1".to_string(),
+                ));
+            }
+            other => other,
+        };
 
         #[cfg(feature = "jq")]
         let output_format = obj
@@ -161,6 +171,27 @@ impl DataReductionArgs {
             used.push("limit");
         }
         used
+    }
+
+    /// [`Self::extract`] plus the guard every handler must apply: a reduction
+    /// param the tool's `OutputKind` cannot use is an error, not a no-op.
+    /// `extract` removes the keys unconditionally, so `deny_unknown_fields`
+    /// never sees them; a Json tool given `columns=[...]` returned the full
+    /// output with nothing to say why.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::extract`] returns, plus
+    /// `BridgeError::McpInvalidRequest` naming the unsupported param.
+    pub fn extract_for(
+        value: &mut serde_json::Value,
+        tool_name: &str,
+        kind: crate::domain::output_kind::OutputKind,
+    ) -> Result<Self> {
+        let dr = Self::extract(value)?;
+        let provided = dr.used_params();
+        crate::domain::arg_validation::reject_unsupported_reduction(tool_name, kind, &provided)?;
+        Ok(dr)
     }
 }
 
@@ -271,6 +302,20 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_limit_zero_is_rejected() {
+        let mut v = serde_json::json!({"limit": 0});
+        let err = DataReductionArgs::extract(&mut v).unwrap_err().to_string();
+        assert!(err.contains("limit"), "got: {err}");
+    }
+
+    #[test]
+    fn test_extract_limit_one_is_accepted() {
+        let mut v = serde_json::json!({"limit": 1});
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
+        assert_eq!(args.limit, Some(1));
+    }
+
+    #[test]
     fn test_extract_limit_not_integer() {
         let mut v = serde_json::json!({"limit": "ten"});
         let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
@@ -350,5 +395,28 @@ mod tests {
         let mut v = serde_json::json!({"jq_filter": ".x", "output_format": "tsv"});
         let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert_eq!(args.used_params(), vec!["jq_filter", "output_format"]);
+    }
+
+    #[test]
+    fn extract_for_rejects_a_param_the_kind_cannot_use() {
+        use crate::domain::output_kind::OutputKind;
+        let mut v = serde_json::json!({"host": "h", "columns": ["NAME"]});
+        let err = DataReductionArgs::extract_for(&mut v, "ssh_awx_jobs", OutputKind::Json)
+            .expect_err("columns is not a Json reduction");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("columns") && msg.contains("ssh_awx_jobs"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn extract_for_accepts_and_strips_supported_params() {
+        use crate::domain::output_kind::OutputKind;
+        let mut v = serde_json::json!({"host": "h", "limit": 3});
+        let dr = DataReductionArgs::extract_for(&mut v, "ssh_awx_jobs", OutputKind::Json)
+            .expect("limit is a Json reduction");
+        assert_eq!(dr.limit, Some(3));
+        assert!(v.get("limit").is_none());
     }
 }

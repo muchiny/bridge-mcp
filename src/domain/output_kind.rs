@@ -52,7 +52,7 @@ impl OutputKind {
     /// Whether this kind supports `yq_filter`.
     #[must_use]
     pub const fn supports_yq(&self) -> bool {
-        matches!(self, Self::Yaml)
+        matches!(self, Self::Yaml | Self::Auto)
     }
 
     /// Whether this kind supports `columns`.
@@ -118,14 +118,16 @@ impl OutputKind {
             Self::Auto => {
                 #[cfg(feature = "jq")]
                 {
-                    "Auto-detect JSON or tabular at runtime — accepts all reduction \
-                     params (jq_filter, columns, limit, output_format). JSON is tried \
-                     first; tabular is the fallback."
+                    "Auto-detect JSON, YAML or tabular at runtime — accepts all \
+                     reduction params (jq_filter for JSON output, yq_filter for YAML \
+                     output, columns and limit for tabular, output_format). JSON is \
+                     tried first, then YAML, then tabular."
                 }
                 #[cfg(not(feature = "jq"))]
                 {
-                    "Auto-detect JSON or tabular at runtime — use columns=[\"A\",\"B\"] \
-                     to pick fields and limit=N to cap rows/items server-side."
+                    "Auto-detect JSON, YAML or tabular at runtime — use \
+                     columns=[\"A\",\"B\"] to pick fields and limit=N to cap \
+                     rows/items server-side."
                 }
             }
         }
@@ -175,8 +177,9 @@ impl OutputKind {
             Self::Auto => Some({
                 #[cfg(feature = "jq")]
                 {
-                    "re-run with jq_filter='...' (JSON output) or columns=[...] and \
-                     limit=N (tabular output) to reduce the output server-side"
+                    "re-run with jq_filter='...' (JSON output), yq_filter='...' \
+                     (YAML output) or columns=[...] and limit=N (tabular output) to \
+                     reduce the output server-side"
                 }
                 #[cfg(not(feature = "jq"))]
                 {
@@ -224,7 +227,13 @@ mod tests {
         assert!(!OutputKind::Tabular.supports_yq());
         assert!(!OutputKind::Json.supports_yq());
         assert!(OutputKind::Yaml.supports_yq());
-        assert!(!OutputKind::Auto.supports_yq());
+        assert!(OutputKind::Auto.supports_yq());
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn auto_hint_mentions_yq() {
+        assert!(OutputKind::Auto.strategy_hint().contains("yq_filter"));
     }
 
     #[test]
