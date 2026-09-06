@@ -686,11 +686,21 @@ pub async fn run_exec(
     let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
     let outcome = run_exec_in_context(&ctx, host, command, timeout, working_dir, json_output).await;
     finish_audit(ctx, audit_writer).await;
-    outcome
+    // The audit writer above has already drained (or been given its 2s
+    // grace period) by the time we decide whether to exit non-zero, so a
+    // failing remote command no longer races its own audit event out of
+    // existence the way `std::process::exit` inside the old single body did.
+    let exit_code = outcome?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
 }
 
 /// The body `run_exec` used to inline, split out so every early return
-/// passes through `finish_audit`.
+/// passes through `finish_audit`. Returns the remote exit code (0 on
+/// success) instead of calling `std::process::exit` itself, so the caller
+/// can drain the audit writer first — mirrors `run_tool_in_context`.
 async fn run_exec_in_context(
     ctx: &ToolContext,
     host: &str,
@@ -698,7 +708,7 @@ async fn run_exec_in_context(
     timeout: u64,
     working_dir: Option<&str>,
     json_output: bool,
-) -> Result<()> {
+) -> Result<i32> {
     // Get host config
     let host_config = ctx
         .config
@@ -800,38 +810,39 @@ async fn run_exec_in_context(
         println!("{}", response.output);
     }
 
-    // Propagate remote exit code to CLI exit code
-    if response.exit_code != 0 {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    // Propagate the remote exit code to the caller instead of exiting the
+    // process here — `run_exec` decides when to exit, after the audit
+    // writer has drained. `u32` -> `i32` only fails for a code no real
+    // process can produce (`response.exit_code` never carries the `u32::MAX`
+    // "no code" sentinel `run_history`'s entries use), so `1` is a safe,
+    // still-nonzero fallback rather than a case that needs its own error.
+    Ok(i32::try_from(response.exit_code).unwrap_or(1))
 }
 
 /// Render the `Audit:` block of `bridge-mcp status`.
 ///
-/// G-13 (audit 2026-08-19): CLI mode never spawns the audit writer task —
-/// `create_context` above binds it to `_audit_task` and drops it, so
-/// `AuditLogger::log`'s `let _ = sender.send(event)` discards every CLI event
-/// and nothing is ever appended to `audit.path`. The events are not lost
-/// outright: `log_to_tracing` still emits them, so they appear under
-/// `RUST_LOG`. Printing a bare `Enabled: true` next to a `Path:` line read as
-/// a promise of a durable file that no CLI command writes.
+/// G-13 (audit 2026-08-19) found that CLI mode never spawned the audit
+/// writer task — `create_context` bound it to `_audit_task` and dropped it,
+/// so `AuditLogger::log`'s `let _ = sender.send(event)` discarded every CLI
+/// event and nothing was ever appended to `audit.path`. Printing a bare
+/// `Enabled: true` next to a `Path:` line read as a promise of a durable
+/// file that no CLI command wrote.
 ///
-/// Durable CLI audit is out of scope for 2.2.0 (it means threading the writer
-/// task out of `create_context` and joining it before exit at every call
-/// site). This function only makes the claim honest.
+/// Fixed 2026-09-06 (tasks C.1/C.2): `run_tool`, `run_exec`, `run_history`,
+/// `run_upload` and `run_download` now call `create_context_with_audit` and
+/// drain the writer through `finish_audit` before returning, so an audit
+/// event logged during one of those five CLI commands is appended to
+/// `audit.path` the same as an MCP-server-side call, not just emitted to
+/// `tracing`/`RUST_LOG`. This function reflects that both surfaces write the
+/// same file now.
 fn audit_status_lines(audit: &AuditConfig) -> Vec<String> {
     if !audit.enabled {
         return vec!["  Enabled: false".to_string()];
     }
 
     vec![
-        "  Enabled: true (config) - CLI commands log to tracing only".to_string(),
-        format!(
-            "  Path: {} (written by the MCP server only, not by CLI commands)",
-            audit.path.display()
-        ),
+        "  Enabled: true (config) - written by the MCP server and by CLI commands".to_string(),
+        format!("  Path: {}", audit.path.display()),
     ]
 }
 
@@ -877,7 +888,7 @@ pub async fn run_status(config: Arc<Config>, json_output: bool) -> Result<()> {
             "audit": {
                 "enabled": config.audit.enabled,
                 "path": config.audit.path.display().to_string(),
-                "written_by": "mcp-server-only",
+                "written_by": "mcp-server-and-cli",
             },
         });
         println!(
@@ -2718,12 +2729,16 @@ mod tests {
 
     // ============== audit_status_lines Tests ==============
 
-    /// G-13 (audit 2026-08-19): `bridge-mcp status` printed
-    /// `Enabled: true` + `Path: <file>` while `create_context` drops the
-    /// `AuditWriterTask`, so no CLI invocation ever appends a byte to that
-    /// path. The output must not promise a file that is never written.
+    /// G-13 (audit 2026-08-19) found `bridge-mcp status` printed
+    /// `Enabled: true` + `Path: <file>` while `create_context` dropped the
+    /// `AuditWriterTask`, so no CLI invocation ever appended a byte to that
+    /// path. Tasks C.1/C.2 (2026-09-06) fixed the underlying gap — `run_tool`,
+    /// `run_exec`, `run_history`, `run_upload` and `run_download` now drain
+    /// the writer via `finish_audit` — so the status output must now claim
+    /// the opposite of what it claimed before: both the MCP server and CLI
+    /// commands write to the file.
     #[test]
-    fn test_audit_status_lines_do_not_promise_a_file_in_cli_mode() {
+    fn test_audit_status_lines_say_both_mcp_server_and_cli_write_the_file() {
         let audit = AuditConfig {
             enabled: true,
             path: std::path::PathBuf::from("/var/log/bridge-mcp/audit.log"),
@@ -2735,8 +2750,13 @@ mod tests {
 
         assert_eq!(lines.len(), 2, "got {lines:?}");
         assert!(
-            lines[0].contains("tracing only"),
-            "the enabled line must say CLI events only reach tracing, got {:?}",
+            !lines[0].contains("tracing only"),
+            "must not claim CLI events only reach tracing anymore, got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("MCP server") && lines[0].contains("CLI"),
+            "the enabled line must say both the MCP server and CLI commands write it, got {:?}",
             lines[0]
         );
         assert!(
@@ -2745,8 +2765,8 @@ mod tests {
             lines[1]
         );
         assert!(
-            lines[1].contains("MCP server"),
-            "the path line must say who actually writes it, got {:?}",
+            !lines[1].contains("only, not by CLI"),
+            "must not claim the MCP server writes it exclusively anymore, got {:?}",
             lines[1]
         );
     }
