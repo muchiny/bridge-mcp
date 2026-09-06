@@ -1,0 +1,8 @@
+      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false
+=>       REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false
+    password: EXAMPLE
+=>     password: [REDACTED]
+    admin.password: EXAMPLE
+=>     admin.password: [REDACTED]
+  password: EXAMPLE
+=>   password: [REDACTED]
