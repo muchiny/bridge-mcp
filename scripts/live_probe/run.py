@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -46,7 +47,10 @@ def run_cli(binary, tool, args, yes):
     if yes:
         cmd.append("--yes")
     cmd += ["--json-args", json.dumps(args)]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env())
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env())
+    except subprocess.TimeoutExpired:
+        return 1, "", "cli: timeout after 180s"
     return p.returncode, clean(p.stdout), clean(p.stderr)
 
 
@@ -55,6 +59,8 @@ def run_mcp(binary, tool, args):
         [binary, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env(),
     )
+    timer = threading.Timer(180, proc.kill)
+    timer.start()
     try:
         req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                "params": {"name": tool, "arguments": args, "_meta": META}}
@@ -81,6 +87,7 @@ def run_mcp(binary, tool, args):
             return 0, text, ""
         return 1, "", "mcp: no response with id 1 in 50 lines"
     finally:
+        timer.cancel()
         proc.kill()
 
 
