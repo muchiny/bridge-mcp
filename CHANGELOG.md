@@ -86,7 +86,7 @@ reading it. Every item below was reproduced before the fix and measured after.
   config auth and Terraform sensitive values each collapse a run of
   spacing around their colon to exactly one space, and the HTTP Basic
   Authorization header pattern both collapses spacing and rewrites the
-  key's case to `Authorization: Basic ` — all pre-existing and out of
+  key's case to `Authorization: Basic` (plus a space) — all pre-existing and out of
   scope here. Brace- or bracket-wrapped scalars
   (`password={x}`) are redacted; nested structures are not, and neither is
   an EMPTY brace, bracket or angle pair (`password={}`, `password=[]`,
