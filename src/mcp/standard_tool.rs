@@ -648,7 +648,9 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 /// - `Json` → apply `jq_filter` if present (`limit` then caps its result
 ///   lines), fall back to `limit` on top-level arrays
 /// - `Tabular` → apply `columns`/`limit` filter (parse columnar → select → TSV)
-/// - `Yaml` → apply `yq_filter` if present (`limit` then caps its result lines)
+/// - `Yaml` → apply `yq_filter` if present (`limit` then caps its result
+///   lines), fall back to `limit` on document counts / a single document's
+///   top-level item list
 /// - `Auto` → try JSON+jq first, fall back to tabular+columns+limit
 /// - `RawText` → no-op
 ///
@@ -676,6 +678,9 @@ pub fn apply_reduction(
         }
         OutputKind::Yaml => {
             jq_applied = try_apply_yq(stdout, dr)?;
+            if !jq_applied {
+                try_apply_yaml_limit(stdout, dr);
+            }
         }
         OutputKind::Auto => {
             // Try JSON + jq first (if jq_filter is present and output parses as JSON)
@@ -792,27 +797,150 @@ fn try_apply_tabular_reduction(
     }
 }
 
-/// Try to apply `limit` to a JSON array output.
-///
-/// If `limit` is set and stdout parses as a JSON array, truncates to the
-/// first N elements. Objects and non-JSON are left unchanged.
+/// `limit` on JSON without a filter: caps a top-level array, or the single
+/// top-level array member of an object (`items` from kubectl, `results`
+/// from AWX). An object with zero or several array members is left alone.
 fn try_apply_json_limit(
     stdout: &mut String,
     dr: &crate::domain::data_reduction::DataReductionArgs,
 ) {
     let Some(limit) = dr.limit else { return };
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout) else {
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(stdout) else {
         return;
     };
-    if let serde_json::Value::Array(arr) = parsed
-        && arr.len() > limit
-    {
-        let truncated = serde_json::Value::Array(arr.into_iter().take(limit).collect());
-        if let Ok(s) = serde_json::to_string_pretty(&truncated) {
-            *stdout = s;
+    let changed = match &mut parsed {
+        serde_json::Value::Array(arr) if arr.len() > limit => {
+            arr.truncate(limit);
+            true
         }
+        serde_json::Value::Object(map) => {
+            let array_keys: Vec<String> = map
+                .iter()
+                .filter(|(_, v)| v.is_array())
+                .map(|(k, _)| k.clone())
+                .collect();
+            match array_keys.as_slice() {
+                [key] => match map.get_mut(key) {
+                    Some(serde_json::Value::Array(arr)) if arr.len() > limit => {
+                        arr.truncate(limit);
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    if changed && let Ok(s) = serde_json::to_string_pretty(&parsed) {
+        *stdout = s;
     }
+}
+
+/// Is this text a YAML document rather than a table? The first non-empty
+/// line is a document marker or a top-level `key:`. Column-aligned tables
+/// (`NAME  READY  STATUS`) never match.
+///
+/// Not yet called from production code: Task B.5 wires this into the `Auto`
+/// arm of `apply_reduction`. Tested directly below in the meantime.
+#[allow(
+    dead_code,
+    reason = "consumed by Task B.5's Auto-arm wiring, not yet landed on this branch; \
+              tested directly below in the meantime"
+)]
+pub(crate) fn looks_like_yaml_document(text: &str) -> bool {
+    let Some(first) = text.lines().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    if first.trim_end() == "---" {
+        return true;
+    }
+    let Some((key, rest)) = first.split_once(':') else {
+        return false;
+    };
+    !key.is_empty()
+        && !key.starts_with(' ')
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+        && (rest.is_empty() || rest.starts_with(' '))
+}
+
+/// `limit` on YAML without a filter: the first N documents of a stream, or
+/// the first N items of the single top-level block sequence of a lone
+/// document (`items:` of a kubectl list). Anything else is left alone.
+fn try_apply_yaml_limit(
+    stdout: &mut String,
+    dr: &crate::domain::data_reduction::DataReductionArgs,
+) {
+    let Some(limit) = dr.limit else { return };
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if let Some(capped) =
+        cap_yaml_documents(stdout, limit).or_else(|| cap_yaml_single_doc_items(stdout, limit))
+    {
+        *stdout = capped;
+    }
+}
+
+/// Keep the first `limit` documents of a `---` stream. `None` when the text
+/// holds `limit` documents or fewer (a single document included).
+fn cap_yaml_documents(text: &str, limit: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut documents_started = 0usize;
+    for line in text.lines() {
+        if line.trim_end() == "---" {
+            if documents_started >= limit {
+                return Some(out);
+            }
+            documents_started += 1;
+        } else if documents_started == 0 && !line.trim().is_empty() {
+            documents_started = 1;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    None
+}
+
+/// Keep the first `limit` items of the single top-level block sequence of a
+/// document: a column-0 `key:` line followed by column-0 `- ` items, then
+/// the remaining column-0 keys. `None` when there is no such sequence, more
+/// than one, or `limit` items or fewer.
+fn cap_yaml_single_doc_items(text: &str, limit: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let is_top_key_only = |l: &str| {
+        let t = l.trim_end();
+        t.ends_with(':') && !t.starts_with([' ', '-', '#']) && !t[..t.len() - 1].contains(' ')
+    };
+    let starts: Vec<usize> = (0..lines.len().saturating_sub(1))
+        .filter(|&i| is_top_key_only(lines[i]) && lines[i + 1].starts_with("- "))
+        .collect();
+    let [start] = starts.as_slice() else {
+        return None;
+    };
+    let mut out: Vec<&str> = lines[..=*start].to_vec();
+    let mut items = 0usize;
+    let mut keep = false;
+    let mut i = start + 1;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.starts_with("- ") {
+            items += 1;
+            keep = items <= limit;
+        } else if !line.starts_with(' ') && !line.trim().is_empty() {
+            out.extend_from_slice(&lines[i..]);
+            break;
+        }
+        if keep {
+            out.push(line);
+        }
+        i += 1;
+    }
+    if items <= limit {
+        return None;
+    }
+    Some(format!("{}\n", out.join("\n")))
 }
 
 /// Auto-populate `structuredContent` from `AppContent` data.
@@ -2359,6 +2487,100 @@ mod tests {
             crate::domain::data_reduction::DataReductionArgs::extract(&mut v).expect("extract");
         assert!(apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap());
         assert_eq!(stdout, "\"a\"\n\"b\"");
+    }
+
+    #[test]
+    fn json_limit_caps_the_single_top_level_array_member() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout =
+            r#"{"apiVersion":"v1","items":[{"n":1},{"n":2},{"n":3}],"kind":"List"}"#.to_string();
+        let mut v = json!({"limit": 2});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(parsed["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed["kind"], "List");
+    }
+
+    #[test]
+    fn json_limit_is_a_no_op_when_the_object_has_two_arrays() {
+        use crate::domain::output_kind::OutputKind;
+        let original = r#"{"a":[1,2,3],"b":[4,5,6]}"#;
+        let mut stdout = original.to_string();
+        let mut v = json!({"limit": 1});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap();
+        assert_eq!(stdout, original);
+    }
+
+    #[test]
+    fn yaml_limit_keeps_the_first_documents_of_a_stream() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "---\n# Source: a\nkind: A\n---\nkind: B\n---\nkind: C\n".to_string();
+        let mut v = json!({"limit": 2});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Yaml).unwrap();
+        assert_eq!(stdout, "---\n# Source: a\nkind: A\n---\nkind: B\n");
+    }
+
+    #[test]
+    fn yaml_limit_caps_the_items_of_a_list_document() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "apiVersion: v1\nitems:\n- kind: Pod\n  metadata:\n    name: a\n- kind: Pod\n  metadata:\n    name: b\n- kind: Pod\n  metadata:\n    name: c\nkind: List\nmetadata:\n  resourceVersion: \"\"\n".to_string();
+        let mut v = json!({"limit": 2});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Yaml).unwrap();
+        assert_eq!(
+            stdout,
+            "apiVersion: v1\nitems:\n- kind: Pod\n  metadata:\n    name: a\n- kind: Pod\n  metadata:\n    name: b\nkind: List\nmetadata:\n  resourceVersion: \"\"\n"
+        );
+    }
+
+    #[test]
+    fn yaml_limit_is_a_no_op_on_a_plain_mapping() {
+        use crate::domain::output_kind::OutputKind;
+        let original = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: argocd\n";
+        let mut stdout = original.to_string();
+        let mut v = json!({"limit": 1});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Yaml).unwrap();
+        assert_eq!(stdout, original);
+    }
+
+    // ============== looks_like_yaml_document tests ==============
+    //
+    // Not yet called from `apply_reduction` — Task B.5 wires it into the
+    // `Auto` arm. Exercised directly here so the helper carries coverage
+    // from the commit that introduces it instead of sitting dead until B.5.
+
+    #[test]
+    fn looks_like_yaml_document_true_for_a_document_marker() {
+        assert!(looks_like_yaml_document("---\nkind: Pod\n"));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_true_for_a_top_level_key() {
+        assert!(looks_like_yaml_document(
+            "apiVersion: v1\nkind: Namespace\n"
+        ));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_false_for_a_tabular_header() {
+        assert!(!looks_like_yaml_document(
+            "NAME  READY  STATUS\npod-a  1/1  Running\n"
+        ));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_false_for_empty_text() {
+        assert!(!looks_like_yaml_document(""));
+        assert!(!looks_like_yaml_document("\n\n"));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_false_for_an_indented_first_line() {
+        assert!(!looks_like_yaml_document("  kind: Pod\n"));
     }
 
     /// The reduction step in the pipeline runs only when both
