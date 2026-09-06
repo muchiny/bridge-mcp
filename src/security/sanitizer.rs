@@ -114,18 +114,68 @@ struct PatternDef {
 /// (`DATABASE_URL=mysql://[CREDENTIALS]@host/db`) and must still be consumed
 /// whole.
 ///
-/// The bare alternative rejects a leading `[` so it never re-consumes a
-/// bracketed marker as a fresh value; the quoted alternatives reject the same
-/// leading `[` on their content, so a quoted marker (`"[REDACTED]"`,
-/// `'[REDACTED]'`) is not re-consumed either — without it, a later pattern
-/// whose key set overlaps an earlier "quoted value" pattern would re-match
-/// and strip the quoting the earlier pattern had just added.
+/// A double-quoted value, with NO capturing group of its own — every caller
+/// wraps it in whatever group it needs. Shared by [`quoted_value`] and by the
+/// two Terraform HCL patterns, which are double-quote only (HCL strings are
+/// never single-quoted, so these two intentionally don't accept
+/// [`single_quoted_value`] — widening their match set is a separate decision
+/// from marker protection).
+///
+/// A real secret can legitimately start with `[` (`"[abc123]"`, `"[1,2]"`),
+/// so only MARKER-SHAPED content is refused: a `[` followed by one or more
+/// of `[A-Z0-9_ ]` and then a `]`, with nothing else in between
+/// (`"[REDACTED]"`, `"[K3S_TOKEN_REDACTED]"`) — detected with `(?-i:…)` so it
+/// stays upper-case-only even inside a case-insensitive pattern, since every
+/// marker this codebase produces is upper-case by construction and a real
+/// lower-case `"[abc]"`-shaped secret must still match. Without this, a later
+/// pattern whose key set overlaps an earlier "quoted value" pattern would
+/// re-match an already-produced marker and either strip its quoting or —
+/// worse, for a pattern with its own named marker — flatten it down to the
+/// generic `[REDACTED]`.
+macro_rules! double_quoted_value {
+    () => {
+        r#""(?:(?:[^"\\\n\[]|\\.|\[(?-i:[^"\\\n\]A-Z0-9_ ]|[A-Z0-9_ ]+[^"\\\n\]A-Z0-9_ ]))(?:[^"\\\n]|\\.)*)?""#
+    };
+}
+
+/// A single-quoted value, with NO capturing group of its own. Same
+/// marker-shaped exclusion as [`double_quoted_value`], for `'` instead of
+/// `"`.
+macro_rules! single_quoted_value {
+    () => {
+        r#"'(?:(?:[^'\n\[]|\[(?-i:[^'\n\]A-Z0-9_ ]|[A-Z0-9_ ]+[^'\n\]A-Z0-9_ ]))[^'\n]*)?'"#
+    };
+}
+
+/// A double- or single-quoted value, with NO capturing group of its own —
+/// every caller wraps it in whatever group it needs. Shared by
+/// `scalar_value!()` (as its first two alternatives) and by the two patterns
+/// whose value class is quoted-only, either quote style ("Generic passwords
+/// with quoted values", "Generic secrets with quoted values"): one grammar,
+/// four users counting the two Terraform patterns on [`double_quoted_value`]
+/// alone — no hand-rolled quoted-value class is left in this file, so a fix
+/// here (or in the double/single halves) fixes all of them at once.
+macro_rules! quoted_value {
+    () => {
+        concat!(double_quoted_value!(), "|", single_quoted_value!())
+    };
+}
+
+/// The bare alternative rejects a leading `[` outright, so it never
+/// re-consumes a bracketed marker as a fresh value; [`quoted_value`] gives
+/// the two quoted alternatives the equivalent protection.
 ///
 /// The macro INCLUDES its capturing parentheses: in a pattern whose key is
 /// group 1 the value is group 2, so `secret_group: Some(2)` stays valid.
 macro_rules! scalar_value {
     () => {
-        r#"("(?:(?:[^"\\\n\[]|\\.)(?:[^"\\\n]|\\.)*)?"|'(?:[^'\n\[][^'\n]*)?'|["']?[^\s"'{}\[\],;](?:[^\s"{}]*[^\s"'{}\[\],;])?)"#
+        concat!(
+            "(",
+            quoted_value!(),
+            "|",
+            r#"["']?[^\s"'{}\[\],;](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
+            ")"
+        )
     };
 }
 
@@ -496,8 +546,8 @@ impl Sanitizer {
     /// Get all default pattern definitions with categories
     ///
     /// IMPORTANT: Order matters! Specific patterns (with unique markers like
-    /// `[GITHUB_PAT_REDACTED]`) must come BEFORE generic patterns (like `$1=[REDACTED]`)
-    /// to ensure proper detection and replacement.
+    /// `[GITHUB_PAT_REDACTED]`) must come BEFORE generic patterns (like
+    /// `${1}[REDACTED]`) to ensure proper detection and replacement.
     ///
     /// Categories available for filtering:
     /// - `github` - GitHub tokens
@@ -830,7 +880,7 @@ impl Sanitizer {
             // AWS
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)(aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -840,7 +890,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)aws[_-]?session[_-]?token[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)(aws[_-]?session[_-]?token[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -851,7 +901,7 @@ impl Sanitizer {
             // Docker compose / environment variables (specific DB names)
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:MYSQL|POSTGRES|MONGO|REDIS|RABBITMQ|MARIADB)[_-]?(?:PASSWORD|ROOT_PASSWORD|PASS)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:MYSQL|POSTGRES|MONGO|REDIS|RABBITMQ|MARIADB)[_-]?(?:PASSWORD|ROOT_PASSWORD|PASS)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -862,7 +912,7 @@ impl Sanitizer {
             // Database URLs
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:DATABASE_URL|DB_URL|REDIS_URL|MONGO_URL)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:DATABASE_URL|DB_URL|REDIS_URL|MONGO_URL)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -872,7 +922,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:DB|DATABASE)[_-]?(?:PASSWORD|PASS)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:DB|DATABASE)[_-]?(?:PASSWORD|PASS)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -883,7 +933,7 @@ impl Sanitizer {
             // Ansible
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)vault[_-]?pass(?:word)?[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)(vault[_-]?pass(?:word)?[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -893,7 +943,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)ansible[_-]?become[_-]?pass(?:word)?[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)(ansible[_-]?become[_-]?pass(?:word)?[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -910,7 +960,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)ansible[_-]?ssh[_-]?pass[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)(ansible[_-]?ssh[_-]?pass[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -921,7 +971,7 @@ impl Sanitizer {
             // GitLab CI tokens
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:GITLAB_TOKEN|CI_JOB_TOKEN)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:GITLAB_TOKEN|CI_JOB_TOKEN)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -932,7 +982,7 @@ impl Sanitizer {
             // Cloud providers
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:AZURE_CLIENT_SECRET|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:AZURE_CLIENT_SECRET|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -942,7 +992,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:GOOGLE_APPLICATION_CREDENTIALS|GCP_SERVICE_ACCOUNT|GCLOUD_SERVICE_KEY)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:GOOGLE_APPLICATION_CREDENTIALS|GCP_SERVICE_ACCOUNT|GCLOUD_SERVICE_KEY)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -952,7 +1002,7 @@ impl Sanitizer {
             },
             // HashiCorp
             PatternDef {
-                pattern: r#"((?i)(?:VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*)(["']?[hs]\.[A-Za-z0-9]+["']?)"#,
+                pattern: r#"(?i)((?:VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*)(["']?[hs]\.[A-Za-z0-9]+["']?)"#,
                 replacement: "${1}[REDACTED]",
                 description: "HashiCorp Vault token",
                 category: "hashicorp",
@@ -960,7 +1010,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)CONSUL_HTTP_TOKEN[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)(CONSUL_HTTP_TOKEN[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -971,7 +1021,7 @@ impl Sanitizer {
             // Docker registry
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:docker[_-]?password|registry[_-]?password)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:docker[_-]?password|registry[_-]?password)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -982,7 +1032,7 @@ impl Sanitizer {
             // AI APIs
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:ANTHROPIC_API_KEY|CLAUDE_API_KEY)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:ANTHROPIC_API_KEY|CLAUDE_API_KEY)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -1029,7 +1079,11 @@ impl Sanitizer {
             },
             // Terraform HCL, strong key: password = "…" — any scalar goes.
             PatternDef {
-                pattern: r#"((?i)(?:password)[ \t]*=[ \t]*)("(?:[^"\\\n]|\\.)*")"#,
+                pattern: concat!(
+                    r#"(?i)((?:password)[ \t]*=[ \t]*)("#,
+                    double_quoted_value!(),
+                    ")"
+                ),
                 replacement: r#"${1}"[REDACTED]""#,
                 description: "Terraform HCL secrets with quoted values (strong)",
                 category: "generic",
@@ -1037,7 +1091,11 @@ impl Sanitizer {
             },
             // Terraform HCL, weak key: token = "5" is a count, not a secret.
             PatternDef {
-                pattern: r#"((?i)(?:secret|token|api_key)[ \t]*=[ \t]*)("(?:[^"\\\n]|\\.)*")"#,
+                pattern: concat!(
+                    r#"(?i)((?:secret|token|api_key)[ \t]*=[ \t]*)("#,
+                    double_quoted_value!(),
+                    ")"
+                ),
                 replacement: r#"${1}"[REDACTED]""#,
                 description: "Terraform HCL secrets with quoted values (weak)",
                 category: "generic",
@@ -1045,7 +1103,11 @@ impl Sanitizer {
             },
             // Bare keys with quoted values, strong: password: "mon secret"
             PatternDef {
-                pattern: r#"((?i)(?:password|passwd|pwd)[ \t]*[=:][ \t]*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*')"#,
+                pattern: concat!(
+                    r#"(?i)((?:password|passwd|pwd)[ \t]*[=:][ \t]*)("#,
+                    quoted_value!(),
+                    ")"
+                ),
                 replacement: r#"${1}"[REDACTED]""#,
                 description: "Generic passwords with quoted values",
                 category: "generic",
@@ -1053,7 +1115,11 @@ impl Sanitizer {
             },
             // Bare keys with quoted values, weak: secret: "…"
             PatternDef {
-                pattern: r#"((?i)(?:secret|credential)[ \t]*[=:][ \t]*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*')"#,
+                pattern: concat!(
+                    r#"(?i)((?:secret|credential)[ \t]*[=:][ \t]*)("#,
+                    quoted_value!(),
+                    ")"
+                ),
                 replacement: r#"${1}"[REDACTED]""#,
                 description: "Generic secrets with quoted values",
                 category: "generic",
@@ -1062,7 +1128,7 @@ impl Sanitizer {
             // Bare keys with bare values, strong
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:password|passwd|pwd)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:password|passwd|pwd)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -1072,7 +1138,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:DIGITALOCEAN_TOKEN|DO_TOKEN)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:DIGITALOCEAN_TOKEN|DO_TOKEN)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -1082,7 +1148,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:ssh[_-]?pass(?:word)?|ssh[_-]?key[_-]?pass(?:word)?)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:ssh[_-]?pass(?:word)?|ssh[_-]?key[_-]?pass(?:word)?)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -1092,7 +1158,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:smtp[_-]?pass(?:word)?|mail[_-]?pass(?:word)?)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:smtp[_-]?pass(?:word)?|mail[_-]?pass(?:word)?)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -1101,14 +1167,14 @@ impl Sanitizer {
                 secret_group: None,
             },
             PatternDef {
-                pattern: concat!(r#"((?i)npm[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
+                pattern: concat!(r#"(?i)(npm[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
                 replacement: "${1}[REDACTED]",
                 description: "NPM token",
                 category: "generic",
                 secret_group: None,
             },
             PatternDef {
-                pattern: concat!(r#"((?i)pypi[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
+                pattern: concat!(r#"(?i)(pypi[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
                 replacement: "${1}[REDACTED]",
                 description: "PyPI token",
                 category: "generic",
@@ -1117,7 +1183,7 @@ impl Sanitizer {
             // Bare keys with bare values, weak
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:api[_-]?key|auth[_-]?token)(?:[ \t]*[=:][ \t]*|[ \t]+))"#,
+                    r#"(?i)((?:api[_-]?key|auth[_-]?token)(?:[ \t]*[=:][ \t]*|[ \t]+))"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -1127,7 +1193,7 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"((?i)(?:secret|credential|token)[ \t]*[=:][ \t]*)"#,
+                    r#"(?i)((?:secret|credential|token)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -2802,6 +2868,49 @@ users:
         }
     }
 
+    /// Ruling 12 (amended): `scalar_value!()`'s quoted alternatives refuse
+    /// only MARKER-SHAPED content (`[` + `[A-Z0-9_ ]+` + `]`, nothing else),
+    /// detected case-sensitively via `(?-i:…)` even inside a
+    /// case-insensitive pattern — not every leading `[`, and not a
+    /// lower-case bracketed run that merely LOOKS like a marker once folded.
+    /// A real quoted secret that happens to start with a bracket must still
+    /// be redacted.
+    #[test]
+    fn quoted_values_starting_with_a_bracket_are_still_redacted_but_markers_are_not() {
+        let s = Sanitizer::with_defaults();
+        // Lower-case bracketed content is a real value, not a marker — even
+        // though the AWS session token pattern is case-insensitive. AWS
+        // session token is a bare-value pattern (like CONSUL_HTTP_TOKEN
+        // elsewhere in this file), so its replacement is `${1}[REDACTED]`
+        // with no added quotes: whatever quoting the matched value carried
+        // is discarded along with the value, same as every other bare
+        // pattern in this file.
+        assert_eq!(
+            s.sanitize(r#"AWS_SESSION_TOKEN: "[abc123def456]""#)
+                .as_ref(),
+            "AWS_SESSION_TOKEN: [REDACTED]"
+        );
+        // Same key, a lower-case marker-LOOKING value: still just a value,
+        // because marker detection is pinned case-sensitive regardless of
+        // the pattern's own (?i).
+        assert_eq!(
+            s.sanitize(r#"AWS_SESSION_TOKEN: "[redacted]""#).as_ref(),
+            "AWS_SESSION_TOKEN: [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize(r#"password = "[REDACTED]""#).as_ref(),
+            r#"password = "[REDACTED]""#
+        );
+        assert_eq!(
+            s.sanitize("password = 'hunter2'").as_ref(),
+            r#"password = "[REDACTED]""#
+        );
+        assert_eq!(
+            s.sanitize(r#"password="[K3S_TOKEN_REDACTED]""#).as_ref(),
+            r#"password="[K3S_TOKEN_REDACTED]""#
+        );
+    }
+
     /// The regression fence for the 2026-09-05 audit. Every shape here is a
     /// leak or a corruption the audit reproduced against the pre-fix tree;
     /// each line is an exact input/output pair so a grammar change that
@@ -2877,10 +2986,12 @@ users:
             // The generic keyed patterns also accept a quoted value, so they
             // are in `matched_indices` for this input too and re-run against
             // what the HCL pattern already redacted. `scalar_value!()`'s
-            // quoted alternatives reject a leading `[` on their content —
-            // the same protection the bare alternative already had — so
-            // `"[REDACTED]"` is not a value to them and the HCL pattern's
-            // quoting survives the cascade untouched.
+            // quoted alternatives reject MARKER-SHAPED content (a `[`
+            // directly followed by `[A-Z0-9_ ]+` and a `]`, nothing else in
+            // between) — so `"[REDACTED]"` is not a value to them and the
+            // HCL pattern's quoting survives the cascade untouched. A real
+            // quoted secret that merely starts with `[` (`"[abc123]"`) is
+            // still redacted; see `quoted_values_starting_with_a_bracket_are_still_redacted_but_markers_are_not`.
             (
                 r#"api_key = "AKxq81mZp0Lw4Rt""#,
                 r#"api_key = "[REDACTED]""#,
