@@ -634,8 +634,8 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 ///   top-level item list
 /// - `Auto` → try `jq_filter` then `yq_filter`; without either, sniff the
 ///   output (JSON braces/brackets, then a YAML document marker or top-level
-///   key) and apply the matching `limit` fallback, else `columns`/`limit`
-///   tabular reduction
+///   key, then a bare list of tokens) and apply the matching `limit`
+///   fallback, else `columns`/`limit` tabular reduction
 /// - `RawText` → no-op
 ///
 /// Returns `true` if `jq_filter` or `yq_filter` was applied (used by the
@@ -873,14 +873,17 @@ fn try_apply_json_limit(
 /// a table? `kubectl get -o name` prints `pod/web-1` lines; the table parser
 /// read the first one as a header and upper-cased it, and `limit=3` gave
 /// four lines. A one-column table keeps its upper-case header (`NAME`),
-/// which is the one shape this deliberately does not claim.
+/// which is the one shape this deliberately does not claim. Nor does a
+/// header-underline table: `vault kv list` prints `Keys\n----\napp1\n`, and a
+/// second line that is nothing but two or more `-` is that underline
+/// convention, never a `-o name` value.
 fn looks_like_bare_list(text: &str) -> bool {
-    let mut lines = text
+    let lines: Vec<&str> = text
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .peekable();
-    let Some(first) = lines.peek().copied() else {
+        .collect();
+    let Some(first) = lines.first() else {
         return false;
     };
     let header_like = first
@@ -889,7 +892,13 @@ fn looks_like_bare_list(text: &str) -> bool {
     if header_like {
         return false;
     }
-    lines.all(|l| !l.chars().any(char::is_whitespace) && !l.contains(": "))
+    if let Some(second) = lines.get(1)
+        && second.len() >= 2
+        && second.chars().all(|c| c == '-')
+    {
+        return false;
+    }
+    lines.iter().all(|l| !l.chars().any(char::is_whitespace))
 }
 
 /// Is this text a YAML document rather than a table? The first line that is
@@ -2478,6 +2487,20 @@ mod tests {
     }
 
     #[test]
+    fn auto_limit_on_a_header_underline_table_still_uses_the_table_parser() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "Keys\n----\napp1\napp2\n".to_string();
+        let mut v = json!({"limit": 2});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
+        assert_eq!(stdout.lines().count(), 3, "header + 2 rows: {stdout}");
+        assert!(
+            stdout.starts_with("KEYS\n"),
+            "table parser upper-cases the header: {stdout}"
+        );
+    }
+
+    #[test]
     fn looks_like_bare_list_cases() {
         assert!(looks_like_bare_list("pod/a\npod/b\n"));
         assert!(looks_like_bare_list("argocd\ndefault\n"));
@@ -2489,6 +2512,10 @@ mod tests {
         assert!(!looks_like_bare_list("apiVersion: v1\n"));
         assert!(!looks_like_bare_list(""));
         assert!(!looks_like_bare_list("\n\n"));
+        assert!(
+            !looks_like_bare_list("Keys\n----\napp1\n"),
+            "header-underline table (vault kv list) is not a bare list"
+        );
     }
 
     /// Default trait `scoped_paths` must return an empty vec — handlers
