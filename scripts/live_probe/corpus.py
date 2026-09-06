@@ -7,6 +7,13 @@ line that differs. The only legitimate difference is a redaction marker
 standing where a secret-shaped value stood, with everything before the
 value byte-identical. Raw captures can hold real secrets: the output
 directory is gitignored.
+
+A handful of commands read live, mutable system state (see VOLATILE) —
+their raw and bridged captures are two separate ssh calls seconds apart, so
+non-marker differences there are the state moving between captures, not a
+sanitizer defect: the sanitizer cannot change a line without leaving a
+marker, so a marker-less change in a command that reads live state is
+classified NOISE, not DEFECT.
 """
 import argparse
 import datetime
@@ -21,7 +28,8 @@ COMMANDS = {
     "kubectl_pods_json": "kubectl get pods -A -o json",
     "kubectl_pods_yaml": "kubectl get pods -A -o yaml",
     "kubectl_all_yaml": "kubectl get all -A -o yaml",
-    "kubectl_secrets_yaml": "kubectl get secrets -A -o yaml",
+    # helm release blobs push the dump past the local config's 1 MiB max_output_bytes transport cap and the audit cannot classify what the transport dropped
+    "kubectl_secrets_yaml": "kubectl get secrets -A -o yaml --field-selector type!=helm.sh/release.v1",
     "kubectl_configmaps_yaml": "kubectl get configmaps -A -o yaml",
     "kubectl_describe_pods": "kubectl describe pods -A",
     "kubectl_events": "kubectl get events -A",
@@ -36,6 +44,7 @@ COMMANDS = {
     "env": "env",
     "os_release": "cat /etc/os-release",
 }
+VOLATILE = {"journal", "systemctl", "ps", "env", "kubectl_events"}
 MARKER = re.compile(r"\[(?:[A-Z_]+_)?REDACTED\]")
 
 
@@ -62,9 +71,9 @@ def secret_shaped(value):
     return not (letters_only or digits_only)
 
 
-def classify_pair(before, after):
+def classify_pair(before, after, volatile=False):
     if not MARKER.search(after):
-        return "DEFECT", "changed without a redaction marker"
+        return ("NOISE" if volatile else "DEFECT"), "changed without a redaction marker"
     i = 0
     while i < min(len(before), len(after)) and before[i] == after[i]:
         i += 1
@@ -81,21 +90,26 @@ def classify_pair(before, after):
     return "REVIEW", f"redacted a value that does not look like a secret: {value!r}"
 
 
-def classify(raw, bridged):
-    raw_lines, br_lines = raw.splitlines(), bridged.splitlines()
-    out, counts = [], {"OK": 0, "REVIEW": 0, "DEFECT": 0}
+def classify(raw, bridged, volatile=False):
+    raw_lines = raw.rstrip("\n").splitlines()
+    br_lines = bridged.rstrip("\n").splitlines()
+    out, counts = [], {"OK": 0, "REVIEW": 0, "DEFECT": 0, "NOISE": 0}
     sm = difflib.SequenceMatcher(a=raw_lines, b=br_lines, autojunk=False)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
         if tag != "replace" or (i2 - i1) != (j2 - j1):
-            counts["DEFECT"] += 1
-            out.append(f"DEFECT line-count changed ({tag}) raw[{i1}:{i2}] bridged[{j1}:{j2}]:\n"
-                       + "".join(f"  - {l}\n" for l in raw_lines[i1:i2])
-                       + "".join(f"  + {l}\n" for l in br_lines[j1:j2]))
+            lines_before = raw_lines[i1:i2]
+            lines_after = br_lines[j1:j2]
+            has_marker = any(MARKER.search(l) for l in lines_before + lines_after)
+            verdict = "NOISE" if (volatile and not has_marker) else "DEFECT"
+            counts[verdict] += 1
+            out.append(f"{verdict} line-count changed ({tag}) raw[{i1}:{i2}] bridged[{j1}:{j2}]:\n"
+                       + "".join(f"  - {l}\n" for l in lines_before)
+                       + "".join(f"  + {l}\n" for l in lines_after))
             continue
         for b, a in zip(raw_lines[i1:i2], br_lines[j1:j2]):
-            verdict, why = classify_pair(b, a)
+            verdict, why = classify_pair(b, a, volatile)
             counts[verdict] += 1
             if verdict != "OK":
                 out.append(f"{verdict} {why}\n  - {b}\n  + {a}\n")
@@ -122,11 +136,11 @@ def main():
         bridged = capture_bridged(a.binary, a.host, command)
         (out / "raw" / f"{name}.txt").write_text(raw)
         (out / "bridged" / f"{name}.txt").write_text(bridged)
-        counts, report = classify(raw, bridged)
+        counts, report = classify(raw, bridged, name in VOLATILE)
         (out / "classified" / f"{name}.txt").write_text(report)
         summary[name] = counts
         defects += counts["DEFECT"]
-        print(f"{name:<26} raw={len(raw.splitlines()):>6} lines  OK={counts['OK']:<4} REVIEW={counts['REVIEW']:<4} DEFECT={counts['DEFECT']}")
+        print(f"{name:<26} raw={len(raw.splitlines()):>6} lines  OK={counts['OK']:<4} REVIEW={counts['REVIEW']:<4} NOISE={counts['NOISE']:<4} DEFECT={counts['DEFECT']}")
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"\n{defects} DEFECT line(s); details in {out}/classified/")
     raise SystemExit(min(defects, 255))
