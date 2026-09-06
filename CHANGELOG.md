@@ -83,6 +83,15 @@ reading it. Every item below was reproduced before the fix and measured after.
   `test_build_rev_matches_live_head_or_is_unknown` on the first such bump.
   Both manifests are now watched.
 
+- **CLI runs now write their audit events.** `create_context` dropped the
+  `AuditWriterTask` on return, so every `bridge-mcp tool …` left a 0-byte
+  `audit.log` and an empty rotated archive. The CLI entry points keep the
+  writer, drop the context and wait up to 2 s for the drain. Tool events carry
+  `reduction: [...]` when reduction params were used. `bridge-mcp exec` now
+  exits with the remote command's exit code once the audit event is written —
+  it always exited 1 before. `bridge-mcp status` reports
+  `"written_by": "mcp-server-and-cli"`.
+
 ### Changed
 
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
