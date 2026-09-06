@@ -680,6 +680,11 @@ pub fn apply_reduction(
                     // documents or list items. Never the table parser: it
                     // reads `apiVersion: v1` as a two-column header.
                     try_apply_yaml_limit(stdout, dr);
+                } else if looks_like_bare_list(stdout) {
+                    // One token per line (`-o name`): `limit` caps lines,
+                    // `columns` has nothing to select. Never the table
+                    // parser, which upper-cases the first line as a header.
+                    cap_filter_results(stdout, dr.limit);
                 } else {
                     try_apply_tabular_reduction(stdout, dr);
                 }
@@ -726,7 +731,8 @@ pub fn apply_reduction_recorded(
 /// can cut a multi-line result short instead of dropping it whole. Without a
 /// filter, `limit` is handled by `try_apply_json_limit`, `try_apply_yaml_limit`
 /// and the tabular path instead.
-#[cfg(feature = "jq")]
+///
+/// Also the line cap for a bare list (`kubectl get -o name`) on the Auto arm.
 fn cap_filter_results(stdout: &mut String, limit: Option<u64>) {
     let Some(limit) = limit else { return };
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -861,6 +867,29 @@ fn try_apply_json_limit(
     if changed && let Ok(s) = serde_json::to_string_pretty(&parsed) {
         *stdout = s;
     }
+}
+
+/// Is this text a bare list — one token per line, no header — rather than
+/// a table? `kubectl get -o name` prints `pod/web-1` lines; the table parser
+/// read the first one as a header and upper-cased it, and `limit=3` gave
+/// four lines. A one-column table keeps its upper-case header (`NAME`),
+/// which is the one shape this deliberately does not claim.
+fn looks_like_bare_list(text: &str) -> bool {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .peekable();
+    let Some(first) = lines.peek().copied() else {
+        return false;
+    };
+    let header_like = first
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '_' | '-'));
+    if header_like {
+        return false;
+    }
+    lines.all(|l| !l.chars().any(char::is_whitespace) && !l.contains(": "))
 }
 
 /// Is this text a YAML document rather than a table? The first line that is
@@ -2422,6 +2451,44 @@ mod tests {
             "Auto branch must fall through to tabular column selection"
         );
         assert!(stdout.contains("NAME"));
+    }
+
+    #[test]
+    fn auto_limit_on_a_bare_list_caps_lines_and_keeps_case() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "pod/argocd-application-controller-0\npod/argocd-image-updater-controller-74f96b4dd-2tvmw\npod/argocd-redis-86846d5986-7zbjj\npod/argocd-repo-server-7d44c57bc8-hcm78\n".to_string();
+        let mut v = json!({"limit": 3});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
+        assert_eq!(
+            stdout,
+            "pod/argocd-application-controller-0\npod/argocd-image-updater-controller-74f96b4dd-2tvmw\npod/argocd-redis-86846d5986-7zbjj"
+        );
+    }
+
+    #[test]
+    fn auto_limit_on_a_one_column_table_with_a_header_still_uses_the_table_parser() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "NAME\nargocd\ndefault\nkube-system\n".to_string();
+        let mut v = json!({"limit": 2});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
+        assert_eq!(stdout.lines().count(), 3, "header + 2 rows: {stdout}");
+        assert!(stdout.starts_with("NAME\n"), "{stdout}");
+    }
+
+    #[test]
+    fn looks_like_bare_list_cases() {
+        assert!(looks_like_bare_list("pod/a\npod/b\n"));
+        assert!(looks_like_bare_list("argocd\ndefault\n"));
+        assert!(
+            !looks_like_bare_list("NAME\nargocd\n"),
+            "upper-case header is a table"
+        );
+        assert!(!looks_like_bare_list("NAME   STATUS\na      Running\n"));
+        assert!(!looks_like_bare_list("apiVersion: v1\n"));
+        assert!(!looks_like_bare_list(""));
+        assert!(!looks_like_bare_list("\n\n"));
     }
 
     /// Default trait `scoped_paths` must return an empty vec — handlers

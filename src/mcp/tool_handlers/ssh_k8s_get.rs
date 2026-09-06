@@ -66,7 +66,7 @@ impl StandardTool for K8sGetTool {
         resource names and status before using ssh_k8s_describe (detailed prose), \
         ssh_k8s_logs (pod logs), ssh_k8s_exec (run command in pod), or ssh_k8s_delete. \
         Use output='json' with jq_filter, or output='yaml' with yq_filter, for \
-        structured data. Use \
+        structured data. Use output='name' with limit for a bare list of names. Use \
         all_namespaces=true to search cluster-wide. Auto-detects kubectl binary (k8s, k3s, \
         microk8s). Returns kubectl text output.";
 
