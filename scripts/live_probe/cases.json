@@ -78,6 +78,18 @@
      "expect": "eq=secret:\\n  secretName: tls\\ntoken: enabled\\nsecretName: argocd-repo-server-tls"},
     {"id": "S6", "owner": "lane-a", "tool": "ssh_exec", "yes": true, "paths": ["cli"],
      "args": {"command": "printf '%s\\n' 'docker login -u bob -p' 'next-line' '--vault-password-file' '/etc/passwd' 'VAULT_TOKEN=hvs.CAESIJ1234567890abcdefghij'"},
-     "expect": "eq=docker login -u bob -p\\nnext-line\\n--vault-password-file\\n/etc/passwd\\nVAULT_TOKEN=[VAULT_TOKEN_REDACTED]"}
+     "expect": "eq=docker login -u bob -p\\nnext-line\\n--vault-password-file\\n/etc/passwd\\nVAULT_TOKEN=[VAULT_TOKEN_REDACTED]"},
+    {"id": "N1", "owner": "fix2", "tool": "ssh_k8s_get",
+     "args": {"resource": "pods", "namespace": "argocd", "output": "name", "limit": 3},
+     "expect": "lines=3"},
+    {"id": "N2", "owner": "fix2", "tool": "ssh_k8s_get",
+     "args": {"resource": "pods", "namespace": "argocd", "output": "name", "limit": 3},
+     "expect": "first=pod/argocd-application-controller-0"},
+    {"id": "E1", "owner": "fix2", "tool": "ssh_k8s_get",
+     "args": {"resource": "secrets", "namespace": "argocd", "output": "yaml", "yq_filter": ".items[] | .metadata.name", "output_format": "tsv"},
+     "expect": "lines>=4"},
+    {"id": "E2", "owner": "fix2", "tool": "ssh_exec", "yes": true, "paths": ["cli"],
+     "args": {"command": "printf '%s\\n' '    tls.key: Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7q==' 'server.secretkey: Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7qJ='"},
+     "expect": "eq=    tls.key: [HIGH_ENTROPY_REDACTED]\\nserver.secretkey: [HIGH_ENTROPY_REDACTED]"}
   ]
 }

@@ -37,6 +37,18 @@ reading it. Every item below was reproduced before the fix and measured after.
 
 ### Fixed
 
+- **A redacted secrets YAML parses again.** The entropy marker replaced a
+  base64 token but left its `=` padding behind (`tls.key:
+  [HIGH_ENTROPY_REDACTED]==`), which is not YAML, so every `yq_filter` on
+  `kubectl get secrets -o yaml` failed. The marker now covers the padding
+  when the token is base64-shaped and the padded length is a multiple of
+  four. The corpus auditor parses every `-o yaml` / `-o json` capture whole,
+  so this class is a DEFECT from now on.
+- **`limit` on `kubectl get -o name` caps lines.** A bare list went through
+  the table parser, which upper-cased the first name as a header and
+  returned one line too many. The Auto arm now recognises a bare list (one
+  token per line, no upper-case header) and caps it like a filter result.
+
 - **`ssh_k8s_get output=yaml` came back as a table, `yq_filter` failed on every
   helm chart, and `limit` was ignored in four situations.** The MCP Apps table
   hook of `ssh_k8s_get`, `ssh_helm_list` and `ssh_helm_history` re-rendered every
