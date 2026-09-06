@@ -10,42 +10,58 @@
 
 use crate::error::{BridgeError, Result};
 
-/// Apply a jq-syntax filter to YAML input.
+/// Apply a jq program to a YAML document or stream.
 ///
-/// The YAML is parsed into `serde_json::Value` via `serde-saphyr`, then
-/// re-serialized to a JSON string and fed to the existing jq engine.
+/// `helm template` prints several documents separated by `---`; like
+/// `yq eval`, the program runs on each document and the outputs are
+/// concatenated, one result per line. A single document behaves as before.
 ///
 /// # Errors
 ///
 /// - `BridgeError::McpInvalidRequest` if the YAML cannot be parsed
 /// - Any error from `apply_jq_filter` (filter parse/compile/runtime)
 pub fn apply_yq_filter(input: &str, filter_expr: &str) -> Result<String> {
-    let json_str = yaml_to_json_string(input)?;
-    crate::domain::jq_filter::apply_jq_filter(&json_str, filter_expr)
+    let mut out = Vec::new();
+    for doc in yaml_documents_as_json(input)? {
+        let result = crate::domain::jq_filter::apply_jq_filter(&doc, filter_expr)?;
+        if !result.is_empty() {
+            out.push(result);
+        }
+    }
+    Ok(out.join("\n"))
 }
 
-/// Apply a jq-syntax filter to YAML input and serialize results as TSV.
-///
-/// Same conversion as [`apply_yq_filter`] but uses the TSV serializer.
+/// Same as [`apply_yq_filter`], each result rendered as one TSV row.
 ///
 /// # Errors
 ///
 /// Same as [`apply_yq_filter`].
 pub fn apply_yq_filter_tsv(input: &str, filter_expr: &str) -> Result<String> {
-    let json_str = yaml_to_json_string(input)?;
-    crate::domain::jq_filter::apply_jq_filter_tsv(&json_str, filter_expr)
+    let mut out = Vec::new();
+    for doc in yaml_documents_as_json(input)? {
+        let result = crate::domain::jq_filter::apply_jq_filter_tsv(&doc, filter_expr)?;
+        if !result.is_empty() {
+            out.push(result);
+        }
+    }
+    Ok(out.join("\n"))
 }
 
-/// Parse YAML to a `serde_json::Value` tree, then re-serialize to a
-/// JSON string suitable for the jq engine.
-fn yaml_to_json_string(yaml: &str) -> Result<String> {
-    let value: serde_json::Value = super::yaml::parse_yaml(yaml).map_err(|e| {
+/// Every non-null document of the stream as a compact JSON string, in order.
+fn yaml_documents_as_json(yaml: &str) -> Result<Vec<String>> {
+    let docs: Vec<serde_json::Value> = super::yaml::parse_yaml_documents(yaml).map_err(|e| {
         BridgeError::McpInvalidRequest(format!(
             "yq_filter requires YAML input, but failed to parse: {e}"
         ))
     })?;
-    serde_json::to_string(&value)
-        .map_err(|e| BridgeError::McpInvalidRequest(format!("YAML→JSON conversion failed: {e}")))
+    docs.into_iter()
+        .filter(|doc| !doc.is_null())
+        .map(|doc| {
+            serde_json::to_string(&doc).map_err(|e| {
+                BridgeError::McpInvalidRequest(format!("YAML→JSON conversion failed: {e}"))
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -109,5 +125,46 @@ hosts:
         let result = apply_yq_filter_tsv(yaml, "keys").unwrap();
         // keys returns an array of strings; TSV joins them with \t
         assert_eq!(result, "alpha\tbeta\tgamma");
+    }
+
+    #[test]
+    fn yq_runs_on_every_document_of_a_stream() {
+        let yaml = "---\n# Source: a.yaml\nkind: ServiceAccount\nmetadata:\n  name: sa\n---\nkind: Deployment\nmetadata:\n  name: app\n";
+        assert_eq!(
+            apply_yq_filter(yaml, ".kind").unwrap(),
+            "\"ServiceAccount\"\n\"Deployment\""
+        );
+        assert_eq!(
+            apply_yq_filter_tsv(yaml, "[.kind, .metadata.name]").unwrap(),
+            "ServiceAccount\tsa\nDeployment\tapp"
+        );
+    }
+
+    #[test]
+    fn yq_helm_template_fixture_lists_every_kind() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sanitizer/helm_template.yaml"
+        ))
+        .expect("fixture");
+        assert_eq!(
+            apply_yq_filter_tsv(&raw, ".kind").unwrap(),
+            "Secret\nDeployment"
+        );
+    }
+
+    #[test]
+    fn yq_document_without_output_contributes_nothing() {
+        let yaml = "---\nkind: A\n---\nother: 1\n";
+        assert_eq!(
+            apply_yq_filter(yaml, ".kind | select(. != null)").unwrap(),
+            "\"A\""
+        );
+    }
+
+    #[test]
+    fn yq_comment_only_leading_segment_is_skipped() {
+        let yaml = "---\n# generated\n---\nkind: A\n";
+        assert_eq!(apply_yq_filter(yaml, ".kind").unwrap(), "\"A\"");
     }
 }

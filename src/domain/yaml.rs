@@ -101,6 +101,23 @@ pub fn parse_yaml<T: DeserializeOwned>(input: &str) -> Result<T, BridgeError> {
         .map_err(|e| BridgeError::Config(format!("YAML parse error: {e}")))
 }
 
+/// Multi-document variant of [`parse_yaml`]: a stream separated by `---`
+/// yields one `T` per document under the same hardened options and size
+/// cap. A single document is a one-element vector. An empty or comment-only
+/// segment deserializes as the type's null form; callers skip those.
+pub fn parse_yaml_documents<T: DeserializeOwned>(input: &str) -> Result<Vec<T>, BridgeError> {
+    if input.len() > MAX_YAML_BYTES {
+        return Err(BridgeError::Config(format!(
+            "YAML input too large: {} bytes (max {})",
+            input.len(),
+            MAX_YAML_BYTES
+        )));
+    }
+
+    serde_saphyr::from_multiple_with_options(input, hardened_options())
+        .map_err(|e| BridgeError::Config(format!("YAML parse error: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +137,30 @@ mod tests {
     fn small_input_round_trips() {
         let v: serde_json::Value = parse_yaml("k: v\n").expect("parse");
         assert_eq!(v["k"], "v");
+    }
+
+    #[test]
+    fn parse_yaml_documents_splits_a_stream() {
+        let docs: Vec<serde_json::Value> =
+            parse_yaml_documents("---\nkind: A\n---\nkind: B\n").expect("two documents");
+        let kinds: Vec<&str> = docs
+            .iter()
+            .filter(|d| !d.is_null())
+            .map(|d| d["kind"].as_str().expect("kind"))
+            .collect();
+        assert_eq!(kinds, ["A", "B"]);
+    }
+
+    #[test]
+    fn parse_yaml_documents_single_document_is_one_element() {
+        let docs: Vec<serde_json::Value> = parse_yaml_documents("kind: A\n").expect("one document");
+        assert_eq!(docs.iter().filter(|d| !d.is_null()).count(), 1);
+    }
+
+    #[test]
+    fn parse_yaml_documents_respects_the_size_cap() {
+        let huge = "a: 1\n".repeat(MAX_YAML_BYTES / 5 + 1);
+        let err = parse_yaml_documents::<serde_json::Value>(&huge).unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 }
