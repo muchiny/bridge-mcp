@@ -2,8 +2,8 @@
 """Before/after snapshot of the campaign host, through read-only bridge-mcp
 tools only. `snapshot.py BIN --out FILE` writes it; `snapshot.py --diff
 BEFORE AFTER` prints what moved and exits 1 when a guarded field differs
-(node readiness, failed units, sandbox presence) or the running-pod set
-changed by more than the CronJob churn (two pods)."""
+(node readiness, failed units, sandbox presence, k3s activity) or the
+running-pod set changed by more than the CronJob churn (two pods)."""
 import argparse
 import json
 import os
@@ -28,7 +28,7 @@ def take(binary, host):
     return {
         "pods": sorted(l for l in pods.splitlines() if l.startswith("pod/")),
         "node_ready": rc2 == 0 and any("Ready" in l.split() for l in nodes.splitlines()),
-        "failed_units": sorted(l.split()[0] for l in failed.splitlines() if l.endswith(".service") or ".service " in l),
+        "failed_units": sorted(t[0] for t in (l.split() for l in failed.splitlines()) if t and t[0].endswith(".service")),
         "sandbox_present": "bridge-campaign" in tmp,
         "k3s_active": rc6 == 0 and "active (running)" in k3s,
         "alerts_raw": alerts.strip(),

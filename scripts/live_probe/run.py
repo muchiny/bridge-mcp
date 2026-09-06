@@ -6,7 +6,8 @@ Usage:
   scripts/live_probe/run.py BIN [--host raspberry] [--jobs 4] [--path both|cli|mcp]
                             [--only J1,J4] [--baseline] [--report PATH] [--cases PATH]
 
-Each case in cases.json runs through every path it lists. A verdict is
+Each case in the cases file (default `cases.json`) runs through every path it
+lists. A verdict is
 UNEXPECTED (and counted in the exit code) when a case fails without
 --baseline, or when a case owned by "base" fails with --baseline. With
 --baseline, a failing case owned by a lane is reported as "KO (expected)":
@@ -124,7 +125,7 @@ def check(expect, rc, out, err):
     if kind == "exit":
         return rc == int(arg)
     if kind == "nore":
-        return rc == 0 and re.search(arg, s, re.M) is None
+        return rc == 0 and re.search(arg, both, re.M) is None
     raise SystemExit(f"unknown expectation kind {kind!r}")
 
 

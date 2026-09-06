@@ -68,7 +68,10 @@ class Server:
     def close(self):
         self.watchdog.cancel()
         self.p.stdin.close()
-        self.p.wait(timeout=10)
+        try:
+            self.p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
 
 
 def text_of(msg):
@@ -139,7 +142,10 @@ def main():
         # `destructive_confirmation_granted` (src/mcp/elicitation.rs):
         # action == "accept" AND content.confirm == true. Anything else, the
         # unticked box included, is refused.
-        CONFIRM = lambda gr, H: {  # noqa: E731
+        check("E08b", bool(gr.get("requestState")) and "confirm_destructive" in gr.get("inputRequests", {}),
+              "gate payload carries requestState={} inputRequests keys={}".format(
+                  bool(gr.get("requestState")), sorted(gr.get("inputRequests", {}))))
+        confirm_params = {
             "name": "ssh_exec",
             "arguments": GATE_ARGS,
             "requestState": gr.get("requestState"),
@@ -147,12 +153,8 @@ def main():
                 "confirm_destructive": {"action": "accept", "content": {"confirm": True}}
             },
         }
-        check("E08b", CONFIRM is not None,
-              "CONFIRM filled: params carry name/arguments verbatim + requestState "
-              "+ inputResponses.confirm_destructive{action:accept, content:{confirm:true}}")
-        if CONFIRM is not None:
-            m2 = s.call("tools/call", CONFIRM(gr, H))
-            check("E08c", "mrtr-ok" in text_of(m2), text_of(m2) or json.dumps(m2)[:300])
+        m2 = s.call("tools/call", confirm_params)
+        check("E08c", "mrtr-ok" in text_of(m2), text_of(m2) or json.dumps(m2)[:300])
 
     g2 = s.tool("mcp_call_tool", {"name": "ssh_exec", "arguments": {"host": H, "command": "true"}})
     check("E09", g2.get("result", {}).get("resultType") == "input_required", f"meta-dispatch gate -> {json.dumps(g2)[:200]}")
