@@ -1,0 +1,13 @@
+{"vars": {},
+ "cases": [
+  {"id": "A201", "owner": "campaign", "tool": "ssh_security_audit", "args": {"sudo": true}, "expect": "ok"},
+  {"id": "A202", "owner": "campaign", "tool": "ssh_compliance_check", "args": {"profile": "basic", "sudo": true}, "expect": "ok"},
+  {"id": "A203", "owner": "campaign", "tool": "ssh_cis_benchmark", "args": {"category": "ssh", "level": 1, "sudo": true}, "expect": "ok"},
+  {"id": "A204", "owner": "campaign", "tool": "ssh_compliance_score", "args": {"sudo": true}, "expect": "ok"},
+  {"id": "A205", "owner": "campaign", "tool": "ssh_compliance_report", "args": {"format": "json", "sudo": true}, "expect": "json"},
+  {"id": "A206", "owner": "env", "tool": "ssh_stig_check", "args": {"stig_id": "V-12345"}, "expect": "ok"},
+  {"id": "A207", "owner": "env", "tool": "ssh_vuln_scan", "args": {"sudo": true}, "expect": "ok"},
+  {"id": "A208", "owner": "env", "tool": "ssh_sbom_generate", "args": {}, "expect": "ok"},
+  {"id": "A209", "owner": "env", "tool": "ssh_perf_trace", "args": {"duration": 2, "sudo": true}, "expect": "ok"},
+  {"id": "A210", "owner": "env", "tool": "ssh_io_trace", "args": {"duration": 2, "sudo": true}, "expect": "ok"}
+ ]}
