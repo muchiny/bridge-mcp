@@ -146,3 +146,6 @@ docs/superpowers/
 # Editor / tooling backups (the originals live in git)
 *.doctor-bak
 *.bak-[0-9]*
+
+# SDD plan workspace and live-probe reports (not shipped project docs)
+.superpowers/
