@@ -156,14 +156,34 @@ macro_rules! quoted_value {
 /// belongs to the container) and takes almost anything non-whitespace in
 /// between, so `aB3,x9Zq!k` is one scalar and `5,` yields `5`.
 ///
-/// The bare alternative also rejects a leading `<`: `kubectl describe`
-/// prints placeholders like `<set to the key 'auth' in secret
-/// 'argocd-redis'>`, `<none>`, `<nil>`, `<unset>` and `<invalid>` for values
-/// it does not have, never a secret. Excluding `<` only from the FIRST
-/// position — not the last, and not the quoted or bracket-group
-/// alternatives — means nothing in `scalar_value!()` matches at that
-/// position, so the whole placeholder is left untouched rather than a
-/// prefix of it (`<set`) being redacted alone.
+/// An angle-wrapped scalar (`<hunter2>`) is a value the same way a
+/// brace-wrapped one is — some tools decorate a bare value with `<>` — but
+/// `kubectl describe` also uses `<...>` for a PLACEHOLDER when it has no
+/// value at all: `<set to the key 'auth' in secret 'argocd-redis'>`,
+/// `<none>`, `<nil>`, `<unset>`, `<invalid>`. The difference is shape, not
+/// content: a placeholder is prose, with a space, a quote or a colon inside
+/// the brackets; a value never is. So the angle-group alternative holds
+/// none of those — `<hunter2>` matches it whole and is redacted, while
+/// `<set to the key 'auth' in secret 'argocd-redis'>` cannot: the mandatory
+/// `>` never follows a run of allowed characters, so this alternative fails
+/// at that position for the whole line, same as the brace- and
+/// bracket-group alternatives before it.
+///
+/// The bare alternative's first position keeps excluding `<`, on top of the
+/// characters above: without that, `<set` alone would still satisfy the
+/// bare alternative once the angle-group alternative gives up on it — the
+/// angle-group failing to match a `<...>` span does not stop a *different*
+/// alternative from matching a *shorter* one starting at the same `<`. A
+/// leading `<` is therefore only ever consumed by the angle-group
+/// alternative, whole or not at all; a value cannot start with a bare,
+/// unmatched `<`. `plausible_secret` trims `<` and `>` the same way it
+/// trims quotes and braces, so a weak key's angle-wrapped placeholder is
+/// judged on its content, not its decoration: `<invalid>` trims to
+/// `invalid`, which the letters-only check would otherwise wave through as
+/// plausible (the untrimmed candidate has `<` and `>` in it, so neither the
+/// letters-only nor the digits-only check applies and it is treated as
+/// plausible by default) but the length gate correctly rejects at 7
+/// characters.
 ///
 /// The bare middle also stops at a brace or a double quote, for the same
 /// reason the first and last positions reject one: both are structure, and a
@@ -194,6 +214,8 @@ macro_rules! scalar_value {
             "|",
             r#"\[(?-i:[^\[\]"'\n,:A-Z0-9_ ]|[A-Z0-9_ ]+[^\[\]"'\n,:A-Z0-9_ ])[^\[\]"'\n,:]*\]"#,
             "|",
+            r#"<[^<>"'\n,:\s]*>"#,
+            "|",
             r#"["']?[^\s"'{}\[\],;<](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
             ")"
         )
@@ -206,7 +228,7 @@ macro_rules! scalar_value {
 /// so identifiers such as `argocd-repo-server-tls` or `deploy-key.pem` pass
 /// through), plus digits-only (ids, ports) and boolean/null literals.
 pub(crate) fn plausible_secret(candidate: &str) -> bool {
-    let s = candidate.trim_matches(|c| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']'));
+    let s = candidate.trim_matches(|c| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | '<' | '>'));
     if s.len() < 8 {
         return false;
     }

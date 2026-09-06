@@ -251,6 +251,31 @@ fn brace_wrapped_scalars_are_redacted_but_structures_are_not() {
     }
 }
 
+/// Ruling 19: an angle-wrapped scalar is a value (`<hunter2>`, the way
+/// `{hunter2}` already was), but a placeholder — prose with a space, a quote
+/// or a colon inside the angle brackets — is not, so `kubectl describe`'s
+/// `<set to the key 'auth' in secret 'argocd-redis'>` and its shorter
+/// cousins (`<none>`, `<nil>`, `<unset>`, `<invalid>`) stay untouched.
+#[test]
+fn angle_wrapped_scalars_are_redacted_but_placeholders_are_not() {
+    let s = sanitizer();
+    assert_eq!(
+        s.sanitize("password: <hunter2>").as_ref(),
+        "password: [REDACTED]"
+    );
+    assert_eq!(
+        s.sanitize("password=<s3cr3t-V4lue_9>").as_ref(),
+        "password=[REDACTED]"
+    );
+    for untouched in [
+        "token: <none>",
+        "secret: <nil>",
+        "      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false",
+    ] {
+        assert_eq!(s.sanitize(untouched).as_ref(), untouched, "{untouched:?}");
+    }
+}
+
 /// Regressions found by the differential audit of real host output
 /// (`scripts/live_probe/corpus.py` against `raspberry`), one input/expected
 /// pair per pattern line in `corpus_regressions.txt`. A missing fixture file
