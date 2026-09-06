@@ -3043,21 +3043,26 @@ users:
     ///
     /// The selector is a literal SUBSTRING test for `[ \t]*[=:][ \t]*` or
     /// `[ \t]*=[ \t]*` in the pattern's own source text — not "has an
-    /// `=`/`:` separator". Six keyed patterns spell their separator some
-    /// other way and are invisible to it: "Docker login command with
-    /// password" (a `-p` flag) and "Ansible vault password file path"
-    /// (`--vault-password-file` followed by whitespace) both comply with the
-    /// verbatim-prefix rule anyway — `${1}[REDACTED]`. The other four do
-    /// not: "Vault KV tabular output secrets" normalises the run of 2+
-    /// spaces between key and value down to exactly two (`$1  [REDACTED]`),
-    /// and the three kubeconfig patterns ("Kubeconfig client certificate",
-    /// "Kubeconfig client key", "Kubeconfig CA certificate", each
-    /// `key:[ \t]*value`) rewrite BOTH the separator, always to `: ` (one
-    /// space), AND the key's own case to their hard-coded lower-case
-    /// spelling — `CLIENT-KEY-DATA:abc` becomes
-    /// `client-key-data: [REDACTED]`. All four are pre-existing,
-    /// out-of-scope quirks this guard would not catch even if it selected
-    /// the pattern.
+    /// `=`/`:` separator". At least nine keyed patterns spell their
+    /// separator some other way and are invisible to it: "Docker login
+    /// command with password" (a `-p` flag) and "Ansible vault password
+    /// file path" (`--vault-password-file` followed by whitespace) both
+    /// comply with the verbatim-prefix rule anyway — `${1}[REDACTED]`. The
+    /// rest do not: "Vault KV tabular output secrets" normalises the run of
+    /// 2+ spaces between key and value down to exactly two
+    /// (`$1  [REDACTED]`); the three kubeconfig patterns ("Kubeconfig
+    /// client certificate", "Kubeconfig client key", "Kubeconfig CA
+    /// certificate", each `key:[ \t]*value`) rewrite BOTH the separator,
+    /// always to `: ` (one space), AND the key's own case to their
+    /// hard-coded lower-case spelling — `CLIENT-KEY-DATA:abc` becomes
+    /// `client-key-data: [REDACTED]`; "Docker config auth"
+    /// (`"auth"[ \t]*:[ \t]*"..."`) collapses the run of spacing around its
+    /// colon to exactly one space; "Terraform sensitive values"
+    /// (`"sensitive_value"[ \t]*:[ \t]*"..."`) does the same; and "HTTP
+    /// Basic Authorization header" (`authorization:[ \t]*basic[ \t]+...`)
+    /// both collapses spacing AND rewrites the key's case, always to
+    /// `Authorization: Basic `. All of these are pre-existing, out-of-scope
+    /// quirks this guard would not catch even if it selected the pattern.
     #[test]
     fn keyed_patterns_replace_only_the_value() {
         for def in Sanitizer::default_pattern_defs() {

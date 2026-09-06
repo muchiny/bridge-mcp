@@ -50,14 +50,18 @@ reading it. Every item below was reproduced before the fix and measured after.
   (`password: 'x'` → `password: "[REDACTED]"`) — a bare-value pattern (no
   quotes added around the marker) drops the value's quotes instead. A guard
   test holds every pattern spelling its separator as `[ \t]*[=:][ \t]*` or
-  `[ \t]*=[ \t]*` to it; six keyed patterns spell it some other way and sit
-  outside the guard's selection — docker login's `-p` flag and
-  `--vault-password-file` comply with the rule anyway, while the Vault KV
-  tabular pattern normalises its key/value separator down to exactly two
-  spaces and the three kubeconfig patterns normalise both the separator and
-  the key's own case to their hard-coded lower-case spelling
-  (`CLIENT-KEY-DATA:abc` → `client-key-data: [REDACTED]`) — all four
-  pre-existing and out of scope here. Brace- or bracket-wrapped scalars
+  `[ \t]*=[ \t]*` to it; at least nine keyed patterns spell it some other
+  way and sit outside the guard's selection — docker login's `-p` flag and
+  `--vault-password-file` comply with the rule anyway, while the rest
+  don't: the Vault KV tabular pattern normalises its key/value separator
+  down to exactly two spaces, the three kubeconfig patterns normalise both
+  the separator and the key's own case to their hard-coded lower-case
+  spelling (`CLIENT-KEY-DATA:abc` → `client-key-data: [REDACTED]`), Docker
+  config auth and Terraform sensitive values each collapse a run of
+  spacing around their colon to exactly one space, and the HTTP Basic
+  Authorization header pattern both collapses spacing and rewrites the
+  key's case to `Authorization: Basic ` — all pre-existing and out of
+  scope here. Brace- or bracket-wrapped scalars
   (`password={x}`) are redacted; nested structures are not, and neither is
   an EMPTY brace, bracket or angle pair (`password={}`, `password=[]`,
   `password=<>`), which is structure — an empty object, array or
