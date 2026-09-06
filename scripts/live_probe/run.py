@@ -4,13 +4,14 @@ and through a stdio MCP session, in parallel.
 
 Usage:
   scripts/live_probe/run.py BIN [--host raspberry] [--jobs 4] [--path both|cli|mcp]
-                            [--only J1,J4] [--baseline] [--report PATH]
+                            [--only J1,J4] [--baseline] [--report PATH] [--cases PATH]
 
 Each case in cases.json runs through every path it lists. A verdict is
 UNEXPECTED (and counted in the exit code) when a case fails without
 --baseline, or when a case owned by "base" fails with --baseline. With
 --baseline, a failing case owned by a lane is reported as "KO (expected)":
-that is the defect the lane exists to fix.
+that is the defect the lane exists to fix. `exit=N` checks the process exit
+code; `nore=REGEX` passes when the regex does NOT match a successful output.
 """
 import argparse
 import concurrent.futures
@@ -48,7 +49,8 @@ def run_cli(binary, tool, args, yes):
         cmd.append("--yes")
     cmd += ["--json-args", json.dumps(args)]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env())
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env(),
+                           stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return 1, "", "cli: timeout after 180s"
     return p.returncode, clean(p.stdout), clean(p.stderr)
@@ -119,6 +121,10 @@ def check(expect, rc, out, err):
             return False
     if kind == "error":
         return rc != 0 and arg in both
+    if kind == "exit":
+        return rc == int(arg)
+    if kind == "nore":
+        return rc == 0 and re.search(arg, s, re.M) is None
     raise SystemExit(f"unknown expectation kind {kind!r}")
 
 
@@ -138,9 +144,10 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--report", default="")
+    ap.add_argument("--cases", default=str(HERE / "cases.json"))
     a = ap.parse_args()
 
-    spec = json.loads((HERE / "cases.json").read_text())
+    spec = json.loads(Path(a.cases).read_text())
     variables = spec.get("vars", {})
     only = {x for x in a.only.split(",") if x}
     cases = [c for c in spec["cases"] if not only or c["id"] in only]
@@ -160,14 +167,14 @@ def main():
             rc, out, err = run_cli(a.binary, c["tool"], args, c.get("yes", False))
         else:
             rc, out, err = run_mcp(a.binary, c["tool"], args)
-        return c["id"], path, check(c["expect"], rc, out, err), out[:400], err[:400]
+        return c["id"], path, check(c["expect"], rc, out, err), out[:400], err[:400], rc
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
         results = list(ex.map(work, jobs))
 
     by_case = {}
-    for cid, path, passed, out, err in results:
-        by_case.setdefault(cid, {})[path] = {"ok": passed, "out": out, "err": err}
+    for cid, path, passed, out, err, rc in results:
+        by_case.setdefault(cid, {})[path] = {"ok": passed, "out": out, "err": err, "rc": rc}
 
     unexpected = 0
     rows = []
@@ -195,7 +202,7 @@ def main():
                 print(f"--- {c['id']} [{path}] out: {v['out']!r}\n    err: {v['err']!r}")
 
     report = a.report or str(HERE.parents[1] / ".superpowers" / "probes" /
-                             f"{datetime.date.today()}-{Path(a.binary).stem}.json")
+                             f"{datetime.date.today()}-{Path(a.binary).stem}-{Path(a.cases).stem}.json")
     Path(report).parent.mkdir(parents=True, exist_ok=True)
     Path(report).write_text(json.dumps({"binary": a.binary, "host": a.host, "baseline": a.baseline,
                                         "results": by_case}, indent=2))
