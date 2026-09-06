@@ -1018,8 +1018,8 @@ impl Sanitizer {
             // HashiCorp
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)((?:VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*["']?)"#,
-                    r#"((?:hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9_-]{8,}["']?)"#
+                    r#"(?i)((?:VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*)"#,
+                    r#"(["']?(?:hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9_-]{8,}["']?)"#
                 ),
                 replacement: "${1}[VAULT_TOKEN_REDACTED]",
                 description: "HashiCorp Vault token",
@@ -2811,7 +2811,11 @@ users:
     /// `HashiCorp` Vault tokens carry a purpose prefix (`hvs.` service, `hvb.`
     /// batch, `hvr.` recovery) alongside the legacy unprefixed `s.`/`b.`/`r.`
     /// forms — the old pattern only matched `[hs]\.`, so `hvs.…` (the live
-    /// S6 harness case) was missed entirely.
+    /// S6 harness case) was missed entirely. Pins the named
+    /// `[VAULT_TOKEN_REDACTED]` marker, not just "the token doesn't leak" —
+    /// the entropy detector alone would also mask these tokens (with a
+    /// different, generic marker), which would pass a looser assertion even
+    /// with the regex broken.
     #[test]
     fn vault_tokens_with_every_prefix() {
         let s = Sanitizer::with_defaults();
@@ -2822,9 +2826,23 @@ users:
             "hvr.abcdef1234567890",
         ] {
             let input = format!("VAULT_TOKEN={token}");
-            let out = s.sanitize(&input);
-            assert!(!out.contains(token), "{token} must be redacted, got {out}");
+            assert_eq!(
+                s.sanitize(&input).as_ref(),
+                "VAULT_TOKEN=[VAULT_TOKEN_REDACTED]",
+                "{token} was not redacted with the named marker"
+            );
         }
+        assert_eq!(
+            s.sanitize(r#"VAULT_TOKEN="hvs.CAESIJ1234567890abcdefghij""#)
+                .as_ref(),
+            "VAULT_TOKEN=[VAULT_TOKEN_REDACTED]",
+            "quotes must be dropped symmetrically with the value"
+        );
+        assert_eq!(
+            s.sanitize("vault_token: hvs.CAESIJ1234567890abcdefghij")
+                .as_ref(),
+            "vault_token: [VAULT_TOKEN_REDACTED]"
+        );
     }
 
     /// Supersedes the narrower `builtin_patterns_never_use_whitespace_class_around_a_separator`:
