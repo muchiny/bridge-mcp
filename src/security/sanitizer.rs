@@ -156,6 +156,15 @@ macro_rules! quoted_value {
 /// belongs to the container) and takes almost anything non-whitespace in
 /// between, so `aB3,x9Zq!k` is one scalar and `5,` yields `5`.
 ///
+/// The bare alternative also rejects a leading `<`: `kubectl describe`
+/// prints placeholders like `<set to the key 'auth' in secret
+/// 'argocd-redis'>`, `<none>`, `<nil>`, `<unset>` and `<invalid>` for values
+/// it does not have, never a secret. Excluding `<` only from the FIRST
+/// position — not the last, and not the quoted or bracket-group
+/// alternatives — means nothing in `scalar_value!()` matches at that
+/// position, so the whole placeholder is left untouched rather than a
+/// prefix of it (`<set`) being redacted alone.
+///
 /// The bare middle also stops at a brace or a double quote, for the same
 /// reason the first and last positions reject one: both are structure, and a
 /// bare scalar never contains either. Without that, compact JSON — which has
@@ -185,7 +194,7 @@ macro_rules! scalar_value {
             "|",
             r#"\[(?-i:[^\[\]"'\n,:A-Z0-9_ ]|[A-Z0-9_ ]+[^\[\]"'\n,:A-Z0-9_ ])[^\[\]"'\n,:]*\]"#,
             "|",
-            r#"["']?[^\s"'{}\[\],;](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
+            r#"["']?[^\s"'{}\[\],;<](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
             ")"
         )
     };
@@ -2990,6 +2999,20 @@ users:
         assert_eq!(
             s.sanitize(r#"password="[K3S_TOKEN_REDACTED]""#).as_ref(),
             r#"password="[K3S_TOKEN_REDACTED]""#
+        );
+    }
+
+    /// `kubectl describe pod` prints this placeholder for an env var sourced
+    /// from a secret it cannot read: not a leak, and not the key's value at
+    /// all, so `scalar_value!()`'s bare alternative must not start a match
+    /// on the leading `<` (Ruling 7, corpus finding against `raspberry`).
+    #[test]
+    fn kubectl_describe_placeholder_not_redacted() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false")
+                .as_ref(),
+            "      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false"
         );
     }
 

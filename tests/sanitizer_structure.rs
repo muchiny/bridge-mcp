@@ -250,3 +250,30 @@ fn brace_wrapped_scalars_are_redacted_but_structures_are_not() {
         assert_eq!(s.sanitize(untouched).as_ref(), untouched, "{untouched:?}");
     }
 }
+
+/// Regressions found by the differential audit of real host output
+/// (`scripts/live_probe/corpus.py` against `raspberry`), one input/expected
+/// pair per pattern line in `corpus_regressions.txt`. A missing fixture file
+/// makes this a no-op rather than a failure, since it is committed only when
+/// the audit finds something.
+#[test]
+fn corpus_regressions_hold() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sanitizer/corpus_regressions.txt");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let s = sanitizer();
+    let mut lines = text.lines().peekable();
+    while let Some(input) = lines.next() {
+        let expected = lines
+            .next()
+            .and_then(|l| l.strip_prefix("=> "))
+            .unwrap_or_else(|| panic!("missing `=> ` line after {input:?}"));
+        assert_eq!(
+            s.sanitize(input).as_ref(),
+            expected,
+            "corpus regression for {input:?}"
+        );
+    }
+}

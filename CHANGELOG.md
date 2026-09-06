@@ -42,6 +42,21 @@ reading it. Every item below was reproduced before the fix and measured after.
   survive. Entropy redaction replaces the flagged span instead of every
   substring occurrence. `tests/sanitizer_structure.rs` parses the output.
 
+- **Sanitizer redacts the value and nothing else.** Keyed patterns rewrote
+  `password: x` to `password=[REDACTED]` (and some renamed the key), which
+  broke the YAML mapping the value sat in. Key, quotes, separator and
+  indentation now come back byte-identical; a guard test holds every keyed
+  pattern to it. Brace- or bracket-wrapped scalars (`password={x}`) are
+  redacted; nested structures are not. The last patterns that could match
+  across a newline (`docker login -p`, `--vault-password-file`) are line-local,
+  and Vault tokens are recognised with `hvs.`/`hvb.`/`hvr.` prefixes. Verified
+  by a differential audit of real host output (`scripts/live_probe/corpus.py`).
+  Also from that audit: `kubectl describe pod` prints a placeholder —
+  `<set to the key 'auth' in secret 'argocd-redis'>`, `<none>`, `<nil>`,
+  `<unset>`, `<invalid>` — for an env var sourced from a secret it cannot
+  read; a bare value can no longer start with `<`, so the placeholder is left
+  alone instead of its leading word being redacted as if it were one.
+
 - **The daemon refused all 279 tools.** With a daemon up, every
   `bridge-mcp tool …` returned `-32602 missing
   _meta["io.modelcontextprotocol/protocolVersion"]`. The CLI forwards
