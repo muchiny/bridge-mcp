@@ -241,8 +241,11 @@ mod credential_leakage {
         let sanitizer = Sanitizer::with_defaults();
         let input = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
         let output = sanitizer.sanitize(input);
+        // The specific marker, not a bare `[REDACTED]` substring: the AKIA
+        // pattern names WHICH secret it found, and a generic assertion would
+        // pass just as well if a later pattern re-swallowed that marker.
         assert!(
-            output.contains("[REDACTED]"),
+            output.contains("[AWS_ACCESS_KEY_REDACTED]"),
             "AWS access key should be redacted, got: {output}"
         );
         // Ensure the actual key value is gone

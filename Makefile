@@ -41,9 +41,15 @@ all: check lint test
 build:
 	cargo build
 
-# Build release version (full features: cli + mimalloc + http + jq + otel)
+# Features the deployed binary needs on this machine: `full` brings jq/http/
+# otel, `winrm`+`psrp` are required to LOAD a config that declares Windows
+# hosts (`protocol: winrm|psrp` is a `#[cfg(feature = "winrm")]` enum variant,
+# so a build without it refuses the whole file).
+RELEASE_FEATURES ?= full,winrm,psrp
+
+# Build release version
 release:
-	cargo build --release --features full
+	CARGO_BUILD_JOBS=2 cargo build --release --features $(RELEASE_FEATURES)
 
 # Check compilation without building
 check:
@@ -128,16 +134,27 @@ clean:
 	cargo clean
 
 # Install to ~/.local/bin (in PATH ahead of ~/.cargo/bin on most setups).
-# Uses the release target above which builds with --features full so server-side
-# jq filtering is available.
+# Uses the release target above which builds with --features $(RELEASE_FEATURES)
+# so server-side jq filtering is available and configs declaring Windows hosts
+# (winrm/psrp) can load.
 #
 # `install -m 0755` rather than `cp`: cp preserves the destination inode and
 # leaves whatever mode was already there, so a previously-installed binary with
 # a wrong mode silently keeps it. install(1) replaces the file atomically and
 # sets the mode explicitly.
+#
+# The two checks run against target/release/bridge-mcp BEFORE the copy, not
+# against the installed one after it. Checking afterwards still overwrote a
+# working deployment with the broken build and only then failed the recipe, so
+# the "FAIL" left the user worse off than not running the target at all.
 install: release
 	@mkdir -p ~/.local/bin
+	@target/release/bridge-mcp validate >/dev/null 2>&1 \
+		|| { echo "install: FAIL - fresh binary cannot load the local config (missing winrm/psrp feature?); nothing installed"; exit 1; }
+	@target/release/bridge-mcp describe-tool ssh_k8s_get 2>/dev/null | grep -q jq_filter \
+		|| { echo "install: FAIL - fresh binary does not advertise jq_filter (missing jq feature?); nothing installed"; exit 1; }
 	install -m 0755 target/release/bridge-mcp ~/.local/bin/bridge-mcp
+	@echo "install: OK - $$(~/.local/bin/bridge-mcp --version)"
 
 # Behavioural fingerprint probes: does the INSTALLED binary actually contain
 # the current behaviour? `--version` cannot answer this (CARGO_PKG_VERSION is
@@ -495,7 +512,7 @@ help:
 	@echo "  release-target   - Build specific target (TARGET=...)"
 	@echo "  check            - Check compilation"
 	@echo "  clean            - Clean build artifacts"
-	@echo "  install          - Build (--features full) + install to ~/.local/bin"
+	@echo "  install          - Build (--features $(RELEASE_FEATURES)) + install to ~/.local/bin"
 	@echo "  probe-install    - Fingerprint-probe the installed binary for staleness"
 	@echo "  verify-install   - Fail unless the installed binary was built from HEAD"
 	@echo ""

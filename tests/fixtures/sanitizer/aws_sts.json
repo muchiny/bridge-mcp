@@ -1,0 +1,11 @@
+{
+    "Credentials": {
+        "AccessKeyId": "ASIAEXAMPLE0000000001",
+        "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "SessionToken": "FwoGZXIvYXdzEBYaDHc3RVhBTVBMRVRPS0VOEXAMPLE",
+        "Expiration": "2026-09-05T18:00:00Z"
+    },
+    "AssumedRoleUser": {
+        "Arn": "arn:aws:sts::123456789012:assumed-role/deploy/session"
+    }
+}

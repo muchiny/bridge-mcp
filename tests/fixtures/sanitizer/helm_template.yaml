@@ -1,0 +1,23 @@
+---
+# Source: app/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-db
+type: Opaque
+stringData:
+  password: hunter2-Xy9
+data:
+  token: Z2hwX2FiYzEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xtbm9w
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      volumes:
+      - name: db
+        secret:
+          secretName: app-db

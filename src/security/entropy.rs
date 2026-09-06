@@ -95,64 +95,72 @@ impl EntropyDetector {
         })
     }
 
-    /// Scan text and replace high-entropy tokens with redaction markers
+    /// Scan text and replace high-entropy tokens with redaction markers.
     ///
-    /// Tokens are extracted by splitting on whitespace, `=`, `:`, `"`, `'`, and newlines.
-    /// Each token is checked for entropy and length thresholds.
+    /// Tokens are delimited by whitespace, `=`, `:`, `"`, `'` and `,`. Each
+    /// flagged token is replaced at its own byte span — never by a global
+    /// `str::replace`, which also rewrote every substring occurrence of the
+    /// same bytes (inside a path, a URL, a longer token).
     #[must_use]
     pub fn redact(&self, text: &str) -> String {
         if !self.enabled || text.len() < self.min_length {
             return text.to_string();
         }
-
-        let mut result = text.to_string();
-        let tokens = Self::extract_tokens(text);
-
-        // Sort tokens by length descending to replace longest first
-        // (avoids partial replacement issues)
-        let mut tokens_sorted: Vec<&str> = tokens.collect();
-        tokens_sorted.sort_by_key(|t| std::cmp::Reverse(t.len()));
-
-        for token in tokens_sorted {
-            if token.len() < self.min_length {
-                continue;
-            }
-
-            // Skip whitelisted tokens
-            if self.whitelist.iter().any(|w| w == token) {
-                continue;
-            }
-
-            // Skip tokens that look like paths, URLs, or common patterns
-            if Self::is_safe_token(token) {
-                continue;
-            }
-
-            let threshold = if Self::is_hex_token(token) {
-                // 40-char hex = git SHA-1: structural false positive.
-                match self.hex_threshold {
-                    Some(t) if token.len() != 40 => t,
-                    _ => continue,
-                }
-            } else {
-                self.threshold
-            };
-
-            let entropy = Self::shannon_entropy(token);
-            if entropy >= threshold {
-                result = result.replace(token, ENTROPY_REDACTED);
+        let mut out = String::with_capacity(text.len());
+        let mut copied_up_to = 0;
+        for (start, token) in Self::tokens_with_offsets(text) {
+            if self.should_redact(token) {
+                out.push_str(&text[copied_up_to..start]);
+                out.push_str(ENTROPY_REDACTED);
+                copied_up_to = start + token.len();
             }
         }
-
-        result
+        out.push_str(&text[copied_up_to..]);
+        out
     }
 
-    /// Extract potential secret tokens from text
-    fn extract_tokens(text: &str) -> impl Iterator<Item = &str> {
-        text.split(|c: char| {
-            c.is_whitespace() || c == '=' || c == ':' || c == '"' || c == '\'' || c == ','
-        })
-        .filter(|s| !s.is_empty())
+    /// The per-token decision `redact` used to make inline.
+    fn should_redact(&self, token: &str) -> bool {
+        if token.len() < self.min_length {
+            return false;
+        }
+        if self.whitelist.iter().any(|w| w == token) {
+            return false;
+        }
+        if Self::is_safe_token(token) {
+            return false;
+        }
+        let threshold = if Self::is_hex_token(token) {
+            // 40-char hex = git SHA-1: structural false positive.
+            match self.hex_threshold {
+                Some(t) if token.len() != 40 => t,
+                _ => return false,
+            }
+        } else {
+            self.threshold
+        };
+        Self::shannon_entropy(token) >= threshold
+    }
+
+    /// Tokens with their byte offset, split on the same delimiters as before.
+    fn tokens_with_offsets(text: &str) -> Vec<(usize, &str)> {
+        let mut tokens = Vec::new();
+        let mut start: Option<usize> = None;
+        for (i, c) in text.char_indices() {
+            let delimiter = c.is_whitespace() || matches!(c, '=' | ':' | '"' | '\'' | ',');
+            match (delimiter, start) {
+                (true, Some(s)) => {
+                    tokens.push((s, &text[s..i]));
+                    start = None;
+                }
+                (false, None) => start = Some(i),
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            tokens.push((s, &text[s..]));
+        }
+        tokens
     }
 
     /// Check if a token is a safe non-secret (path, URL, command, etc.)
@@ -465,5 +473,17 @@ mod tests {
             !result.contains("Zx9!kQ2"),
             "general detection regressed: {result}"
         );
+    }
+
+    #[test]
+    fn redact_replaces_only_the_flagged_span() {
+        let d = EntropyDetector::new(4.0, 16, vec![], true);
+        let secret = "xK9#mP2$vL5@qR8!wZ3%";
+        // The same bytes appear as a substring of a longer, whitelisted-safe
+        // path and as a standalone token; only the standalone token is a
+        // high-entropy TOKEN, and only it may be replaced.
+        let text = format!("/opt/{secret}/bin {secret}");
+        let out = d.redact(&text);
+        assert_eq!(out, format!("/opt/{secret}/bin [HIGH_ENTROPY_REDACTED]"));
     }
 }

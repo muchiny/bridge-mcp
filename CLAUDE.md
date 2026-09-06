@@ -17,7 +17,8 @@ invoking tools; do not re-derive it here.
 ## Build Commands
 
 `make ci` before every commit (fmt-check, lint, test, audit, typos). `make help` lists
-every target.
+every target. `make install` builds with `RELEASE_FEATURES` (`full,winrm,psrp`) and
+refuses to install a binary that cannot load the local config or lacks `jq_filter`.
 
 ## Tool Groups Reference
 

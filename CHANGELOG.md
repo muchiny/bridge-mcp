@@ -29,6 +29,19 @@ reading it. Every item below was reproduced before the fix and measured after.
 
 ### Fixed
 
+- **Sanitizer no longer corrupts structured output.** Two generic patterns
+  rewrote structure, not values: `"secret": {` became `"secret": "[REDACTED]"`
+  with the object's members left dangling (every kubectl pod with a secret
+  volume, every AWX `summary_fields.credentials`, every `aws sts`
+  `Credentials`), and `secret:` at the end of a YAML line swallowed the line
+  break and the first token of the next line. Keyed patterns are now
+  line-local (`[ \t]*`, never `\s*`) and structure-safe (bare values exclude
+  `{ } [ ] , ; " '`); weak keys (`secret`, `token`, `credential`, `api_key`)
+  replace only a value that looks like a secret (gitleaks' letters-only /
+  digits-only / length gate), so `"credential": 5` and `secretName: tls`
+  survive. Entropy redaction replaces the flagged span instead of every
+  substring occurrence. `tests/sanitizer_structure.rs` parses the output.
+
 - **The daemon refused all 279 tools.** With a daemon up, every
   `bridge-mcp tool …` returned `-32602 missing
   _meta["io.modelcontextprotocol/protocolVersion"]`. The CLI forwards
