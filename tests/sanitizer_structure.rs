@@ -40,7 +40,7 @@ fn assert_only_values_changed(raw: &str, out: &str) {
         let (bp, ap) = (&before[..split_at(before)], &after[..split_at(after)]);
         assert_eq!(bp, ap, "prefix changed:\n  - {before}\n  + {after}");
         assert!(
-            after.contains("[REDACTED]"),
+            after.contains("[REDACTED]") || after.contains("[HIGH_ENTROPY_REDACTED]"),
             "changed without a marker:\n  - {before}\n  + {after}"
         );
     }
@@ -290,6 +290,20 @@ fn angle_wrapped_scalars_are_redacted_but_placeholders_are_not() {
     ] {
         assert_eq!(s.sanitize(untouched).as_ref(), untouched, "{untouched:?}");
     }
+}
+
+#[test]
+fn padded_base64_secret_values_stay_valid_yaml() {
+    let raw = "- apiVersion: v1\n  data:\n    admin.password: Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7qJ=\n    tls.key: Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7q==\n  kind: Secret\n";
+    let out = sanitizer().sanitize(raw);
+    assert_eq!(
+        out.as_ref(),
+        "- apiVersion: v1\n  data:\n    admin.password: [REDACTED]\n    tls.key: [HIGH_ENTROPY_REDACTED]\n  kind: Secret\n"
+    );
+    assert_only_values_changed(raw, &out);
+    let parsed: serde_json::Value =
+        bridge_mcp::domain::yaml::parse_yaml(&out).expect("sanitized YAML must parse");
+    assert_eq!(parsed[0]["kind"], "Secret");
 }
 
 /// Regressions found by the differential audit of real host output

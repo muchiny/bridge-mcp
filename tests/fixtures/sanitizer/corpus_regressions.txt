@@ -6,3 +6,7 @@
 =>     admin.password: [REDACTED]
   password: EXAMPLE
 =>   password: [REDACTED]
+    tls.key: Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7q==
+=>     tls.key: [HIGH_ENTROPY_REDACTED]
+    server.secretkey: Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7qJ=
+=>     server.secretkey: [HIGH_ENTROPY_REDACTED]

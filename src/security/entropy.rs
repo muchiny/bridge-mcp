@@ -112,7 +112,8 @@ impl EntropyDetector {
             if self.should_redact(token) {
                 out.push_str(&text[copied_up_to..start]);
                 out.push_str(ENTROPY_REDACTED);
-                copied_up_to = start + token.len();
+                let token_end = start + token.len();
+                copied_up_to = token_end + Self::base64_padding_after(text, token_end, token);
             }
         }
         out.push_str(&text[copied_up_to..]);
@@ -161,6 +162,34 @@ impl EntropyDetector {
             tokens.push((s, &text[s..]));
         }
         tokens
+    }
+
+    /// How many `=` bytes right after a flagged token are its base64 padding.
+    ///
+    /// `=` is a token delimiter, so `tls.key: AAAA==` split the value into
+    /// `AAAA` plus two stray `=`; the marker replaced the token and the
+    /// padding stayed behind as `[HIGH_ENTROPY_REDACTED]==`, which is not
+    /// YAML (a flow sequence followed by junk) and broke every `yq_filter`
+    /// on `kubectl get secrets -o yaml`. The padding belongs to the value
+    /// when: the token is base64-shaped, the run is one or two `=`, the
+    /// padded length is a multiple of four, and nothing token-like follows
+    /// the run — so `KEY=value` after a flagged `KEY` keeps its `=`.
+    fn base64_padding_after(text: &str, token_end: usize, token: &str) -> usize {
+        let rest = &text[token_end..];
+        let run = rest.bytes().take_while(|&b| b == b'=').count();
+        if run == 0 || run > 2 {
+            return 0;
+        }
+        let base64_shaped = token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
+        if !base64_shaped || !(token.len() + run).is_multiple_of(4) {
+            return 0;
+        }
+        let after_run = rest[run..].chars().next();
+        let ends_cleanly = after_run
+            .is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ':' | ']' | '}'));
+        if ends_cleanly { run } else { 0 }
     }
 
     /// Check if a token is a safe non-secret (path, URL, command, etc.)
@@ -485,5 +514,57 @@ mod tests {
         let text = format!("/opt/{secret}/bin {secret}");
         let out = d.redact(&text);
         assert_eq!(out, format!("/opt/{secret}/bin [HIGH_ENTROPY_REDACTED]"));
+    }
+
+    fn detector() -> EntropyDetector {
+        EntropyDetector::new(4.5, 16, Vec::new(), true)
+    }
+
+    /// 43 base64 characters, entropy well above 4.5 bits/char, one pad.
+    const B64_43: &str = "Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7qJ";
+    /// 42 base64 characters, two pads.
+    const B64_42: &str = "Q7xP2mZ9kL4vN8bT1wR6yH3jF5sD0aG2cV9nM4pX7q";
+
+    #[test]
+    fn padding_is_swallowed_with_the_token() {
+        let d = detector();
+        assert_eq!(
+            d.redact(&format!("    tls.key: {B64_42}==")),
+            "    tls.key: [HIGH_ENTROPY_REDACTED]"
+        );
+        assert_eq!(
+            d.redact(&format!("server.secretkey: {B64_43}=")),
+            "server.secretkey: [HIGH_ENTROPY_REDACTED]"
+        );
+        assert_eq!(
+            d.redact(&format!("{{\"k\": \"{B64_43}=\"}}")),
+            "{\"k\": \"[HIGH_ENTROPY_REDACTED]\"}"
+        );
+    }
+
+    #[test]
+    fn padding_that_is_not_base64_padding_stays() {
+        let d = detector();
+        // Three `=` is never base64 padding.
+        assert_eq!(
+            d.redact(&format!("x: {B64_43}===")),
+            "x: [HIGH_ENTROPY_REDACTED]==="
+        );
+        // Wrong length for the run: 43 chars need one pad, not two.
+        assert_eq!(
+            d.redact(&format!("x: {B64_43}==")),
+            "x: [HIGH_ENTROPY_REDACTED]=="
+        );
+        // A `=` that starts a KEY=value pair after a flagged key is not padding
+        // (the char after the run is a token char).
+        assert_eq!(
+            d.redact(&format!("{B64_43}=value")),
+            "[HIGH_ENTROPY_REDACTED]=value"
+        );
+        // Padding-free base64 is untouched by this change.
+        assert_eq!(
+            d.redact(&format!("SECRET={B64_42}Ab")),
+            "SECRET=[HIGH_ENTROPY_REDACTED]"
+        );
     }
 }
