@@ -89,37 +89,8 @@ struct PatternDef {
     secret_group: Option<usize>,
 }
 
-/// One scalar on the same line, quoted or bare. Quoted forms come first, so a
-/// properly quoted value is captured whole (commas, braces and spaces inside
-/// are fine). The bare form accepts an optional opening quote — a value whose
-/// closing quote was cut off by `max_output_bytes` truncation must still be
-/// redacted — rejects a structural character at its FIRST and LAST position
-/// (`{` and `[` open a container, a trailing `,` `;` `}` `]` belongs to the
-/// container) and takes almost anything non-whitespace in between, so
-/// `aB3,x9Zq!k` is one scalar and `5,` yields `5`.
-///
-/// The middle also stops at a brace or a double quote, for the same reason the
-/// first and last positions reject one: both are structure, and a bare scalar
-/// never contains either. Without that, compact JSON — which has no space
-/// after the colon, and is what AWX and `jq -c` return — let the value run
-/// past the end of its own leaf and swallow every sibling field on the line:
-/// `{"credential":5,"name":"deploy-key"}` captured `5,"name":"deploy-key`,
-/// which is plausible enough to redact the whole object, and
-/// `{"cmd":"--password=hunter2","x":"y"}` captured `hunter2","x":"y`.
-///
-/// An apostrophe, a comma, a semicolon and a bracket stay legal in the middle.
-/// The first three occur inside real secrets (`don't-tell-anyone`,
-/// `aB3,x9Zq!k`). Brackets are needed because a value an earlier pattern has
-/// already partly redacted carries a marker
-/// (`DATABASE_URL=mysql://[CREDENTIALS]@host/db`) and must still be consumed
-/// whole.
-///
 /// A double-quoted value, with NO capturing group of its own — every caller
-/// wraps it in whatever group it needs. Shared by [`quoted_value`] and by the
-/// two Terraform HCL patterns, which are double-quote only (HCL strings are
-/// never single-quoted, so these two intentionally don't accept
-/// [`single_quoted_value`] — widening their match set is a separate decision
-/// from marker protection).
+/// wraps it in whatever group it needs.
 ///
 /// A real secret can legitimately start with `[` (`"[abc123]"`, `"[1,2]"`),
 /// so only MARKER-SHAPED content is refused: a `[` followed by one or more
@@ -128,7 +99,7 @@ struct PatternDef {
 /// stays upper-case-only even inside a case-insensitive pattern, since every
 /// marker this codebase produces is upper-case by construction and a real
 /// lower-case `"[abc]"`-shaped secret must still match. Without this, a later
-/// pattern whose key set overlaps an earlier "quoted value" pattern would
+/// pattern whose key set overlaps an earlier quoted-value pattern would
 /// re-match an already-produced marker and either strip its quoting or —
 /// worse, for a pattern with its own named marker — flatten it down to the
 /// generic `[REDACTED]`.
@@ -161,9 +132,46 @@ macro_rules! quoted_value {
     };
 }
 
-/// The bare alternative rejects a leading `[` outright, so it never
-/// re-consumes a bracketed marker as a fresh value; [`quoted_value`] gives
-/// the two quoted alternatives the equivalent protection.
+/// One value grammar for every keyed pattern: a double-quoted string with
+/// escapes, a single-quoted string, a single-line brace or bracket group
+/// that holds no quote, comma or colon (`{hunter2}` is a value written with
+/// decoration; `{"nested": "x"}`, `[1, 2]` and a lone `{` are structure), or
+/// an unquoted scalar that never contains a structural character.
+///
+/// The bracket-group alternative excludes MARKER-SHAPED content the same way
+/// the quoted alternatives do (content may not be exactly one run of
+/// `[A-Z0-9_ ]`), so `password=[REDACTED]` and `token=[K3S_TOKEN_REDACTED]`
+/// are left untouched rather than re-consumed as a fresh value. The
+/// brace-group alternative needs no such exclusion: this codebase never
+/// produces a `{…}`-wrapped marker.
+///
+/// Quoted and bracketed forms come first, so a properly wrapped value is
+/// captured whole (commas, braces and spaces inside are fine). The bare
+/// alternative comes last, rejects a leading `[` outright — the quoted and
+/// bracket-group alternatives already give bracketed content the equivalent
+/// protection — and otherwise accepts an optional opening quote (a value
+/// whose closing quote was cut off by `max_output_bytes` truncation must
+/// still be redacted). It rejects a structural character at its FIRST and
+/// LAST position (`{` and `[` open a container, a trailing `,` `;` `}` `]`
+/// belongs to the container) and takes almost anything non-whitespace in
+/// between, so `aB3,x9Zq!k` is one scalar and `5,` yields `5`.
+///
+/// The bare middle also stops at a brace or a double quote, for the same
+/// reason the first and last positions reject one: both are structure, and a
+/// bare scalar never contains either. Without that, compact JSON — which has
+/// no space after the colon, and is what AWX and `jq -c` return — let the
+/// value run past the end of its own leaf and swallow every sibling field on
+/// the line: `{"credential":5,"name":"deploy-key"}` captured
+/// `5,"name":"deploy-key`, which is plausible enough to redact the whole
+/// object, and `{"cmd":"--password=hunter2","x":"y"}` captured
+/// `hunter2","x":"y`.
+///
+/// An apostrophe, a comma, a semicolon and a bracket stay legal in the bare
+/// middle. The first three occur inside real secrets (`don't-tell-anyone`,
+/// `aB3,x9Zq!k`). Brackets are needed because a value an earlier pattern has
+/// already partly redacted carries a marker
+/// (`DATABASE_URL=mysql://[CREDENTIALS]@host/db`) and must still be consumed
+/// whole.
 ///
 /// The macro INCLUDES its capturing parentheses: in a pattern whose key is
 /// group 1 the value is group 2, so `secret_group: Some(2)` stays valid.
@@ -172,6 +180,10 @@ macro_rules! scalar_value {
         concat!(
             "(",
             quoted_value!(),
+            "|",
+            r#"\{[^{}"'\n,:]*\}"#,
+            "|",
+            r#"\[(?-i:[^\[\]"'\n,:A-Z0-9_ ]|[A-Z0-9_ ]+[^\[\]"'\n,:A-Z0-9_ ])[^\[\]"'\n,:]*\]"#,
             "|",
             r#"["']?[^\s"'{}\[\],;](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
             ")"
@@ -185,7 +197,7 @@ macro_rules! scalar_value {
 /// so identifiers such as `argocd-repo-server-tls` or `deploy-key.pem` pass
 /// through), plus digits-only (ids, ports) and boolean/null literals.
 pub(crate) fn plausible_secret(candidate: &str) -> bool {
-    let s = candidate.trim_matches(|c| c == '"' || c == '\'');
+    let s = candidate.trim_matches(|c| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']'));
     if s.len() < 8 {
         return false;
     }

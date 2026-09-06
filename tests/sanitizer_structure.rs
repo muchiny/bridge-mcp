@@ -218,3 +218,35 @@ fn text_lines_false_positives_left_alone() {
         assert_eq!(out.as_ref(), input, "{input:?} must not be touched");
     }
 }
+
+#[test]
+fn brace_wrapped_scalars_are_redacted_but_structures_are_not() {
+    let s = sanitizer();
+    assert_eq!(
+        s.sanitize("password={hunter2}").as_ref(),
+        "password=[REDACTED]"
+    );
+    assert_eq!(
+        s.sanitize("password=[hunter2]").as_ref(),
+        "password=[REDACTED]"
+    );
+    assert_eq!(
+        s.sanitize("password=[abc123def]").as_ref(),
+        "password=[REDACTED]"
+    );
+    assert_eq!(
+        s.sanitize("secret: {s3cr3t-V4lue_9}").as_ref(),
+        "secret: [REDACTED]"
+    );
+    for untouched in [
+        r#"{"password": {"nested": "x"}}"#,
+        r#"{"password": ["a", "b"]}"#,
+        "password: {",
+        "credential: [1, 2]",
+        "secret: {a: b}",
+        "password=[REDACTED]",
+        "token=[K3S_TOKEN_REDACTED]",
+    ] {
+        assert_eq!(s.sanitize(untouched).as_ref(), untouched, "{untouched:?}");
+    }
+}
