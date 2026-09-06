@@ -10,10 +10,15 @@ directory is gitignored.
 
 A handful of commands read live, mutable system state (see VOLATILE) —
 their raw and bridged captures are two separate ssh calls seconds apart, so
-non-marker differences there are the state moving between captures, not a
-sanitizer defect: the sanitizer cannot change a line without leaving a
-marker, so a marker-less change in a command that reads live state is
-classified NOISE, not DEFECT.
+differences there can be the state moving between captures, not a
+sanitizer defect. This includes the harness's own ssh logins: each capture
+appends fresh "Accepted publickey" journal entries between the raw and
+bridged calls, complete with a legitimate entropy-redacted key fingerprint
+— so for a volatile command, a pure insert or delete is time skew whether
+or not it carries a marker, since a sanitizer line split always shows up
+as a replace, never as a pure insert or delete. A replace with unequal
+line counts is still NOISE when marker-less, but DEFECT when a marker is
+present, since that shape a sanitizer split could actually produce.
 """
 import argparse
 import datetime
@@ -102,7 +107,11 @@ def classify(raw, bridged, volatile=False):
             lines_before = raw_lines[i1:i2]
             lines_after = br_lines[j1:j2]
             has_marker = any(MARKER.search(l) for l in lines_before + lines_after)
-            verdict = "NOISE" if (volatile and not has_marker) else "DEFECT"
+            # A pure insert/delete on a volatile command is time skew regardless
+            # of marker (the harness's own ssh logins append journal entries
+            # between captures); only a replace with unequal counts still needs
+            # the marker check, since that's the shape a sanitizer split makes.
+            verdict = "NOISE" if (volatile and (tag in ("insert", "delete") or not has_marker)) else "DEFECT"
             counts[verdict] += 1
             out.append(f"{verdict} line-count changed ({tag}) raw[{i1}:{i2}] bridged[{j1}:{j2}]:\n"
                        + "".join(f"  - {l}\n" for l in lines_before)
