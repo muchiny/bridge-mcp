@@ -643,7 +643,7 @@ fn create_context_with_audit(config: Arc<Config>) -> (ToolContext, Option<AuditW
     (ctx, audit_task)
 }
 
-/// Context for tests and for paths that produce no audit event.
+/// Test helper: the production entry points use `create_context_with_audit`.
 #[cfg(test)]
 fn create_context(config: Arc<Config>) -> ToolContext {
     create_context_with_audit(config).0
@@ -665,7 +665,10 @@ async fn finish_audit(ctx: ToolContext, writer: Option<tokio::task::JoinHandle<(
     }
 }
 
-/// Execute a command on a remote host
+/// Execute a command on a remote host.
+///
+/// Exits the process with code 1, after the audit event is written, if the
+/// remote command failed.
 ///
 /// # Errors
 ///
@@ -692,7 +695,7 @@ pub async fn run_exec(
     // existence the way `std::process::exit` inside the old single body did.
     let exit_code = outcome?;
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -1993,6 +1996,14 @@ mod tests {
         assert!(
             log.contains("ssh_exec"),
             "the CLI run must persist its audit event, got {log:?}"
+        );
+        // `event_type` is the literal "ssh_exec" for every event (see the
+        // comment above), so that assertion alone would pass even if this
+        // run's event were never written and some other line happened to
+        // match. Pin it to the host this test configured.
+        assert!(
+            log.contains(r#""host":"h""#),
+            "the audit event must record this run's host, got {log:?}"
         );
     }
 

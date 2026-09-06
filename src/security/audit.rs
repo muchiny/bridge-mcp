@@ -30,7 +30,10 @@ pub struct AuditEvent {
     pub tool_name: Option<String>,
     pub result: CommandResult,
     /// Reduction params supplied on this call (`jq_filter`, `columns`, …),
-    /// so adoption can be measured from the log with a grep.
+    /// so adoption can be measured from the log with a grep. Populated only
+    /// for tools on the `StandardTool` pipeline (`process_success_for_tool`);
+    /// the custom handlers still log through `process_success` and leave
+    /// this empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reduction: Vec<&'static str>,
 }

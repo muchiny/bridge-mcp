@@ -27,6 +27,14 @@ reading it. Every item below was reproduced before the fix and measured after.
   unguarded one. The gate follows
   `security.require_elicitation_on_destructive`; set it false to disable.
 
+- **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
+  struct-literal construction outside this crate must add it;
+  `AuditEvent::new` and `AuditEvent::denied` set it empty.
+
+- **`ExecuteCommandUseCase::process_success_for_tool` takes a new
+  `reduction: &[&'static str]` parameter.** Existing callers must pass the
+  reduction params actually used, or `&[]`.
+
 ### Fixed
 
 - **Sanitizer no longer corrupts structured output.** Two generic patterns
@@ -87,9 +95,8 @@ reading it. Every item below was reproduced before the fix and measured after.
   `AuditWriterTask` on return, so every `bridge-mcp tool …` left a 0-byte
   `audit.log` and an empty rotated archive. The CLI entry points keep the
   writer, drop the context and wait up to 2 s for the drain. Tool events carry
-  `reduction: [...]` when reduction params were used. `bridge-mcp exec` now
-  exits with the remote command's exit code once the audit event is written —
-  it always exited 1 before. `bridge-mcp status` reports
+  `reduction: [...]` when reduction params were used — standard tools only,
+  the custom handlers are a follow-up. `bridge-mcp status` reports
   `"written_by": "mcp-server-and-cli"`.
 
 ### Changed
