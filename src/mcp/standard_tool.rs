@@ -696,6 +696,7 @@ pub fn apply_reduction(
 /// one TSV row), so a line cap is a result cap. Without a filter, `limit`
 /// is handled by `try_apply_json_limit`, `try_apply_yaml_limit` and the
 /// tabular path instead.
+#[cfg(feature = "jq")]
 fn cap_filter_results(stdout: &mut String, limit: Option<u64>) {
     let Some(limit) = limit else { return };
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
