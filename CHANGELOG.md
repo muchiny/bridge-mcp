@@ -27,6 +27,14 @@ reading it. Every item below was reproduced before the fix and measured after.
   unguarded one. The gate follows
   `security.require_elicitation_on_destructive`; set it false to disable.
 
+- **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
+  struct-literal construction outside this crate must add it;
+  `AuditEvent::new` and `AuditEvent::denied` set it empty.
+
+- **`ExecuteCommandUseCase::process_success_for_tool` takes a new
+  `reduction: &[&'static str]` parameter.** Existing callers must pass the
+  reduction params actually used, or `&[]`.
+
 ### Fixed
 
 - **`ssh_k8s_get output=yaml` came back as a table, `yq_filter` failed on every
@@ -143,6 +151,14 @@ reading it. Every item below was reproduced before the fix and measured after.
   `BUILD_REV` without its `-dirty` suffix — caught by
   `test_build_rev_matches_live_head_or_is_unknown` on the first such bump.
   Both manifests are now watched.
+
+- **CLI runs now write their audit events.** `create_context` dropped the
+  `AuditWriterTask` on return, so every `bridge-mcp tool …` left a 0-byte
+  `audit.log` and an empty rotated archive. The CLI entry points keep the
+  writer, drop the context and wait up to 2 s for the drain. Tool events carry
+  `reduction: [...]` when reduction params were used — standard tools only,
+  the custom handlers are a follow-up. `bridge-mcp status` reports
+  `"written_by": "mcp-server-and-cli"`.
 
 ### Changed
 

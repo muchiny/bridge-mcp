@@ -22,7 +22,8 @@ use crate::mcp::request_meta::keys as meta_keys;
 use crate::ports::ExecutorRouter;
 use crate::ports::ToolContext;
 use crate::security::{
-    AuditEvent, AuditLogger, CommandResult, CommandValidator, RateLimiter, Sanitizer,
+    AuditEvent, AuditLogger, AuditWriterTask, CommandResult, CommandValidator, RateLimiter,
+    Sanitizer,
 };
 use crate::ssh::{
     SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error_for,
@@ -591,8 +592,12 @@ pub async fn run_config_diff(config: Arc<Config>, json_output: bool) -> Result<(
     Ok(())
 }
 
-/// Create a `ToolContext` from configuration
-fn create_context(config: Arc<Config>) -> ToolContext {
+/// Create a `ToolContext` from configuration, together with the audit
+/// writer task the context's audit logger sends to (if audit logging is
+/// enabled). The caller must drain the writer — see [`finish_audit`] —
+/// before the process exits, or every event sent through the returned
+/// context's audit logger is silently dropped when it goes out of scope.
+fn create_context_with_audit(config: Arc<Config>) -> (ToolContext, Option<AuditWriterTask>) {
     let validator = Arc::new(CommandValidator::new(&config.security));
     let known_secrets = config.collect_secret_values();
     let sanitizer = Arc::new(
@@ -602,20 +607,11 @@ fn create_context(config: Arc<Config>) -> ToolContext {
         )
         .with_known_secrets(&known_secrets),
     );
-    // For CLI mode, we don't spawn the audit writer task (short-lived process).
-    //
-    // KNOWN GAP (audit 2026-08-13): the consequence is that `audit.path`
-    // receives nothing at all from CLI invocations — every event is dropped by
-    // `let _ = send(...)` once the writer half goes out of scope here. Only the
-    // tracing sink below sees them. Closing this properly means returning the
-    // task from `create_context`, then dropping the logger and joining the
-    // writer before the process exits, across all six production call sites.
-    //
     // Wire the sanitizer so event.command is masked on the tracing sink too
     // (audit 2026-07-05 finding 1 — MCP mode already does this in server.rs).
     let audit_sanitizer =
         Sanitizer::from_config(&config.security.sanitize).with_known_secrets(&known_secrets);
-    let (audit_logger, _audit_task) =
+    let (audit_logger, audit_task) =
         AuditLogger::new_with_sanitizer(&config.audit, audit_sanitizer)
             .unwrap_or_else(|_| (AuditLogger::disabled(), None));
     let audit_logger = Arc::new(audit_logger);
@@ -632,7 +628,7 @@ fn create_context(config: Arc<Config>) -> ToolContext {
 
     let session_manager = Arc::new(SessionManager::new(config.sessions.clone()));
 
-    ToolContext::new(
+    let ctx = ToolContext::new(
         config,
         validator,
         sanitizer,
@@ -642,10 +638,37 @@ fn create_context(config: Arc<Config>) -> ToolContext {
         execute_use_case,
         rate_limiter,
         session_manager,
-    )
+    );
+
+    (ctx, audit_task)
 }
 
-/// Execute a command on a remote host
+/// Test helper: the production entry points use `create_context_with_audit`.
+#[cfg(test)]
+fn create_context(config: Arc<Config>) -> ToolContext {
+    create_context_with_audit(config).0
+}
+
+/// Let the audit writer drain before the process exits. The writer stops
+/// when the last `AuditLogger` sender is dropped, and the context (directly
+/// and through `execute_use_case`) holds them all, so the context is
+/// consumed here on purpose. A writer that cannot finish in two seconds is
+/// abandoned with a warning rather than hanging the CLI.
+async fn finish_audit(ctx: ToolContext, writer: Option<tokio::task::JoinHandle<()>>) {
+    drop(ctx);
+    if let Some(handle) = writer
+        && tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .is_err()
+    {
+        tracing::warn!("audit writer did not drain within 2s; events may be lost");
+    }
+}
+
+/// Execute a command on a remote host.
+///
+/// Exits the process with code 1, after the audit event is written, if the
+/// remote command failed.
 ///
 /// # Errors
 ///
@@ -662,10 +685,36 @@ pub async fn run_exec(
     working_dir: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_exec_in_context(&ctx, host, command, timeout, working_dir, json_output).await;
+    finish_audit(ctx, audit_writer).await;
+    // The audit writer above has already drained (or been given its 2s
+    // grace period) by the time we decide whether to exit non-zero, so a
+    // failing remote command no longer races its own audit event out of
+    // existence the way `std::process::exit` inside the old single body did.
+    let exit_code = outcome?;
+    if exit_code != 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
 
+/// The body `run_exec` used to inline, split out so every early return
+/// passes through `finish_audit`. Returns the remote exit code (0 on
+/// success) instead of calling `std::process::exit` itself, so the caller
+/// can drain the audit writer first — mirrors `run_tool_in_context`.
+async fn run_exec_in_context(
+    ctx: &ToolContext,
+    host: &str,
+    command: &str,
+    timeout: u64,
+    working_dir: Option<&str>,
+    json_output: bool,
+) -> Result<i32> {
     // Get host config
-    let host_config = config
+    let host_config = ctx
+        .config
         .hosts
         .get(host)
         .ok_or_else(|| BridgeError::UnknownHost {
@@ -685,7 +734,7 @@ pub async fn run_exec(
     info!(host = %host, command = %command, "Executing SSH command");
 
     // Build limits with timeout override
-    let mut limits = config.limits.clone();
+    let mut limits = ctx.config.limits.clone();
     limits.command_timeout_seconds = timeout;
 
     // Build the actual command (with optional cd)
@@ -699,7 +748,7 @@ pub async fn run_exec(
 
     // Resolve jump host if configured
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
-        config
+        ctx.config
             .hosts
             .get(jump_name)
             .map(|jump_config| (jump_name.as_str(), jump_config))
@@ -764,38 +813,39 @@ pub async fn run_exec(
         println!("{}", response.output);
     }
 
-    // Propagate remote exit code to CLI exit code
-    if response.exit_code != 0 {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    // Propagate the remote exit code to the caller instead of exiting the
+    // process here — `run_exec` decides when to exit, after the audit
+    // writer has drained. `u32` -> `i32` only fails for a code no real
+    // process can produce (`response.exit_code` never carries the `u32::MAX`
+    // "no code" sentinel `run_history`'s entries use), so `1` is a safe,
+    // still-nonzero fallback rather than a case that needs its own error.
+    Ok(i32::try_from(response.exit_code).unwrap_or(1))
 }
 
 /// Render the `Audit:` block of `bridge-mcp status`.
 ///
-/// G-13 (audit 2026-08-19): CLI mode never spawns the audit writer task —
-/// `create_context` above binds it to `_audit_task` and drops it, so
-/// `AuditLogger::log`'s `let _ = sender.send(event)` discards every CLI event
-/// and nothing is ever appended to `audit.path`. The events are not lost
-/// outright: `log_to_tracing` still emits them, so they appear under
-/// `RUST_LOG`. Printing a bare `Enabled: true` next to a `Path:` line read as
-/// a promise of a durable file that no CLI command writes.
+/// G-13 (audit 2026-08-19) found that CLI mode never spawned the audit
+/// writer task — `create_context` bound it to `_audit_task` and dropped it,
+/// so `AuditLogger::log`'s `let _ = sender.send(event)` discarded every CLI
+/// event and nothing was ever appended to `audit.path`. Printing a bare
+/// `Enabled: true` next to a `Path:` line read as a promise of a durable
+/// file that no CLI command wrote.
 ///
-/// Durable CLI audit is out of scope for 2.2.0 (it means threading the writer
-/// task out of `create_context` and joining it before exit at every call
-/// site). This function only makes the claim honest.
+/// Fixed 2026-09-06 (tasks C.1/C.2): `run_tool`, `run_exec`, `run_history`,
+/// `run_upload` and `run_download` now call `create_context_with_audit` and
+/// drain the writer through `finish_audit` before returning, so an audit
+/// event logged during one of those five CLI commands is appended to
+/// `audit.path` the same as an MCP-server-side call, not just emitted to
+/// `tracing`/`RUST_LOG`. This function reflects that both surfaces write the
+/// same file now.
 fn audit_status_lines(audit: &AuditConfig) -> Vec<String> {
     if !audit.enabled {
         return vec!["  Enabled: false".to_string()];
     }
 
     vec![
-        "  Enabled: true (config) - CLI commands log to tracing only".to_string(),
-        format!(
-            "  Path: {} (written by the MCP server only, not by CLI commands)",
-            audit.path.display()
-        ),
+        "  Enabled: true (config) - written by the MCP server and by CLI commands".to_string(),
+        format!("  Path: {}", audit.path.display()),
     ]
 }
 
@@ -841,7 +891,7 @@ pub async fn run_status(config: Arc<Config>, json_output: bool) -> Result<()> {
             "audit": {
                 "enabled": config.audit.enabled,
                 "path": config.audit.path.display().to_string(),
-                "written_by": "mcp-server-only",
+                "written_by": "mcp-server-and-cli",
             },
         });
         println!(
@@ -946,8 +996,21 @@ pub async fn run_history(
     host_filter: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let ctx = create_context(config);
+    let (ctx, audit_task) = create_context_with_audit(config);
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_history_in_context(&ctx, limit, host_filter, json_output);
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
 
+/// The body `run_history` used to inline, split out so every early return
+/// passes through `finish_audit`.
+fn run_history_in_context(
+    ctx: &ToolContext,
+    limit: usize,
+    host_filter: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
     let entries = if let Some(host) = host_filter {
         ctx.history.for_host(host, limit)
     } else {
@@ -1031,7 +1094,7 @@ pub async fn run_history(
 /// - SSH/SFTP connection fails
 /// - The file transfer fails (permissions, disk space, network)
 /// - Checksum verification fails (if enabled)
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments)]
 pub async fn run_upload(
     config: Arc<Config>,
     host: &str,
@@ -1043,10 +1106,41 @@ pub async fn run_upload(
     preserve_permissions: bool,
     show_progress: bool,
 ) -> Result<()> {
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_upload_in_context(
+        &ctx,
+        host,
+        local_path,
+        remote_path,
+        mode,
+        chunk_size,
+        verify_checksum,
+        preserve_permissions,
+        show_progress,
+    )
+    .await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
 
+/// The body `run_upload` used to inline, split out so every early return
+/// passes through `finish_audit`.
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_upload_in_context(
+    ctx: &ToolContext,
+    host: &str,
+    local_path: &Path,
+    remote_path: &str,
+    mode: &str,
+    chunk_size: u64,
+    verify_checksum: bool,
+    preserve_permissions: bool,
+    show_progress: bool,
+) -> Result<()> {
     // Get host config
-    let host_config = config
+    let host_config = ctx
+        .config
         .hosts
         .get(host)
         .ok_or_else(|| BridgeError::UnknownHost {
@@ -1093,7 +1187,7 @@ pub async fn run_upload(
 
     // Resolve jump host if configured
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
-        config
+        ctx.config
             .hosts
             .get(jump_name)
             .map(|jump_config| (jump_name.as_str(), jump_config))
@@ -1101,10 +1195,16 @@ pub async fn run_upload(
 
     // Connect to host (via jump host if configured)
     let client = if let Some((jump_name, jump_config)) = jump_host {
-        SshClient::connect_via_jump(host, host_config, jump_name, jump_config, &config.limits)
-            .await?
+        SshClient::connect_via_jump(
+            host,
+            host_config,
+            jump_name,
+            jump_config,
+            &ctx.config.limits,
+        )
+        .await?
     } else {
-        SshClient::connect(host, host_config, &config.limits).await?
+        SshClient::connect(host, host_config, &ctx.config.limits).await?
     };
 
     // Create SFTP session
@@ -1196,7 +1296,7 @@ pub async fn run_upload(
 /// - The remote file does not exist or cannot be read
 /// - The file transfer fails (permissions, disk space, network)
 /// - Checksum verification fails (if enabled)
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments)]
 pub async fn run_download(
     config: Arc<Config>,
     host: &str,
@@ -1208,10 +1308,41 @@ pub async fn run_download(
     preserve_permissions: bool,
     show_progress: bool,
 ) -> Result<()> {
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_download_in_context(
+        &ctx,
+        host,
+        remote_path,
+        local_path,
+        mode,
+        chunk_size,
+        verify_checksum,
+        preserve_permissions,
+        show_progress,
+    )
+    .await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
 
+/// The body `run_download` used to inline, split out so every early return
+/// passes through `finish_audit`.
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_download_in_context(
+    ctx: &ToolContext,
+    host: &str,
+    remote_path: &str,
+    local_path: &Path,
+    mode: &str,
+    chunk_size: u64,
+    verify_checksum: bool,
+    preserve_permissions: bool,
+    show_progress: bool,
+) -> Result<()> {
     // Get host config
-    let host_config = config
+    let host_config = ctx
+        .config
         .hosts
         .get(host)
         .ok_or_else(|| BridgeError::UnknownHost {
@@ -1254,7 +1385,7 @@ pub async fn run_download(
 
     // Resolve jump host if configured
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
-        config
+        ctx.config
             .hosts
             .get(jump_name)
             .map(|jump_config| (jump_name.as_str(), jump_config))
@@ -1262,10 +1393,16 @@ pub async fn run_download(
 
     // Connect to host (via jump host if configured)
     let client = if let Some((jump_name, jump_config)) = jump_host {
-        SshClient::connect_via_jump(host, host_config, jump_name, jump_config, &config.limits)
-            .await?
+        SshClient::connect_via_jump(
+            host,
+            host_config,
+            jump_name,
+            jump_config,
+            &ctx.config.limits,
+        )
+        .await?
     } else {
-        SshClient::connect(host, host_config, &config.limits).await?
+        SshClient::connect(host, host_config, &ctx.config.limits).await?
     };
 
     // Create SFTP session
@@ -1466,17 +1603,29 @@ pub async fn run_tool(
     }
 
     // Slow path: stateless in-process execution.
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_tool_in_context(&registry, tool_name, args, &ctx, json_output).await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
+
+/// The in-process execution `run_tool` used to inline, split out so every
+/// early return passes through `finish_audit`.
+async fn run_tool_in_context(
+    registry: &crate::mcp::registry::ToolRegistry,
+    tool_name: &str,
+    args: Option<serde_json::Value>,
+    ctx: &ToolContext,
+    json_output: bool,
+) -> Result<i32> {
     // Strip interactive App components, exactly as `McpServer` does before it
     // answers a `tools/call`. This path calls the registry directly and so
     // bypassed that filter: a terminal has nothing to render an App with, and
     // serializing it made the blob the bulk of the output — on `ssh_storage_df`
     // 3377 of 3950 bytes, and 412 bytes appended to a 6-byte answer that
     // `jq_filter` had just reduced. `structured_content` survives, as there.
-    let result = registry
-        .execute(tool_name, args, &ctx)
-        .await?
-        .without_apps();
+    let result = registry.execute(tool_name, args, ctx).await?.without_apps();
 
     let is_error = result.is_error.unwrap_or(false);
     let exit_code = i32::from(is_error);
@@ -1771,6 +1920,90 @@ mod tests {
         assert!(
             ctx.audit_logger.has_sanitizer(),
             "CLI audit logger must sanitize event.command (audit 2026-07-05 finding 1)"
+        );
+    }
+
+    /// A `Config::default()` with one host inserted under `name`, for tests
+    /// that need `run_tool` to reach the slow (in-process) path and dispatch
+    /// a real tool against it.
+    fn test_config_with_host(name: &str, hostname: &str) -> Config {
+        let mut config = Config::default();
+        config.hosts.insert(
+            name.to_string(),
+            HostConfig {
+                hostname: hostname.to_string(),
+                port: 22,
+                user: "test".to_string(),
+                auth: AuthConfig::Agent,
+                description: None,
+                host_key_verification: HostKeyVerification::Strict,
+                proxy_jump: None,
+                socks_proxy: None,
+                sudo_password: None,
+                tags: Vec::new(),
+                os_type: OsType::Linux,
+                shell: None,
+                retry: None,
+                protocol: crate::config::Protocol::default(),
+                #[cfg(feature = "winrm")]
+                winrm_use_tls: None,
+                #[cfg(feature = "winrm")]
+                winrm_accept_invalid_certs: None,
+                #[cfg(feature = "winrm")]
+                winrm_operation_timeout_secs: None,
+                #[cfg(feature = "winrm")]
+                winrm_max_envelope_size: None,
+            },
+        );
+        config
+    }
+
+    #[tokio::test]
+    async fn run_tool_persists_the_audit_event_of_a_cli_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let mut config = test_config_with_host("h", "127.0.0.1");
+        config.audit.enabled = true;
+        config.audit.path = audit_path.clone();
+        // Standard mode denies anything not on an (empty) whitelist before a
+        // command is ever attempted — permissive mode lets `validate()` pass
+        // so this test exercises the connection path instead.
+        config.security.mode = crate::config::SecurityMode::Permissive;
+        // Bound the connection attempt: a closed port on 127.0.0.1 gets no
+        // RST in this sandbox's network stack, so it would otherwise hang
+        // for the full default 10s timeout, times up to 3 retries.
+        config.limits.connection_timeout_seconds = 1;
+        config.limits.retry_attempts = 0;
+        if let Some(host) = config.hosts.get_mut("h") {
+            host.port = 1; // reserved, unused: guarantees a connection failure
+        }
+        // `ssh_exec`'s blacklist-denial path (`log_denied`) does NOT carry
+        // the tool name or "ssh_exec" anywhere in the event — only its
+        // connection-failure path (`log_failure`, whose event carries the
+        // literal `event_type: "ssh_exec"` for every tool) does. So this
+        // exercises a failed connection, not a blacklist denial.
+        let _ = run_tool(
+            Arc::new(config),
+            "ssh_exec",
+            &["host=h".to_string(), "command=echo hi".to_string()],
+            None,
+            false,
+            DataReductionFlags::default(),
+            true,
+        )
+        .await;
+        let log = std::fs::read_to_string(&audit_path).expect("audit.log exists");
+        assert!(
+            log.contains("ssh_exec"),
+            "the CLI run must persist its audit event, got {log:?}"
+        );
+        // `event_type` is the literal "ssh_exec" for every event (see the
+        // comment above), so that assertion alone would pass even if this
+        // run's event were never written and some other line happened to
+        // match. Pin it to the host this test configured.
+        assert!(
+            log.contains(r#""host":"h""#),
+            "the audit event must record this run's host, got {log:?}"
         );
     }
 
@@ -2507,12 +2740,16 @@ mod tests {
 
     // ============== audit_status_lines Tests ==============
 
-    /// G-13 (audit 2026-08-19): `bridge-mcp status` printed
-    /// `Enabled: true` + `Path: <file>` while `create_context` drops the
-    /// `AuditWriterTask`, so no CLI invocation ever appends a byte to that
-    /// path. The output must not promise a file that is never written.
+    /// G-13 (audit 2026-08-19) found `bridge-mcp status` printed
+    /// `Enabled: true` + `Path: <file>` while `create_context` dropped the
+    /// `AuditWriterTask`, so no CLI invocation ever appended a byte to that
+    /// path. Tasks C.1/C.2 (2026-09-06) fixed the underlying gap — `run_tool`,
+    /// `run_exec`, `run_history`, `run_upload` and `run_download` now drain
+    /// the writer via `finish_audit` — so the status output must now claim
+    /// the opposite of what it claimed before: both the MCP server and CLI
+    /// commands write to the file.
     #[test]
-    fn test_audit_status_lines_do_not_promise_a_file_in_cli_mode() {
+    fn test_audit_status_lines_say_both_mcp_server_and_cli_write_the_file() {
         let audit = AuditConfig {
             enabled: true,
             path: std::path::PathBuf::from("/var/log/bridge-mcp/audit.log"),
@@ -2524,8 +2761,13 @@ mod tests {
 
         assert_eq!(lines.len(), 2, "got {lines:?}");
         assert!(
-            lines[0].contains("tracing only"),
-            "the enabled line must say CLI events only reach tracing, got {:?}",
+            !lines[0].contains("tracing only"),
+            "must not claim CLI events only reach tracing anymore, got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("MCP server") && lines[0].contains("CLI"),
+            "the enabled line must say both the MCP server and CLI commands write it, got {:?}",
             lines[0]
         );
         assert!(
@@ -2534,8 +2776,8 @@ mod tests {
             lines[1]
         );
         assert!(
-            lines[1].contains("MCP server"),
-            "the path line must say who actually writes it, got {:?}",
+            !lines[1].contains("only, not by CLI"),
+            "must not claim the MCP server writes it exclusively anymore, got {:?}",
             lines[1]
         );
     }
