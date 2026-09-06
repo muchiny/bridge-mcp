@@ -369,6 +369,26 @@ pub fn maybe_reduce_table(
     table
 }
 
+/// Does a `kubectl get -o …` value produce a column-aligned table that the
+/// MCP Apps table widget (and `to_tsv`) may re-render? Only the default
+/// output, `wide` and `custom-columns=…` do. `json`, `yaml`, `name`,
+/// `jsonpath=…`, `go-template=…` and `template=…` are documents or bare
+/// lists: re-rendering them as a table turned `apiVersion: v1` into
+/// `APIVERSION: V1` and flattened every nested key.
+#[must_use]
+pub(crate) fn kubectl_output_is_table(output: Option<&str>) -> bool {
+    match output.map(str::trim) {
+        None | Some("" | "wide") => true,
+        Some(other) => other.starts_with("custom-columns"),
+    }
+}
+
+/// Same question for `helm … -o table|json|yaml`.
+#[must_use]
+pub(crate) fn helm_output_is_table(output: Option<&str>) -> bool {
+    matches!(output.map(str::trim), None | Some("" | "table"))
+}
+
 /// Parse columnar CLI output using data-driven gutter detection.
 ///
 /// Algorithm:
@@ -1475,5 +1495,44 @@ muchini  2411977  0.0  0.0   2772  1664 ?        S    22:06   0:00 [kworker]\n";
     #[test]
     fn reject_posix_only_on_windows_lets_a_linux_host_through() {
         assert!(reject_posix_only_on_windows(&host_with_os("linux"), "ssh_find").is_none());
+    }
+
+    // ============== kubectl_output_is_table / helm_output_is_table ==============
+
+    #[test]
+    fn kubectl_table_formats_are_recognised() {
+        for output in [
+            None,
+            Some(""),
+            Some("wide"),
+            Some("custom-columns=NAME:.metadata.name"),
+        ] {
+            assert!(kubectl_output_is_table(output), "{output:?} is a table");
+        }
+    }
+
+    #[test]
+    fn kubectl_document_formats_are_not_tables() {
+        for output in [
+            "json",
+            "yaml",
+            "name",
+            "jsonpath={.items[*].metadata.name}",
+            "go-template={{.metadata.name}}",
+            "template={{.metadata.name}}",
+        ] {
+            assert!(
+                !kubectl_output_is_table(Some(output)),
+                "{output:?} is not a table"
+            );
+        }
+    }
+
+    #[test]
+    fn helm_output_formats() {
+        assert!(helm_output_is_table(None));
+        assert!(helm_output_is_table(Some("table")));
+        assert!(!helm_output_is_table(Some("json")));
+        assert!(!helm_output_is_table(Some("yaml")));
     }
 }

@@ -78,6 +78,6 @@
      "expect": "eq=secret:\\n  secretName: tls\\ntoken: enabled\\nsecretName: argocd-repo-server-tls"},
     {"id": "S6", "owner": "lane-a", "tool": "ssh_exec", "yes": true, "paths": ["cli"],
      "args": {"command": "printf '%s\\n' 'docker login -u bob -p' 'next-line' '--vault-password-file' '/etc/passwd' 'VAULT_TOKEN=hvs.CAESIJ1234567890abcdefghij'"},
-     "expect": "eq=docker login -u bob -p\\nnext-line\\n--vault-password-file\\n/etc/passwd\\nVAULT_TOKEN=[REDACTED]"}
+     "expect": "eq=docker login -u bob -p\\nnext-line\\n--vault-password-file\\n/etc/passwd\\nVAULT_TOKEN=[VAULT_TOKEN_REDACTED]"}
   ]
 }

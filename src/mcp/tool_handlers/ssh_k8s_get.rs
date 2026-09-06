@@ -65,7 +65,8 @@ impl StandardTool for K8sGetTool {
     const DESCRIPTION: &'static str = "List or get Kubernetes resources via kubectl on a remote host. Start here to discover \
         resource names and status before using ssh_k8s_describe (detailed prose), \
         ssh_k8s_logs (pod logs), ssh_k8s_exec (run command in pod), or ssh_k8s_delete. \
-        Use output='json' or 'yaml' for structured data filterable with jq_filter. Use \
+        Use output='json' with jq_filter, or output='yaml' with yq_filter, for \
+        structured data. Use \
         all_namespaces=true to search cluster-wide. Auto-detects kubectl binary (k8s, k3s, \
         microk8s). Returns kubectl text output.";
 
@@ -161,6 +162,12 @@ impl StandardTool for K8sGetTool {
         output: &str,
         dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
+        // A document (`-o yaml`, `-o json`) or a bare list (`-o name`,
+        // `-o jsonpath=…`) is not a table: hand it back exactly as kubectl
+        // printed it. Only the default/wide/custom-columns output is.
+        if !super::utils::kubectl_output_is_table(args.output.as_deref()) {
+            return result;
+        }
         let Some(parsed) = super::utils::parse_columnar_output(output) else {
             return result;
         };
@@ -648,5 +655,67 @@ mod tests {
         let dr = crate::domain::data_reduction::DataReductionArgs::default();
         let result = K8sGetTool::post_process(result, &args, "", &dr);
         assert!(!result.content.is_empty());
+    }
+
+    fn text_of(result: &ToolCallResult) -> &str {
+        match result.content.first() {
+            Some(crate::ports::protocol::ToolContent::Text { text }) => text,
+            _ => panic!("expected a text content block"),
+        }
+    }
+
+    fn empty_reduction() -> crate::domain::data_reduction::DataReductionArgs {
+        let mut v = json!({});
+        crate::domain::data_reduction::DataReductionArgs::extract(&mut v)
+            .expect("empty args extract")
+    }
+
+    #[test]
+    fn post_process_leaves_yaml_output_untouched() {
+        use crate::mcp::standard_tool::StandardTool;
+        let yaml = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web\n  labels:\n    app: web\n";
+        let args: SshK8sGetArgs = serde_json::from_value(
+            json!({"host": "server1", "resource": "pods", "output": "yaml"}),
+        )
+        .expect("args");
+        let out =
+            K8sGetTool::post_process(ToolCallResult::text(yaml), &args, yaml, &empty_reduction());
+        assert_eq!(text_of(&out), yaml, "yaml must come back byte-identical");
+    }
+
+    #[test]
+    fn post_process_leaves_name_output_untouched() {
+        use crate::mcp::standard_tool::StandardTool;
+        let names = "pod/web-1\npod/web-2\n";
+        let args: SshK8sGetArgs = serde_json::from_value(
+            json!({"host": "server1", "resource": "pods", "output": "name"}),
+        )
+        .expect("args");
+        let out = K8sGetTool::post_process(
+            ToolCallResult::text(names),
+            &args,
+            names,
+            &empty_reduction(),
+        );
+        assert_eq!(text_of(&out), names);
+    }
+
+    #[test]
+    fn post_process_still_renders_the_default_table() {
+        use crate::mcp::standard_tool::StandardTool;
+        let table = "NAME    READY   STATUS\nweb-1   1/1     Running\nweb-2   1/1     Running\n";
+        let args: SshK8sGetArgs =
+            serde_json::from_value(json!({"host": "server1", "resource": "pods"})).expect("args");
+        let out = K8sGetTool::post_process(
+            ToolCallResult::text(table),
+            &args,
+            table,
+            &empty_reduction(),
+        );
+        assert!(
+            text_of(&out).starts_with("NAME\tREADY\tSTATUS\n"),
+            "{}",
+            text_of(&out)
+        );
     }
 }

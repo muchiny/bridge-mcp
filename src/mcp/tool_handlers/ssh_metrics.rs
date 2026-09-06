@@ -13,7 +13,7 @@ use crate::domain::use_cases::parse_metrics::{self, SECTION_SEPARATOR, SystemMet
 use crate::error::{BridgeError, Result};
 use crate::mcp::apps::dashboard;
 use crate::mcp::protocol::ToolCallResult;
-use crate::mcp::standard_tool::apply_reduction;
+use crate::mcp::standard_tool::apply_reduction_recorded;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::ssh::{is_retryable_error_for, with_retry_if};
@@ -123,7 +123,7 @@ impl ToolHandler for SshMetricsHandler {
                 param: "arguments".to_string(),
             });
         };
-        let dr = DataReductionArgs::extract(&mut v)?;
+        let dr = DataReductionArgs::extract_for(&mut v, self.name(), self.output_kind())?;
         let args: SshMetricsArgs =
             serde_json::from_value(v).map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 
@@ -228,7 +228,7 @@ impl ToolHandler for SshMetricsHandler {
         let mut json_output = ctx.sanitizer.sanitize(&json_output).into_owned();
 
         // Apply server-side data reduction (jq_filter / output_format=tsv / limit)
-        apply_reduction(&mut json_output, &dr, OutputKind::Json)?;
+        apply_reduction_recorded(ctx, &mut json_output, &dr, OutputKind::Json)?;
 
         // Build dashboard app from metrics
         let mut dash = dashboard("System Metrics");

@@ -29,6 +29,13 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     pub result: CommandResult,
+    /// Reduction params supplied on this call (`jq_filter`, `columns`, …),
+    /// so adoption can be measured from the log with a grep. Populated only
+    /// for tools on the `StandardTool` pipeline (`process_success_for_tool`);
+    /// the custom handlers still log through `process_success` and leave
+    /// this empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reduction: Vec<&'static str>,
 }
 
 impl AuditEvent {
@@ -42,6 +49,7 @@ impl AuditEvent {
             command: command.to_string(),
             tool_name: None,
             result,
+            reduction: Vec::new(),
         }
     }
 
@@ -57,6 +65,7 @@ impl AuditEvent {
             result: CommandResult::Denied {
                 reason: reason.to_string(),
             },
+            reduction: Vec::new(),
         }
     }
 
@@ -692,6 +701,25 @@ mod tests {
             },
         );
         assert_eq!(event.tool_name, None);
+    }
+
+    #[test]
+    fn reduction_params_are_serialized_only_when_present() {
+        let mut ev = AuditEvent::new(
+            "h",
+            "kubectl get pods -o json",
+            CommandResult::Success {
+                exit_code: 0,
+                duration_ms: 1,
+            },
+        );
+        assert!(!serde_json::to_string(&ev).unwrap().contains("reduction"));
+        ev.reduction = vec!["jq_filter", "output_format"];
+        let with = serde_json::to_string(&ev).unwrap();
+        assert!(
+            with.contains(r#""reduction":["jq_filter","output_format"]"#),
+            "{with}"
+        );
     }
 
     #[test]

@@ -108,7 +108,11 @@ impl ToolHandler for SshLsHandler {
                 param: "arguments".to_string(),
             });
         };
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)?;
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract_for(
+            &mut v,
+            self.name(),
+            self.output_kind(),
+        )?;
         let args: SshLsArgs =
             serde_json::from_value(v).map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 
@@ -229,7 +233,8 @@ impl ToolHandler for SshLsHandler {
                 let mut json_output =
                     serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
 
-                crate::mcp::standard_tool::apply_reduction(
+                crate::mcp::standard_tool::apply_reduction_recorded(
+                    ctx,
                     &mut json_output,
                     &dr,
                     crate::domain::output_kind::OutputKind::Json,

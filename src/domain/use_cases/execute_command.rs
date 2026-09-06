@@ -193,6 +193,7 @@ impl ExecuteCommandUseCase {
         host: &str,
         command: &str,
         output: &CommandOutput,
+        reduction: &[&'static str],
     ) -> ExecuteCommandResponse {
         let redacted = self.sanitizer.sanitize(command);
         self.record_success_redacted_for_tool(
@@ -201,6 +202,7 @@ impl ExecuteCommandUseCase {
             &redacted,
             output.exit_code,
             output.duration_ms,
+            reduction,
         );
         self.finish_success(host, &redacted, output)
     }
@@ -279,7 +281,7 @@ impl ExecuteCommandUseCase {
         exit_code: u32,
         duration_ms: u64,
     ) {
-        self.record_success_redacted_for_tool(None, host, redacted, exit_code, duration_ms);
+        self.record_success_redacted_for_tool(None, host, redacted, exit_code, duration_ms, &[]);
     }
 
     /// As [`Self::record_success_redacted`], carrying the tool name into the
@@ -291,6 +293,7 @@ impl ExecuteCommandUseCase {
         redacted: &str,
         exit_code: u32,
         duration_ms: u64,
+        reduction: &[&'static str],
     ) {
         let mut event = AuditEvent::new(
             host,
@@ -303,6 +306,7 @@ impl ExecuteCommandUseCase {
         if let Some(name) = tool {
             event = event.with_tool_name(name);
         }
+        event.reduction = reduction.to_vec();
         self.audit_logger.log(event);
         self.history
             .record_success(host, redacted, exit_code, duration_ms);

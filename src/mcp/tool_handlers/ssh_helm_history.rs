@@ -118,6 +118,9 @@ impl StandardTool for HelmHistoryTool {
         output: &str,
         dr: &crate::domain::data_reduction::DataReductionArgs,
     ) -> ToolCallResult {
+        if !super::utils::helm_output_is_table(args.output.as_deref()) {
+            return result;
+        }
         let Some(parsed) = super::utils::parse_columnar_output(output) else {
             return result;
         };
@@ -411,5 +414,23 @@ mod tests {
         let dr = crate::domain::data_reduction::DataReductionArgs::default();
         let result = HelmHistoryTool::post_process(result, &args, "", &dr);
         assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn post_process_leaves_yaml_output_untouched() {
+        use crate::mcp::standard_tool::StandardTool;
+        let yaml = "- revision: 1\n  status: deployed\n  chart: nginx-1.0.0\n";
+        let args: SshHelmHistoryArgs = serde_json::from_value(
+            json!({"host": "server1", "release": "my-app", "output": "yaml"}),
+        )
+        .expect("args");
+        let mut v = json!({});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).expect("dr");
+        let out = HelmHistoryTool::post_process(ToolCallResult::text(yaml), &args, yaml, &dr);
+        let text = match out.content.first() {
+            Some(crate::ports::protocol::ToolContent::Text { text }) => text.as_str(),
+            _ => panic!("expected text"),
+        };
+        assert_eq!(text, yaml, "yaml must come back byte-identical");
     }
 }

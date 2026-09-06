@@ -89,26 +89,132 @@ struct PatternDef {
     secret_group: Option<usize>,
 }
 
-/// One scalar on the same line, quoted or bare. Quoted forms come first, so a
-/// properly quoted value is captured whole (commas, braces and spaces inside
-/// are fine). The bare form accepts an optional opening quote — a value whose
-/// closing quote was cut off by `max_output_bytes` truncation must still be
-/// redacted — rejects a structural character at its FIRST and LAST position
-/// (`{` and `[` open a container, a trailing `,` `;` `}` `]` belongs to the
-/// container) and takes almost anything non-whitespace in between, so
-/// `aB3,x9Zq!k` is one scalar and `5,` yields `5`.
+/// A double-quoted value, with NO capturing group of its own — every caller
+/// wraps it in whatever group it needs.
 ///
-/// The middle also stops at a brace or a double quote, for the same reason the
-/// first and last positions reject one: both are structure, and a bare scalar
-/// never contains either. Without that, compact JSON — which has no space
-/// after the colon, and is what AWX and `jq -c` return — let the value run
-/// past the end of its own leaf and swallow every sibling field on the line:
-/// `{"credential":5,"name":"deploy-key"}` captured `5,"name":"deploy-key`,
-/// which is plausible enough to redact the whole object, and
-/// `{"cmd":"--password=hunter2","x":"y"}` captured `hunter2","x":"y`.
+/// A real secret can legitimately start with `[` (`"[abc123]"`, `"[1,2]"`),
+/// so only MARKER-SHAPED content is refused: a `[` followed by one or more
+/// of `[A-Z0-9_ ]` and then a `]`, with nothing else in between
+/// (`"[REDACTED]"`, `"[K3S_TOKEN_REDACTED]"`) — detected with `(?-i:…)` so it
+/// stays upper-case-only even inside a case-insensitive pattern, since every
+/// marker this codebase produces is upper-case by construction and a real
+/// lower-case `"[abc]"`-shaped secret must still match. Without this, a later
+/// pattern whose key set overlaps an earlier quoted-value pattern would
+/// re-match an already-produced marker and either strip its quoting or —
+/// worse, for a pattern with its own named marker — flatten it down to the
+/// generic `[REDACTED]`.
 ///
-/// An apostrophe, a comma, a semicolon and a bracket stay legal in the middle.
-/// The first three occur inside real secrets (`don't-tell-anyone`,
+/// The exclusion is by SHAPE, not by membership in an actual marker list: it
+/// refuses any `"[…]"` whose interior is only `[A-Z0-9_ ]`, so an all-digit
+/// bracketed value such as `"[12345678]"` is refused the same as
+/// `"[REDACTED]"`, even though it is not one of this codebase's markers and
+/// could be a real secret.
+macro_rules! double_quoted_value {
+    () => {
+        r#""(?:(?:[^"\\\n\[]|\\.|\[(?-i:[^"\\\n\]A-Z0-9_ ]|[A-Z0-9_ ]+[^"\\\n\]A-Z0-9_ ]))(?:[^"\\\n]|\\.)*)?""#
+    };
+}
+
+/// A single-quoted value, with NO capturing group of its own. Same
+/// marker-shaped exclusion as [`double_quoted_value`], for `'` instead of
+/// `"`.
+macro_rules! single_quoted_value {
+    () => {
+        r#"'(?:(?:[^'\n\[]|\[(?-i:[^'\n\]A-Z0-9_ ]|[A-Z0-9_ ]+[^'\n\]A-Z0-9_ ]))[^'\n]*)?'"#
+    };
+}
+
+/// A double- or single-quoted value, with NO capturing group of its own —
+/// every caller wraps it in whatever group it needs. Shared by
+/// `scalar_value!()` (as its first two alternatives) and by the two patterns
+/// whose value class is quoted-only, either quote style ("Generic passwords
+/// with quoted values", "Generic secrets with quoted values"): one grammar,
+/// four users counting the two Terraform patterns on [`double_quoted_value`]
+/// alone — no hand-rolled quoted-value class is left in this file, so a fix
+/// here (or in the double/single halves) fixes all of them at once.
+macro_rules! quoted_value {
+    () => {
+        concat!(double_quoted_value!(), "|", single_quoted_value!())
+    };
+}
+
+/// One value grammar for every keyed pattern: a double-quoted string with
+/// escapes, a single-quoted string, a single-line brace or bracket group
+/// that holds no quote, comma or colon (`{hunter2}` is a value written with
+/// decoration; `{"nested": "x"}`, `[1, 2]` and a lone `{` are structure), or
+/// an unquoted scalar that never contains a structural character.
+///
+/// The bracket-group alternative excludes MARKER-SHAPED content the same way
+/// the quoted alternatives do (content may not be exactly one run of
+/// `[A-Z0-9_ ]`), so `password=[REDACTED]` and `token=[K3S_TOKEN_REDACTED]`
+/// are left untouched rather than re-consumed as a fresh value. The
+/// brace-group alternative needs no such exclusion: this codebase never
+/// produces a `{…}`-wrapped marker.
+///
+/// Quoted and bracketed forms come first, so a properly wrapped value is
+/// captured whole (commas, braces and spaces inside are fine). The bare
+/// alternative comes last, rejects a leading `[` outright — the quoted and
+/// bracket-group alternatives already give bracketed content the equivalent
+/// protection — and otherwise accepts an optional opening quote (a value
+/// whose closing quote was cut off by `max_output_bytes` truncation must
+/// still be redacted). It rejects a structural character at its FIRST and
+/// LAST position (`{` and `[` open a container, a trailing `,` `;` `}` `]`
+/// belongs to the container) and takes almost anything non-whitespace in
+/// between, so `aB3,x9Zq!k` is one scalar and `5,` yields `5`.
+///
+/// An angle-wrapped scalar (`<hunter2>`) is a value the same way a
+/// brace-wrapped one is — some tools decorate a bare value with `<>` — but
+/// `kubectl describe` also uses `<...>` for a PLACEHOLDER when it has no
+/// value at all: `<set to the key 'auth' in secret 'argocd-redis'>`,
+/// `<none>`, `<nil>`, `<unset>`, `<invalid>`. The difference is shape, not
+/// content: a placeholder is prose, with a space, a quote or a colon inside
+/// the brackets; a value never is. So the angle-group alternative holds
+/// none of those — `<hunter2>` matches it whole and is redacted, while
+/// `<set to the key 'auth' in secret 'argocd-redis'>` cannot: the mandatory
+/// `>` never follows a run of allowed characters, so this alternative fails
+/// at that position for the whole line, same as the brace- and
+/// bracket-group alternatives before it.
+///
+/// The bare alternative's first position keeps excluding `<`, on top of the
+/// characters above: without that, `<set` alone would still satisfy the
+/// bare alternative once the angle-group alternative gives up on it — the
+/// angle-group failing to match a `<...>` span does not stop a *different*
+/// alternative from matching a *shorter* one starting at the same `<`. A
+/// leading `<` is therefore only ever consumed by the angle-group
+/// alternative, whole or not at all; a value cannot start with a bare,
+/// unmatched `<`. `plausible_secret` trims `<` and `>` the same way it
+/// trims quotes and braces, so a weak key's angle-wrapped placeholder is
+/// judged on its content, not its decoration: `<invalid>` trims to
+/// `invalid`, which the letters-only check would otherwise wave through as
+/// plausible (the untrimmed candidate has `<` and `>` in it, so neither the
+/// letters-only nor the digits-only check applies and it is treated as
+/// plausible by default) but the length gate correctly rejects at 7
+/// characters.
+///
+/// Accepted narrowing: a value that starts with `<` but is not a
+/// well-formed `<...>` group — `MYSQL_ROOT_PASSWORD=<Xk9!pQ2z`, a truncated
+/// or hand-typed value, never closed — is refused by every alternative. The
+/// angle-group alternative needs a matching `>` this value never supplies,
+/// and the bare alternative's leading-`<` exclusion (needed to leave
+/// `kubectl describe`'s placeholders alone, see above) blocks it too, with
+/// no lookaround available to tell "starts a well-formed `<...>` group"
+/// from "starts with `<` but isn't one" at that position. Since
+/// `kubectl describe` prints its placeholder on every secret-sourced env var
+/// it cannot read, that trade-off is accepted: a `<`-initial secret written
+/// unquoted is a known miss left to the entropy detector.
+///
+/// The bare middle also stops at a brace or a double quote, for the same
+/// reason the first and last positions reject one: both are structure, and a
+/// bare scalar never contains either. Without that, compact JSON — which has
+/// no space after the colon, and is what AWX and `jq -c` return — let the
+/// value run past the end of its own leaf and swallow every sibling field on
+/// the line: `{"credential":5,"name":"deploy-key"}` captured
+/// `5,"name":"deploy-key`, which is plausible enough to redact the whole
+/// object, and `{"cmd":"--password=hunter2","x":"y"}` captured
+/// `hunter2","x":"y`.
+///
+/// An apostrophe, a comma, a semicolon and a bracket stay legal in the bare
+/// middle. The first three occur inside real secrets (`don't-tell-anyone`,
 /// `aB3,x9Zq!k`). Brackets are needed because a value an earlier pattern has
 /// already partly redacted carries a marker
 /// (`DATABASE_URL=mysql://[CREDENTIALS]@host/db`) and must still be consumed
@@ -116,9 +222,32 @@ struct PatternDef {
 ///
 /// The macro INCLUDES its capturing parentheses: in a pattern whose key is
 /// group 1 the value is group 2, so `secret_group: Some(2)` stays valid.
+///
+/// The brace, bracket and angle alternatives all require at least one
+/// character inside: an empty pair (`{}`, `[]`, `<>`) is structure — an
+/// empty object, an empty array, an empty placeholder — not a value, so
+/// `"password": {}` and `"password": []` are left alone rather than turned
+/// into `"password": "[REDACTED]"`. The brace and angle alternatives need
+/// exactly one; the bracket alternative needs TWO, because its
+/// marker-shaped exclusion is itself a mandatory leading group (one
+/// character via its first branch) ahead of the trailing `+` (one more) —
+/// so `password=[x]` and `password=[!]`, a single character inside
+/// brackets, are ALSO left alone, unlike `password={x}`, which redacts.
 macro_rules! scalar_value {
     () => {
-        r#"("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|["']?[^\s"'{}\[\],;](?:[^\s"{}]*[^\s"'{}\[\],;])?)"#
+        concat!(
+            "(",
+            quoted_value!(),
+            "|",
+            r#"\{[^{}"'\n,:]+\}"#,
+            "|",
+            r#"\[(?-i:[^\[\]"'\n,:A-Z0-9_ ]|[A-Z0-9_ ]+[^\[\]"'\n,:A-Z0-9_ ])[^\[\]"'\n,:]+\]"#,
+            "|",
+            r#"<[^<>"'\n,:\s]+>"#,
+            "|",
+            r#"["']?[^\s"'{}\[\],;<](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
+            ")"
+        )
     };
 }
 
@@ -128,7 +257,7 @@ macro_rules! scalar_value {
 /// so identifiers such as `argocd-repo-server-tls` or `deploy-key.pem` pass
 /// through), plus digits-only (ids, ports) and boolean/null literals.
 pub(crate) fn plausible_secret(candidate: &str) -> bool {
-    let s = candidate.trim_matches(|c| c == '"' || c == '\'');
+    let s = candidate.trim_matches(|c| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | '<' | '>'));
     if s.len() < 8 {
         return false;
     }
@@ -489,8 +618,8 @@ impl Sanitizer {
     /// Get all default pattern definitions with categories
     ///
     /// IMPORTANT: Order matters! Specific patterns (with unique markers like
-    /// `[GITHUB_PAT_REDACTED]`) must come BEFORE generic patterns (like `$1=[REDACTED]`)
-    /// to ensure proper detection and replacement.
+    /// `[GITHUB_PAT_REDACTED]`) must come BEFORE generic patterns (like
+    /// `${1}[REDACTED]`) to ensure proper detection and replacement.
     ///
     /// Categories available for filtering:
     /// - `github` - GitHub tokens
@@ -689,28 +818,28 @@ impl Sanitizer {
             // TIER 2: CERTIFICATES & KEYS (multi-line patterns)
             // ══════════════════════════════════════════════════════════════════
             PatternDef {
-                pattern: r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(RSA\s+)?PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+(RSA[ \t]+)?PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+(RSA[ \t]+)?PRIVATE[ \t]+KEY-----",
                 replacement: "[PRIVATE_KEY_REDACTED]",
                 description: "RSA Private Key",
                 category: "certificates",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"-----BEGIN\s+OPENSSH\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+OPENSSH\s+PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+OPENSSH[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+OPENSSH[ \t]+PRIVATE[ \t]+KEY-----",
                 replacement: "[OPENSSH_PRIVATE_KEY_REDACTED]",
                 description: "OpenSSH Private Key",
                 category: "certificates",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"-----BEGIN\s+EC\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+EC\s+PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+EC[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+EC[ \t]+PRIVATE[ \t]+KEY-----",
                 replacement: "[EC_PRIVATE_KEY_REDACTED]",
                 description: "EC Private Key",
                 category: "certificates",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----[\s\S]*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----",
+                pattern: r"-----BEGIN[ \t]+PGP[ \t]+PRIVATE[ \t]+KEY[ \t]+BLOCK-----[\s\S]*?-----END[ \t]+PGP[ \t]+PRIVATE[ \t]+KEY[ \t]+BLOCK-----",
                 replacement: "[PGP_PRIVATE_KEY_REDACTED]",
                 description: "PGP Private Key",
                 category: "certificates",
@@ -718,7 +847,7 @@ impl Sanitizer {
             },
             // PKCS#8 Private Key (generic, covers DSA, ECDSA, Ed25519, etc.)
             PatternDef {
-                pattern: r"-----BEGIN\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+PRIVATE[ \t]+KEY-----",
                 replacement: "[PKCS8_PRIVATE_KEY_REDACTED]",
                 description: "PKCS#8 Private Key",
                 category: "certificates",
@@ -767,8 +896,21 @@ impl Sanitizer {
                 secret_group: None,
             },
             PatternDef {
-                pattern: r#"(?i)docker\s+login\s+[^\n]*-p\s*['"]?[^\s'"]+['"]?"#,
-                replacement: "docker login [CREDENTIALS REDACTED]",
+                pattern: concat!(
+                    // `-p` must be a flag (preceded by whitespace), not a
+                    // substring of a longer flag: `[^\n]*-p[ \t]*` matched
+                    // the `-p` inside `--password-stdin`, redacting a
+                    // fragment of "-stdin" as if it were the password. The
+                    // leading run before that whitespace is OPTIONAL: making
+                    // it mandatory (`[^\n]*[ \t]`) meant `docker login -p
+                    // hunter2` — `-p` right after the mandatory space after
+                    // `login`, with nothing in between — had no run of
+                    // characters left to consume before that space, so the
+                    // whole prefix failed to match.
+                    r#"(?i)(docker[ \t]+login[ \t]+(?:[^\n]*[ \t])?-p[ \t]*)"#,
+                    scalar_value!()
+                ),
+                replacement: "${1}[REDACTED]",
                 description: "Docker login command with password",
                 category: "docker",
                 secret_group: None,
@@ -823,20 +965,20 @@ impl Sanitizer {
             // AWS
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(aws[_-]?(access[_-]?key[_-]?id|secret[_-]?access[_-]?key))[ \t]*[=:][ \t]*"#,
+                    r#"(?i)(aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "AWS credentials",
                 category: "aws",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)aws[_-]?session[_-]?token[ \t]*[=:][ \t]*"#,
+                    r#"(?i)(aws[_-]?session[_-]?token[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "aws_session_token=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "AWS Session Token",
                 category: "aws",
                 secret_group: None,
@@ -844,10 +986,10 @@ impl Sanitizer {
             // Docker compose / environment variables (specific DB names)
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(MYSQL|POSTGRES|MONGO|REDIS|RABBITMQ|MARIADB)[_-]?(PASSWORD|ROOT_PASSWORD|PASS)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:MYSQL|POSTGRES|MONGO|REDIS|RABBITMQ|MARIADB)[_-]?(?:PASSWORD|ROOT_PASSWORD|PASS)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "${1}_${2}=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Docker compose database passwords",
                 category: "database",
                 secret_group: None,
@@ -855,20 +997,20 @@ impl Sanitizer {
             // Database URLs
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(DATABASE_URL|DB_URL|REDIS_URL|MONGO_URL)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:DATABASE_URL|DB_URL|REDIS_URL|MONGO_URL)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Database URL environment variables",
                 category: "database",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(DB|DATABASE)[_-]?(PASSWORD|PASS)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:DB|DATABASE)[_-]?(?:PASSWORD|PASS)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "${1}_PASSWORD=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Database password variables",
                 category: "database",
                 secret_group: None,
@@ -876,37 +1018,37 @@ impl Sanitizer {
             // Ansible
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)vault[_-]?pass(word)?[ \t]*[=:][ \t]*"#,
+                    r#"(?i)(vault[_-]?pass(?:word)?[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "vault_password=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Ansible Vault password",
                 category: "ansible",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)ansible[_-]?become[_-]?pass(word)?[ \t]*[=:][ \t]*"#,
+                    r#"(?i)(ansible[_-]?become[_-]?pass(?:word)?[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "ansible_become_password=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Ansible become password",
                 category: "ansible",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)--vault-password-file\s+[^\s]+",
-                replacement: "--vault-password-file [REDACTED]",
+                pattern: concat!(r#"(?i)(--vault-password-file[ \t]+)"#, scalar_value!()),
+                replacement: "${1}[REDACTED]",
                 description: "Ansible vault password file path",
                 category: "ansible",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)ansible[_-]?ssh[_-]?pass[ \t]*[=:][ \t]*"#,
+                    r#"(?i)(ansible[_-]?ssh[_-]?pass[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "ansible_ssh_pass=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Ansible SSH password",
                 category: "ansible",
                 secret_group: None,
@@ -914,10 +1056,10 @@ impl Sanitizer {
             // GitLab CI tokens
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(GITLAB_TOKEN|CI_JOB_TOKEN)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:GITLAB_TOKEN|CI_JOB_TOKEN)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "GitLab CI tokens",
                 category: "gitlab",
                 secret_group: None,
@@ -925,35 +1067,41 @@ impl Sanitizer {
             // Cloud providers
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(AZURE_CLIENT_SECRET|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:AZURE_CLIENT_SECRET|AZURE_TENANT_ID|AZURE_SUBSCRIPTION_ID)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Azure credentials",
                 category: "azure",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(GOOGLE_APPLICATION_CREDENTIALS|GCP_SERVICE_ACCOUNT|GCLOUD_SERVICE_KEY)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:GOOGLE_APPLICATION_CREDENTIALS|GCP_SERVICE_ACCOUNT|GCLOUD_SERVICE_KEY)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "GCP credentials",
                 category: "gcp",
                 secret_group: None,
             },
             // HashiCorp
             PatternDef {
-                pattern: r#"(?i)(VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*["']?[hs]\.[A-Za-z0-9]+["']?"#,
-                replacement: "$1=[REDACTED]",
+                pattern: concat!(
+                    r#"(?i)((?:VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*)"#,
+                    r#"(["']?(?:hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9_-]{8,}["']?)"#
+                ),
+                replacement: "${1}[VAULT_TOKEN_REDACTED]",
                 description: "HashiCorp Vault token",
                 category: "hashicorp",
                 secret_group: None,
             },
             PatternDef {
-                pattern: concat!(r#"(?i)CONSUL_HTTP_TOKEN[ \t]*[=:][ \t]*"#, scalar_value!()),
-                replacement: "CONSUL_HTTP_TOKEN=[REDACTED]",
+                pattern: concat!(
+                    r#"(?i)(CONSUL_HTTP_TOKEN[ \t]*[=:][ \t]*)"#,
+                    scalar_value!()
+                ),
+                replacement: "${1}[REDACTED]",
                 description: "Consul HTTP token",
                 category: "hashicorp",
                 secret_group: None,
@@ -961,10 +1109,10 @@ impl Sanitizer {
             // Docker registry
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(docker[_-]?password|registry[_-]?password)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:docker[_-]?password|registry[_-]?password)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Docker registry password",
                 category: "docker",
                 secret_group: None,
@@ -972,10 +1120,10 @@ impl Sanitizer {
             // AI APIs
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(ANTHROPIC_API_KEY|CLAUDE_API_KEY)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:ANTHROPIC_API_KEY|CLAUDE_API_KEY)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Anthropic API Key",
                 category: "openai", // Grouped with AI APIs
                 secret_group: None,
@@ -996,10 +1144,10 @@ impl Sanitizer {
             // Quoted JSON/YAML keys, strong: {"password": "…"}
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)["'](password|passwd|pwd)["'][ \t]*[=:][ \t]*"#,
+                    r#"(["'](?i:password|passwd|pwd)["'][ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: r#""$1": "[REDACTED]""#,
+                replacement: r#"${1}"[REDACTED]""#,
                 description: "Quoted JSON/YAML password keys",
                 category: "generic",
                 secret_group: None,
@@ -1009,42 +1157,59 @@ impl Sanitizer {
             // {"secret": {…}} are left alone.
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)["'](secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)["'][ \t]*[=:][ \t]*"#,
+                    r#"(["'](?i:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)["'][ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: r#""$1": "[REDACTED]""#,
+                replacement: r#"${1}"[REDACTED]""#,
                 description: "Quoted JSON/YAML secret keys",
                 category: "generic",
                 secret_group: Some(2),
             },
-            // Terraform HCL, strong key: password = "…" — any scalar goes.
+            // Terraform HCL, strong key: password = "…" — any double-quoted
+            // string goes (no plausibility gate).
             PatternDef {
-                pattern: r#"(?i)(password)[ \t]*=[ \t]*("(?:[^"\\\n]|\\.)*")"#,
-                replacement: r#"$1 = "[REDACTED]""#,
+                pattern: concat!(
+                    r#"(?i)((?:password)[ \t]*=[ \t]*)("#,
+                    double_quoted_value!(),
+                    ")"
+                ),
+                replacement: r#"${1}"[REDACTED]""#,
                 description: "Terraform HCL secrets with quoted values (strong)",
                 category: "generic",
                 secret_group: None,
             },
             // Terraform HCL, weak key: token = "5" is a count, not a secret.
             PatternDef {
-                pattern: r#"(?i)(secret|token|api_key)[ \t]*=[ \t]*("(?:[^"\\\n]|\\.)*")"#,
-                replacement: r#"$1 = "[REDACTED]""#,
+                pattern: concat!(
+                    r#"(?i)((?:secret|token|api_key)[ \t]*=[ \t]*)("#,
+                    double_quoted_value!(),
+                    ")"
+                ),
+                replacement: r#"${1}"[REDACTED]""#,
                 description: "Terraform HCL secrets with quoted values (weak)",
                 category: "generic",
                 secret_group: Some(2),
             },
             // Bare keys with quoted values, strong: password: "mon secret"
             PatternDef {
-                pattern: r#"(?i)(password|passwd|pwd)[ \t]*[=:][ \t]*("(?:[^"\\\n]|\\.)*"|'[^'\n]*')"#,
-                replacement: r#"$1="[REDACTED]""#,
+                pattern: concat!(
+                    r#"(?i)((?:password|passwd|pwd)[ \t]*[=:][ \t]*)("#,
+                    quoted_value!(),
+                    ")"
+                ),
+                replacement: r#"${1}"[REDACTED]""#,
                 description: "Generic passwords with quoted values",
                 category: "generic",
                 secret_group: None,
             },
             // Bare keys with quoted values, weak: secret: "…"
             PatternDef {
-                pattern: r#"(?i)(secret|credential)[ \t]*[=:][ \t]*("(?:[^"\\\n]|\\.)*"|'[^'\n]*')"#,
-                replacement: r#"$1="[REDACTED]""#,
+                pattern: concat!(
+                    r#"(?i)((?:secret|credential)[ \t]*[=:][ \t]*)("#,
+                    quoted_value!(),
+                    ")"
+                ),
+                replacement: r#"${1}"[REDACTED]""#,
                 description: "Generic secrets with quoted values",
                 category: "generic",
                 secret_group: Some(2),
@@ -1052,54 +1217,54 @@ impl Sanitizer {
             // Bare keys with bare values, strong
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(password|passwd|pwd)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:password|passwd|pwd)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Generic password patterns",
                 category: "generic",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(DIGITALOCEAN_TOKEN|DO_TOKEN)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:DIGITALOCEAN_TOKEN|DO_TOKEN)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "DigitalOcean token",
                 category: "generic",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(ssh[_-]?pass(?:word)?|ssh[_-]?key[_-]?pass(?:word)?)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:ssh[_-]?pass(?:word)?|ssh[_-]?key[_-]?pass(?:word)?)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "SSH password/passphrase",
                 category: "generic",
                 secret_group: None,
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(smtp[_-]?pass(?:word)?|mail[_-]?pass(?:word)?)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:smtp[_-]?pass(?:word)?|mail[_-]?pass(?:word)?)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "SMTP/Mail password",
                 category: "generic",
                 secret_group: None,
             },
             PatternDef {
-                pattern: concat!(r#"(?i)(npm[_-]?token)[ \t]*[=:][ \t]*"#, scalar_value!()),
-                replacement: "$1=[REDACTED]",
+                pattern: concat!(r#"(?i)(npm[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
+                replacement: "${1}[REDACTED]",
                 description: "NPM token",
                 category: "generic",
                 secret_group: None,
             },
             PatternDef {
-                pattern: concat!(r#"(?i)(pypi[_-]?token)[ \t]*[=:][ \t]*"#, scalar_value!()),
-                replacement: "$1=[REDACTED]",
+                pattern: concat!(r#"(?i)(pypi[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
+                replacement: "${1}[REDACTED]",
                 description: "PyPI token",
                 category: "generic",
                 secret_group: None,
@@ -1107,20 +1272,20 @@ impl Sanitizer {
             // Bare keys with bare values, weak
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(api[_-]?key|auth[_-]?token)(?:[ \t]*[=:][ \t]*|[ \t]+)"#,
+                    r#"(?i)((?:api[_-]?key|auth[_-]?token)(?:[ \t]*[=:][ \t]*|[ \t]+))"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Generic API keys and auth tokens",
                 category: "generic",
                 secret_group: Some(2),
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(secret|credential|token)[ \t]*[=:][ \t]*"#,
+                    r#"(?i)((?:secret|credential|token)[ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
-                replacement: "$1=[REDACTED]",
+                replacement: "${1}[REDACTED]",
                 description: "Generic secrets",
                 category: "generic",
                 secret_group: Some(2),
@@ -2688,27 +2853,139 @@ users:
         }
     }
 
+    /// `docker login … -p\s*<value>` and `--vault-password-file\s+<value>`
+    /// used `\s` around the value, which matches a newline — on the K3s host
+    /// `docker login -u bob -p` followed by a bare newline (password supplied
+    /// on stdin) swallowed the next line of output as the "password", and
+    /// `--vault-password-file` did the same.
     #[test]
-    fn builtin_patterns_never_use_whitespace_class_around_a_separator() {
+    fn docker_login_and_vault_file_stop_at_end_of_line() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("docker login -u bob -p\nnext-line").as_ref(),
+            "docker login -u bob -p\nnext-line"
+        );
+        assert_eq!(
+            s.sanitize("--vault-password-file\n/etc/passwd").as_ref(),
+            "--vault-password-file\n/etc/passwd"
+        );
+        assert_eq!(
+            s.sanitize("docker login -u bob -p hunter2").as_ref(),
+            "docker login -u bob -p [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("--vault-password-file /root/.vault").as_ref(),
+            "--vault-password-file [REDACTED]"
+        );
+    }
+
+    /// The docker-login `-p` must be a flag, not any `-p` substring: the
+    /// prefix used to be `[^\n]*-p[ \t]*`, which also matched the `-p`
+    /// inside `--password-stdin` and redacted a fragment of `-stdin` as if
+    /// it were a password. Requiring a whitespace character immediately
+    /// before `-p` fixes that without touching the genuine `-p <value>` and
+    /// `-p<value>` (no space) forms. That whitespace requirement also has to
+    /// be optional: `docker login -p hunter2` has `-p` right after the
+    /// mandatory space after `login`, with no run of other characters (and
+    /// so no *second* space) in between, so a MANDATORY `[^\n]*[ \t]` run
+    /// before `-p` failed to match this, the most common form.
+    #[test]
+    fn docker_login_p_flag_is_not_a_substring_match() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("docker login -u bob --password-stdin").as_ref(),
+            "docker login -u bob --password-stdin"
+        );
+        assert_eq!(
+            s.sanitize("docker login -u bob -p hunter2").as_ref(),
+            "docker login -u bob -p [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("docker login -u bob -phunter2").as_ref(),
+            "docker login -u bob -p[REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("docker login -p hunter2").as_ref(),
+            "docker login -p [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("docker login -phunter2 -u bob").as_ref(),
+            "docker login -p[REDACTED] -u bob"
+        );
+        assert_eq!(
+            s.sanitize("docker login -p hunter2 registry.example.io")
+                .as_ref(),
+            "docker login -p [REDACTED] registry.example.io"
+        );
+    }
+
+    /// `HashiCorp` Vault tokens carry a purpose prefix (`hvs.` service, `hvb.`
+    /// batch, `hvr.` recovery) alongside the legacy unprefixed `s.`/`b.`/`r.`
+    /// forms — the old pattern only matched `[hs]\.`, so `hvs.…` (the live
+    /// S6 harness case) was missed entirely. Pins the named
+    /// `[VAULT_TOKEN_REDACTED]` marker, not just "the token doesn't leak" —
+    /// the entropy detector alone would also mask these tokens (with a
+    /// different, generic marker), which would pass a looser assertion even
+    /// with the regex broken.
+    #[test]
+    fn vault_tokens_with_every_prefix() {
+        let s = Sanitizer::with_defaults();
+        for token in [
+            "hvs.CAESIJ1234567890abcdefghij",
+            "hvb.AAAAAQI1234567890",
+            "s.1234567890abcdef",
+            "hvr.abcdef1234567890",
+        ] {
+            let input = format!("VAULT_TOKEN={token}");
+            assert_eq!(
+                s.sanitize(&input).as_ref(),
+                "VAULT_TOKEN=[VAULT_TOKEN_REDACTED]",
+                "{token} was not redacted with the named marker"
+            );
+        }
+        assert_eq!(
+            s.sanitize(r#"VAULT_TOKEN="hvs.CAESIJ1234567890abcdefghij""#)
+                .as_ref(),
+            "VAULT_TOKEN=[VAULT_TOKEN_REDACTED]",
+            "quotes must be dropped symmetrically with the value"
+        );
+        assert_eq!(
+            s.sanitize("vault_token: hvs.CAESIJ1234567890abcdefghij")
+                .as_ref(),
+            "vault_token: [VAULT_TOKEN_REDACTED]"
+        );
+    }
+
+    /// Supersedes the narrower `builtin_patterns_never_use_whitespace_class_around_a_separator`:
+    /// that guard only caught `\s` next to `[=:]`, so `--vault-password-file\s+…`
+    /// and `docker\s+login\s+…` — no `=`/`:` separator at all — slipped
+    /// through and swallowed the next line. This guard rejects `\s*`/`\s+`
+    /// ANYWHERE in a builtin pattern. The one legitimate multi-line pattern,
+    /// Redis `"requirepass"\r?\n"…"`, uses `\r?\n`, not `\s`, so it keeps
+    /// passing untouched.
+    #[test]
+    fn no_builtin_pattern_uses_a_whitespace_class_before_a_value() {
         for def in Sanitizer::default_pattern_defs() {
-            for forbidden in [
-                r"\s*[=:]", r"\s*=\s*", r":\s*", r"\s*:", r"\s+[=:]", r"[=:]\s+",
-            ] {
-                assert!(
-                    !def.pattern.contains(forbidden),
-                    "{}: {forbidden} matches a newline, so the value on the NEXT \
-                     line becomes this key's value — use [ \\t] around separators: {:?}",
-                    def.description,
-                    def.pattern
-                );
-            }
+            assert!(
+                !def.pattern.contains(r"\s*") && !def.pattern.contains(r"\s+"),
+                "{}: \\s matches a newline; use [ \\t]* or [ \\t]+",
+                def.description
+            );
         }
     }
 
     /// Every bare value in a builtin pattern must come from `scalar_value!()`.
-    /// The class this replaced (`[^\s"'{}\[\],;]+`) stopped at the first comma
-    /// or brace *inside* the value, so `PASSWORD=aB3,x9Zq!k` redacted `aB3`
-    /// and printed `,x9Zq!k` in the clear.
+    /// This asserts only the ABSENCE of one literal class string
+    /// (`[^\s"'{}\[\],;]+`, the class this replaced): it cannot tell that a
+    /// pattern uses `scalar_value!()` specifically, only that it doesn't use
+    /// the old, narrower one, which stopped at the first comma or brace
+    /// *inside* the value, so `PASSWORD=aB3,x9Zq!k` redacted `aB3` and
+    /// printed `,x9Zq!k` in the clear.
+    ///
+    /// The `HashiCorp` Vault token pattern is a deliberate exception: its
+    /// value is `(["']?(?:hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9_-]{8,}["']?)`, a
+    /// purpose-prefixed token, not `scalar_value!()` — a real secret's shape
+    /// is known there, so the shared, permissive grammar is not needed.
     #[test]
     fn builtin_patterns_use_the_shared_value_grammar() {
         for def in Sanitizer::default_pattern_defs() {
@@ -2759,6 +3036,135 @@ users:
         }
     }
 
+    /// The verbatim-prefix rule: a keyed pattern captures everything before
+    /// the value as group 1 and the value as group 2, and its replacement
+    /// starts with `${1}` — so key, quotes, separator and indentation come
+    /// back byte-identical and only the value changes.
+    ///
+    /// The selector is a literal SUBSTRING test for `[ \t]*[=:][ \t]*` or
+    /// `[ \t]*=[ \t]*` in the pattern's own source text — not "has an
+    /// `=`/`:` separator". At least nine keyed patterns spell their
+    /// separator some other way and are invisible to it: "Docker login
+    /// command with password" (a `-p` flag) and "Ansible vault password
+    /// file path" (`--vault-password-file` followed by whitespace) both
+    /// comply with the verbatim-prefix rule anyway — `${1}[REDACTED]`. The
+    /// rest do not: "Vault KV tabular output secrets" normalises the run of
+    /// 2+ spaces between key and value down to exactly two
+    /// (`$1  [REDACTED]`); the three kubeconfig patterns ("Kubeconfig
+    /// client certificate", "Kubeconfig client key", "Kubeconfig CA
+    /// certificate", each `key:[ \t]*value`) rewrite BOTH the separator,
+    /// always to `: ` (one space), AND the key's own case to their
+    /// hard-coded lower-case spelling — `CLIENT-KEY-DATA:abc` becomes
+    /// `client-key-data: [REDACTED]`; "Docker config auth"
+    /// (`"auth"[ \t]*:[ \t]*"..."`) collapses the run of spacing around its
+    /// colon to exactly one space; "Terraform sensitive values"
+    /// (`"sensitive_value"[ \t]*:[ \t]*"..."`) does the same; and "HTTP
+    /// Basic Authorization header" (`authorization:[ \t]*basic[ \t]+...`)
+    /// both collapses spacing AND rewrites the key's case, always to
+    /// `Authorization: Basic `. All of these are pre-existing, out-of-scope
+    /// quirks this guard would not catch even if it selected the pattern.
+    #[test]
+    fn keyed_patterns_replace_only_the_value() {
+        for def in Sanitizer::default_pattern_defs() {
+            if !def.pattern.contains("[ \\t]*[=:][ \\t]*")
+                && !def.pattern.contains("[ \\t]*=[ \\t]*")
+            {
+                continue;
+            }
+            let re = regex::Regex::new(def.pattern).expect(def.description);
+            assert_eq!(
+                re.captures_len(),
+                3,
+                "{}: prefix group + value group, inner groups non-capturing",
+                def.description
+            );
+            assert!(
+                def.replacement.starts_with("${1}"),
+                "{}: replacement must start with ${{1}}, got {}",
+                def.description,
+                def.replacement
+            );
+            assert!(
+                def.secret_group.is_none_or(|g| g == 2),
+                "{}: secret_group names the value, which is group 2",
+                def.description
+            );
+        }
+    }
+
+    /// Ruling 12 (amended): `scalar_value!()`'s quoted alternatives refuse
+    /// only MARKER-SHAPED content (`[` + `[A-Z0-9_ ]+` + `]`, nothing else),
+    /// detected case-sensitively via `(?-i:…)` even inside a
+    /// case-insensitive pattern — not every leading `[`, and not a
+    /// lower-case bracketed run that merely LOOKS like a marker once folded.
+    /// A real quoted secret that happens to start with a bracket must still
+    /// be redacted.
+    #[test]
+    fn quoted_values_starting_with_a_bracket_are_still_redacted_but_markers_are_not() {
+        let s = Sanitizer::with_defaults();
+        // Lower-case bracketed content is a real value, not a marker — even
+        // though the AWS session token pattern is case-insensitive. AWS
+        // session token is a bare-value pattern (like CONSUL_HTTP_TOKEN
+        // elsewhere in this file), so its replacement is `${1}[REDACTED]`
+        // with no added quotes: whatever quoting the matched value carried
+        // is discarded along with the value, same as every other bare
+        // pattern in this file.
+        assert_eq!(
+            s.sanitize(r#"AWS_SESSION_TOKEN: "[abc123def456]""#)
+                .as_ref(),
+            "AWS_SESSION_TOKEN: [REDACTED]"
+        );
+        // Same key, a lower-case marker-LOOKING value: still just a value,
+        // because marker detection is pinned case-sensitive regardless of
+        // the pattern's own (?i).
+        assert_eq!(
+            s.sanitize(r#"AWS_SESSION_TOKEN: "[redacted]""#).as_ref(),
+            "AWS_SESSION_TOKEN: [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize(r#"password = "[REDACTED]""#).as_ref(),
+            r#"password = "[REDACTED]""#
+        );
+        assert_eq!(
+            s.sanitize("password = 'hunter2'").as_ref(),
+            r#"password = "[REDACTED]""#
+        );
+        assert_eq!(
+            s.sanitize(r#"password="[K3S_TOKEN_REDACTED]""#).as_ref(),
+            r#"password="[K3S_TOKEN_REDACTED]""#
+        );
+    }
+
+    /// `kubectl describe pod` prints this placeholder for an env var sourced
+    /// from a secret it cannot read: not a leak, and not the key's value at
+    /// all, so `scalar_value!()`'s bare alternative must not start a match
+    /// on the leading `<` (Ruling 7, corpus finding against `raspberry`).
+    #[test]
+    fn kubectl_describe_placeholder_not_redacted() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false")
+                .as_ref(),
+            "      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false"
+        );
+    }
+
+    /// Pins a KNOWN MISS, deliberately accepted (see the `scalar_value!()`
+    /// doc comment): a value that starts with `<` but is not a well-formed
+    /// `<...>` group is refused by every alternative, same as a `kubectl
+    /// describe` placeholder. If this ever starts getting redacted, that is
+    /// a real improvement, not a regression — update this test (and its
+    /// doc comment) deliberately rather than treating a red run here as a
+    /// bug to revert.
+    #[test]
+    fn angle_initial_unquoted_secret_is_a_known_miss() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("MYSQL_ROOT_PASSWORD=<Xk9!pQ2z").as_ref(),
+            "MYSQL_ROOT_PASSWORD=<Xk9!pQ2z"
+        );
+    }
+
     /// The regression fence for the 2026-09-05 audit. Every shape here is a
     /// leak or a corruption the audit reproduced against the pre-fix tree;
     /// each line is an exact input/output pair so a grammar change that
@@ -2771,7 +3177,7 @@ users:
             // is one scalar, so a comma, an unterminated quote or a whole
             // connection string no longer leaves a tail in the clear.
             ("PASSWORD=aB3,x9Zq!k", "PASSWORD=[REDACTED]"),
-            ("password: don't-tell-anyone", "password=[REDACTED]"),
+            ("password: don't-tell-anyone", "password: [REDACTED]"),
             ("PASSWORD=\"s3cr3tV4lue", "PASSWORD=[REDACTED]"),
             (r#"SMTP_PASS="hunter2Xk9""#, "SMTP_PASS=[REDACTED]"),
             (
@@ -2805,7 +3211,7 @@ users:
             // swallows every sibling field to the end of the line.
             (
                 r#"{"data":{"password":hunter2},"other":"keep"}"#,
-                r#"{"data":{"password": "[REDACTED]"},"other":"keep"}"#,
+                r#"{"data":{"password":"[REDACTED]"},"other":"keep"}"#,
             ),
             // A credential ID next to a sibling key: without the quote in the
             // exclusion the value read `5,"name":"deploy-key`, which IS
@@ -2824,19 +3230,27 @@ users:
             // Space-separated CLI flag (audit IMPORTANT #3).
             (
                 "curl --api-key 7f3aB9k2Lm4Qz8Xw --url https://x",
-                "curl --api-key=[REDACTED] --url https://x",
+                "curl --api-key [REDACTED] --url https://x",
             ),
             // …and the gate keeps prose off it.
             ("API_KEY is required", "API_KEY is required"),
             ("api-key header", "api-key header"),
             // Terraform HCL weak keys are gated: a count is not a token.
             (r#"token = "5""#, r#"token = "5""#),
-            // NOTE: the brief expected `api_key = "[REDACTED]"` and
-            // `password = "[REDACTED]"` here. The generic keyed patterns now
-            // accept a quoted value, so they re-normalise what the HCL pattern
-            // already redacted — more redaction, less HCL structure.
-            (r#"api_key = "AKxq81mZp0Lw4Rt""#, "api_key=[REDACTED]"),
-            (r#"password = "x""#, "password=[REDACTED]"),
+            // The generic keyed patterns also accept a quoted value, so they
+            // are in `matched_indices` for this input too and re-run against
+            // what the HCL pattern already redacted. `scalar_value!()`'s
+            // quoted alternatives reject MARKER-SHAPED content (a `[`
+            // directly followed by `[A-Z0-9_ ]+` and a `]`, nothing else in
+            // between) — so `"[REDACTED]"` is not a value to them and the
+            // HCL pattern's quoting survives the cascade untouched. A real
+            // quoted secret that merely starts with `[` (`"[abc123]"`) is
+            // still redacted; see `quoted_values_starting_with_a_bracket_are_still_redacted_but_markers_are_not`.
+            (
+                r#"api_key = "AKxq81mZp0Lw4Rt""#,
+                r#"api_key = "[REDACTED]""#,
+            ),
+            (r#"password = "x""#, r#"password = "[REDACTED]""#),
             // `:[ \t]*` instead of `:\s*`: a base64 blob on the NEXT line is
             // not this key's value (audit IMPORTANT #4).
             (

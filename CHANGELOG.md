@@ -27,7 +27,33 @@ reading it. Every item below was reproduced before the fix and measured after.
   unguarded one. The gate follows
   `security.require_elicitation_on_destructive`; set it false to disable.
 
+- **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
+  struct-literal construction outside this crate must add it;
+  `AuditEvent::new` and `AuditEvent::denied` set it empty.
+
+- **`ExecuteCommandUseCase::process_success_for_tool` takes a new
+  `reduction: &[&'static str]` parameter.** Existing callers must pass the
+  reduction params actually used, or `&[]`.
+
 ### Fixed
+
+- **`ssh_k8s_get output=yaml` came back as a table, `yq_filter` failed on every
+  helm chart, and `limit` was ignored in four situations.** The MCP Apps table
+  hook of `ssh_k8s_get`, `ssh_helm_list` and `ssh_helm_history` re-rendered every
+  non-JSON output as TSV (`apiVersion: v1` became `APIVERSION: V1`); it now runs
+  only for the formats kubectl/helm print as a table. `yq_filter` parsed a
+  single document while `helm template` always emits a `---` stream; it now runs
+  per document. `limit` now caps filter results (one per line), a JSON object's
+  single top-level array (`items`, `results`), a YAML stream's documents and a
+  YAML list's items — and an Auto tool whose output looks like a YAML
+  document (a `---` or `key:` first significant line) never goes through the
+  table parser: `limit` caps its documents or list items and is otherwise a
+  no-op, which also means `limit` is now a no-op rather than a mangled table
+  on `Key: value` prose such as `kubectl describe`. `Auto` tools accept
+  `yq_filter`. The 43 custom handlers reject a reduction param their output
+  kind cannot use, as the standard pipeline does, and feed the reduction
+  metrics. Found by probing the reduction params against a live K3s host on
+  2026-09-06.
 
 - **Sanitizer no longer corrupts structured output.** Two generic patterns
   rewrote structure, not values: `"secret": {` became `"secret": "[REDACTED]"`
@@ -41,6 +67,49 @@ reading it. Every item below was reproduced before the fix and measured after.
   digits-only / length gate), so `"credential": 5` and `secretName: tls`
   survive. Entropy redaction replaces the flagged span instead of every
   substring occurrence. `tests/sanitizer_structure.rs` parses the output.
+
+- **Sanitizer redacts the value and nothing else.** Keyed patterns rewrote
+  `password: x` to `password=[REDACTED]` (and some renamed the key), which
+  broke the YAML mapping the value sat in. For `key=value` and `key: value`
+  patterns, key, quotes, separator and indentation now come back
+  byte-identical, and the value's own quotes are rewritten as double quotes
+  (`password: 'x'` → `password: "[REDACTED]"`) — a bare-value pattern (no
+  quotes added around the marker) drops the value's quotes instead. A guard
+  test holds every pattern spelling its separator as `[ \t]*[=:][ \t]*` or
+  `[ \t]*=[ \t]*` to it; at least nine keyed patterns spell it some other
+  way and sit outside the guard's selection — docker login's `-p` flag and
+  `--vault-password-file` comply with the rule anyway, while the rest
+  don't: the Vault KV tabular pattern normalises its key/value separator
+  down to exactly two spaces, the three kubeconfig patterns normalise both
+  the separator and the key's own case to their hard-coded lower-case
+  spelling (`CLIENT-KEY-DATA:abc` → `client-key-data: [REDACTED]`), Docker
+  config auth and Terraform sensitive values each collapse a run of
+  spacing around their colon to exactly one space, and the HTTP Basic
+  Authorization header pattern both collapses spacing and rewrites the
+  key's case to `Authorization: Basic` (plus a space) — all pre-existing and out of
+  scope here. Brace- or bracket-wrapped scalars
+  (`password={x}`) are redacted; nested structures are not, and neither is
+  an EMPTY brace, bracket or angle pair (`password={}`, `password=[]`,
+  `password=<>`), which is structure — an empty object, array or
+  placeholder — not a value. The last patterns that could match across a
+  newline (`docker login -p`, `--vault-password-file`) are line-local, and
+  Vault tokens are recognised with `hvs.`/`hvb.`/`hvr.` prefixes. Docker
+  login's old `docker login [CREDENTIALS REDACTED]` reply, which discarded
+  the whole match including flags like `-u bob`, is gone — the value alone
+  is redacted in place — and its `-p` must now either follow `login`
+  directly or be preceded by whitespace, so it still matches
+  `docker login -p hunter2` and `docker login -u bob -p hunter2` but no
+  longer matches the `-p` inside `--password-stdin`. Verified by a
+  differential audit of real host output
+  (`scripts/live_probe/corpus.py`). Also from that audit: `kubectl describe
+  pod` prints a placeholder — `<set to the key 'auth' in secret
+  'argocd-redis'>`, `<none>`, `<nil>`, `<unset>`, `<invalid>` — for an env
+  var sourced from a secret it cannot read; a bare value can no longer start
+  with `<`, so the placeholder is left alone instead of its leading word
+  being redacted as if it were one — the accepted cost of that narrowing is
+  that a real secret written unquoted and starting with `<`
+  (`MYSQL_ROOT_PASSWORD=<Xk9!pQ2z`) is missed by every alternative too, left
+  to the entropy detector.
 
 - **The daemon refused all 279 tools.** With a daemon up, every
   `bridge-mcp tool …` returned `-32602 missing
@@ -82,6 +151,14 @@ reading it. Every item below was reproduced before the fix and measured after.
   `BUILD_REV` without its `-dirty` suffix — caught by
   `test_build_rev_matches_live_head_or_is_unknown` on the first such bump.
   Both manifests are now watched.
+
+- **CLI runs now write their audit events.** `create_context` dropped the
+  `AuditWriterTask` on return, so every `bridge-mcp tool …` left a 0-byte
+  `audit.log` and an empty rotated archive. The CLI entry points keep the
+  writer, drop the context and wait up to 2 s for the drain. Tool events carry
+  `reduction: [...]` when reduction params were used — standard tools only,
+  the custom handlers are a follow-up. `bridge-mcp status` reports
+  `"written_by": "mcp-server-and-cli"`.
 
 ### Changed
 
