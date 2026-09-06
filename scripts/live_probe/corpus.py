@@ -19,6 +19,9 @@ or not it carries a marker, since a sanitizer line split always shows up
 as a replace, never as a pure insert or delete. A replace with unequal
 line counts is still NOISE when marker-less, but DEFECT when a marker is
 present, since that shape a sanitizer split could actually produce.
+
+Captures asked for as `-o json` / `-o yaml` are also parsed whole (PyYAML
+when installed); a capture that does not parse is one DEFECT line.
 """
 import argparse
 import datetime
@@ -125,6 +128,29 @@ def classify(raw, bridged, volatile=False):
     return counts, "".join(out)
 
 
+def document_defect(command, bridged):
+    """A sanitized capture that no longer parses as the document its command
+    asked for is a DEFECT the line rubric cannot see: the marker sits where
+    a value stood, the prefix is intact, and the file is still broken.
+    Returns the DEFECT line, or None."""
+    if " -o json" in command:
+        try:
+            json.loads(bridged)
+        except json.JSONDecodeError as e:
+            return f"DEFECT INVALID json: {e}\n"
+        return None
+    if " -o yaml" in command:
+        try:
+            import yaml  # PyYAML, optional
+        except ImportError:
+            return None
+        try:
+            list(yaml.safe_load_all(bridged))
+        except yaml.YAMLError as e:
+            return f"DEFECT INVALID yaml: {str(e).splitlines()[0]}\n"
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("binary")
@@ -146,6 +172,9 @@ def main():
         (out / "raw" / f"{name}.txt").write_text(raw)
         (out / "bridged" / f"{name}.txt").write_text(bridged)
         counts, report = classify(raw, bridged, name in VOLATILE)
+        if (doc := document_defect(command, bridged)) is not None:
+            counts["DEFECT"] += 1
+            report += doc
         (out / "classified" / f"{name}.txt").write_text(report)
         summary[name] = counts
         defects += counts["DEFECT"]
