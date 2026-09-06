@@ -527,9 +527,13 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         })?;
 
         // Step 13: Process success (audit + history + sanitize)
-        let mut response =
-            ctx.execute_use_case
-                .process_success_for_tool(T::NAME, &host, &command, &output.into());
+        let mut response = ctx.execute_use_case.process_success_for_tool(
+            T::NAME,
+            &host,
+            &command,
+            &output.into(),
+            &dr.used_params(),
+        );
         let raw_chars = response.stdout.len();
 
         // Step 14: Warn on non-zero exit
