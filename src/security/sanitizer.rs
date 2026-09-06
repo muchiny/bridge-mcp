@@ -227,7 +227,12 @@ macro_rules! quoted_value {
 /// character inside: an empty pair (`{}`, `[]`, `<>`) is structure — an
 /// empty object, an empty array, an empty placeholder — not a value, so
 /// `"password": {}` and `"password": []` are left alone rather than turned
-/// into `"password": "[REDACTED]"`.
+/// into `"password": "[REDACTED]"`. The brace and angle alternatives need
+/// exactly one; the bracket alternative needs TWO, because its
+/// marker-shaped exclusion is itself a mandatory leading group (one
+/// character via its first branch) ahead of the trailing `+` (one more) —
+/// so `password=[x]` and `password=[!]`, a single character inside
+/// brackets, are ALSO left alone, unlike `password={x}`, which redacts.
 macro_rules! scalar_value {
     () => {
         concat!(
@@ -895,8 +900,14 @@ impl Sanitizer {
                     // `-p` must be a flag (preceded by whitespace), not a
                     // substring of a longer flag: `[^\n]*-p[ \t]*` matched
                     // the `-p` inside `--password-stdin`, redacting a
-                    // fragment of "-stdin" as if it were the password.
-                    r#"(?i)(docker[ \t]+login[ \t]+[^\n]*[ \t]-p[ \t]*)"#,
+                    // fragment of "-stdin" as if it were the password. The
+                    // leading run before that whitespace is OPTIONAL: making
+                    // it mandatory (`[^\n]*[ \t]`) meant `docker login -p
+                    // hunter2` — `-p` right after the mandatory space after
+                    // `login`, with nothing in between — had no run of
+                    // characters left to consume before that space, so the
+                    // whole prefix failed to match.
+                    r#"(?i)(docker[ \t]+login[ \t]+(?:[^\n]*[ \t])?-p[ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -2873,7 +2884,11 @@ users:
     /// inside `--password-stdin` and redacted a fragment of `-stdin` as if
     /// it were a password. Requiring a whitespace character immediately
     /// before `-p` fixes that without touching the genuine `-p <value>` and
-    /// `-p<value>` (no space) forms.
+    /// `-p<value>` (no space) forms. That whitespace requirement also has to
+    /// be optional: `docker login -p hunter2` has `-p` right after the
+    /// mandatory space after `login`, with no run of other characters (and
+    /// so no *second* space) in between, so a MANDATORY `[^\n]*[ \t]` run
+    /// before `-p` failed to match this, the most common form.
     #[test]
     fn docker_login_p_flag_is_not_a_substring_match() {
         let s = Sanitizer::with_defaults();
@@ -2888,6 +2903,19 @@ users:
         assert_eq!(
             s.sanitize("docker login -u bob -phunter2").as_ref(),
             "docker login -u bob -p[REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("docker login -p hunter2").as_ref(),
+            "docker login -p [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("docker login -phunter2 -u bob").as_ref(),
+            "docker login -p[REDACTED] -u bob"
+        );
+        assert_eq!(
+            s.sanitize("docker login -p hunter2 registry.example.io")
+                .as_ref(),
+            "docker login -p [REDACTED] registry.example.io"
         );
     }
 
@@ -3013,16 +3041,23 @@ users:
     /// starts with `${1}` — so key, quotes, separator and indentation come
     /// back byte-identical and only the value changes.
     ///
-    /// The selector (`[ \t]*[=:][ \t]*` / `[ \t]*=[ \t]*`) skips three keyed
-    /// patterns that carry no `=`/`:` separator at all, so this guard cannot
-    /// see them: "Docker login command with password" (its separator is a
-    /// `-p` flag) and "Ansible vault password file path" (`--vault-password-file`
-    /// followed by whitespace) both comply with the rule anyway — verbatim
-    /// prefix, `${1}[REDACTED]`. "Vault KV tabular output secrets" does not:
-    /// its replacement is `$1  [REDACTED]`, which normalises the run of 2+
-    /// spaces between key and value down to exactly two — a pre-existing,
-    /// out-of-scope quirk, not a violation this guard would catch even if it
-    /// selected the pattern.
+    /// The selector is a literal SUBSTRING test for `[ \t]*[=:][ \t]*` or
+    /// `[ \t]*=[ \t]*` in the pattern's own source text — not "has an
+    /// `=`/`:` separator". Six keyed patterns spell their separator some
+    /// other way and are invisible to it: "Docker login command with
+    /// password" (a `-p` flag) and "Ansible vault password file path"
+    /// (`--vault-password-file` followed by whitespace) both comply with the
+    /// verbatim-prefix rule anyway — `${1}[REDACTED]`. The other four do
+    /// not: "Vault KV tabular output secrets" normalises the run of 2+
+    /// spaces between key and value down to exactly two (`$1  [REDACTED]`),
+    /// and the three kubeconfig patterns ("Kubeconfig client certificate",
+    /// "Kubeconfig client key", "Kubeconfig CA certificate", each
+    /// `key:[ \t]*value`) rewrite BOTH the separator, always to `: ` (one
+    /// space), AND the key's own case to their hard-coded lower-case
+    /// spelling — `CLIENT-KEY-DATA:abc` becomes
+    /// `client-key-data: [REDACTED]`. All four are pre-existing,
+    /// out-of-scope quirks this guard would not catch even if it selected
+    /// the pattern.
     #[test]
     fn keyed_patterns_replace_only_the_value() {
         for def in Sanitizer::default_pattern_defs() {

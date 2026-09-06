@@ -251,6 +251,13 @@ fn brace_wrapped_scalars_are_redacted_but_structures_are_not() {
         // alternatives both require at least one character inside.
         r#"{"password": {}}"#,
         r#"{"password": []}"#,
+        // The bracket alternative actually needs TWO characters inside (its
+        // marker-shaped exclusion is a mandatory one-character leading
+        // group, ahead of a `+` trailing class needing one more), unlike
+        // brace and angle, which need only one — so a single character in
+        // brackets is left alone too.
+        "password=[x]",
+        "password=[!]",
     ] {
         assert_eq!(s.sanitize(untouched).as_ref(), untouched, "{untouched:?}");
     }

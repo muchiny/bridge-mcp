@@ -49,22 +49,28 @@ reading it. Every item below was reproduced before the fix and measured after.
   byte-identical, and the value's own quotes are rewritten as double quotes
   (`password: 'x'` → `password: "[REDACTED]"`) — a bare-value pattern (no
   quotes added around the marker) drops the value's quotes instead. A guard
-  test holds every pattern in that `=`/`:` family to it; three keyed patterns
-  carry no `=`/`:` separator at all and sit outside the guard's selection —
-  docker login's `-p` flag and `--vault-password-file` comply with the rule
-  anyway, while the Vault KV tabular pattern normalises its key/value
-  separator down to exactly two spaces, a pre-existing and out-of-scope
-  quirk. Brace- or bracket-wrapped scalars (`password={x}`) are redacted;
-  nested structures are not, and neither is an EMPTY brace, bracket or angle
-  pair (`password={}`, `password=[]`, `password=<>`), which is structure —
-  an empty object, array or placeholder — not a value. The last patterns
-  that could match across a newline (`docker login -p`, `--vault-password-file`)
-  are line-local, and Vault tokens are recognised with `hvs.`/`hvb.`/`hvr.`
-  prefixes. Docker login's old `docker login [CREDENTIALS REDACTED]` reply,
-  which discarded the whole match including flags like `-u bob`, is gone —
-  the value alone is redacted in place — and its `-p` must now be preceded
-  by whitespace, so it no longer matches the `-p` inside `--password-stdin`.
-  Verified by a differential audit of real host output
+  test holds every pattern spelling its separator as `[ \t]*[=:][ \t]*` or
+  `[ \t]*=[ \t]*` to it; six keyed patterns spell it some other way and sit
+  outside the guard's selection — docker login's `-p` flag and
+  `--vault-password-file` comply with the rule anyway, while the Vault KV
+  tabular pattern normalises its key/value separator down to exactly two
+  spaces and the three kubeconfig patterns normalise both the separator and
+  the key's own case to their hard-coded lower-case spelling
+  (`CLIENT-KEY-DATA:abc` → `client-key-data: [REDACTED]`) — all four
+  pre-existing and out of scope here. Brace- or bracket-wrapped scalars
+  (`password={x}`) are redacted; nested structures are not, and neither is
+  an EMPTY brace, bracket or angle pair (`password={}`, `password=[]`,
+  `password=<>`), which is structure — an empty object, array or
+  placeholder — not a value. The last patterns that could match across a
+  newline (`docker login -p`, `--vault-password-file`) are line-local, and
+  Vault tokens are recognised with `hvs.`/`hvb.`/`hvr.` prefixes. Docker
+  login's old `docker login [CREDENTIALS REDACTED]` reply, which discarded
+  the whole match including flags like `-u bob`, is gone — the value alone
+  is redacted in place — and its `-p` must now either follow `login`
+  directly or be preceded by whitespace, so it still matches
+  `docker login -p hunter2` and `docker login -u bob -p hunter2` but no
+  longer matches the `-p` inside `--password-stdin`. Verified by a
+  differential audit of real host output
   (`scripts/live_probe/corpus.py`). Also from that audit: `kubectl describe
   pod` prints a placeholder — `<set to the key 'auth' in secret
   'argocd-redis'>`, `<none>`, `<nil>`, `<unset>`, `<invalid>` — for an env
