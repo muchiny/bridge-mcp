@@ -104,7 +104,20 @@ pub fn parse_yaml<T: DeserializeOwned>(input: &str) -> Result<T, BridgeError> {
 /// Multi-document variant of [`parse_yaml`]: a stream separated by `---`
 /// yields one `T` per document under the same hardened options and size
 /// cap. A single document is a one-element vector. An empty or comment-only
-/// segment deserializes as the type's null form; callers skip those.
+/// segment is omitted by the parser itself — verified against the locked
+/// serde-saphyr 1.1.0, it never appears as a null element of the returned
+/// vector. Callers that still filter out `T::is_null()` values (e.g.
+/// `yq_filter`'s `yaml_documents_as_json`, feature `jq`) do so as a
+/// defensive guard against other null-producing documents (an explicit
+/// `null` or `~` document), not because of this case.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::Config`] when:
+/// - the input exceeds `MAX_YAML_BYTES`,
+/// - the input trips any saphyr [`Budget`](serde_saphyr::Budget) limit
+///   (anchor count, alias count, depth, node count, total scalar bytes),
+/// - any document is not valid YAML or does not match the target type `T`.
 pub fn parse_yaml_documents<T: DeserializeOwned>(input: &str) -> Result<Vec<T>, BridgeError> {
     if input.len() > MAX_YAML_BYTES {
         return Err(BridgeError::Config(format!(
