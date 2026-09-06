@@ -99,7 +99,11 @@ impl ToolHandler for SshAwxWorkflowNodesHandler {
         let mut raw = args.ok_or_else(|| BridgeError::McpMissingParam {
             param: "arguments".to_string(),
         })?;
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut raw)?;
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract_for(
+            &mut raw,
+            self.name(),
+            self.output_kind(),
+        )?;
         let args: SshAwxWorkflowNodesArgs = serde_json::from_value(raw)
             .map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 
@@ -149,7 +153,12 @@ impl ToolHandler for SshAwxWorkflowNodesHandler {
             .process_success(host, &cmd, &output.into())
             .stdout;
         let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
-        crate::mcp::standard_tool::apply_reduction(&mut stdout, &dr, OutputKind::Json)?;
+        crate::mcp::standard_tool::apply_reduction_recorded(
+            ctx,
+            &mut stdout,
+            &dr,
+            OutputKind::Json,
+        )?;
         Ok(ToolCallResult::text(stdout))
     }
 }

@@ -79,7 +79,11 @@ impl ToolHandler for SshAwxStatusHandler {
         let mut raw = args.ok_or_else(|| BridgeError::McpMissingParam {
             param: "arguments".to_string(),
         })?;
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut raw)?;
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract_for(
+            &mut raw,
+            self.name(),
+            self.output_kind(),
+        )?;
         let args: SshAwxStatusArgs = serde_json::from_value(raw)
             .map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
 
@@ -120,7 +124,12 @@ impl ToolHandler for SshAwxStatusHandler {
             .process_success(host, &cmd, &output.into())
             .stdout;
         let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
-        crate::mcp::standard_tool::apply_reduction(&mut stdout, &dr, OutputKind::Json)?;
+        crate::mcp::standard_tool::apply_reduction_recorded(
+            ctx,
+            &mut stdout,
+            &dr,
+            OutputKind::Json,
+        )?;
         Ok(ToolCallResult::text(stdout))
     }
 }
@@ -221,5 +230,16 @@ mod tests {
     fn test_output_kind() {
         let handler = SshAwxStatusHandler;
         assert_eq!(handler.output_kind(), OutputKind::Json);
+    }
+
+    #[tokio::test]
+    async fn columns_is_rejected_before_any_network_call() {
+        let handler = SshAwxStatusHandler;
+        let ctx = create_test_context();
+        let err = handler
+            .execute(Some(json!({"host": "awx", "columns": ["NAME"]})), &ctx)
+            .await
+            .expect_err("columns is not a Json reduction param");
+        assert!(err.to_string().contains("columns"), "{err}");
     }
 }

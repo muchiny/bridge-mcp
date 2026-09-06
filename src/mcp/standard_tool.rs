@@ -295,41 +295,18 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 param: "arguments".to_string(),
             });
         };
-        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v)?;
+        // Step 0b (folded in): a reduction param the tool's `OutputKind`
+        // cannot use is an error, not a no-op. `extract` removes these keys
+        // unconditionally, so `deny_unknown_fields` on `T::Args` never sees
+        // them and a `RawText` tool swallowed `limit=3` without a word.
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract_for(
+            &mut v,
+            T::NAME,
+            T::OUTPUT_KIND,
+        )?;
         // Same lift as the reduction params: taken off the raw object before
         // `T::Args` sees it, so elevation costs nothing per handler.
         let privilege = crate::domain::privilege::PrivilegeArgs::extract(&mut v)?;
-
-        // Step 0b: a reduction param the tool's `OutputKind` cannot use is an
-        // error, not a no-op. `extract` above removes these keys
-        // unconditionally, so `deny_unknown_fields` on `T::Args` never sees
-        // them and a `RawText` tool swallowed `limit=3` without a word.
-        {
-            let mut provided: Vec<&str> = Vec::new();
-            #[cfg(feature = "jq")]
-            {
-                if dr.jq_filter.is_some() {
-                    provided.push("jq_filter");
-                }
-                if dr.yq_filter.is_some() {
-                    provided.push("yq_filter");
-                }
-                if dr.output_format.is_some() {
-                    provided.push("output_format");
-                }
-            }
-            if dr.columns.is_some() {
-                provided.push("columns");
-            }
-            if dr.limit.is_some() {
-                provided.push("limit");
-            }
-            crate::domain::arg_validation::reject_unsupported_reduction(
-                T::NAME,
-                T::OUTPUT_KIND,
-                &provided,
-            )?;
-        }
 
         // Step 1: Parse args
         let args: T::Args =
@@ -708,6 +685,34 @@ pub fn apply_reduction(
     }
 
     Ok(jq_applied)
+}
+
+/// [`apply_reduction`] plus the pipeline-stats hook the `StandardTool` path
+/// already records, so `bridge_mcp_reduction_*` metrics count every tool.
+/// `truncated` is reported as `false`: custom handlers truncate on their own
+/// after this call.
+///
+/// # Errors
+///
+/// Everything [`apply_reduction`] returns.
+pub fn apply_reduction_recorded(
+    ctx: &ToolContext,
+    stdout: &mut String,
+    dr: &crate::domain::data_reduction::DataReductionArgs,
+    kind: crate::domain::output_kind::OutputKind,
+) -> Result<bool> {
+    let before = stdout.len();
+    let applied = apply_reduction(stdout, dr, kind)?;
+    if let Some(metrics) = &ctx.metrics {
+        metrics.record_pipeline_stats(
+            before as u64,
+            stdout.len() as u64,
+            false,
+            &format!("{kind:?}"),
+            &dr.used_params(),
+        );
+    }
+    Ok(applied)
 }
 
 /// `limit` after a jq/yq filter: keep the first `limit` result lines. Both
