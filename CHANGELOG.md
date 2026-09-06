@@ -37,11 +37,15 @@ reading it. Every item below was reproduced before the fix and measured after.
   single document while `helm template` always emits a `---` stream; it now runs
   per document. `limit` now caps filter results (one per line), a JSON object's
   single top-level array (`items`, `results`), a YAML stream's documents and a
-  YAML list's items — and an Auto tool whose output is YAML never goes through
-  the table parser. `Auto` tools accept `yq_filter`. The 43 custom handlers
-  reject a reduction param their output kind cannot use, as the standard
-  pipeline does, and feed the reduction metrics. Found by probing the reduction
-  params against a live K3s host on 2026-09-06.
+  YAML list's items — and an Auto tool whose output looks like a YAML
+  document (a `---` or `key:` first significant line) never goes through the
+  table parser: `limit` caps its documents or list items and is otherwise a
+  no-op, which also means `limit` is now a no-op rather than a mangled table
+  on `Key: value` prose such as `kubectl describe`. `Auto` tools accept
+  `yq_filter`. The 43 custom handlers reject a reduction param their output
+  kind cannot use, as the standard pipeline does, and feed the reduction
+  metrics. Found by probing the reduction params against a live K3s host on
+  2026-09-06.
 
 - **Sanitizer no longer corrupts structured output.** Two generic patterns
   rewrote structure, not values: `"secret": {` became `"secret": "[REDACTED]"`

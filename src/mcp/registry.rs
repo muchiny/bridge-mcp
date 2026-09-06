@@ -304,7 +304,8 @@ pub fn inject_reduction_schema(schema: &mut Value, kind: crate::domain::output_k
                     For tabular output: caps data rows (header always kept). \
                     For JSON/YAML output: caps top-level array elements (or the single \
                     top-level array of an object such as 'items'/'results', or the \
-                    documents of a YAML stream), or, together with jq_filter/yq_filter, \
+                    documents of a YAML stream, or the items of a lone 'items:' list \
+                    document), or, together with jq_filter/yq_filter, \
                     the number of filter results (one per line). \
                     Use this to reduce token consumption when you only need the top N results. \
                     Example: limit=10 returns only 10 rows/items."

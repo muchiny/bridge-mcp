@@ -6,7 +6,6 @@
 
 use serde::Deserialize;
 
-#[cfg(not(feature = "jq"))]
 use crate::error::BridgeError;
 use crate::error::Result;
 
@@ -54,7 +53,11 @@ impl DataReductionArgs {
     /// When the binary is built WITHOUT the `jq` feature and the caller
     /// supplied `jq_filter`, `yq_filter`, or `output_format`, returns
     /// `BridgeError::McpInvalidRequest` instead of silently ignoring the
-    /// param — the model must not believe its filter was applied.
+    /// param — the model must not believe its filter was applied. Also
+    /// errors when `limit` is present and `0`: the schema declares
+    /// `"minimum": 1`, and every `cap_*` helper treats `0` as "keep
+    /// nothing" rather than "no limit", so a silent pass-through would
+    /// return an empty result with nothing to say why.
     pub fn extract(value: &mut serde_json::Value) -> Result<Self> {
         let Some(obj) = value.as_object_mut() else {
             return Ok(Self::default());
@@ -89,7 +92,14 @@ impl DataReductionArgs {
             })
         });
 
-        let limit = obj.remove("limit").and_then(|v| v.as_u64());
+        let limit = match obj.remove("limit").and_then(|v| v.as_u64()) {
+            Some(0) => {
+                return Err(BridgeError::McpInvalidRequest(
+                    "limit must be at least 1".to_string(),
+                ));
+            }
+            other => other,
+        };
 
         #[cfg(feature = "jq")]
         let output_format = obj
@@ -289,6 +299,20 @@ mod tests {
         let mut v = serde_json::json!({"limit": 5});
         let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
         assert!(!args.is_empty());
+    }
+
+    #[test]
+    fn test_extract_limit_zero_is_rejected() {
+        let mut v = serde_json::json!({"limit": 0});
+        let err = DataReductionArgs::extract(&mut v).unwrap_err().to_string();
+        assert!(err.contains("limit"), "got: {err}");
+    }
+
+    #[test]
+    fn test_extract_limit_one_is_accepted() {
+        let mut v = serde_json::json!({"limit": 1});
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
+        assert_eq!(args.limit, Some(1));
     }
 
     #[test]

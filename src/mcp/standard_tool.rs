@@ -689,8 +689,8 @@ pub fn apply_reduction(
 
 /// [`apply_reduction`] plus the pipeline-stats hook the `StandardTool` path
 /// already records, so `bridge_mcp_reduction_*` metrics count every tool.
-/// `truncated` is reported as `false`: custom handlers truncate on their own
-/// after this call.
+/// `truncated` is reported as `false`: this hook measures only the reduction
+/// step, not whatever truncation a caller applies afterward.
 ///
 /// # Errors
 ///
@@ -715,11 +715,13 @@ pub fn apply_reduction_recorded(
     Ok(applied)
 }
 
-/// `limit` after a jq/yq filter: keep the first `limit` result lines. Both
-/// filter modes emit exactly one result per line (a compact JSON value, or
-/// one TSV row), so a line cap is a result cap. Without a filter, `limit`
-/// is handled by `try_apply_json_limit`, `try_apply_yaml_limit` and the
-/// tabular path instead.
+/// `limit` after a jq/yq filter: keep the first `limit` result lines. In
+/// JSON output each result is exactly one line (a compact JSON value), so a
+/// line cap is a result cap. In TSV mode each result is normally one row,
+/// but a cell holding a literal newline splits into extra lines, so the cap
+/// can cut a multi-line result short instead of dropping it whole. Without a
+/// filter, `limit` is handled by `try_apply_json_limit`, `try_apply_yaml_limit`
+/// and the tabular path instead.
 #[cfg(feature = "jq")]
 fn cap_filter_results(stdout: &mut String, limit: Option<u64>) {
     let Some(limit) = limit else { return };
@@ -857,14 +859,20 @@ fn try_apply_json_limit(
     }
 }
 
-/// Is this text a YAML document rather than a table? The first non-empty
-/// line is a document marker or a top-level `key:`. Column-aligned tables
+/// Is this text a YAML document rather than a table? The first line that is
+/// neither blank nor a `#` comment (`helm show values`'s `# Default values
+/// for nginx.`, a K3s addon manifest's `# Copyright …` header) is a document
+/// marker or a top-level `key:`, where the key may contain internal spaces
+/// (`helm get values`'s `USER-SUPPLIED VALUES:`). Column-aligned tables
 /// (`NAME  READY  STATUS`) never match.
 ///
 /// Called from the `Auto` arm of `apply_reduction` before falling back to
 /// the table parser, so a YAML document is never misread as a table.
-pub(crate) fn looks_like_yaml_document(text: &str) -> bool {
-    let Some(first) = text.lines().find(|l| !l.trim().is_empty()) else {
+fn looks_like_yaml_document(text: &str) -> bool {
+    let Some(first) = text.lines().find(|l| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#')
+    }) else {
         return false;
     };
     if first.trim_end() == "---" {
@@ -877,7 +885,7 @@ pub(crate) fn looks_like_yaml_document(text: &str) -> bool {
         && !key.starts_with(' ')
         && key
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | ' '))
         && (rest.is_empty() || rest.starts_with(' '))
 }
 
@@ -898,7 +906,10 @@ fn try_apply_yaml_limit(
 }
 
 /// Keep the first `limit` documents of a `---` stream. `None` when the text
-/// holds `limit` documents or fewer (a single document included).
+/// holds `limit` documents or fewer (a single document included). A leading
+/// blank or `#`-comment line (a `helm template` `# Source: …` header before
+/// the stream's first marker) does not itself start that implicit first
+/// document.
 fn cap_yaml_documents(text: &str, limit: usize) -> Option<String> {
     let mut out = String::new();
     let mut documents_started = 0usize;
@@ -908,8 +919,11 @@ fn cap_yaml_documents(text: &str, limit: usize) -> Option<String> {
                 return Some(out);
             }
             documents_started += 1;
-        } else if documents_started == 0 && !line.trim().is_empty() {
-            documents_started = 1;
+        } else if documents_started == 0 {
+            let t = line.trim();
+            if !t.is_empty() && !t.starts_with('#') {
+                documents_started = 1;
+            }
         }
         out.push_str(line);
         out.push('\n');
@@ -919,8 +933,11 @@ fn cap_yaml_documents(text: &str, limit: usize) -> Option<String> {
 
 /// Keep the first `limit` items of the single top-level block sequence of a
 /// document: a column-0 `key:` line followed by column-0 `- ` items, then
-/// the remaining column-0 keys. `None` when there is no such sequence, more
-/// than one, or `limit` items or fewer.
+/// the remaining column-0 keys. Only that exact shape is recognised — an
+/// indented sequence (nested under another mapping) or a bare-dash sequence
+/// with no preceding `key:` line (a document that is itself a top-level
+/// list) is a no-op. `None` when there is no such sequence, more than one,
+/// or `limit` items or fewer.
 fn cap_yaml_single_doc_items(text: &str, limit: usize) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let is_top_key_only = |l: &str| {
@@ -2597,6 +2614,15 @@ mod tests {
     }
 
     #[test]
+    fn cap_yaml_documents_does_not_count_a_leading_comment_as_a_document() {
+        let text = "# generated by helm\n---\nkind: A\n---\nkind: B\n";
+        assert_eq!(
+            cap_yaml_documents(text, 1),
+            Some("# generated by helm\n---\nkind: A\n".to_string())
+        );
+    }
+
+    #[test]
     fn yaml_limit_is_a_no_op_on_a_plain_mapping() {
         use crate::domain::output_kind::OutputKind;
         let original = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: argocd\n";
@@ -2641,6 +2667,45 @@ mod tests {
     #[test]
     fn looks_like_yaml_document_false_for_an_indented_first_line() {
         assert!(!looks_like_yaml_document("  kind: Pod\n"));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_true_past_a_leading_comment_block() {
+        // `helm show values` output.
+        assert!(looks_like_yaml_document(
+            "# Default values for nginx.\n# This is a YAML-formatted file.\nreplicaCount: 1\n"
+        ));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_true_past_a_license_header_before_a_document_marker() {
+        // A K3s addon manifest.
+        assert!(looks_like_yaml_document(
+            "# Copyright The Kubernetes Authors.\n---\napiVersion: v1\nkind: ConfigMap\n"
+        ));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_true_for_a_spaced_top_level_key() {
+        // `helm get values` output.
+        assert!(looks_like_yaml_document(
+            "USER-SUPPLIED VALUES:\nreplicaCount: 1\n"
+        ));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_false_for_a_tabular_header_no_colon() {
+        assert!(!looks_like_yaml_document("NAME   STATUS\n"));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_true_for_apiversion() {
+        assert!(looks_like_yaml_document("apiVersion: v1\n"));
+    }
+
+    #[test]
+    fn looks_like_yaml_document_false_for_a_url() {
+        assert!(!looks_like_yaml_document("http://x\n"));
     }
 
     /// The reduction step in the pipeline runs only when both
