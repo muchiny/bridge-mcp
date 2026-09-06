@@ -645,9 +645,10 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 /// want to opt into the same reduction semantics.
 ///
 /// Strategy:
-/// - `Json` → apply `jq_filter` if present, fall back to `limit` on top-level arrays
+/// - `Json` → apply `jq_filter` if present (`limit` then caps its result
+///   lines), fall back to `limit` on top-level arrays
 /// - `Tabular` → apply `columns`/`limit` filter (parse columnar → select → TSV)
-/// - `Yaml` → apply `yq_filter` if present
+/// - `Yaml` → apply `yq_filter` if present (`limit` then caps its result lines)
 /// - `Auto` → try JSON+jq first, fall back to tabular+columns+limit
 /// - `RawText` → no-op
 ///
@@ -690,6 +691,21 @@ pub fn apply_reduction(
     Ok(jq_applied)
 }
 
+/// `limit` after a jq/yq filter: keep the first `limit` result lines. Both
+/// filter modes emit exactly one result per line (a compact JSON value, or
+/// one TSV row), so a line cap is a result cap. Without a filter, `limit`
+/// is handled by `try_apply_json_limit`, `try_apply_yaml_limit` and the
+/// tabular path instead.
+fn cap_filter_results(stdout: &mut String, limit: Option<u64>) {
+    let Some(limit) = limit else { return };
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if stdout.lines().count() <= limit {
+        return;
+    }
+    let kept: Vec<&str> = stdout.lines().take(limit).collect();
+    *stdout = kept.join("\n");
+}
+
 /// Try to apply a `yq_filter` to stdout. Returns `true` if applied.
 ///
 /// Parses the YAML stdout to a generic value tree, then runs the jaq engine
@@ -709,6 +725,7 @@ fn try_apply_yq(
         } else {
             crate::domain::yq_filter::apply_yq_filter(stdout, filter)?
         };
+        cap_filter_results(stdout, dr.limit);
         tracing::debug!(
             before_chars = before,
             after_chars = stdout.len(),
@@ -741,6 +758,7 @@ fn try_apply_jq(
         } else {
             crate::domain::jq_filter::apply_jq_filter(stdout, filter)?
         };
+        cap_filter_results(stdout, dr.limit);
         tracing::debug!(
             before_chars = before,
             after_chars = stdout.len(),
@@ -2292,6 +2310,54 @@ mod tests {
             1,
             "jq's `.[0:1]` slice (1 element) must win over limit=2"
         );
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn json_limit_caps_jq_results() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = r#"{"items":[{"n":"a"},{"n":"b"},{"n":"c"}]}"#.to_string();
+        let mut v = json!({"jq_filter": ".items[].n", "limit": 2});
+        let dr =
+            crate::domain::data_reduction::DataReductionArgs::extract(&mut v).expect("extract");
+        assert!(apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap());
+        assert_eq!(stdout, "\"a\"\n\"b\"");
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn auto_limit_caps_jq_tsv_rows() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = r#"{"items":[{"n":"a"},{"n":"b"},{"n":"c"}]}"#.to_string();
+        let mut v = json!({"jq_filter": ".items[] | [.n]", "output_format": "tsv", "limit": 1});
+        let dr =
+            crate::domain::data_reduction::DataReductionArgs::extract(&mut v).expect("extract");
+        assert!(apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap());
+        assert_eq!(stdout, "a");
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn yaml_limit_caps_yq_results() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "items:\n- a\n- b\n- c\n".to_string();
+        let mut v = json!({"yq_filter": ".items[]", "limit": 2});
+        let dr =
+            crate::domain::data_reduction::DataReductionArgs::extract(&mut v).expect("extract");
+        assert!(apply_reduction(&mut stdout, &dr, OutputKind::Yaml).unwrap());
+        assert_eq!(stdout, "\"a\"\n\"b\"");
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn limit_larger_than_the_result_set_changes_nothing() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = r#"{"items":[{"n":"a"},{"n":"b"}]}"#.to_string();
+        let mut v = json!({"jq_filter": ".items[].n", "limit": 10});
+        let dr =
+            crate::domain::data_reduction::DataReductionArgs::extract(&mut v).expect("extract");
+        assert!(apply_reduction(&mut stdout, &dr, OutputKind::Json).unwrap());
+        assert_eq!(stdout, "\"a\"\n\"b\"");
     }
 
     /// The reduction step in the pipeline runs only when both
