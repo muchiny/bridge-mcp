@@ -235,7 +235,7 @@ impl ToolRegistry {
 /// - `Json` → `jq_filter` + `output_format`
 /// - `Tabular` → `columns`
 /// - `Yaml` → `yq_filter` + `output_format`
-/// - `Auto` → `jq_filter` + `columns` + `output_format`
+/// - `Auto` → `jq_filter` + `yq_filter` + `columns` + `output_format`
 /// - `RawText` → nothing
 ///
 /// All `Json`/`Yaml`/`Auto` tools also accept `limit`.

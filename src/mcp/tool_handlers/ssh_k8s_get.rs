@@ -65,7 +65,8 @@ impl StandardTool for K8sGetTool {
     const DESCRIPTION: &'static str = "List or get Kubernetes resources via kubectl on a remote host. Start here to discover \
         resource names and status before using ssh_k8s_describe (detailed prose), \
         ssh_k8s_logs (pod logs), ssh_k8s_exec (run command in pod), or ssh_k8s_delete. \
-        Use output='json' or 'yaml' for structured data filterable with jq_filter. Use \
+        Use output='json' with jq_filter, or output='yaml' with yq_filter, for \
+        structured data. Use \
         all_namespaces=true to search cluster-wide. Auto-detects kubectl binary (k8s, k3s, \
         microk8s). Returns kubectl text output.";
 

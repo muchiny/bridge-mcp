@@ -651,7 +651,10 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 /// - `Yaml` → apply `yq_filter` if present (`limit` then caps its result
 ///   lines), fall back to `limit` on document counts / a single document's
 ///   top-level item list
-/// - `Auto` → try JSON+jq first, fall back to tabular+columns+limit
+/// - `Auto` → try `jq_filter` then `yq_filter`; without either, sniff the
+///   output (JSON braces/brackets, then a YAML document marker or top-level
+///   key) and apply the matching `limit` fallback, else `columns`/`limit`
+///   tabular reduction
 /// - `RawText` → no-op
 ///
 /// Returns `true` if `jq_filter` or `yq_filter` was applied (used by the
@@ -683,11 +686,22 @@ pub fn apply_reduction(
             }
         }
         OutputKind::Auto => {
-            // Try JSON + jq first (if jq_filter is present and output parses as JSON)
             jq_applied = try_apply_jq(stdout, dr)?;
             if !jq_applied {
-                // Fall back to tabular + columns/limit
-                try_apply_tabular_reduction(stdout, dr);
+                jq_applied = try_apply_yq(stdout, dr)?;
+            }
+            if !jq_applied {
+                let head = stdout.trim_start();
+                if head.starts_with('{') || head.starts_with('[') {
+                    try_apply_json_limit(stdout, dr);
+                } else if looks_like_yaml_document(stdout) {
+                    // `columns` has no meaning on a document; `limit` keeps
+                    // documents or list items. Never the table parser: it
+                    // reads `apiVersion: v1` as a two-column header.
+                    try_apply_yaml_limit(stdout, dr);
+                } else {
+                    try_apply_tabular_reduction(stdout, dr);
+                }
             }
         }
         OutputKind::RawText => {}
@@ -842,13 +856,8 @@ fn try_apply_json_limit(
 /// line is a document marker or a top-level `key:`. Column-aligned tables
 /// (`NAME  READY  STATUS`) never match.
 ///
-/// Not yet called from production code: Task B.5 wires this into the `Auto`
-/// arm of `apply_reduction`. Tested directly below in the meantime.
-#[allow(
-    dead_code,
-    reason = "consumed by Task B.5's Auto-arm wiring, not yet landed on this branch; \
-              tested directly below in the meantime"
-)]
+/// Called from the `Auto` arm of `apply_reduction` before falling back to
+/// the table parser, so a YAML document is never misread as a table.
 pub(crate) fn looks_like_yaml_document(text: &str) -> bool {
     let Some(first) = text.lines().find(|l| !l.trim().is_empty()) else {
         return false;
@@ -2475,6 +2484,52 @@ mod tests {
             crate::domain::data_reduction::DataReductionArgs::extract(&mut v).expect("extract");
         assert!(apply_reduction(&mut stdout, &dr, OutputKind::Yaml).unwrap());
         assert_eq!(stdout, "\"a\"\n\"b\"");
+    }
+
+    #[cfg(feature = "jq")]
+    #[test]
+    fn auto_applies_yq_filter_to_yaml_output() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "items:\n- metadata:\n    name: a\n- metadata:\n    name: b\n".to_string();
+        let mut v = json!({"yq_filter": ".items[] | [.metadata.name]", "output_format": "tsv"});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        assert!(apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap());
+        assert_eq!(stdout.trim(), "a\nb");
+    }
+
+    #[test]
+    fn auto_limit_on_yaml_output_never_goes_through_the_table_parser() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: argocd\n".to_string();
+        let mut v = json!({"limit": 3});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
+        assert!(
+            stdout.starts_with("apiVersion: v1\n"),
+            "YAML must not be re-rendered as TSV: {stdout}"
+        );
+    }
+
+    #[test]
+    fn auto_limit_on_json_object_caps_items() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout = r#"{"items":[{"n":1},{"n":2},{"n":3}],"kind":"List"}"#.to_string();
+        let mut v = json!({"limit": 1});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(parsed["items"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn auto_limit_on_a_table_still_caps_rows() {
+        use crate::domain::output_kind::OutputKind;
+        let mut stdout =
+            "NAME   STATUS\na      Running\nb      Running\nc      Running\n".to_string();
+        let mut v = json!({"limit": 1});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        apply_reduction(&mut stdout, &dr, OutputKind::Auto).unwrap();
+        assert_eq!(stdout.lines().count(), 2, "{stdout}");
     }
 
     #[cfg(feature = "jq")]
