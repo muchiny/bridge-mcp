@@ -758,28 +758,28 @@ impl Sanitizer {
             // TIER 2: CERTIFICATES & KEYS (multi-line patterns)
             // ══════════════════════════════════════════════════════════════════
             PatternDef {
-                pattern: r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(RSA\s+)?PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+(RSA[ \t]+)?PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+(RSA[ \t]+)?PRIVATE[ \t]+KEY-----",
                 replacement: "[PRIVATE_KEY_REDACTED]",
                 description: "RSA Private Key",
                 category: "certificates",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"-----BEGIN\s+OPENSSH\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+OPENSSH\s+PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+OPENSSH[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+OPENSSH[ \t]+PRIVATE[ \t]+KEY-----",
                 replacement: "[OPENSSH_PRIVATE_KEY_REDACTED]",
                 description: "OpenSSH Private Key",
                 category: "certificates",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"-----BEGIN\s+EC\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+EC\s+PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+EC[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+EC[ \t]+PRIVATE[ \t]+KEY-----",
                 replacement: "[EC_PRIVATE_KEY_REDACTED]",
                 description: "EC Private Key",
                 category: "certificates",
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----[\s\S]*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----",
+                pattern: r"-----BEGIN[ \t]+PGP[ \t]+PRIVATE[ \t]+KEY[ \t]+BLOCK-----[\s\S]*?-----END[ \t]+PGP[ \t]+PRIVATE[ \t]+KEY[ \t]+BLOCK-----",
                 replacement: "[PGP_PRIVATE_KEY_REDACTED]",
                 description: "PGP Private Key",
                 category: "certificates",
@@ -787,7 +787,7 @@ impl Sanitizer {
             },
             // PKCS#8 Private Key (generic, covers DSA, ECDSA, Ed25519, etc.)
             PatternDef {
-                pattern: r"-----BEGIN\s+PRIVATE\s+KEY-----[\s\S]*?-----END\s+PRIVATE\s+KEY-----",
+                pattern: r"-----BEGIN[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+PRIVATE[ \t]+KEY-----",
                 replacement: "[PKCS8_PRIVATE_KEY_REDACTED]",
                 description: "PKCS#8 Private Key",
                 category: "certificates",
@@ -836,8 +836,11 @@ impl Sanitizer {
                 secret_group: None,
             },
             PatternDef {
-                pattern: r#"(?i)docker\s+login\s+[^\n]*-p\s*['"]?[^\s'"]+['"]?"#,
-                replacement: "docker login [CREDENTIALS REDACTED]",
+                pattern: concat!(
+                    r#"(?i)(docker[ \t]+login[ \t]+[^\n]*-p[ \t]*)"#,
+                    scalar_value!()
+                ),
+                replacement: "${1}[REDACTED]",
                 description: "Docker login command with password",
                 category: "docker",
                 secret_group: None,
@@ -964,8 +967,8 @@ impl Sanitizer {
                 secret_group: None,
             },
             PatternDef {
-                pattern: r"(?i)--vault-password-file\s+[^\s]+",
-                replacement: "--vault-password-file [REDACTED]",
+                pattern: concat!(r#"(?i)(--vault-password-file[ \t]+)"#, scalar_value!()),
+                replacement: "${1}[REDACTED]",
                 description: "Ansible vault password file path",
                 category: "ansible",
                 secret_group: None,
@@ -1014,8 +1017,11 @@ impl Sanitizer {
             },
             // HashiCorp
             PatternDef {
-                pattern: r#"(?i)((?:VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*)(["']?[hs]\.[A-Za-z0-9]+["']?)"#,
-                replacement: "${1}[REDACTED]",
+                pattern: concat!(
+                    r#"(?i)((?:VAULT_TOKEN|vault_token)[ \t]*[=:][ \t]*["']?)"#,
+                    r#"((?:hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9_-]{8,}["']?)"#
+                ),
+                replacement: "${1}[VAULT_TOKEN_REDACTED]",
                 description: "HashiCorp Vault token",
                 category: "hashicorp",
                 secret_group: None,
@@ -2776,20 +2782,66 @@ users:
         }
     }
 
+    /// `docker login … -p\s*<value>` and `--vault-password-file\s+<value>`
+    /// used `\s` around the value, which matches a newline — on the K3s host
+    /// `docker login -u bob -p` followed by a bare newline (password supplied
+    /// on stdin) swallowed the next line of output as the "password", and
+    /// `--vault-password-file` did the same.
     #[test]
-    fn builtin_patterns_never_use_whitespace_class_around_a_separator() {
+    fn docker_login_and_vault_file_stop_at_end_of_line() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("docker login -u bob -p\nnext-line").as_ref(),
+            "docker login -u bob -p\nnext-line"
+        );
+        assert_eq!(
+            s.sanitize("--vault-password-file\n/etc/passwd").as_ref(),
+            "--vault-password-file\n/etc/passwd"
+        );
+        assert_eq!(
+            s.sanitize("docker login -u bob -p hunter2").as_ref(),
+            "docker login -u bob -p [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("--vault-password-file /root/.vault").as_ref(),
+            "--vault-password-file [REDACTED]"
+        );
+    }
+
+    /// `HashiCorp` Vault tokens carry a purpose prefix (`hvs.` service, `hvb.`
+    /// batch, `hvr.` recovery) alongside the legacy unprefixed `s.`/`b.`/`r.`
+    /// forms — the old pattern only matched `[hs]\.`, so `hvs.…` (the live
+    /// S6 harness case) was missed entirely.
+    #[test]
+    fn vault_tokens_with_every_prefix() {
+        let s = Sanitizer::with_defaults();
+        for token in [
+            "hvs.CAESIJ1234567890abcdefghij",
+            "hvb.AAAAAQI1234567890",
+            "s.1234567890abcdef",
+            "hvr.abcdef1234567890",
+        ] {
+            let input = format!("VAULT_TOKEN={token}");
+            let out = s.sanitize(&input);
+            assert!(!out.contains(token), "{token} must be redacted, got {out}");
+        }
+    }
+
+    /// Supersedes the narrower `builtin_patterns_never_use_whitespace_class_around_a_separator`:
+    /// that guard only caught `\s` next to `[=:]`, so `--vault-password-file\s+…`
+    /// and `docker\s+login\s+…` — no `=`/`:` separator at all — slipped
+    /// through and swallowed the next line. This guard rejects `\s*`/`\s+`
+    /// ANYWHERE in a builtin pattern. The one legitimate multi-line pattern,
+    /// Redis `"requirepass"\r?\n"…"`, uses `\r?\n`, not `\s`, so it keeps
+    /// passing untouched.
+    #[test]
+    fn no_builtin_pattern_uses_a_whitespace_class_before_a_value() {
         for def in Sanitizer::default_pattern_defs() {
-            for forbidden in [
-                r"\s*[=:]", r"\s*=\s*", r":\s*", r"\s*:", r"\s+[=:]", r"[=:]\s+",
-            ] {
-                assert!(
-                    !def.pattern.contains(forbidden),
-                    "{}: {forbidden} matches a newline, so the value on the NEXT \
-                     line becomes this key's value — use [ \\t] around separators: {:?}",
-                    def.description,
-                    def.pattern
-                );
-            }
+            assert!(
+                !def.pattern.contains(r"\s*") && !def.pattern.contains(r"\s+"),
+                "{}: \\s matches a newline; use [ \\t]* or [ \\t]+",
+                def.description
+            );
         }
     }
 
