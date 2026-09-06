@@ -103,6 +103,12 @@ struct PatternDef {
 /// re-match an already-produced marker and either strip its quoting or —
 /// worse, for a pattern with its own named marker — flatten it down to the
 /// generic `[REDACTED]`.
+///
+/// The exclusion is by SHAPE, not by membership in an actual marker list: it
+/// refuses any `"[…]"` whose interior is only `[A-Z0-9_ ]`, so an all-digit
+/// bracketed value such as `"[12345678]"` is refused the same as
+/// `"[REDACTED]"`, even though it is not one of this codebase's markers and
+/// could be a real secret.
 macro_rules! double_quoted_value {
     () => {
         r#""(?:(?:[^"\\\n\[]|\\.|\[(?-i:[^"\\\n\]A-Z0-9_ ]|[A-Z0-9_ ]+[^"\\\n\]A-Z0-9_ ]))(?:[^"\\\n]|\\.)*)?""#
@@ -185,6 +191,18 @@ macro_rules! quoted_value {
 /// plausible by default) but the length gate correctly rejects at 7
 /// characters.
 ///
+/// Accepted narrowing: a value that starts with `<` but is not a
+/// well-formed `<...>` group — `MYSQL_ROOT_PASSWORD=<Xk9!pQ2z`, a truncated
+/// or hand-typed value, never closed — is refused by every alternative. The
+/// angle-group alternative needs a matching `>` this value never supplies,
+/// and the bare alternative's leading-`<` exclusion (needed to leave
+/// `kubectl describe`'s placeholders alone, see above) blocks it too, with
+/// no lookaround available to tell "starts a well-formed `<...>` group"
+/// from "starts with `<` but isn't one" at that position. Since
+/// `kubectl describe` prints its placeholder on every secret-sourced env var
+/// it cannot read, that trade-off is accepted: a `<`-initial secret written
+/// unquoted is a known miss left to the entropy detector.
+///
 /// The bare middle also stops at a brace or a double quote, for the same
 /// reason the first and last positions reject one: both are structure, and a
 /// bare scalar never contains either. Without that, compact JSON — which has
@@ -204,17 +222,23 @@ macro_rules! quoted_value {
 ///
 /// The macro INCLUDES its capturing parentheses: in a pattern whose key is
 /// group 1 the value is group 2, so `secret_group: Some(2)` stays valid.
+///
+/// The brace, bracket and angle alternatives all require at least one
+/// character inside: an empty pair (`{}`, `[]`, `<>`) is structure — an
+/// empty object, an empty array, an empty placeholder — not a value, so
+/// `"password": {}` and `"password": []` are left alone rather than turned
+/// into `"password": "[REDACTED]"`.
 macro_rules! scalar_value {
     () => {
         concat!(
             "(",
             quoted_value!(),
             "|",
-            r#"\{[^{}"'\n,:]*\}"#,
+            r#"\{[^{}"'\n,:]+\}"#,
             "|",
-            r#"\[(?-i:[^\[\]"'\n,:A-Z0-9_ ]|[A-Z0-9_ ]+[^\[\]"'\n,:A-Z0-9_ ])[^\[\]"'\n,:]*\]"#,
+            r#"\[(?-i:[^\[\]"'\n,:A-Z0-9_ ]|[A-Z0-9_ ]+[^\[\]"'\n,:A-Z0-9_ ])[^\[\]"'\n,:]+\]"#,
             "|",
-            r#"<[^<>"'\n,:\s]*>"#,
+            r#"<[^<>"'\n,:\s]+>"#,
             "|",
             r#"["']?[^\s"'{}\[\],;<](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
             ")"
@@ -868,7 +892,11 @@ impl Sanitizer {
             },
             PatternDef {
                 pattern: concat!(
-                    r#"(?i)(docker[ \t]+login[ \t]+[^\n]*-p[ \t]*)"#,
+                    // `-p` must be a flag (preceded by whitespace), not a
+                    // substring of a longer flag: `[^\n]*-p[ \t]*` matched
+                    // the `-p` inside `--password-stdin`, redacting a
+                    // fragment of "-stdin" as if it were the password.
+                    r#"(?i)(docker[ \t]+login[ \t]+[^\n]*[ \t]-p[ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
@@ -1126,7 +1154,8 @@ impl Sanitizer {
                 category: "generic",
                 secret_group: Some(2),
             },
-            // Terraform HCL, strong key: password = "…" — any scalar goes.
+            // Terraform HCL, strong key: password = "…" — any double-quoted
+            // string goes (no plausibility gate).
             PatternDef {
                 pattern: concat!(
                     r#"(?i)((?:password)[ \t]*=[ \t]*)("#,
@@ -2839,6 +2868,29 @@ users:
         );
     }
 
+    /// The docker-login `-p` must be a flag, not any `-p` substring: the
+    /// prefix used to be `[^\n]*-p[ \t]*`, which also matched the `-p`
+    /// inside `--password-stdin` and redacted a fragment of `-stdin` as if
+    /// it were a password. Requiring a whitespace character immediately
+    /// before `-p` fixes that without touching the genuine `-p <value>` and
+    /// `-p<value>` (no space) forms.
+    #[test]
+    fn docker_login_p_flag_is_not_a_substring_match() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("docker login -u bob --password-stdin").as_ref(),
+            "docker login -u bob --password-stdin"
+        );
+        assert_eq!(
+            s.sanitize("docker login -u bob -p hunter2").as_ref(),
+            "docker login -u bob -p [REDACTED]"
+        );
+        assert_eq!(
+            s.sanitize("docker login -u bob -phunter2").as_ref(),
+            "docker login -u bob -p[REDACTED]"
+        );
+    }
+
     /// `HashiCorp` Vault tokens carry a purpose prefix (`hvs.` service, `hvb.`
     /// batch, `hvr.` recovery) alongside the legacy unprefixed `s.`/`b.`/`r.`
     /// forms — the old pattern only matched `[hs]\.`, so `hvs.…` (the live
@@ -2895,9 +2947,17 @@ users:
     }
 
     /// Every bare value in a builtin pattern must come from `scalar_value!()`.
-    /// The class this replaced (`[^\s"'{}\[\],;]+`) stopped at the first comma
-    /// or brace *inside* the value, so `PASSWORD=aB3,x9Zq!k` redacted `aB3`
-    /// and printed `,x9Zq!k` in the clear.
+    /// This asserts only the ABSENCE of one literal class string
+    /// (`[^\s"'{}\[\],;]+`, the class this replaced): it cannot tell that a
+    /// pattern uses `scalar_value!()` specifically, only that it doesn't use
+    /// the old, narrower one, which stopped at the first comma or brace
+    /// *inside* the value, so `PASSWORD=aB3,x9Zq!k` redacted `aB3` and
+    /// printed `,x9Zq!k` in the clear.
+    ///
+    /// The `HashiCorp` Vault token pattern is a deliberate exception: its
+    /// value is `(["']?(?:hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9_-]{8,}["']?)`, a
+    /// purpose-prefixed token, not `scalar_value!()` — a real secret's shape
+    /// is known there, so the shared, permissive grammar is not needed.
     #[test]
     fn builtin_patterns_use_the_shared_value_grammar() {
         for def in Sanitizer::default_pattern_defs() {
@@ -2952,6 +3012,17 @@ users:
     /// the value as group 1 and the value as group 2, and its replacement
     /// starts with `${1}` — so key, quotes, separator and indentation come
     /// back byte-identical and only the value changes.
+    ///
+    /// The selector (`[ \t]*[=:][ \t]*` / `[ \t]*=[ \t]*`) skips three keyed
+    /// patterns that carry no `=`/`:` separator at all, so this guard cannot
+    /// see them: "Docker login command with password" (its separator is a
+    /// `-p` flag) and "Ansible vault password file path" (`--vault-password-file`
+    /// followed by whitespace) both comply with the rule anyway — verbatim
+    /// prefix, `${1}[REDACTED]`. "Vault KV tabular output secrets" does not:
+    /// its replacement is `$1  [REDACTED]`, which normalises the run of 2+
+    /// spaces between key and value down to exactly two — a pre-existing,
+    /// out-of-scope quirk, not a violation this guard would catch even if it
+    /// selected the pattern.
     #[test]
     fn keyed_patterns_replace_only_the_value() {
         for def in Sanitizer::default_pattern_defs() {
@@ -3035,6 +3106,22 @@ users:
             s.sanitize("      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false")
                 .as_ref(),
             "      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false"
+        );
+    }
+
+    /// Pins a KNOWN MISS, deliberately accepted (see the `scalar_value!()`
+    /// doc comment): a value that starts with `<` but is not a well-formed
+    /// `<...>` group is refused by every alternative, same as a `kubectl
+    /// describe` placeholder. If this ever starts getting redacted, that is
+    /// a real improvement, not a regression — update this test (and its
+    /// doc comment) deliberately rather than treating a red run here as a
+    /// bug to revert.
+    #[test]
+    fn angle_initial_unquoted_secret_is_a_known_miss() {
+        let s = Sanitizer::with_defaults();
+        assert_eq!(
+            s.sanitize("MYSQL_ROOT_PASSWORD=<Xk9!pQ2z").as_ref(),
+            "MYSQL_ROOT_PASSWORD=<Xk9!pQ2z"
         );
     }
 

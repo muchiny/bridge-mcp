@@ -246,6 +246,11 @@ fn brace_wrapped_scalars_are_redacted_but_structures_are_not() {
         "secret: {a: b}",
         "password=[REDACTED]",
         "token=[K3S_TOKEN_REDACTED]",
+        // An empty brace/bracket pair is structure — an empty object or
+        // array — not a value; scalar_value!()'s brace and bracket
+        // alternatives both require at least one character inside.
+        r#"{"password": {}}"#,
+        r#"{"password": []}"#,
     ] {
         assert_eq!(s.sanitize(untouched).as_ref(), untouched, "{untouched:?}");
     }
@@ -271,6 +276,10 @@ fn angle_wrapped_scalars_are_redacted_but_placeholders_are_not() {
         "token: <none>",
         "secret: <nil>",
         "      REDIS_PASSWORD:   <set to the key 'auth' in secret 'argocd-redis'>   Optional: false",
+        // An empty angle pair is structure — a placeholder with nothing in
+        // it — not a value; the angle alternative requires at least one
+        // character inside, same as the brace and bracket alternatives.
+        "password=<>",
     ] {
         assert_eq!(s.sanitize(untouched).as_ref(), untouched, "{untouched:?}");
     }
