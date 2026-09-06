@@ -644,6 +644,7 @@ fn create_context_with_audit(config: Arc<Config>) -> (ToolContext, Option<AuditW
 }
 
 /// Context for tests and for paths that produce no audit event.
+#[cfg(test)]
 fn create_context(config: Arc<Config>) -> ToolContext {
     create_context_with_audit(config).0
 }
@@ -681,10 +682,26 @@ pub async fn run_exec(
     working_dir: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_exec_in_context(&ctx, host, command, timeout, working_dir, json_output).await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
 
+/// The body `run_exec` used to inline, split out so every early return
+/// passes through `finish_audit`.
+async fn run_exec_in_context(
+    ctx: &ToolContext,
+    host: &str,
+    command: &str,
+    timeout: u64,
+    working_dir: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
     // Get host config
-    let host_config = config
+    let host_config = ctx
+        .config
         .hosts
         .get(host)
         .ok_or_else(|| BridgeError::UnknownHost {
@@ -704,7 +721,7 @@ pub async fn run_exec(
     info!(host = %host, command = %command, "Executing SSH command");
 
     // Build limits with timeout override
-    let mut limits = config.limits.clone();
+    let mut limits = ctx.config.limits.clone();
     limits.command_timeout_seconds = timeout;
 
     // Build the actual command (with optional cd)
@@ -718,7 +735,7 @@ pub async fn run_exec(
 
     // Resolve jump host if configured
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
-        config
+        ctx.config
             .hosts
             .get(jump_name)
             .map(|jump_config| (jump_name.as_str(), jump_config))
@@ -965,8 +982,21 @@ pub async fn run_history(
     host_filter: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let ctx = create_context(config);
+    let (ctx, audit_task) = create_context_with_audit(config);
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_history_in_context(&ctx, limit, host_filter, json_output);
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
 
+/// The body `run_history` used to inline, split out so every early return
+/// passes through `finish_audit`.
+fn run_history_in_context(
+    ctx: &ToolContext,
+    limit: usize,
+    host_filter: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
     let entries = if let Some(host) = host_filter {
         ctx.history.for_host(host, limit)
     } else {
@@ -1050,7 +1080,7 @@ pub async fn run_history(
 /// - SSH/SFTP connection fails
 /// - The file transfer fails (permissions, disk space, network)
 /// - Checksum verification fails (if enabled)
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments)]
 pub async fn run_upload(
     config: Arc<Config>,
     host: &str,
@@ -1062,10 +1092,41 @@ pub async fn run_upload(
     preserve_permissions: bool,
     show_progress: bool,
 ) -> Result<()> {
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_upload_in_context(
+        &ctx,
+        host,
+        local_path,
+        remote_path,
+        mode,
+        chunk_size,
+        verify_checksum,
+        preserve_permissions,
+        show_progress,
+    )
+    .await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
 
+/// The body `run_upload` used to inline, split out so every early return
+/// passes through `finish_audit`.
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_upload_in_context(
+    ctx: &ToolContext,
+    host: &str,
+    local_path: &Path,
+    remote_path: &str,
+    mode: &str,
+    chunk_size: u64,
+    verify_checksum: bool,
+    preserve_permissions: bool,
+    show_progress: bool,
+) -> Result<()> {
     // Get host config
-    let host_config = config
+    let host_config = ctx
+        .config
         .hosts
         .get(host)
         .ok_or_else(|| BridgeError::UnknownHost {
@@ -1112,7 +1173,7 @@ pub async fn run_upload(
 
     // Resolve jump host if configured
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
-        config
+        ctx.config
             .hosts
             .get(jump_name)
             .map(|jump_config| (jump_name.as_str(), jump_config))
@@ -1120,10 +1181,16 @@ pub async fn run_upload(
 
     // Connect to host (via jump host if configured)
     let client = if let Some((jump_name, jump_config)) = jump_host {
-        SshClient::connect_via_jump(host, host_config, jump_name, jump_config, &config.limits)
-            .await?
+        SshClient::connect_via_jump(
+            host,
+            host_config,
+            jump_name,
+            jump_config,
+            &ctx.config.limits,
+        )
+        .await?
     } else {
-        SshClient::connect(host, host_config, &config.limits).await?
+        SshClient::connect(host, host_config, &ctx.config.limits).await?
     };
 
     // Create SFTP session
@@ -1215,7 +1282,7 @@ pub async fn run_upload(
 /// - The remote file does not exist or cannot be read
 /// - The file transfer fails (permissions, disk space, network)
 /// - Checksum verification fails (if enabled)
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments)]
 pub async fn run_download(
     config: Arc<Config>,
     host: &str,
@@ -1227,10 +1294,41 @@ pub async fn run_download(
     preserve_permissions: bool,
     show_progress: bool,
 ) -> Result<()> {
-    let ctx = create_context(Arc::clone(&config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_download_in_context(
+        &ctx,
+        host,
+        remote_path,
+        local_path,
+        mode,
+        chunk_size,
+        verify_checksum,
+        preserve_permissions,
+        show_progress,
+    )
+    .await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
 
+/// The body `run_download` used to inline, split out so every early return
+/// passes through `finish_audit`.
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_download_in_context(
+    ctx: &ToolContext,
+    host: &str,
+    remote_path: &str,
+    local_path: &Path,
+    mode: &str,
+    chunk_size: u64,
+    verify_checksum: bool,
+    preserve_permissions: bool,
+    show_progress: bool,
+) -> Result<()> {
     // Get host config
-    let host_config = config
+    let host_config = ctx
+        .config
         .hosts
         .get(host)
         .ok_or_else(|| BridgeError::UnknownHost {
@@ -1273,7 +1371,7 @@ pub async fn run_download(
 
     // Resolve jump host if configured
     let jump_host = host_config.proxy_jump.as_ref().and_then(|jump_name| {
-        config
+        ctx.config
             .hosts
             .get(jump_name)
             .map(|jump_config| (jump_name.as_str(), jump_config))
@@ -1281,10 +1379,16 @@ pub async fn run_download(
 
     // Connect to host (via jump host if configured)
     let client = if let Some((jump_name, jump_config)) = jump_host {
-        SshClient::connect_via_jump(host, host_config, jump_name, jump_config, &config.limits)
-            .await?
+        SshClient::connect_via_jump(
+            host,
+            host_config,
+            jump_name,
+            jump_config,
+            &ctx.config.limits,
+        )
+        .await?
     } else {
-        SshClient::connect(host, host_config, &config.limits).await?
+        SshClient::connect(host, host_config, &ctx.config.limits).await?
     };
 
     // Create SFTP session
