@@ -32,6 +32,9 @@ extend-ignore-identifiers-re = [
 ]
 
 [default.extend-words]
+# `nore=` is a live-probe expectation kind (scripts/live_probe/run.py and the
+# campaign lane files): passes when the regex does NOT match.
+nore = "nore"
 # French words used in documentation
 projet = "projet"
 # Legitimate code patterns
