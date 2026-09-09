@@ -128,6 +128,11 @@ jobs:
           DEFAULT_DURATION: ${{ inputs.duration || '30' }}
           SPECIFIC_TARGET: ${{ inputs.target }}
         run: |
+          # The names of the targets that exited non-zero, for the issue step.
+          # A boolean was all it had, so every night's issue said "one or more
+          # crashes" and named none of them.
+          : > "$RUNNER_TEMP/fuzz-failures.txt"
+
           # Security-critical targets get extra time
           # `fuzz_yaml_config` and `fuzz_host_config` joined the moment they
           # stopped calling saphyr bare: one asserts that a parse error never
@@ -255,6 +260,7 @@ jobs:
             # shellcheck disable=SC2086 # DICT is one flag or empty, deliberately unquoted
             cargo +nightly fuzz run "$SPECIFIC_TARGET" -- $DICT -max_total_time="$DEFAULT_DURATION" 2>&1 || {
               echo "::error::Crash found in $SPECIFIC_TARGET"
+              echo "$SPECIFIC_TARGET" >> "$RUNNER_TEMP/fuzz-failures.txt"
               CRASHES_FOUND=true
             }
             echo "::endgroup::"
@@ -281,6 +287,7 @@ jobs:
               # shellcheck disable=SC2086 # DICT is one flag or empty, deliberately unquoted
               cargo +nightly fuzz run "$target" -- $DICT -max_total_time="$DURATION" 2>&1 || {
                 echo "::error::Crash found in $target"
+                echo "$target" >> "$RUNNER_TEMP/fuzz-failures.txt"
                 CRASHES_FOUND=true
               }
               echo "::endgroup::"
@@ -300,16 +307,78 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Create issue on crash
+      - name: Create or update the issue for each failing target
         if: env.CRASHES_FOUND == 'true'
         uses: actions/github-script@v8
         with:
           script: |
+            // One open issue per target, not one per night. The backlog hit
+            // 47 issues in July 2026 and 23 in September, both times because
+            // a handful of known failures refiled nightly. A recurrence
+            // comments on the standing issue instead, so the count reflects
+            // distinct findings and a real one is visible among them.
+            //
+            // The list is the targets that exited non-zero, NOT the artifact
+            // directories: a target that fails to START — a malformed
+            // dictionary, a build that did not link — leaves no `crash-*`
+            // file behind, and that is exactly what happened to
+            // fuzz_elicitation_params for a week. Filing nothing for it would
+            // trade 21 false issues for a silent red job.
+            const fs = require('fs');
             const { owner, repo } = context.repo;
-            await github.rest.issues.create({
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const failed = [...new Set(
+              fs.readFileSync(`${process.env.RUNNER_TEMP}/fuzz-failures.txt`, 'utf8')
+                .split('\n')
+                .map((t) => t.trim())
+                .filter(Boolean),
+            )];
+
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
               owner,
               repo,
-              title: `Fuzz testing found crashes (${new Date().toISOString().split('T')[0]})`,
-              body: `Nightly fuzz testing found one or more crashes.\n\nSee [workflow run](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}) for details.\n\nDownload the crash artifacts to reproduce locally.`,
-              labels: ['bug', 'security']
+              state: 'open',
+              labels: 'fuzz',
             });
+
+            for (const target of failed) {
+              const dir = `fuzz/artifacts/${target}`;
+              const artifacts = fs.existsSync(dir)
+                ? fs.readdirSync(dir).filter((f) => f.startsWith('crash-'))
+                : [];
+              const title = `Fuzz failure in ${target}`;
+              const open = existing.find((i) => i.title === title);
+              const state = artifacts.length
+                ? `${artifacts.length} crash artifact(s)`
+                : 'NO crash artifact — the target exited non-zero without one, '
+                  + 'so check whether it started at all (dictionary parse error, '
+                  + 'link failure) before reading this as a finding';
+              if (open) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: open.number,
+                  body: `Still failing as of ${runUrl} (${state}).`,
+                });
+                continue;
+              }
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                labels: ['bug', 'security', 'fuzz'],
+                body: [
+                  `\`${target}\` exited non-zero: ${state}.`,
+                  '',
+                  `Run: ${runUrl}`,
+                  '',
+                  'Reproduce:',
+                  '```bash',
+                  'gh run download <run-id> --name fuzz-crashes --dir /tmp/fuzz-crashes',
+                  `TMPDIR=/var/tmp cargo +nightly fuzz run ${target} /tmp/fuzz-crashes/${target}/crash-*`,
+                  '```',
+                  '',
+                  'Recurrences comment here rather than opening a new issue.',
+                ].join('\n'),
+              });
+            }
