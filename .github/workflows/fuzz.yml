@@ -103,6 +103,24 @@ jobs:
       - name: Build fuzz targets
         run: cargo +nightly fuzz build
 
+      # A dictionary that does not parse takes its target down with it, and
+      # libFuzzer's only escapes are \\, \" and \xNN. A `\n` in
+      # fuzz/dicts/markdown.dict made every nightly run report
+      # fuzz_elicitation_params as a crash from 2026-09-02 to 2026-09-09 while
+      # the target never executed once — the gate on the destructive prompt
+      # went a week unfuzzed while its issue count grew.
+      #
+      # `-runs=0` parses the dictionary and exits, so this is libFuzzer's own
+      # parser answering, not a regex approximating it. Any target will do:
+      # dictionary parsing does not depend on which one.
+      - name: Validate fuzz dictionaries
+        run: |
+          for dict in fuzz/dicts/*.dict; do
+            echo "::group::$dict"
+            cargo +nightly fuzz run fuzz_elicitation_params -- -dict="$dict" -runs=0
+            echo "::endgroup::"
+          done
+
       - name: Run fuzz targets
         # Dispatch inputs go through env so they are never interpolated
         # into the shell script (template-injection hardening).
