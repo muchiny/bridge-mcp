@@ -5,10 +5,20 @@ use aho_corasick::AhoCorasick;
 use regex::{Regex, RegexSet};
 use tracing::{debug, error, info};
 
+/// The pattern that decides what counts as an escape sequence rather than
+/// content.
+///
+/// Public because the `fuzz_sanitizer` target has to know what this code
+/// removes before it can assert what survives. It used to keep its own idea
+/// of that — "anything that is not a control character is content" — so the
+/// four printable bytes inside `\x1b[31m` read as content and the target
+/// called a correct sanitizer a crash, nightly, from 2026-08-20 onwards.
+/// One definition, two readers, no drift.
+pub const ANSI_PATTERN: &str = r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\[[\d;]*m";
+
 /// Pre-compiled regex for stripping ANSI escape codes from SSH output.
 #[allow(clippy::unwrap_used)] // static regex literal, exercised by the ANSI-stripping tests
-static ANSI_ESCAPE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\[[\d;]*m").unwrap());
+static ANSI_ESCAPE_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(ANSI_PATTERN).unwrap());
 
 use crate::config::{CustomSanitizePattern, SanitizeConfig};
 use crate::security::entropy::EntropyDetector;
@@ -2610,6 +2620,24 @@ users:
         let input = "\x1b[32mSuccess\x1b[0m: operation completed";
         let output = sanitizer.sanitize(input);
         assert_eq!(output.as_ref(), "Success: operation completed");
+    }
+
+    /// An input made only of ANSI escape sequences sanitizes to nothing, and
+    /// that is correct: there is no printable content under the escapes.
+    ///
+    /// The fuzz harness asserted the opposite for two weeks and filed a
+    /// nightly issue about it, because `[`, `3`, `1` and `m` are not control
+    /// characters even though the sequence they sit in is not content.
+    #[test]
+    fn an_input_of_pure_ansi_sanitizes_to_nothing() {
+        let sanitizer = Sanitizer::with_defaults();
+        assert_eq!(sanitizer.sanitize("\x1b[31m"), "");
+        assert_eq!(sanitizer.sanitize("\x1b[0m\x1b[1;32m"), "");
+        assert_eq!(
+            sanitizer.sanitize("\x1b[31mred\x1b[0m"),
+            "red",
+            "escapes around real content leave the content"
+        );
     }
 
     #[test]

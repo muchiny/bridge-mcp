@@ -74,6 +74,13 @@ jobs:
     name: Cargo deny
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # cargo-deny-action runs in a musl container that has no toolchain by
+      # this name, and the workflow-level RUSTUP_TOOLCHAIN follows it in:
+      # "override toolchain 'stable-x86_64-unknown-linux-musl' is not
+      # installed". The action brings its own cargo, so this job does not
+      # need the pin the other jobs do. Red from 2026-08-31 to this commit.
+      RUSTUP_TOOLCHAIN: ""
     steps:
       - uses: actions/checkout@v7
         with:
