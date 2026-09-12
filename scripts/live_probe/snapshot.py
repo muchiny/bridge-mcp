@@ -9,11 +9,16 @@ guarded field differs.
 
 Guarded (hard) fields: node_ready, k3s_active, failed_units, namespaces,
 users, groups, crons, listening_ports, packages_count, units_count,
-k8s_workloads. sandbox_present/home_sandbox are compared against a declared
---expect-sandbox {absent,present} instead of an equality (the campaign's own
-sandbox legitimately flips this True for a few hours). pods tolerates up to
-two entries of churn (the media-backup CronJob). alerts_raw is informational
-only, never guarded.
+k8s_workloads. sandbox_present is compared against a declared --expect-sandbox
+{absent,present} instead of an equality (the campaign's own sandbox
+legitimately flips this True for a few hours). home_sandbox is NOT covered by
+--expect-sandbox: it is *always* expected False, sandbox up or down -- the
+campaign's $SANDBOX lives under /tmp on the Pi and its only /home counterpart
+($SANDBOX_LOCAL) lives on the bridge machine, never on the Pi, so any
+^(bridge-|bmcp-) entry under /home/muchini on the host is a real leak at any
+point in the campaign. This is a strengthening of the guard, not a relaxation.
+pods tolerates up to two entries of churn (the media-backup CronJob).
+alerts_raw is informational only, never guarded.
 
 Every parse_<field>(text, rc) below is a pure function, proven independently
 by scripts/live_probe/snapshot_selftest.py against a real capture and a
@@ -170,10 +175,34 @@ def parse_groups(text, rc):
     return sorted(v for v in _tab_header_column(text, rc, "GROUP") if v)
 
 
+# `ssh_cron_list system=true` embeds an `ls -la /etc/cron.d/` directory
+# listing. A raw `ls -l` row: permission bits, link count, owner, group,
+# size, month, day, year-or-time, name. Owner/group/size/date are pure
+# filesystem-metadata noise -- in particular the '..' row's mtime is
+# /etc's own mtime, which drifts on totally unrelated host activity (a
+# package install, a log rotation) and has nothing to do with cron content.
+_LS_ROW_RE = re.compile(r"^[bcdlpsD-][rwxstST-]{9}\+?\s+\d+\s+\S+\s+\S+\s+\d+\s+\S+\s+\S+\s+\S+\s+(.+)$")
+_TOTAL_ROW_RE = re.compile(r"^total\s+\d+$")
+
+
 def parse_crons(text, rc):
     if rc != 0:
         return []
-    return sorted(l for l in text.splitlines() if l.strip())
+    out = []
+    for l in text.splitlines():
+        if not l.strip():
+            continue
+        m = _LS_ROW_RE.match(l)
+        if m:
+            name = m.group(1)
+            if name in (".", ".."):
+                continue  # not a real cron file, always present, no signal
+            out.append(f"entry: {name}")  # keep the filename, drop perm/size/date noise
+            continue
+        if _TOTAL_ROW_RE.match(l.strip()):
+            continue  # block-count accounting noise, not cron content
+        out.append(l)
+    return sorted(out)
 
 
 PORT_RE = re.compile(r":(\d+)$")
@@ -303,8 +332,17 @@ def _is_sandbox_named(value):
     return bool(SANDBOX_NAME_RE.match(value) or SANDBOX_MARKER in value)
 
 
-def _strip_sandbox(values):
-    return [v for v in values if not _is_sandbox_named(v)]
+def _k8s_name(value):
+    """k8s `output=name` renders '<kind>/<name>' (e.g. 'namespace/bridge-test') --
+    match the sandbox pattern against the name part, never the kind prefix.
+    Only ever applied to the `namespaces` field, whose entries are always in
+    this exact <kind>/<name> shape; falls back to the whole value if there is
+    no '/' so it is a no-op on anything else."""
+    return value.partition("/")[2] or value
+
+
+def _strip_sandbox(values, keyfunc=lambda v: v):
+    return [v for v in values if not _is_sandbox_named(keyfunc(v))]
 
 
 def diff(before, after, expect_sandbox="absent", expect_sandbox_objects=False):
@@ -318,7 +356,9 @@ def diff(before, after, expect_sandbox="absent", expect_sandbox_objects=False):
 
     for key in HARD_FIELDS:
         b, a = before[key], after[key]
-        if expect_sandbox_objects and key in ("namespaces", "users", "groups", "crons"):
+        if expect_sandbox_objects and key == "namespaces":
+            b, a = _strip_sandbox(b, keyfunc=_k8s_name), _strip_sandbox(a, keyfunc=_k8s_name)
+        elif expect_sandbox_objects and key in ("users", "groups", "crons"):
             b, a = _strip_sandbox(b), _strip_sandbox(a)
         elif expect_sandbox_objects and key == "k8s_workloads":
             # Task 7/8 sandbox creates exactly one Deployment ('bt-pause') in
@@ -334,10 +374,19 @@ def diff(before, after, expect_sandbox="absent", expect_sandbox_objects=False):
         hard(key, b, a)
 
     expected_present = expect_sandbox == "present"
-    for key in ("sandbox_present", "home_sandbox"):
-        if after[key] != expected_present:
-            print(f"CHANGED {key}: expected {expected_present!r}, got {after[key]!r}")
-            bad += 1
+    if after["sandbox_present"] != expected_present:
+        print(f"CHANGED sandbox_present: expected {expected_present!r}, got {after['sandbox_present']!r}")
+        bad += 1
+
+    # home_sandbox is NOT --expect-sandbox: the campaign's $SANDBOX lives under
+    # /tmp on the Pi, and its only /home counterpart ($SANDBOX_LOCAL) lives on
+    # the bridge machine, never on the Pi. So no legitimate campaign object
+    # ever appears under /home/muchini on the host, at any point in the
+    # campaign, sandbox up or down -- this is a strengthening of the guard,
+    # not a relaxation: home_sandbox is always expected False.
+    if after["home_sandbox"] is not False:
+        print(f"CHANGED home_sandbox: expected False, got {after['home_sandbox']!r}")
+        bad += 1
 
     gone = sorted(set(before["pods"]) - set(after["pods"]))
     new = sorted(set(after["pods"]) - set(before["pods"]))
