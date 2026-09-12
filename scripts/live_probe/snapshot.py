@@ -145,9 +145,9 @@ def parse_count(text, rc):
 def _tab_header_column(text, rc, colname):
     """Extract one column by header name from TAB-separated tool output.
 
-    Falls back to treating the whole line as the value when the header IS
-    the bare column name (columns=[...] actually reduced to one column), and
-    to the first whitespace-split token as a last resort.
+    Falls back to the first whitespace-split token as a last resort (covers
+    a single-column header too: a one-element header list still satisfies
+    `colname in header` above).
     """
     if rc != 0:
         return []
@@ -159,8 +159,6 @@ def _tab_header_column(text, rc, colname):
     if colname in header:
         idx = header.index(colname)
         return [(r.split("\t")[idx] if idx < len(r.split("\t")) else "") for r in rows]
-    if lines[0].strip() == colname:
-        return [r.split("\t")[0] for r in rows]
     return [r.split()[0] for r in rows if r.split()]
 
 
@@ -237,13 +235,46 @@ def take(binary, host):
     return build_snapshot(calls, rc)
 
 
-def load_from_dir(directory):
+class MissingCaptureFiles(Exception):
+    """Raised by load_from_dir() when the union of given directories still
+    lacks a field's capture file -- carries every missing name so the caller
+    can report all of them at once, not just the first."""
+
+    def __init__(self, missing, directories):
+        self.missing = missing
+        self.directories = directories
+        names = ", ".join(f"{m}.txt" for m in missing)
+        dirs = ", ".join(directories)
+        super().__init__(f"missing capture file(s) [{names}] -- looked in: {dirs}")
+
+
+def load_from_dir(directories):
+    """Build a snapshot from `DIR/<field>.txt` files instead of calling the
+    host. `directories` is a path, or a list of paths searched in order --
+    the first directory to hold a given field's file wins, so a later
+    directory only fills the gaps an earlier one leaves (Ruling R10: this is
+    what lets a partial doctored-fixtures directory be completed by the real
+    captures directory, e.g. `--from-dir fixtures --from-dir captures`)."""
+    if isinstance(directories, str):
+        directories = [directories]
     calls, rc = {}, {}
+    missing = []
     for name in CAPTURE_SPECS:
-        with open(os.path.join(directory, f"{name}.txt")) as f:
+        found = None
+        for d in directories:
+            path = os.path.join(d, f"{name}.txt")
+            if os.path.exists(path):
+                found = path
+                break
+        if found is None:
+            missing.append(name)
+            continue
+        with open(found) as f:
             calls[name] = f.read()
-        rc_path = os.path.join(directory, f"{name}.rc")
+        rc_path = os.path.splitext(found)[0] + ".rc"
         rc[name] = int(open(rc_path).read().strip()) if os.path.exists(rc_path) else 0
+    if missing:
+        raise MissingCaptureFiles(missing, directories)
     return build_snapshot(calls, rc)
 
 
@@ -330,7 +361,10 @@ def main():
     ap.add_argument("binary", nargs="?")
     ap.add_argument("--host", default="raspberry")
     ap.add_argument("--out", default="")
-    ap.add_argument("--from-dir", default="")
+    ap.add_argument("--from-dir", action="append", default=[],
+                    help="Build a snapshot from DIR/<field>.txt files instead of the host. "
+                         "Repeatable: later --from-dir directories fill the gaps left by "
+                         "earlier ones (first directory given wins per field).")
     ap.add_argument("--diff", nargs=2, metavar=("BEFORE", "AFTER"))
     ap.add_argument("--expect-sandbox", choices=["absent", "present"], default="absent")
     ap.add_argument("--expect-sandbox-objects", action="store_true")
@@ -345,7 +379,11 @@ def main():
     if a.from_dir:
         if not a.out:
             ap.error("--out is required with --from-dir")
-        snap = load_from_dir(a.from_dir)
+        try:
+            snap = load_from_dir(a.from_dir)
+        except MissingCaptureFiles as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(2)
     else:
         if not a.binary or not a.out:
             ap.error("BIN and --out are required to take a snapshot")
