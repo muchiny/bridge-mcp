@@ -6,7 +6,14 @@
           "SBXUSER": "btest0909",
           "SBXGROUP": "btestgrp0909",
           "CRON_MARK": "BRIDGE_TEST_0909",
-          "UNIT": "bridge-test-0909"
+          "UNIT": "bridge-test-0909",
+          "SLEEPPID": "2283184",
+          "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+          "PAUSE_IMAGE": "",
+          "BUSYBOX_OK": "",
+          "UFW_ABSENT": "true",
+          "HAD_CRONTAB": "true",
+          "BT_CID": ""
          },
  "cases": [
   {"id": "E901", "owner": "campaign", "tool": "ssh_ls", "paths": ["cli"], "args": {"path": "/tmp"}, "expect": "nore=bridge-test-0909"},
