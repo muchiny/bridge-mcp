@@ -317,6 +317,15 @@ HARD_FIELDS = [
 # Closed set of sandbox object names/markers the campaign is allowed to create
 # (Task 1bis / global-constraints §3.0). Matched against list *entries*, never
 # against a bare count.
+#
+# KNOWN LIMITATION (documented, not fixed -- fix round 3): the `bt-` branch is
+# a bare prefix, so under --expect-sandbox-objects this strips ANY namespace,
+# user, or group whose name merely starts with "bt-", sandbox-created or not
+# -- e.g. a real namespace called `bt-real-workload` would be invisible to the
+# diff while the flag is set. Harmless on this host today: raspberry's actual
+# namespaces are argocd, default, kube-node-lease, kube-public, kube-system,
+# media-stack, none of which match. Narrowing the pattern (e.g. requiring the
+# campaign's exact object names only) is future work, not done here.
 SANDBOX_NAME_RE = re.compile(r"^(btest0909|btestgrp0909|bridge-test|bridge-test-0909|bt-)")
 SANDBOX_MARKER = "BRIDGE_TEST_0909"
 
