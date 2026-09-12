@@ -1,0 +1,37 @@
+* k3s.service - Lightweight Kubernetes
+     Loaded: loaded (/etc/systemd/system/k3s.service; enabled; preset: enabled)
+    Drop-In: /etc/systemd/system/k3s.service.d
+             `-10-wait-for-time.conf
+     Active: active (running) since Wed 2026-09-02 23:46:01 CEST; 1 week 2 days ago
+ Invocation: 4827b39ec7e64641b9b31023fcb3553e
+       Docs: https://k3s.io
+   Main PID: 1035112 (k3s-server)
+      Tasks: 164
+     Memory: 2G (peak: 3.9G, swap: 768K, swap peak: 784K)
+        CPU: 16h 34min 47.334s
+     CGroup: /system.slice/k3s.service
+             |-   2790 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id bb56aaf2d0598bd56a60ac0d3b8ab8a272646b5083d28051b6cc0998332c902e -address /run/k3s/containerd/containerd.sock
+             |-   2917 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id 95ffbf13560e00b3dcf7847256d8498115c79e950d63980e5cee1684d5d13b1f -address /run/k3s/containerd/containerd.sock
+             |- 972221 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id dddcd5f80b7e3cf629cb318964394a50d1a8d4e8ccb75866353c02b83acd571a -address /run/k3s/containerd/containerd.sock
+             |- 976026 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id f9440e439e76d18ca36dc21e4b492eec45a9fbbcf7b71b8fd5026fa83403568f -address /run/k3s/containerd/containerd.sock
+             |- 976053 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id a1c88503b996c0328aaded00d9b8a89e6d047669190716f868e2ee0f2dc3d740 -address /run/k3s/containerd/containerd.sock
+             |- 976091 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id 331a5bf406ae1215e0e62e1a21a665a75a490a47063c752eb26f18f479d091f9 -address /run/k3s/containerd/containerd.sock
+             |- 976107 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id 1678c0f9a3d046541f855ec9ef497ded715adbc26aa4859b78d76c52e95abcb2 -address /run/k3s/containerd/containerd.sock
+             |- 979483 /var/lib/rancher/k3s/data/876326f0487c64e27190fea8c8c5f54263aabc782061df6455fa54c0f7e2a1ad/bin/containerd-shim-runc-v2 -namespace k8s.io -id 46a907de8ed41077a7e1fab6bda6670d644997d852dcee3e6cb4ef2e7b2e3cae -address /run/k3s/containerd/containerd.sock
+             |-1035112 "/usr/local/bin/k3s server"
+             |-1035143 "containerd "
+             |-1035799 /var/lib/rancher/k3s/data/d83b1e679e41e04bbf4c6ff76f5684f0f98b2b4bf29bb632db4a497cd8093a71/bin/containerd-shim-runc-v2 -namespace k8s.io -id 1819d4fc7fdcec4e1b1704aa1fdefe4587c80972dc467053f31f34505b9e2fff -address /run/k3s/containerd/containerd.sock
+             |-1035938 /var/lib/rancher/k3s/data/d83b1e679e41e04bbf4c6ff76f5684f0f98b2b4bf29bb632db4a497cd8093a71/bin/containerd-shim-runc-v2 -namespace k8s.io -id b08dbb6563625730b891229494bed37e670a91b0d4367136dd704ba39e22b964 -address /run/k3s/containerd/containerd.sock
+             `-2111842 /var/lib/rancher/k3s/data/d83b1e679e41e04bbf4c6ff76f5684f0f98b2b4bf29bb632db4a497cd8093a71/bin/containerd-shim-runc-v2 -namespace k8s.io -id 87289e7b48b7f478d3f03772aa128d1e04b2e21310501bbca202d4ddb55671aa -address /run/k3s/containerd/containerd.sock
+
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.129039 1035112 operation_generator.go:782] UnmountVolume.TearDown succeeded for volume "[HIGH_ENTROPY_REDACTED]" pod "df097e6e-0c99-4665-9539-31db4884d078" (UID: "df097e6e-0c99-4665-9539-31db4884d078"). InnerVolumeSpecName "source". PluginName "kubernetes.io/host-path", VolumeGIDValue ""
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.129077 1035112 reconciler_common.go:163] "operationExecutor.UnmountVolume started for volume \"[HIGH_ENTROPY_REDACTED]" (UniqueName: \"[HIGH_ENTROPY_REDACTED]") pod \"df097e6e-0c99-4665-9539-31db4884d078\" (UID: \"df097e6e-0c99-4665-9539-31db4884d078\") "
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.129085 1035112 operation_generator.go:782] UnmountVolume.TearDown succeeded for volume "[HIGH_ENTROPY_REDACTED]" pod "df097e6e-0c99-4665-9539-31db4884d078" (UID: "df097e6e-0c99-4665-9539-31db4884d078"). InnerVolumeSpecName "dest". PluginName "kubernetes.io/host-path", VolumeGIDValue ""
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.129167 1035112 reconciler_common.go:299] "Volume detached for volume \"source\" (UniqueName: \"[HIGH_ENTROPY_REDACTED]") on node \"server\" DevicePath \"\""
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.129180 1035112 reconciler_common.go:299] "Volume detached for volume \"dest\" (UniqueName: \"[HIGH_ENTROPY_REDACTED]") on node \"server\" DevicePath \"\""
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.130178 1035112 operation_generator.go:782] UnmountVolume.TearDown succeeded for volume "[HIGH_ENTROPY_REDACTED]" pod "df097e6e-0c99-4665-9539-31db4884d078" (UID: "df097e6e-0c99-4665-9539-31db4884d078"). InnerVolumeSpecName "kube-api-access-wzcrb". PluginName "kubernetes.io/projected", VolumeGIDValue ""
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.229734 1035112 reconciler_common.go:299] "Volume detached for volume \"kube-api-access-wzcrb\" (UniqueName: \"[HIGH_ENTROPY_REDACTED]") on node \"server\" DevicePath \"\""
+Sep 12 03:03:46 server k3s[1035112]: I0912 03:03:46.923292 1035112 pod_container_deletor.go:80] "Container not found in pod's containers" containerID="a211775e623e6de6855746c77f59050275f15cd5ede003892b36e0e58cc72616"
+Sep 12 03:03:47 server k3s[1035112]: I0912 03:03:47.230834 1035112 kubelet_volumes.go:161] "Cleaned up orphaned pod volumes dir" podUID="4374ff3b-8a18-4ca0-82ae-c480774b0736" path="/var/lib/kubelet/pods/4374ff3b-8a18-4ca0-82ae-c480774b0736/volumes"
+Sep 12 03:03:50 server k3s[1035112]: I0912 03:03:50.801791 1035112 scope.go:122] "RemoveContainer" containerID="f0202111dfb30ccddb5be2c1f2b1301fed39a74326f288f1fd5fe370ef6b4bae"
+
