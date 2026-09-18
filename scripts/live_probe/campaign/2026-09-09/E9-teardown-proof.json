@@ -7,7 +7,7 @@
           "SBXGROUP": "btestgrp0909",
           "CRON_MARK": "BRIDGE_TEST_0909",
           "UNIT": "bridge-test-0909",
-          "SLEEPPID": "2283184",
+          "SLEEPPID": "",
           "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
           "PAUSE_IMAGE": "",
           "BUSYBOX_OK": "",

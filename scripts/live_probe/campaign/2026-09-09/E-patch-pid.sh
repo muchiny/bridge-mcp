@@ -29,6 +29,25 @@
 # exception is the sentinel 2147483647 ("inexistent by construction", the fallback the
 # safety whitelist allows): that case is deliberately left untouched.
 #
+# ROUND-3 HARDENING (fix round 3, routed from the task-1bis re-review's stale-PID
+# trace): numeric and >1 is NOT enough.  The campaign's original `sleep 86400`
+# (PID 2283184, created by Task 1bis Step 2.7) has since self-exited — six days
+# is 6x its lifetime — and the Pi creates processes continuously, so that PID may
+# now belong to something real.  Before touching any case file, this script
+# queries $HOST through $BIN and requires the PID to be, AT THAT MOMENT, a live
+# process whose argv is EXACTLY the campaign's sleep ("$SLEEP_ARGV").  Anything
+# else — dead, live-but-different-argv, or an ambiguous/empty probe (dropped SSH
+# call, gate refusal) — is refused loudly, non-zero exit, no file is touched.
+# Same philosophy as E-teardown.sh: absence/identity is proved positively via an
+# explicit token, never inferred from silence.  The sentinel is exempt (it is
+# "inexistent by construction", there is nothing to probe).
+#
+# BIN and HOST reach this script as environment variables (not positional, so the
+# existing `<pid> [case-file.json ...]` calling convention is untouched):
+#   BIN   default: /home/muchini/bmcp-test-0909/target/release/bridge-mcp (pinned campaign binary)
+#   HOST  default: raspberry
+# Override: `BIN=/other/bridge-mcp HOST=otherhost E-patch-pid.sh <pid> ...`
+#
 # Usage:
 #   E-patch-pid.sh <pid | /path/to/pidfile> [case-file.json ...]
 # Default case file:
@@ -38,9 +57,14 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SENTINEL=2147483647
+SLEEP_ARGV='sleep 86400'   # must match E-teardown.sh's SLEEP_ARGV — the campaign's sleep
+BIN="${BIN:-/home/muchini/bmcp-test-0909/target/release/bridge-mcp}"
+HOST="${HOST:-raspberry}"
 
 if [ "$#" -lt 1 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  echo "usage: $0 <pid | /path/to/pidfile> [case-file.json ...]" >&2
+  echo "usage: BIN=/path/to/bridge-mcp HOST=host $0 <pid | /path/to/pidfile> [case-file.json ...]" >&2
+  echo "  BIN defaults to $BIN" >&2
+  echo "  HOST defaults to $HOST" >&2
   exit 2
 fi
 
@@ -60,6 +84,65 @@ if [ "$PID" -le 1 ]; then
   echo "error: refusing pid $PID (0 and 1 are never valid targets)" >&2
   exit 2
 fi
+
+# --------------------------------------------------------------- liveness + identity
+# Queries $HOST via $BIN for the live argv of $1.  Prints exactly one of:
+#   dead          -- ps found no process with that pid
+#   live:<argv>   -- ps found a process; <argv> is its exact command line
+#   inconclusive  -- neither token came back (dropped SSH call, gate refusal,
+#                    mangled output) — never treated as "dead", never accepted
+# The probe command embeds "pidprobe:dead" / "pidprobe:live:%s" as literal source
+# text, which also shows up verbatim in the CLI's own audit/log lines (they echo
+# the command they ran).  grep -x (whole-line match) is what keeps those log
+# lines — always prefixed with a timestamp and other words — from ever matching.
+probe_pid() {
+  pid="$1"
+  out=$("$BIN" --yes tool ssh_exec host="$HOST" \
+    command="a=\$(ps -p $pid -o args= 2>/dev/null); if [ -z \"\$a\" ]; then echo pidprobe:dead; else printf 'pidprobe:live:%s\n' \"\$a\"; fi" 2>&1)
+  if printf '%s\n' "$out" | grep -qx 'pidprobe:dead'; then
+    echo dead
+    return
+  fi
+  live_line="$(printf '%s\n' "$out" | grep -x 'pidprobe:live:.*' | tail -n1)"
+  if [ -n "$live_line" ]; then
+    echo "live:${live_line#pidprobe:live:}"
+    return
+  fi
+  echo inconclusive
+}
+
+# Refuses (message on stderr, exit 2) unless $1 is the sentinel or is, right now,
+# a live process on $HOST whose argv is exactly $SLEEP_ARGV.
+verify_pid_or_die() {
+  pid="$1"
+  if [ "$pid" = "$SENTINEL" ]; then
+    return 0
+  fi
+  if [ ! -x "$BIN" ]; then
+    echo "error: '$BIN' is not an executable bridge-mcp binary — cannot verify pid $pid is live before patching. Set BIN=/path/to/bridge-mcp." >&2
+    exit 2
+  fi
+  result="$(probe_pid "$pid")"
+  case "$result" in
+    dead)
+      echo "error: pid $pid is NOT a live process on $HOST (ps found nothing) — refusing to patch a stale/recycled pid. Task 7 must re-create the sleep and re-run this script immediately before E505; do not substitute another pid by hand." >&2
+      exit 2
+      ;;
+    "live:$SLEEP_ARGV")
+      : # exact identity match — proceed
+      ;;
+    live:*)
+      echo "error: pid $pid IS live on $HOST but its argv is '${result#live:}', not '$SLEEP_ARGV' — refusing to patch a pid that is not the campaign's sleep (pids are recycled). Task 7 must re-create the sleep and re-run this script." >&2
+      exit 2
+      ;;
+    *)
+      echo "error: could not determine whether pid $pid is live on $HOST (ambiguous or empty probe output: '$result') — refusing rather than guessing." >&2
+      exit 2
+      ;;
+  esac
+}
+
+verify_pid_or_die "$PID"
 
 if [ "$#" -eq 0 ]; then
   set -- "$HERE/E5-storage-process-env.json"
