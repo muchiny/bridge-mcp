@@ -407,44 +407,50 @@ else:
             FAILS.append(f"régression corpus : guard() refuse {_rel} (devrait "
                          f"passer intégralement) — {e}")
 
-    # C-security.json et D-sandbox.json sont DEUX des cinq fichiers baseline
-    # 2026-09-06 — gelés, jamais rejoués par cette campagne (global
-    # constraints §3.0bis : "servent uniquement de baseline"). Mesuré : ils
-    # NE PASSENT PAS `guard()` même une fois le bug scalaire corrigé, et
-    # chaque refus s'explique par une règle NÉE APRÈS leur écriture : les dix
-    # outils de classe (b) (ruling R20, ssh_k8s_drain/ssh_pkg_remove),
-    # l'ancienne orthographe de bac à sable "/tmp/bridge-campaign" (morte,
-    # §3.0), des namespaces/noms réels non créés par CETTE campagne
-    # ("default", "argocd"), `sudo` sans `sudo_reason`, un `pid` réel plutôt
-    # que la sentinelle, et des sondes de blacklist sans `guard_probe` (un
-    # champ que CETTE tâche introduit). Ce n'est PAS le bug scalaire — c'est
-    # `guard()` qui applique fidèlement le contrat DE CETTE campagne à des
-    # cas écrits pour une autre. Le test ci-dessous n'exige donc PAS qu'ils
-    # passent : il exige que TOUTE ligne de refus reste rattachée à l'une de
-    # ces raisons connues, pour qu'un refus futur pour une raison NOUVELLE
-    # continue d'être signalé plutôt que noyé dans le bruit attendu.
-    ACCOUNTED_FOR = (
-        "est de classe (b)",                        # R20 : ssh_k8s_drain / ssh_pkg_remove
-        "bac à sable",                              # /tmp/bridge-campaign(-local) mort (2 formes)
-        "n'est pas un objet créé par la campagne",  # namespace=default/argocd, noms 2026-09-06
-        "sudo=true sans champ 'sudo_reason'",       # champ né avec CETTE campagne
-        "seule la sentinelle 2147483647",           # pid réel 2026-09-06, pas la sentinelle
-        "touche un motif interdit",                 # sonde blacklist sans guard_probe (champ 2026-09-09)
-    )
+    # Ruling R21 (fix round 3) : C-security.json et D-sandbox.json sont DEUX
+    # des cinq fichiers baseline 2026-09-06 — gelés par global constraints
+    # §3.0bis ("servent uniquement de baseline"), consommés STATIQUEMENT par
+    # `coverage.py` (simple appariement de noms d'outil) et JAMAIS exécutés
+    # par `run.py` dans cette campagne. `guard()` ne doit donc JAMAIS les
+    # accepter : les admettre voudrait dire admettre `ssh_k8s_drain` et
+    # `ssh_pkg_remove`, que R20 interdit sans exception. Leur refus n'est pas
+    # un bug à corriger ni le bug scalaire (déjà réglé plus haut) — c'est le
+    # garde-fou qui applique fidèlement, à la lettre, des règles nées APRÈS
+    # l'écriture de ces deux fichiers. Le test ci-dessous n'exige donc PAS
+    # qu'ils passent : il exige (a) qu'ils soient refusés et (b) que CHAQUE
+    # ligne de refus relève d'une des six CLASSES ci-dessous — jamais un
+    # compte exact de lignes, pour survivre à une reformulation du message
+    # tout en continuant à échouer si le garde-fou était un jour relâché pour
+    # les admettre.
+    REFUSAL_CLASSES = {
+        "R20 : outil de classe (b) (ssh_k8s_drain / ssh_pkg_remove)": "est de classe (b)",
+        "orthographe morte du bac à sable (/tmp/bridge-campaign)": "bac à sable",
+        "namespace/nom non créé par CETTE campagne (default/argocd, 2026-09-06)":
+            "n'est pas un objet créé par la campagne",
+        "sudo sans sudo_reason (champ né avec cette campagne)":
+            "sudo=true sans champ 'sudo_reason'",
+        "pid réel au lieu de la sentinelle 2147483647": "seule la sentinelle 2147483647",
+        "sonde de blacklist sans guard_probe (champ né avec cette tâche)":
+            "touche un motif interdit",
+    }
     for _rel in ("campaign/C-security.json", "campaign/D-sandbox.json"):
         try:
             R.guard(_corpus_cases(_rel), _inv)
             FAILS.append(f"régression corpus : {_rel} passe désormais guard() — "
-                         "si c'est voulu, retirer ce fichier de la liste "
-                         "« baseline gelée » ci-dessus et l'ajouter à la liste "
-                         "« doit passer »")
+                         "R21 : ceci n'est PAS voulu (admettre ce fichier admet "
+                         "ssh_k8s_drain/ssh_pkg_remove, que R20 interdit) ; ne "
+                         "PAS relâcher le garde-fou pour ce résultat")
         except SystemExit as e:
-            unaccounted = [ln for ln in str(e).splitlines()[1:]
-                          if not any(tag in ln for tag in ACCOUNTED_FOR)]
-            if unaccounted:
+            reasons = str(e).splitlines()[1:]
+            if not reasons:
+                FAILS.append(f"régression corpus : {_rel} refusé sans aucune "
+                             "ligne de raison — message vide ?")
+            unclassed = [ln for ln in reasons
+                        if not any(tag in ln for tag in REFUSAL_CLASSES.values())]
+            if unclassed:
                 FAILS.append(f"régression corpus : {_rel} refusé pour une "
-                             f"raison NON comptabilisée (nouvelle ? une "
-                             f"vraie régression ?) : {unaccounted}")
+                             f"raison HORS des six classes attendues (R21) — "
+                             f"nouvelle règle, ou vraie régression ? {unclassed}")
 
 for f in FAILS:
     print("FAIL " + f)
