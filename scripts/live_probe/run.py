@@ -24,23 +24,39 @@ du bac à sable / suffixés `-nonexistent`. Sinon le cas est refusé quand même
 Espèces d'assertion : ok, first=, eq=, re=, lines=, lines>=, lines<=, count=, json,
 error=, exit=N, nore=REGEX, bytes<=N, bytes>=N, stderr=SUBSTR, trunc[=N], notrunc,
 saved=CHEMIN, dur<=S, dur>=S. Il n'y en a PAS d'autre : `maxbytes=`, `minbytes=`,
-`maxlines=`, `outid`, `file=`, `filebytes=`, `and=` et `discover` n'existent pas et
-font lever SystemExit, qui avorte le fichier entier. `re=` ne voit que stdout ; `nore=`, `error=`, `trunc`
-et `notrunc` voient stdout+stderr ; `stderr=` ne voit que stderr ; `bytes*`, `trunc`,
-`notrunc` et `dur*` n'imposent aucune condition sur rc (D1 le rend inexploitable).
+`maxlines=`, `outid`, `file=`, `filebytes=`, `and=` et `discover` n'existent pas — et,
+depuis le fix round 1 (C-3), une espèce inconnue ou un `argstyle` inconnu sont détectés
+par `guard()` **avant** toute exécution (auparavant `check()` ne levait SystemExit que
+dans un worker, après coup — un fichier pouvait déjà avoir tiré sur l'hôte et aucun
+rapport n'était écrit). `check()` garde le même SystemExit en second rideau.
+`re=` ne voit que stdout ; `nore=`, `error=`, `trunc` et `notrunc` voient stdout+stderr ;
+`stderr=` ne voit que stderr ; `bytes*`, `trunc`, `notrunc` et `dur*` n'imposent aucune
+condition sur rc (D1 le rend inexploitable).
 
-Un garde-fou refuse le fichier entier avant toute exécution : outil inexistant,
-outil de NEVER_PROBE_LIVE hors --dry-run/porte destructive, chemin ou objet hors
-bac à sable, écriture vers un chemin absolu hors bac à sable dans `command`,
-sudo sans sudo_reason, ssh_k8s_delete avec all/label_selector/field_selector,
-commande interdite, flags/argstyle sur le chemin mcp.
+Un garde-fou refuse le fichier entier avant toute exécution : outil inexistant, espèce
+d'assertion ou argstyle inconnu (C-3), les dix outils de classe (b) (§3.4(b)) refusés
+par NOM sans aucune échappatoire — ni --dry-run (§3.10) ni guard_probe (ruling R20) —,
+chemin ou objet hors bac à sable (y compris niché dans une liste/un dict, I-9), `pid`
+autre que la sentinelle 2147483647 (I-9), `save_output` hors du répertoire local même
+sur un outil readonly (I-8), `saved=` sans `paths=["cli"]` ou partagé entre deux cas
+(course, I-11), écriture (ou `systemctl stop/disable/mask`, ou kill-family) hors bac à
+sable n'importe où dans `command` — plus l'adjacence verbe/chemin n'est PAS requise
+(C-2) —, sudo sans sudo_reason, ssh_k8s_delete avec all/label_selector/field_selector,
+commande interdite (COMMAND_DENY), flags/argstyle sur le chemin mcp.
 `--dry-run` ne vaut certificat d'inertie que pour `bridge-mcp tool` : pour
-`upload`/`download`/`daemon` il est ignoré et la commande s'exécute (P8-11).
+`upload`/`download`/`daemon` il est ignoré et la commande s'exécute (P8-11) — et ne
+vaut de toute façon RIEN pour les dix outils de classe (b), refusés même sous
+--dry-run.
+`guard_probe` lève l'interdiction COMMAND_DENY seulement si la commande ENTIÈRE est
+inerte — chaque segment scindé sur `&&`/`||`/`;`/`|`/retour-ligne doit l'être
+indépendamment (C-1) ; toute substitution de commande (rétro-guillemets, `$(...)`)
+refuse d'emblée.
 """
 
 import argparse
 import concurrent.futures
 import datetime
+import importlib.util  # fix round 1 (Minor #9) : remonté du milieu du fichier
 import json
 import os
 import re
@@ -227,8 +243,6 @@ def check(expect, rc, out, err, ctx=None):
     raise SystemExit(f"unknown expectation kind {kind!r}")
 
 
-import importlib.util
-
 # --- §6 garde-fou --------------------------------------------------------
 # Outils dont AUCUNE invocation réelle n'est admissible sur ce Pi : ils
 # n'ont pas d'objet « bac à sable » possible (ils agissent sur le nœud, le
@@ -251,13 +265,6 @@ NEVER_PROBE_LIVE = frozenset({
 # autre forme est refusée. Le mettre dans NEVER_PROBE_LIVE tout court faisait
 # avorter A2-missing-heavy.json en entier (mesuré le 2026-09-12).
 PKG_INSTALL_OK = re.compile(r"^bmcp-nonexistent[\w.-]*$")
-# Autorisés UNIQUEMENT si toute cible est sous le bac à sable ou inexistante
-# (classe §3.4(a)). La vérification PATH_KEYS/NAME_KEYS ci-dessous s'applique.
-SANDBOX_ONLY = frozenset({
-    "ssh_backup_restore", "ssh_runbook_execute", "ssh_template_apply",
-    "ssh_crictl_rmi", "ssh_process_kill", "ssh_docker_compose",
-    "ssh_user_modify", "ssh_firewall_allow",
-})
 # Objets que la campagne a le droit de créer et donc de modifier (Task 1bis, §3.0).
 SANDBOX_PATH_RE = re.compile(r"^/tmp/bridge-test-0909(?:-local)?(?:/|$)")
 # Deux familles de noms légitimes, et pas une seule : les objets que la
@@ -288,8 +295,23 @@ PATH_KEYS = frozenset({"path", "paths", "source", "destination", "dest", "target
                        # clés réellement employées par les cas mutants des lanes C/E :
                        "output_file", "archive_file", "mount_point", "template_path",
                        "output_path", "chart_path", "project_dir"})
-NAME_KEYS = frozenset({"name", "username", "group", "service", "unit", "namespace",
-                       "release", "pattern"})
+NAME_KEYS = frozenset({"name", "names", "username", "group", "service", "unit",
+                       "namespace", "release", "pattern"})
+# Fix round 1 (review C-3/R20): les espèces d'assertion et les valeurs d'argstyle
+# valides, pour un refus AVANT exécution plutôt qu'un SystemExit dans un worker
+# après que des cas ont déjà tourné (mesuré : 3 run_cli avant l'abort, aucun
+# rapport écrit — run.py:227,107 anciennement).
+OWNERS = frozenset({"campaign", "base", "env", "discover", "defect"})
+EXPECT_KINDS = frozenset({
+    "ok", "first", "eq", "re", "lines", "lines>", "lines<", "count", "json",
+    "error", "exit", "nore", "bytes<", "bytes>", "stderr", "notrunc", "trunc",
+    "saved", "dur<", "dur>",
+})
+ARGSTYLES = frozenset({"json-args", "kv"})
+# Fix round 1 (review R20, ruling du contrôleur) : les dix outils de classe (b)
+# des contraintes globales §3.4(b) ne sont JAMAIS invocables, sous AUCUNE forme
+# — pas même --dry-run (§3.10) — et sans échappatoire `guard_probe`. Refusés par
+# NOM, avant tout autre calcul (avant même `is_inert`), dans `guard()`.
 # Défense en profondeur : la porte destructive s'exécute AVANT la blacklist
 # (défaut connu), donc un `--yes` la franchit et seule la blacklist serveur
 # arrête ensuite. On refuse ici, côté harness, sans dépendre d'elle.
@@ -310,21 +332,52 @@ SENTINEL = "ssh_bridge_campaign_"
 # après une affectation `VAR=…;`), soit tout chemin absolu qu'elle nomme est
 # sous le bac à sable ou porte un suffixe d'inexistence. Une sonde qui ne
 # satisfait aucune des deux formes est refusée MALGRÉ son `guard_probe`.
-INERT_ECHO = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s*;\s*)?echo\b")
+# Fix round 1 (review C-1): l'ancienne version de `INERT_ECHO` était ancrée en
+# DÉBUT de chaîne seulement — `echo probe && shutdown -h now` matchait le
+# préfixe et `is_inert_probe` rendait la main avant d'avoir regardé le reste
+# de la commande. Toute substitution de commande (rétro-guillemets, `$(...)`)
+# exécute un contenu non analysable statiquement : elle refuse la sonde
+# d'emblée, quoi qu'il arrive ensuite. Le reste de la commande — hors le
+# préfixe `VAR=valeur;` documenté, qui n'est PAS un opérateur de séquencement
+# mais une affectation locale au même segment — est scindé sur tout opérateur
+# de séquencement (`&&`, `||`, `;`, `|`, retour à la ligne) et CHAQUE segment
+# résultant doit, à lui seul, être inerte.
+CHAIN_OPS = re.compile(r"&&|\|\||;|\||\n")
+SHELL_SUBST = re.compile(r"`|\$\(")
+VAR_ASSIGN_PREFIX = re.compile(r"^\s*[A-Za-z_]\w*=\S*\s*;\s*")
+# Un segment est un `echo` pur seulement s'il ne porte plus, après le mot
+# `echo`, aucun caractère qui lui donnerait un effet de bord (redirection,
+# séquencement, substitution) : `echo shutdown` est pur, `echo x > /etc/motd`
+# ne l'est pas (la redirection retombe sur le contrôle par chemin ci-dessous).
+ECHO_ONLY = re.compile(r"^\s*echo\b[^>|;&`]*$")
 NONEXISTENT_SUFFIX = re.compile(
     r"-(nonexistent|guard-probe|canary-does-not-exist|inexistant)[\w.-]*$")
 
 
+def _segment_is_inert(seg):
+    """Un seul segment (déjà scindé sur tout opérateur de séquencement) est
+    inerte s'il s'agit d'un `echo` pur, ou si tout chemin absolu qu'il nomme
+    est sous le bac à sable ou porte un suffixe d'inexistence."""
+    if ECHO_ONLY.match(seg):
+        return True
+    paths = re.findall(r"(?<![\w-])(/[A-Za-z0-9._/-]+)", seg)
+    return bool(paths) and all(
+        SANDBOX_PATH_RE.match(p) or NONEXISTENT_SUFFIX.search(p) for p in paths)
+
+
 def is_inert_probe(c):
-    """Vrai si un cas `guard_probe` est démontrablement sans effet."""
+    """Vrai si un cas `guard_probe` est démontrablement sans effet, sur la
+    TOTALITÉ de la commande — pas seulement son préfixe (C-1)."""
     if not c.get("guard_probe"):
         return False
     cmd = c["args"].get("command", "")
-    if INERT_ECHO.match(cmd):
-        return True
-    paths = re.findall(r"(?<![\w-])(/[A-Za-z0-9._/-]+)", cmd)
-    return bool(paths) and all(
-        SANDBOX_PATH_RE.match(p) or NONEXISTENT_SUFFIX.search(p) for p in paths)
+    if not isinstance(cmd, str) or not cmd.strip():
+        return False
+    if SHELL_SUBST.search(cmd):
+        return False
+    body = VAR_ASSIGN_PREFIX.sub("", cmd, count=1)
+    segments = [s.strip() for s in CHAIN_OPS.split(body) if s.strip()]
+    return bool(segments) and all(_segment_is_inert(s) for s in segments)
 
 
 def _coverage():
@@ -356,22 +409,109 @@ def is_inert(c, inv):
     return bool(inv.get(c["tool"], {}).get("destructive")) and not c.get("yes", False)
 
 
-def guard(cases, inv, path_filter):
+# Fix round 1 (C-2) : l'ancien contrôle exigeait le chemin immédiatement après
+# le verbe (`rm |mv |cp |…` suivi tout de suite du chemin) — `rm -r -- /etc/motd`
+# (la forme même que §3.3 impose pour tout démontage), `rm -fr /etc/motd` et
+# `cp SRC /etc/x` (le chemin dangereux n'est pas le premier après le verbe)
+# passaient tous. Le nouveau contrôle détecte le verbe n'importe où dans la
+# commande, puis inspecte TOUS les chemins absolus, sans exiger l'adjacence.
+WRITE_VERB = re.compile(r"\b(rm|mv|cp|chmod|chown|tee|mkdir|truncate|dd)\b")
+FIND_DELETE = re.compile(r"\bfind\b.*(-delete\b|-exec\b)")
+REDIRECT = re.compile(r">>?(?!=)")
+# `systemctl stop k3s` ne porte AUCUN chemin absolu — c'est l'exemple cité par
+# le commentaire original comme raison d'être du contrôle par chemin, et ce
+# contrôle ne le voyait jamais puisqu'il n'y a pas de chemin à inspecter.
+SERVICE_STOP_RE = re.compile(r"\bsystemctl\s+(?:stop|disable|mask)\s+(\S+)")
+# Aucune forme sandboxée légitime n'existe pour kill/pkill/killall en `command`
+# brut : un PID sandboxé passe par l'outil dédié `ssh_process_kill` (liste
+# blanche §3.2), jamais par une commande `ssh_exec` à la main.
+KILL_FAMILY_RE = re.compile(r"\b(?:kill|pkill|killall)\b")
+ABS_PATH = re.compile(r"(?<![\w-])(/[A-Za-z0-9._/-]+)")
+READ_ONLY_OK = re.compile(
+    r"^/(etc/os-release|etc/hostname|proc|sys|usr|bin|sbin|lib|var/log|dev/null)")
+
+
+def _walk_args(args):
+    """Génère (clé, valeur-chaîne) pour toute chaîne trouvée dans les args,
+    y compris nichée dans une liste ou un dict (fix round 1, I-9 :
+    `files=[{"path": …}]` et `names=[...]` échappaient tout contrôle car
+    seules les valeurs `str` de premier niveau étaient inspectées). Dans un
+    dict, SES clés prennent le relais du contrôle ; dans une liste, chaque
+    élément hérite de la clé de la liste, sauf s'il est lui-même un dict."""
+    def walk(k, v):
+        if isinstance(v, str):
+            yield k, v
+        elif isinstance(v, dict):
+            for kk, vv in v.items():
+                yield from walk(kk, vv)
+        elif isinstance(v, list):
+            for item in v:
+                yield from walk(k, item)
+    for k, v in args.items():
+        yield from walk(k, v)
+
+
+def guard(cases, inv):
     """Refuse le fichier entier avant la première exécution. Aucune option ne
     la désactive : un garde-fou débrayable n'en est pas un."""
     bad = []
+
+    # Fix round 1 (ruling R20 du contrôleur) : chemin séparé, AVANT tout le
+    # reste, pour les dix outils de classe (b) (§3.4(b)) — jamais invoqués,
+    # sous AUCUNE forme, pas même --dry-run (§3.10). Aucune échappatoire :
+    # ni `is_inert`, ni `guard_probe` ne s'appliquent à ce refus.
+    never_probe_cids = set()
+    for c in cases:
+        if c["tool"] in NEVER_PROBE_LIVE:
+            bad.append(f"{c['id']}: {c['tool']} est de classe (b) (§3.4(b)) — refus "
+                       "par nom, sans exception --dry-run/guard_probe (§3.10)")
+            never_probe_cids.add(c["id"])
+
+    # Fix round 1 (I-11) : deux cas qui partagent le même `saved=` chemin
+    # entrent en course dès qu'ils tournent en parallèle — inspection au
+    # niveau du fichier entier, indépendante de --jobs.
+    saved_targets = {}
+    for c in cases:
+        for e in c.get("expect", []):
+            if isinstance(e, str) and e.startswith("saved="):
+                saved_targets.setdefault(e.partition("=")[2], []).append(c["id"])
+    for target, ids in saved_targets.items():
+        if len(ids) > 1:
+            bad.append(f"cas {ids} partagent le même chemin saved={target!r} — "
+                       "collision garantie (I-11)")
+
     for c in cases:
         cid, tool = c["id"], c["tool"]
+        if cid in never_probe_cids:
+            continue                                       # déjà refusé ci-dessus
         if tool not in inv and not tool.startswith(SENTINEL):
             bad.append(f"{cid}: outil inexistant {tool!r} "
                        f"(préfixe {SENTINEL!r} réservé aux cas « outil inconnu »)")
             continue
+        # Fix round 1 (C-3) : espèce d'assertion et argstyle vérifiés ICI,
+        # avant tout subprocess — pas dans un worker après coup, où l'ancien
+        # SystemExit surgissait après que d'autres cas avaient déjà tourné
+        # (mesuré par la relecture : 3 run_cli exécutés avant l'abort, aucun
+        # rapport écrit, contrairement à ce que promettait la docstring).
+        for e in c.get("expect", []):
+            kind = e.partition("=")[0] if isinstance(e, str) else None
+            if kind not in EXPECT_KINDS:
+                bad.append(f"{cid}: espèce d'assertion inconnue {e!r} dans expect")
+        argstyle = c.get("argstyle", "json-args")
+        if argstyle not in ARGSTYLES:
+            bad.append(f"{cid}: argstyle inconnu {argstyle!r} (json-args|kv)")
+        # Fix round 1 (Minor #8) : une faute de frappe sur `owner` se lisait
+        # silencieusement comme "non-base" (tout ce qui n'est pas exactement
+        # "base" prend la branche KO(e) sous --baseline).
+        owner = c.get("owner", "base")
+        if owner not in OWNERS:
+            bad.append(f"{cid}: owner={owner!r} hors du vocabulaire fermé {sorted(OWNERS)}")
         if (c.get("flags") or c.get("argstyle")) and "mcp" in c.get("paths", ["cli", "mcp"]):
             bad.append(f"{cid}: flags/argstyle n'existent pas côté MCP — mets paths=['cli']")
+        if (any(isinstance(e, str) and e.startswith("saved=") for e in c.get("expect", []))
+                and c.get("paths", ["cli", "mcp"]) != ["cli"]):
+            bad.append(f"{cid}: saved= exige paths=['cli'] (sinon course cli/mcp — I-11)")
         inert = is_inert(c, inv)
-        if tool in NEVER_PROBE_LIVE and not inert:
-            bad.append(f"{cid}: {tool} est dans NEVER_PROBE_LIVE — seulement --dry-run "
-                       "ou un refus de la porte destructive")
         if tool == "ssh_pkg_install" and not inert:
             pkg = str(c["args"].get("package", ""))
             if c["args"].get("sudo") or not PKG_INSTALL_OK.match(pkg):
@@ -379,8 +519,8 @@ def guard(cases, inv, path_filter):
                            f"paquet `bmcp-nonexistent*` (décision B) — vu package={pkg!r}")
         if c.get("guard_probe") and not is_inert_probe(c):
             bad.append(f"{cid}: guard_probe déclaré mais la charge n'est pas inerte "
-                       "(ni préfixée par `echo`, ni confinée au bac à sable / aux cibles "
-                       "suffixées -nonexistent)")
+                       "(ni un `echo` intégral sans effet de bord, ni confinée au bac à "
+                       "sable / aux cibles suffixées -nonexistent, sur CHAQUE segment)")
         if tool == "ssh_k8s_delete" and ({"all", "label_selector", "field_selector"}
                                          & set(c["args"])):
             # validate_delete (kubernetes.rs:920-936) ne protège les namespaces
@@ -388,34 +528,57 @@ def guard(cases, inv, path_filter):
             # `field_selector`, `name` vaut "" et le garde applicatif ne mord pas.
             bad.append(f"{cid}: ssh_k8s_delete avec all/label_selector/field_selector "
                        "— forme interdite dans toute la campagne")
+        # Fix round 1 (I-8) : `save_output` écrit sur la machine bridge (WSL),
+        # pas sur le Pi — orthogonal à `readonly`/`inert`, donc vérifié
+        # inconditionnellement plutôt que dans la boucle d'arguments plus bas,
+        # que `readonly` court-circuitait entièrement (la majorité des outils
+        # qui utilisent réellement `save_output` sont readonly).
+        sv = c["args"].get("save_output")
+        if isinstance(sv, str) and not LOCAL_OUT_RE.match(sv):
+            bad.append(f"{cid}: save_output={sv!r} hors du répertoire de sortie local")
+        # Fix round 1 (I-9) : `pid` est un entier, dans aucun PATH_KEYS/NAME_KEYS,
+        # donc invisible à la boucle par clé ci-dessous. Seule la valeur
+        # sentinelle est mécaniquement vérifiable sans état inter-tâches — un
+        # pid réel exige la garde d'identité E505a/E505b (§3.2), hors du
+        # périmètre de ce garde-fou statique.
+        pid = c["args"].get("pid")
+        if pid is not None and not isinstance(pid, bool):
+            try:
+                pid_ok = int(pid) == 2147483647
+            except (TypeError, ValueError):
+                pid_ok = False
+            if not pid_ok:
+                bad.append(f"{cid}: pid={pid!r} — seule la sentinelle 2147483647 est "
+                           "vérifiable ici (§3.2) ; un pid réel exige la garde d'identité "
+                           "E505a/E505b dans le même sous-lot")
         if inert:
             continue
         if inv.get(tool, {}).get("readonly"):
             continue                                   # lecture seule : hors périmètre du garde-fou
-        # `command` n'est dans aucune PATH_KEYS : ssh_exec est l'outil le plus
-        # dangereux du parc et n'a que cet argument. COMMAND_DENY seule ne
-        # couvre que huit motifs de destruction massive — `systemctl stop k3s`
-        # n'est dans aucune blacklist. On inspecte donc les chemins absolus.
-        ABS_PATH = re.compile(r"(?<![\w-])(/[A-Za-z0-9._/-]+)")
-        READ_ONLY_OK = re.compile(
-            r"^/(etc/os-release|etc/hostname|proc|sys|usr|bin|sbin|lib|var/log|dev/null)")
         if tool in ("ssh_exec", "ssh_session_exec", "ssh_exec_multi"):
             cmdtext = c["args"].get("command", "")
-            if (c.get("sudo") or c["args"].get("sudo")) and not c.get("sudo_reason"):
-                bad.append(f"{cid}: sudo=true sans champ 'sudo_reason' justifiant l'élévation")
-            for p in ABS_PATH.findall(cmdtext):
-                if (SANDBOX_PATH_RE.match(p) or READ_ONLY_OK.match(p)
-                        or p.startswith("/run/systemd/system/bridge-test-0909")):
-                    continue
-                if re.search(r"(>|>>|rm |mv |cp |chmod |chown |tee |mkdir |truncate |dd )\s*"
-                             + re.escape(p), cmdtext):
-                    bad.append(f"{cid}: écriture hors bac à sable dans command: {p}")
-        for k, v in c["args"].items():
-            if not isinstance(v, str):
-                continue
-            if k == "save_output" and not LOCAL_OUT_RE.match(v):
-                bad.append(f"{cid}: save_output={v!r} hors du répertoire de sortie local")
-            elif k in PATH_KEYS and not SANDBOX_PATH_RE.match(v):
+            if not isinstance(cmdtext, str):
+                bad.append(f"{cid}: command doit être une chaîne, pas {type(cmdtext).__name__}")
+            else:
+                if (c.get("sudo") or c["args"].get("sudo")) and not c.get("sudo_reason"):
+                    bad.append(f"{cid}: sudo=true sans champ 'sudo_reason' justifiant l'élévation")
+                has_write_verb = bool(WRITE_VERB.search(cmdtext) or FIND_DELETE.search(cmdtext)
+                                       or REDIRECT.search(cmdtext))
+                if has_write_verb:
+                    for p in ABS_PATH.findall(cmdtext):
+                        if (SANDBOX_PATH_RE.match(p) or READ_ONLY_OK.match(p)
+                                or p.startswith("/run/systemd/system/bridge-test-0909")):
+                            continue
+                        bad.append(f"{cid}: écriture hors bac à sable dans command: {p}")
+                m = SERVICE_STOP_RE.search(cmdtext)
+                if m and not m.group(1).startswith("bridge-test-0909"):
+                    bad.append(f"{cid}: systemctl stop/disable/mask hors bac à sable "
+                               f"dans command: {m.group(1)}")
+                if KILL_FAMILY_RE.search(cmdtext):
+                    bad.append(f"{cid}: kill/pkill/killall dans command — utiliser "
+                               "ssh_process_kill (liste blanche §3.2), pas une commande brute")
+        for k, v in _walk_args(c["args"]):
+            if k in PATH_KEYS and not SANDBOX_PATH_RE.match(v):
                 bad.append(f"{cid}: {k}={v!r} hors du bac à sable {SANDBOX_PATH_RE.pattern}")
             elif (k in NAME_KEYS and not SANDBOX_NAME_RE.match(v)
                   and cid not in GUARD_EXPECTED_REFUSAL):
@@ -423,7 +586,7 @@ def guard(cases, inv, path_filter):
             elif k == "command" and COMMAND_DENY.search(v) and not is_inert_probe(c):
                 bad.append(f"{cid}: command={v!r} touche un motif interdit "
                            "(ajouter `\"guard_probe\": true` SI et seulement si la charge "
-                           "est inerte par construction)")
+                           "est inerte par construction, sur CHAQUE segment)")
     if bad:
         raise SystemExit("GARDE-FOU — aucun cas n'a été exécuté :\n  " + "\n  ".join(bad))
 
@@ -464,7 +627,8 @@ def main():
         c["expect"] = [substitute(e, variables) for e in expectations(c)]
         allcases.append(c)
     inv = _coverage().inventory(a.binary)      # cf. Step 5
-    guard(allcases, inv, a.path)               # cf. Step 5 — AVANT toute exécution
+    guard(allcases, inv)                       # cf. Step 5 — AVANT toute exécution ; fix
+                                                # round 1 (I-10) : `path_filter` était mort
     only = {x for x in a.only.split(",") if x}
     cases = [c for c in allcases if not only or c["id"] in only]
 
@@ -475,6 +639,8 @@ def main():
             if a.path != "both" and path != a.path:
                 continue
             jobs.append((c, path, args))
+
+    ATTEMPT_KEYS = ("ok", "rc", "duration", "out", "err", "failed", "out_bytes", "omitted_lines")
 
     def attempt(c, path, args):
         # `saved=` mentirait sur un fichier laissé par un run précédent.
@@ -488,9 +654,22 @@ def main():
         else:
             rc, out, err, dt, argv = run_mcp(a.binary, c["tool"], args)
         ctx = {"duration": dt, "argv": argv}
-        ok = all(check(e, rc, out, err, ctx) for e in c["expect"])
+        # Fix round 1 (I-4) : quelle assertion précise a échoué, pas un seul
+        # booléen global — `all()` court-circuite, donc sans ceci un échec
+        # sur la première assertion d'une liste rend le verdict des suivantes
+        # à jamais inconnu du rapport (mesuré sur un cas `["exit=0", "re=…"]`).
+        checks = [{"expect": e, "ok": check(e, rc, out, err, ctx)} for e in c["expect"]]
+        ok = all(x["ok"] for x in checks)
+        failed = [x["expect"] for x in checks if not x["ok"]]
+        # Fix round 1 (I-7) : le nombre d'octets et de lignes omises sont déjà
+        # calculés par check() puis jetés ; sans eux un échec bytes<=/trunc ne
+        # dit jamais "401 octets" ou "bannière absente", et l'extrait [:400]
+        # place la preuve décisive hors champ pour tout payload assez gros
+        # pour que D2 soit intéressant.
+        both = out + "\n" + err
         return {"ok": ok, "rc": rc, "duration": round(dt, 3), "argv": argv,
-                "out": out[:400], "err": err[:400]}
+                "out": out[:400], "err": err[:400], "failed": failed,
+                "out_bytes": len(out.encode()), "omitted_lines": omitted_lines(both)}
 
     def work(job):
         c, path, args = job
@@ -503,7 +682,7 @@ def main():
 
     by_case = {}
     for cid, path, r in results:
-        r["attempts"] = [{k: r[k] for k in ("ok", "rc", "duration", "out", "err")}]
+        r["attempts"] = [{k: r[k] for k in ATTEMPT_KEYS}]
         by_case.setdefault(cid, {})[path] = r
 
     if a.rerun_ko:
@@ -513,14 +692,24 @@ def main():
         for cid, path in ko:                        # série stricte : jamais de parallélisme ici
             c = by_id[cid]
             args = {"host": a.host, **c["args"]}
+            # Fix round 1 (I-6) : la boucle ne rompt PLUS au premier succès —
+            # global-constraints §4 exige trois verdicts consignés avant de
+            # conclure ("obligation de trois relances… le cas déclaré FLAKY
+            # seulement si les trois ne concordent pas"), pas "le premier qui
+            # bascule gagne" (mesuré : l'ancien code ne consignait que 2
+            # tentatives sur les 3 requises par --rerun-ko 2).
             for _ in range(a.rerun_ko):
                 r = attempt(c, path, args)
-                by_case[cid][path]["attempts"].append(
-                    {k: r[k] for k in ("ok", "rc", "duration", "out", "err")})
-                if r["ok"]:
-                    by_case[cid][path]["ok"] = True
-                    by_case[cid][path]["flaky"] = True
-                    break
+                by_case[cid][path]["attempts"].append({k: r[k] for k in ATTEMPT_KEYS})
+            verdicts = {att["ok"] for att in by_case[cid][path]["attempts"]}
+            if len(verdicts) > 1:
+                # Fix round 1 (I-5) : le sommaire de tête reflète la DERNIÈRE
+                # tentative — pas la première (celle qui a échoué), laissée en
+                # place avec seulement `ok` forcé à True par l'ancien code, ce
+                # qui faisait cohabiter `ok=true` avec le `rc`/`duration` d'un
+                # échec. L'historique complet reste, honnête, dans `attempts`.
+                by_case[cid][path].update({k: r[k] for k in ATTEMPT_KEYS + ("argv",)})
+                by_case[cid][path]["flaky"] = True
         n_flaky = sum(1 for p in by_case.values() for r in p.values() if r.get("flaky"))
         print(f"rerun-ko: {len(ko)} échec(s) rejoué(s) en série, {n_flaky} FLAKY")
 
@@ -549,7 +738,10 @@ def main():
     for c in cases:
         for path, v in by_case.get(c["id"], {}).items():
             if not v["ok"] and not (a.baseline and c.get("owner", "base") != "base"):
-                print(f"--- {c['id']} [{path}] out: {v['out']!r}\n    err: {v['err']!r}")
+                # Fix round 1 (I-4) : nommer l'assertion en cause, pas
+                # seulement les extraits stdout/stderr.
+                print(f"--- {c['id']} [{path}] failed: {v.get('failed')}\n"
+                      f"    out: {v['out']!r}\n    err: {v['err']!r}")
 
     report = a.report or str(HERE.parents[1] / ".superpowers" / "probes" /
                              f"{datetime.date.today()}-{Path(a.binary).stem}-{Path(a.cases).stem}.json")
