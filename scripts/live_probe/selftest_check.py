@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Test unitaire local de check() — aucune connexion, aucun sous-processus.
+"""Test unitaire local de check() et de guard() — aucune connexion, aucun
+sous-processus RÉSEAU. La section « régression corpus » plus bas invoque le
+binaire LOCAL (`list-tools`, comme `coverage.py` et Step 1 : lecture de la
+config locale uniquement) pour obtenir l'inventaire réel — c'est la même
+garantie « local, pas de connexion » que le reste de la campagne, pas une
+exception à elle.
 
 Lancer : scripts/live_probe/selftest_check.py
-Sortie 0 = toutes les espèces d'assertion se comportent comme documenté.
+Sortie 0 = toutes les espèces d'assertion, et tout ce que `guard()` doit
+refuser ou accepter, se comportent comme documenté.
 """
 import importlib.util
+import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -168,6 +176,17 @@ INV = {
 }
 
 
+def _bad_of(mod, cases_list, inv):
+    """Rend le message de refus de guard(), ou None si guard() ne refuse pas —
+    pour COMPARER deux verdicts (fix round 2 : forme scalaire vs liste), pas
+    seulement en affirmer un."""
+    try:
+        mod.guard(cases_list, inv)
+        return None
+    except SystemExit as e:
+        return str(e)
+
+
 def guard_refuses(label, cases_list, must_contain):
     try:
         R.guard(cases_list, INV)
@@ -323,6 +342,109 @@ guard_passes("guard-regression-G2-sandbox-write-passes",
     [{"id": "G2", "tool": "ssh_file_write", "yes": True, "paths": ["cli"],
       "args": {"path": "/tmp/bridge-test-0909/g2.txt", "content": "x\n"},
       "expect": ["ok"]}])
+
+# =============================================================================
+# Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
+# validation d'espèce/argstyle du C-3 itérait `c.get("expect", [])` sans
+# passer par `expectations()`. Sur un `expect` SCALAIRE (la forme des 357
+# cas du corpus — "ok" n'est pas une liste), `for e in "ok"` itère les
+# CARACTÈRES 'o' et 'k', pas la chaîne entière : `guard()` refusait alors
+# TOUT fichier de cas existant, y compris les cinq fichiers baseline
+# 2026-09-06 et les preuves déjà relues de la Task 1bis. Rule 1 appliquée à
+# la lettre : le vieux bug ne se voyait qu'en GREEN (`selftest_check: 0
+# échec(s)`) parce que rien ne testait jamais `guard()` sur du JSON de cas
+# BRUT — seulement sur des dicts déjà construits à la main avec `expect` en
+# liste. Les preuves ci-dessous testent `guard()` sur le contenu RÉEL des
+# fichiers de cas, chargé depuis le disque, exactement comme un futur appel
+# de `guard()` en dehors de `main()` le ferait.
+# =============================================================================
+
+# --- équivalence scalaire / liste-à-un-élément, à la fois pour guard() et pour
+# le sens que `check()` (via `expectations()`) leur donne -------------------
+_scalar_case = {"id": "SCALAR", "tool": "ssh_ls", "paths": ["cli"],
+                "args": {"path": "/tmp/bridge-test-0909/x"}, "expect": "ok"}
+_list_case = {"id": "LIST", "tool": "ssh_ls", "paths": ["cli"],
+              "args": {"path": "/tmp/bridge-test-0909/x"}, "expect": ["ok"]}
+if R.expectations(_scalar_case) != R.expectations(_list_case):
+    FAILS.append("expectations() ne rend pas la même liste pour un expect "
+                 "scalaire et son équivalent à un élément")
+_scalar_verdict = _bad_of(R, [_scalar_case], INV)
+_list_verdict = _bad_of(R, [_list_case], INV)
+if _scalar_verdict != _list_verdict:
+    FAILS.append(f"guard() diverge entre expect scalaire ({_scalar_verdict!r}) "
+                 f"et liste équivalente ({_list_verdict!r})")
+# Un expect scalaire MULTI-CARACTÈRES qui ressemblerait à une espèce connue
+# lettre par lettre serait le pire cas — "ok" contient 'o' et 'k', ni l'un ni
+# l'autre une espèce valide, donc l'ancien bug aurait aussi dû se voir ici.
+guard_passes("guard-fix2-scalar-expect-passes", [_scalar_case])
+guard_passes("guard-fix2-list-expect-passes", [_list_case])
+
+# --- régression corpus : le contenu RÉEL des fichiers commités, avec le
+# VRAI inventaire (nécessite le binaire local — voir docstring du module) --
+_BIN = os.environ.get("BMCP_SELFTEST_BIN", str(HERE.parents[1] / "target" / "release" / "bridge-mcp"))
+if not Path(_BIN).is_file():
+    FAILS.append(f"régression corpus : binaire introuvable à {_BIN!r} — "
+                 "impossible de charger l'inventaire réel, ce fichier ne "
+                 "prouve alors RIEN sur guard() vis-à-vis du corpus (le "
+                 "définir via BMCP_SELFTEST_BIN si le worktree diffère)")
+else:
+    _inv = R._coverage().inventory(_BIN)
+
+    def _corpus_cases(relpath):
+        return json.loads((HERE / relpath).read_text())["cases"]
+
+    # Ces quatre fichiers sont des cas RÉELLEMENT en jeu dans la campagne
+    # 2026-09-09 (les trois premiers sont la baseline 2026-09-06 la plus
+    # ancienne et la plus simple, la moins susceptible d'avoir jamais visé
+    # les conventions nées avec CETTE campagne ; E9 est du Task 1bis déjà
+    # relu). Ils DOIVENT passer `guard()` intégralement, sans modification —
+    # si l'un d'eux échoue, c'est `guard()` qui a régressé, jamais le fichier.
+    for _rel in ("campaign/A-host.json", "campaign/A2-host-heavy.json",
+                 "campaign/B-k8s.json", "campaign/2026-09-09/E9-teardown-proof.json"):
+        try:
+            R.guard(_corpus_cases(_rel), _inv)
+        except SystemExit as e:
+            FAILS.append(f"régression corpus : guard() refuse {_rel} (devrait "
+                         f"passer intégralement) — {e}")
+
+    # C-security.json et D-sandbox.json sont DEUX des cinq fichiers baseline
+    # 2026-09-06 — gelés, jamais rejoués par cette campagne (global
+    # constraints §3.0bis : "servent uniquement de baseline"). Mesuré : ils
+    # NE PASSENT PAS `guard()` même une fois le bug scalaire corrigé, et
+    # chaque refus s'explique par une règle NÉE APRÈS leur écriture : les dix
+    # outils de classe (b) (ruling R20, ssh_k8s_drain/ssh_pkg_remove),
+    # l'ancienne orthographe de bac à sable "/tmp/bridge-campaign" (morte,
+    # §3.0), des namespaces/noms réels non créés par CETTE campagne
+    # ("default", "argocd"), `sudo` sans `sudo_reason`, un `pid` réel plutôt
+    # que la sentinelle, et des sondes de blacklist sans `guard_probe` (un
+    # champ que CETTE tâche introduit). Ce n'est PAS le bug scalaire — c'est
+    # `guard()` qui applique fidèlement le contrat DE CETTE campagne à des
+    # cas écrits pour une autre. Le test ci-dessous n'exige donc PAS qu'ils
+    # passent : il exige que TOUTE ligne de refus reste rattachée à l'une de
+    # ces raisons connues, pour qu'un refus futur pour une raison NOUVELLE
+    # continue d'être signalé plutôt que noyé dans le bruit attendu.
+    ACCOUNTED_FOR = (
+        "est de classe (b)",                        # R20 : ssh_k8s_drain / ssh_pkg_remove
+        "bac à sable",                              # /tmp/bridge-campaign(-local) mort (2 formes)
+        "n'est pas un objet créé par la campagne",  # namespace=default/argocd, noms 2026-09-06
+        "sudo=true sans champ 'sudo_reason'",       # champ né avec CETTE campagne
+        "seule la sentinelle 2147483647",           # pid réel 2026-09-06, pas la sentinelle
+        "touche un motif interdit",                 # sonde blacklist sans guard_probe (champ 2026-09-09)
+    )
+    for _rel in ("campaign/C-security.json", "campaign/D-sandbox.json"):
+        try:
+            R.guard(_corpus_cases(_rel), _inv)
+            FAILS.append(f"régression corpus : {_rel} passe désormais guard() — "
+                         "si c'est voulu, retirer ce fichier de la liste "
+                         "« baseline gelée » ci-dessus et l'ajouter à la liste "
+                         "« doit passer »")
+        except SystemExit as e:
+            unaccounted = [ln for ln in str(e).splitlines()[1:]
+                          if not any(tag in ln for tag in ACCOUNTED_FOR)]
+            if unaccounted:
+                FAILS.append(f"régression corpus : {_rel} refusé pour une "
+                             f"raison NON comptabilisée (nouvelle ? une "
+                             f"vraie régression ?) : {unaccounted}")
 
 for f in FAILS:
     print("FAIL " + f)

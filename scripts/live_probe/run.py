@@ -417,7 +417,16 @@ def is_inert(c, inv):
 # commande, puis inspecte TOUS les chemins absolus, sans exiger l'adjacence.
 WRITE_VERB = re.compile(r"\b(rm|mv|cp|chmod|chown|tee|mkdir|truncate|dd)\b")
 FIND_DELETE = re.compile(r"\bfind\b.*(-delete\b|-exec\b)")
-REDIRECT = re.compile(r">>?(?!=)")
+# Fix round 2 (found while proving E9-teardown-proof.json — a LIVE, in-scope
+# file — should pass unchanged) : la première forme de `REDIRECT` matchait
+# `2>/dev/null` (suppression banale de stderr) et `2>&1` (duplication de
+# descripteur, aucun chemin impliqué) comme des écritures, faisant croire
+# qu'une commande purement en lecture (`ls … 2>/dev/null | grep -c …`)
+# écrivait, et faisant alors inspecter TOUT chemin absolu de la commande —
+# y compris la cible LUE par `ls` — contre le bac à sable. Exclut la
+# duplication de descripteur (`>&`) et toute redirection vers `/dev/null`
+# (déjà dans READ_ONLY_OK, donc jamais une écriture qui compte).
+REDIRECT = re.compile(r">>?(?!=|&)(?!\s*/dev/null\b)")
 # `systemctl stop k3s` ne porte AUCUN chemin absolu — c'est l'exemple cité par
 # le commentaire original comme raison d'être du contrôle par chemin, et ce
 # contrôle ne le voyait jamais puisqu'il n'y a pas de chemin à inspecter.
@@ -451,6 +460,21 @@ def _walk_args(args):
         yield from walk(k, v)
 
 
+def _expect_list(c):
+    """Fix round 2 : `guard()` doit rester correct qu'on l'appelle sur des cas
+    déjà normalisés par `main()` (où `c["expect"]` est toujours une liste,
+    `expectations()` + substitution déjà appliquées) OU directement sur le
+    JSON brut d'un fichier de cas — où `expect` est le plus souvent une
+    CHAÎNE nue. `for e in c.get("expect", [])` sur une chaîne itère ses
+    CARACTÈRES ('o', 'k' pour "ok"...) : c'est exactement ce qui faisait
+    refuser les 357 cas du corpus (tous en forme scalaire) avant ce fix.
+    Réutilise `expectations()` (chaîne OU liste -> liste), tolérant en plus
+    une clé `expect` absente."""
+    if "expect" not in c:
+        return []
+    return expectations(c)
+
+
 def guard(cases, inv):
     """Refuse le fichier entier avant la première exécution. Aucune option ne
     la désactive : un garde-fou débrayable n'en est pas un."""
@@ -472,7 +496,7 @@ def guard(cases, inv):
     # niveau du fichier entier, indépendante de --jobs.
     saved_targets = {}
     for c in cases:
-        for e in c.get("expect", []):
+        for e in _expect_list(c):
             if isinstance(e, str) and e.startswith("saved="):
                 saved_targets.setdefault(e.partition("=")[2], []).append(c["id"])
     for target, ids in saved_targets.items():
@@ -493,7 +517,7 @@ def guard(cases, inv):
         # SystemExit surgissait après que d'autres cas avaient déjà tourné
         # (mesuré par la relecture : 3 run_cli exécutés avant l'abort, aucun
         # rapport écrit, contrairement à ce que promettait la docstring).
-        for e in c.get("expect", []):
+        for e in _expect_list(c):
             kind = e.partition("=")[0] if isinstance(e, str) else None
             if kind not in EXPECT_KINDS:
                 bad.append(f"{cid}: espèce d'assertion inconnue {e!r} dans expect")
@@ -508,7 +532,7 @@ def guard(cases, inv):
             bad.append(f"{cid}: owner={owner!r} hors du vocabulaire fermé {sorted(OWNERS)}")
         if (c.get("flags") or c.get("argstyle")) and "mcp" in c.get("paths", ["cli", "mcp"]):
             bad.append(f"{cid}: flags/argstyle n'existent pas côté MCP — mets paths=['cli']")
-        if (any(isinstance(e, str) and e.startswith("saved=") for e in c.get("expect", []))
+        if (any(isinstance(e, str) and e.startswith("saved=") for e in _expect_list(c))
                 and c.get("paths", ["cli", "mcp"]) != ["cli"]):
             bad.append(f"{cid}: saved= exige paths=['cli'] (sinon course cli/mcp — I-11)")
         inert = is_inert(c, inv)
