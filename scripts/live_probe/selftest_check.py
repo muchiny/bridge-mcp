@@ -13,6 +13,7 @@ refuser ou accepter, se comportent comme documenté.
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -580,6 +581,113 @@ for _label, _v, _base, _isbase, _cell, _cnt in (
         FAILS.append(f"verdict_cell {_label}: {_got} au lieu de {(_cell, _cnt)} — "
                      "un cas fini KO doit compter dans `unexpected` quel que soit "
                      "son étiquetage FLAKY")
+
+# =============================================================================
+# Fix round 5 (ruling R22) — les HUIT charges de sonde que global-constraints
+# §3.3 impose doivent toutes passer `guard()`. C'est le test d'acceptation
+# réel de la lane C : une sonde de blacklist DOIT contenir le motif qu'elle
+# mesure, sinon elle ne mesure rien ; un garde qui la refuse n'empêche aucune
+# destruction, il empêche de mesurer le garde du produit.
+# =============================================================================
+
+# (motif de la blacklist vivante, charge utile §3.3). Chaque charge est
+# vérifiée DEUX fois : elle doit passer `guard()`, ET elle doit réellement
+# matcher son motif — sans quoi « corriger » une sonde en lui retirant le
+# motif la ferait passer tout en la rendant inutile.
+GUARD_PROBE_PAYLOADS = (
+    (r"rm\s+-rf",
+     "rm -rf /tmp/bridge-test-0909/nonexistent-guard-probe"),
+    (r"cat\s+/etc/shadow",
+     "cat /etc/shadow-nonexistent-guard-probe"),
+    (r"\b(shutdown|reboot|halt|poweroff)\b",
+     "echo shutdown guard probe"),
+    (r"\binit\s+[06]\b",
+     "echo init 0 guard probe"),
+    (r"\bmkfs(\.|\s)",
+     "echo mkfs.ext4 guard probe"),
+    (r"\bdd\b.*\bof=/dev/",
+     "echo dd if=/dev/zero of=/dev/null"),
+    # R22 : forme QUOTÉE. Le `>` est à l'intérieur d'un jeton, le shell ne le
+    # lit jamais comme un opérateur et ne redirige rien — mais la blacklist du
+    # produit, elle, matche sur le texte brut, donc la sonde mord quand même.
+    (r">\s*/dev/(sd|mmcblk|nvme)",
+     'echo "probe > /dev/sdz9999"'),
+    (r"k3s-uninstall|k3s-killall",
+     "echo k3s-uninstall.sh guard probe"),
+)
+if len(GUARD_PROBE_PAYLOADS) != 8:
+    FAILS.append("§3.3 tabule HUIT charges de sonde ; la liste en porte "
+                 f"{len(GUARD_PROBE_PAYLOADS)}")
+for _i, (_pat, _payload) in enumerate(GUARD_PROBE_PAYLOADS):
+    if not re.search(_pat, _payload):
+        FAILS.append(f"sonde §3.3 #{_i}: la charge {_payload!r} ne matche PLUS son "
+                     f"motif de blacklist {_pat!r} — elle ne mesure donc rien ; "
+                     "une sonde ne se « corrige » pas en lui retirant le motif")
+    guard_passes(f"guard-R22-probe-{_i}-{_pat[:18]}",
+        [{"id": f"GP{_i}", "tool": "ssh_exec", "yes": True, "guard_probe": True,
+          "paths": ["cli"], "args": {"command": _payload}, "expect": ["exit=4"]}])
+
+# --- R22, l'autre sens : ce que l'exemption ne doit PAS admettre ------------
+# Une exemption par SUFFIXE sur une cible d'écriture créerait un vrai fichier
+# dans /etc ; c'est refusé par `scan_command()`, pas par l'inertie.
+for _cid, _cmd in (
+        ("Q1", 'echo "x" > /etc/motd'),      # argument quoté MAIS redirection réelle
+        ("Q2", "echo probe > /dev/sdz9999"),  # forme NON quotée : `>` est un opérateur
+        ("Q3", "echo x > /etc/motd-nonexistent-guard-probe"),
+        ("Q4", "rm -rf /etc/motd-nonexistent-guard-probe"),
+        ("Q5", "echo x >> /etc/motd"),
+        ("Q6", "echo x >& /etc/motd"),
+        ("Q7", "echo x | tee /etc/motd"),
+        ("Q8", "echo x; rm -r -- /etc/motd"),
+        ("Q9", "rm -rf /etc/motd"),
+        ("Q10", "sudo rm -rf /etc/x"),
+        ("Q11", "bash -c 'rm -rf /etc/motd'"),
+        ("Q12", "cat /etc/shadow"),           # §3.3 : aucune sonde ne nomme un vrai fichier d'/etc
+        ("Q13", "echo 'unbalanced"),          # guillemet non fermé : refus, pas devinette
+        ("Q14", "echo x > out.txt"),          # cible relative, cwd inconnu
+):
+    guard_refuses(f"guard-R22-not-inert-{_cid}",
+        [{"id": _cid, "tool": "ssh_exec", "yes": True, "guard_probe": True,
+          "paths": ["cli"], "args": {"command": _cmd}, "expect": ["exit=4"]}],
+        f"{_cid}:")
+# Les mêmes, SANS `yes`. Un cas destructif sans `yes` est `inert` : `guard()`
+# fait `continue` AVANT `scan_command()` et avant la boucle COMMAND_DENY, donc
+# `is_inert_probe()` est alors le SEUL décideur. Sans ces variantes, les
+# contrôles de redirection de `_segment_is_inert` sont masqués par
+# `scan_command()` et leur mutation survit — mesuré.
+for _cid, _cmd in (
+        ("QN1", 'echo "x" > /etc/motd'),
+        ("QN2", "echo probe > /dev/sdz9999"),
+        ("QN3", "echo x > /etc/motd-nonexistent-guard-probe"),
+        ("QN4", "echo x >> /etc/motd"),
+        ("QN5", "echo x >& /etc/motd"),
+        ("QN6", "echo 'unbalanced"),
+        ("QN7", "echo x > out.txt"),
+        ("QN8", "echo x; rm -r -- /etc/motd"),
+):
+    guard_refuses(f"guard-R22-not-inert-noyes-{_cid}",
+        [{"id": _cid, "tool": "ssh_exec", "guard_probe": True, "paths": ["cli"],
+          "args": {"command": _cmd}, "expect": ["exit=4"]}],
+        f"{_cid}: guard_probe déclaré mais la charge n'est pas inerte")
+# Et les huit charges §3.3 doivent passer dans les DEUX formes — la lane C peut
+# écrire une sonde avec ou sans `yes` selon la porte qu'elle mesure.
+for _i, (_pat, _payload) in enumerate(GUARD_PROBE_PAYLOADS):
+    guard_passes(f"guard-R22-probe-noyes-{_i}",
+        [{"id": f"GN{_i}", "tool": "ssh_exec", "guard_probe": True, "paths": ["cli"],
+          "args": {"command": _payload}, "expect": ["exit=4"]}])
+
+# ... et les formes inertes que la tokenisation doit continuer d'accepter :
+for _cid, _cmd in (
+        ("QP1", "PID=1; echo shutdown"),      # segment d'affectation seule
+        ("QP2", "echo a && echo b"),
+        ("QP3", "echo -e 'a\\tb'"),
+        ("QP4", "echo x 2>/dev/null"),        # redirection vers /dev/null
+        ("QP5", 'echo "rm -rf /"'),           # charge entièrement quotée
+        ("QP6", "echo x > /tmp/bridge-test-0909/probe.txt"),
+):
+    guard_passes(f"guard-R22-inert-{_cid}",
+        [{"id": _cid, "tool": "ssh_exec", "yes": True, "guard_probe": True,
+          "paths": ["cli"], "args": {"command": _cmd}, "expect": ["exit=4"]}])
 
 # =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la

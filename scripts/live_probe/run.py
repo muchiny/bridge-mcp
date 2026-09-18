@@ -18,8 +18,18 @@ portant `sudo: true` — le garde-fou refuse le fichier sans lui.
 Champ `guard_probe` (bool) : réservé aux sondes qui doivent CONTENIR un motif de
 blacklist pour le mesurer (lane C : C161, C201-C208, C220-C238 ; lane F : F16).
 Il lève la seule interdiction COMMAND_DENY, et uniquement si la charge est
-inerte par construction — préfixée d'un `echo`, ou ne nommant que des chemins
-du bac à sable / suffixés `-nonexistent`. Sinon le cas est refusé quand même.
+inerte par construction. L'inertie se lit sur la MÊME tokenisation que
+`scan_command()` (ruling R22), segment par segment : le mot de commande est
+`echo`, ou le segment n'est qu'une affectation `VAR=val`, ou tout chemin absolu
+qu'il nomme est sous le bac à sable / suffixé `-nonexistent` ; et aucune
+redirection ne vise autre chose que le bac à sable ou `/dev/null`. Un `>` à
+l'INTÉRIEUR d'un jeton quoté n'est pas une redirection — le shell ne le lit
+jamais comme un opérateur — donc `echo "probe > /dev/sdz9999"`, la charge que
+§3.3 impose pour le motif de blacklist `> /dev/(sd|mmcblk|nvme)`, est inerte ;
+`echo probe > /dev/sdz9999`, lui, ne l'est pas. Le suffixe `-nonexistent` n'excuse
+JAMAIS une cible d'ÉCRITURE : `echo x > /etc/motd-nonexistent-guard-probe`
+créerait un vrai fichier dans /etc et reste refusé. Les huit charges du tableau
+§3.3 passent `guard()`, avec ou sans `yes` — `selftest_check.py` les fige.
 
 Espèces d'assertion : ok, first=, eq=, re=, lines=, lines>=, lines<=, count=, json,
 error=, exit=N, nore=REGEX, bytes<=N, bytes>=N, stderr=SUBSTR, trunc[=N], notrunc,
@@ -364,32 +374,62 @@ SENTINEL = "ssh_bridge_campaign_"
 # mais une affectation locale au même segment — est scindé sur tout opérateur
 # de séquencement (`&&`, `||`, `;`, `|`, retour à la ligne) et CHAQUE segment
 # résultant doit, à lui seul, être inerte.
-CHAIN_OPS = re.compile(r"&&|\|\||;|\||\n")
+# Une substitution de commande exécute un contenu qu'aucune analyse statique ne
+# suit : elle disqualifie la sonde d'emblée. C'est le SEUL contrôle d'inertie
+# qui reste sur le texte brut, et à raison — `shlex` ne développe rien, donc
+# un `$(...)` lui ressemble à des jetons ordinaires.
 SHELL_SUBST = re.compile(r"`|\$\(")
-VAR_ASSIGN_PREFIX = re.compile(r"^\s*[A-Za-z_]\w*=\S*\s*;\s*")
-# Un segment est un `echo` pur seulement s'il ne porte plus, après le mot
-# `echo`, aucun caractère qui lui donnerait un effet de bord (redirection,
-# séquencement, substitution) : `echo shutdown` est pur, `echo x > /etc/motd`
-# ne l'est pas (la redirection retombe sur le contrôle par chemin ci-dessous).
-ECHO_ONLY = re.compile(r"^\s*echo\b[^>|;&`]*$")
 NONEXISTENT_SUFFIX = re.compile(
     r"-(nonexistent|guard-probe|canary-does-not-exist|inexistant)[\w.-]*$")
 
 
 def _segment_is_inert(seg):
-    """Un seul segment (déjà scindé sur tout opérateur de séquencement) est
-    inerte s'il s'agit d'un `echo` pur, ou si tout chemin absolu qu'il nomme
-    est sous le bac à sable ou porte un suffixe d'inexistence."""
-    if ECHO_ONLY.match(seg):
+    r"""Un segment (liste de JETONS, déjà scindée sur les opérateurs de
+    séquencement) est inerte si :
+      - il ne redirige que vers une cible admissible (bac à sable, /dev/null,
+        l'unité systemd d'E321) — une vraie redirection écrit, et écrire n'est
+        jamais inerte ;
+      - ET son mot de commande est `echo` (il n'écrit rien par construction),
+        ou il ne consiste qu'en affectations de variables, ou tout chemin
+        absolu qu'il nomme est sous le bac à sable / porte un suffixe
+        d'inexistence.
+
+    Fix round 5 (ruling R22) : ce contrôle travaillait sur le TEXTE BRUT
+    (`ECHO_ONLY = ^\s*echo\b[^>|;&`]*$`, `CHAIN_OPS.split(...)`), alors que
+    `scan_command()` tokenise déjà la commande. Les deux se contredisaient :
+    `echo "probe > /dev/sdz9999"` — la charge que §3.3 impose pour le motif
+    `>\s*/dev/(sd|mmcblk|nvme)` — était jugée NON inerte parce qu'un `>`
+    apparaît dans la chaîne, alors que ce `>` est À L'INTÉRIEUR d'un jeton
+    quoté : le shell ne le lit jamais comme un opérateur et ne redirige rien.
+    `scan_command()`, lui, le voyait correctement (un seul jeton, aucune
+    redirection) et laissait passer la commande. Le garde refusait donc une
+    sonde que sa propre tokenisation démontre inoffensive, et la lane C ne
+    pouvait pas exprimer ce probe du tout. Ce n'est pas un relâchement : le
+    shell ne peut pas rediriger ce qu'il n'analyse jamais comme un opérateur.
+    La forme NON quotée `echo probe > /dev/sdz9999` reste refusée — là, le
+    `>` est bien un opérateur et la cible est bien hors bac à sable."""
+    words, redir_targets = _split_redirs(seg)
+    if any(not _write_target_ok(_norm(t)) for t in redir_targets
+           if t.startswith("/")):
+        return False
+    if any(not t.startswith("/") for t in redir_targets):
+        return False                      # cible relative : cwd inconnu
+    verb, _ = _command_word(words)
+    if verb is None:                      # segment fait uniquement d'affectations
+        return True                       # (`PID=1;` — aucune commande lancée)
+    if verb == "echo":
         return True
-    paths = re.findall(r"(?<![\w-])(/[A-Za-z0-9._/-]+)", seg)
+    paths = [w for w in words if w.startswith("/")]
     return bool(paths) and all(
-        SANDBOX_PATH_RE.match(p) or NONEXISTENT_SUFFIX.search(p) for p in paths)
+        SANDBOX_PATH_RE.match(_norm(p)) or NONEXISTENT_SUFFIX.search(p)
+        for p in paths)
 
 
 def is_inert_probe(c):
     """Vrai si un cas `guard_probe` est démontrablement sans effet, sur la
-    TOTALITÉ de la commande — pas seulement son préfixe (C-1)."""
+    TOTALITÉ de la commande — pas seulement son préfixe (C-1) — et d'après la
+    MÊME tokenisation que `scan_command()` (R22), pas d'après une seconde
+    lecture du texte brut qui la contredirait."""
     if not c.get("guard_probe"):
         return False
     cmd = c["args"].get("command", "")
@@ -397,8 +437,10 @@ def is_inert_probe(c):
         return False
     if SHELL_SUBST.search(cmd):
         return False
-    body = VAR_ASSIGN_PREFIX.sub("", cmd, count=1)
-    segments = [s.strip() for s in CHAIN_OPS.split(body) if s.strip()]
+    try:
+        segments = _segments(_tokenize(cmd))
+    except CommandUnparsable:
+        return False                      # guillemet non fermé : on ne devine pas
     return bool(segments) and all(_segment_is_inert(s) for s in segments)
 
 
