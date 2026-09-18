@@ -106,16 +106,38 @@ def union_of_cases(paths):
 
 
 def ran_case_ids(report_paths):
-    """Fix round 1 (I-2) : {id de cas} ayant produit AU MOINS une entrée de
-    résultat (donc réellement passé par `attempt()`, au moins sur un chemin)
+    """{"<stem du fichier de cas>:<id de cas>"} ayant réellement produit un
+    RÉSULTAT (donc réellement passé par `attempt()`, au moins sur un chemin)
     dans l'un des rapports JSON de run.py fournis. Lecture de fichiers déjà
-    sur disque — aucune connexion, aucun sous-processus."""
+    sur disque — aucune connexion, aucun sous-processus.
+
+    Fix round 4 (relecture, I-2) : la version précédente rendait l'id NU, et
+    l'intersection dans `main()` comparait `i.rpartition(":")[2] in ran` —
+    elle jetait donc le stem que `union_of_cases` avait justement calculé.
+    Mesuré : un fichier de cas dont `X1` est `ssh_docker_ps` avec `paths: []`
+    était crédité par le `X1` d'une AUTRE lane, portant un autre outil. Les
+    ids de cas ne sont uniques que DANS un fichier ; la clé doit l'être
+    aussi. Le rapport porte son propre `cases_file` (champ ajouté au Step 6),
+    c'est lui qui donne le stem — un rapport qui ne le porte pas est refusé
+    plutôt que rabattu silencieusement sur l'ancienne comparaison ambiguë.
+
+    « Réellement produit un résultat » veut dire : l'entrée du chemin porte
+    une liste `attempts` non vide. Une entrée vide (`paths: []` → aucun job
+    construit) ne compte pas ; un dict de chemins présent mais sans tentative
+    non plus."""
     ran = set()
     for p in report_paths:
         data = json.loads(Path(p).read_text())
+        cases_file = data.get("cases_file")
+        if not cases_file:
+            raise SystemExit(f"coverage: le rapport {p} ne porte pas de champ "
+                             "'cases_file' — il précède le harnais 2026-09-09 et "
+                             "ses ids de cas ne sont pas rattachables à un fichier ; "
+                             "rejoue-le avec le run.py courant")
+        stem = Path(cases_file).stem
         for cid, paths in data.get("results", {}).items():
-            if paths:
-                ran.add(cid)
+            if any(r.get("attempts") for r in (paths or {}).values()):
+                ran.add(f"{stem}:{cid}")
     return ran
 
 
@@ -138,7 +160,9 @@ def main():
     used = union_of_cases(a.cases)
     if a.reports:
         ran = ran_case_ids(a.reports)
-        used = {t: [i for i in ids if i.rpartition(":")[2] in ran] for t, ids in used.items()}
+        # Fix round 4 (I-2) : intersection sur la clé COMPLÈTE `stem:id`, pas
+        # sur l'id nu — deux lanes peuvent nommer `X1` deux outils différents.
+        used = {t: [i for i in ids if i in ran] for t, ids in used.items()}
         used = {t: ids for t, ids in used.items() if ids}
 
     waivers = json.loads(Path(a.waivers).read_text()) if a.waivers else {}

@@ -117,6 +117,25 @@ want("dur>=-nocx", "dur>=1",   0, "", "", None,               False)
 # Boundary >= vs > : durée == seuil doit passer avec >=.
 want("dur>=-boundary", "dur>=15.7", 0, "", "", {"duration": 15.7}, True)
 
+# --- error= : la clause `rc != 0` (D1), et re= : stdout SEULEMENT (§3.7) -----
+# Fix round 4 : le rapport du fix round 1 AFFIRMAIT ces deux tests ; ils
+# n'existaient pas, et les deux mutants correspondants survivaient — mesuré
+# par la relecture. Les voici, écrits pour de bon.
+# `error=` exige rc != 0 : un message d'erreur imprimé avec rc 0 (exactement
+# ce que fait D1) ne doit PAS satisfaire `error=`, sinon l'assertion
+# confondrait « la commande a échoué » et « le mot Error apparaît ».
+want("error-needs-rc",  "error=Unknown host", 0, "", "Error: Unknown host", None, False)
+want("error-rc-ok",     "error=Unknown host", 1, "", "Error: Unknown host", None, True)
+# `error=` cherche dans stdout+stderr (les deux), contrairement à `re=`.
+want("error-in-stdout", "error=Unknown host", 1, "Error: Unknown host", "", None, True)
+# `re=` ne voit QUE stdout : un secret qui ne fuit que sur stderr est invisible
+# pour `re=` — c'est le piège que §3.7 nomme, et un mutant qui lirait
+# stdout+stderr passerait sans ce cas.
+want("re-stdout-only",  "re=AKIA[A-Z0-9]+", 0, "rien ici", "AKIAIOSFODNN7EXAMPLE", None, False)
+want("re-stdout-hit",   "re=AKIA[A-Z0-9]+", 0, "AKIAIOSFODNN7EXAMPLE", "", None, True)
+# `nore=`, lui, voit les deux — la contre-épreuve du couple.
+want("nore-sees-stderr", "nore=AKIA[A-Z0-9]+", 0, "rien ici", "AKIAIOSFODNN7EXAMPLE", None, False)
+
 # --- lines<= : la borne haute de cardinalité ---------------------------------
 want("lines<=-ok", "lines<=3", 0, "a\nb\n", "", None, True)
 want("lines<=-ko", "lines<=3", 0, "a\nb\nc\nd\n", "", None, False)
@@ -173,6 +192,9 @@ INV = {
     "ssh_k8s_delete":      {"group": "kubernetes",  "reduce": "-", "readonly": False, "destructive": True},
     "ssh_cron_remove":     {"group": "cron",        "reduce": "-", "readonly": False, "destructive": True},
     "ssh_user_delete":     {"group": "user_management", "reduce": "-", "readonly": False, "destructive": True},
+    # readonly ET preneur de `pid` : la combinaison que le contrôle `pid` du
+    # fix round 1 refusait, alors que le contrat 279/279 exige de l'exercer.
+    "ssh_perf_trace":      {"group": "performance", "reduce": "-", "readonly": True,  "destructive": False},
 }
 
 
@@ -264,29 +286,66 @@ guard_passes("guard-C3-known-kind-and-argstyle-pass",
       "args": {"path": "/tmp"}, "expect": ["ok", "lines>=1"]}])
 
 # --- R20 (ruling du contrôleur) : les dix outils de classe (b), aucune échappatoire
+# Fix round 4 (relecture : « la preuve de R20 est vacue »). La version
+# précédente tournait contre `INV`, l'inventaire SYNTHÉTIQUE, où aucun des dix
+# outils n'existe : la branche `outil inexistant` refusait donc les 30 cas
+# MÊME SANS R20, et l'assertion — qui ne cherchait que l'id du cas dans le
+# message — était satisfaite dans les deux mondes. Mesuré : vider
+# `NEVER_PROBE_LIVE` laissait la suite à `0 échec(s)`. Deux corrections, il
+# fallait les DEUX : (a) un inventaire où les dix outils EXISTENT, sinon la
+# branche `outil inexistant` couvre tout ; (b) une assertion sur le MOTIF du
+# refus (« est de classe (b) »), jamais sur le seul id du cas.
 NEVER_PROBE_LIVE_TOOLS = (
     "ssh_k3s_uninstall", "ssh_k3s_killall", "ssh_k3s_upgrade", "ssh_k3s_cert_rotate",
     "ssh_k3s_etcd_snapshot_restore", "ssh_pkg_update", "ssh_pkg_remove",
     "ssh_k8s_drain", "ssh_firewall_deny", "ssh_k8s_localpath_gc",
 )
+if len(R.NEVER_PROBE_LIVE) != 10:
+    FAILS.append(f"R20 : NEVER_PROBE_LIVE porte {len(R.NEVER_PROBE_LIVE)} outils, "
+                 "attendu exactement les dix de §3.4(b)")
+if set(NEVER_PROBE_LIVE_TOOLS) != set(R.NEVER_PROBE_LIVE):
+    FAILS.append("R20 : NEVER_PROBE_LIVE ne coïncide plus avec la liste §3.4(b) "
+                 f"— écart {set(NEVER_PROBE_LIVE_TOOLS) ^ set(R.NEVER_PROBE_LIVE)}")
+# Inventaire où les dix EXISTENT : sans lui, la preuve ci-dessous ne prouve
+# que « guard() refuse un outil inconnu », ce qui est une autre règle.
+INV_R20 = dict(INV)
 for _t in NEVER_PROBE_LIVE_TOOLS:
-    guard_refuses(f"guard-R20-{_t}-dry-run",     # --dry-run n'est PAS une échappatoire (§3.10)
+    INV_R20[_t] = {"group": "k3s", "reduce": "-", "readonly": False, "destructive": True}
+
+
+def guard_refuses_in(label, cases_list, inv, must_contain):
+    try:
+        R.guard(cases_list, inv)
+        FAILS.append(f"{label}: guard() n'a PAS refusé (attendu un message "
+                     f"contenant {must_contain!r})")
+    except SystemExit as e:
+        if must_contain not in str(e):
+            FAILS.append(f"{label}: guard() a refusé, mais sans {must_contain!r} "
+                         f"— message: {e}")
+
+
+for _t in NEVER_PROBE_LIVE_TOOLS:
+    guard_refuses_in(f"guard-R20-{_t}-dry-run",  # --dry-run n'est PAS une échappatoire (§3.10)
         [{"id": f"R20d-{_t}", "tool": _t, "paths": ["cli"], "flags": ["--dry-run"],
-          "args": {}, "expect": ["ok"]}],
-        f"R20d-{_t}:")
-    guard_refuses(f"guard-R20-{_t}-no-yes",      # ni l'absence de `yes` (via is_inert)
+          "args": {}, "expect": ["ok"]}], INV_R20,
+        f"R20d-{_t}: {_t} est de classe (b)")
+    guard_refuses_in(f"guard-R20-{_t}-no-yes",   # ni l'absence de `yes` (via is_inert)
         [{"id": f"R20n-{_t}", "tool": _t, "paths": ["cli"], "args": {}, "expect": ["ok"]}],
-        f"R20n-{_t}:")
-    guard_refuses(f"guard-R20-{_t}-guard-probe", # ni guard_probe
+        INV_R20, f"R20n-{_t}: {_t} est de classe (b)")
+    guard_refuses_in(f"guard-R20-{_t}-guard-probe",  # ni guard_probe
         [{"id": f"R20g-{_t}", "tool": _t, "paths": ["cli"], "guard_probe": True,
-          "args": {}, "expect": ["ok"]}],
-        f"R20g-{_t}:")
+          "args": {}, "expect": ["ok"]}], INV_R20,
+        f"R20g-{_t}: {_t} est de classe (b)")
+    guard_refuses_in(f"guard-R20-{_t}-yes",      # ni --yes
+        [{"id": f"R20y-{_t}", "tool": _t, "paths": ["cli"], "yes": True,
+          "args": {}, "expect": ["ok"]}], INV_R20,
+        f"R20y-{_t}: {_t} est de classe (b)")
 
 # --- I-9 : les valeurs non-chaîne (int, listes, dicts nichés) n'échappaient pas
-guard_refuses("guard-I9-pid-not-sentinel",
+guard_refuses("guard-I9-pid-real-without-identity",
     [{"id": "H-pid", "tool": "ssh_process_kill", "yes": True, "paths": ["cli"],
-      "args": {"pid": 1}, "expect": ["ok"]}],
-    "H-pid:")
+      "args": {"pid": 31337}, "expect": ["ok"]}],
+    "H-pid: pid=31337 réel sans champ 'pid_identity'")
 guard_passes("guard-I9-pid-sentinel-passes",
     [{"id": "H-pid-ok", "tool": "ssh_process_kill", "yes": True, "paths": ["cli"],
       "args": {"pid": 2147483647}, "expect": ["ok"]}])
@@ -342,6 +401,185 @@ guard_passes("guard-regression-G2-sandbox-write-passes",
     [{"id": "G2", "tool": "ssh_file_write", "yes": True, "paths": ["cli"],
       "args": {"path": "/tmp/bridge-test-0909/g2.txt", "content": "x\n"},
       "expect": ["ok"]}])
+
+# =============================================================================
+# Fix round 4 — les trous confirmés par le contrôleur, et les sur-détections
+# que la correction ne doit PAS créer. Chaque bloc prouve les DEUX sens :
+# la charge dangereuse refusée, la charge légitime équivalente acceptée.
+# =============================================================================
+
+def _X(cid, cmd, **kw):
+    """Un cas `ssh_exec` avec `yes` — donc NON inerte, donc soumis à
+    `scan_command()`. Sans `yes`, `is_inert()` court-circuite tout et la
+    preuve ne prouverait rien (c'est la divergence exacte qui a fait croire à
+    la relecture que `KILL_FAMILY_RE` bloquait les sondes de la lane C)."""
+    c = {"id": cid, "tool": "ssh_exec", "yes": True, "paths": ["cli"],
+         "args": {"command": cmd}, "expect": ["ok"]}
+    c.update(kw)
+    return c
+
+
+# --- R4-a : READ_ONLY_OK exemptait /proc, /sys, /usr, /var/log EN CIBLE -----
+# `echo c > /proc/sysrq-trigger` est un redémarrage matériel immédiat du Pi.
+for _cid, _cmd in (
+        ("W1", "echo c > /proc/sysrq-trigger"),
+        ("W2", "echo 1 > /proc/sys/vm/drop_caches"),
+        ("W3", "rm -r -- /usr/local/bin/foo"),
+        ("W4", "tee /var/log/evil.log"),
+        ("W5", 'tee "/var/log/evil.log"'),
+        ("W6", "truncate -s 0 /var/log/syslog"),
+        ("W7", "find /usr -name foo -delete"),
+        ("W8", "cd /var/log && rm -r -- syslog"),
+        ("W9", "rm -r -- syslog"),
+        ("W10", "echo pwned >& /etc/motd"),          # forme bash exclue par (?!&)
+        ("W11", "echo pwned &> /etc/motd"),
+        ("W12", "echo pwned >| /etc/motd"),
+        ("W13", "echo x > /dev/null/../../etc/motd"),  # exemption /dev/null par préfixe
+        ("W14", "echo x > /tmp/bridge-test-0909/../../etc/motd"),
+        ("W15", "ls /etc\nrm -r -- /usr/local/bin/foo"),   # 2e ligne invisible
+        ("W16", "bash -c 'rm -r -- /etc/motd'"),
+        ("W17", "sh -c 'echo x > /proc/sysrq-trigger'"),
+        ("W18", "eval rm -r -- /etc/motd"),
+        ("W19", "find /etc -name x | xargs rm"),
+        ("W20", "cp /tmp/bridge-test-0909/x /etc/motd"),
+        ("W21", "rm -r -- '/etc/motd"),               # guillemet non fermé
+        # W22-W25 isolent chacun un mécanisme qui, sans eux, est couvert par un
+        # autre contrôle : la mutation le laisserait alors survivre (mesuré).
+        ("W22", "eval 'rm -r -- /etc/motd'"),         # entre guillemets : SEULE la récursion eval voit le rm
+        ("W23", "ls /etc\nsystemctl stop k3s"),       # SEULE la coupure par ligne voit le 2e segment
+        ("W24", "cd /var/log && echo x > syslog"),    # SEULE cwd_sandboxed voit la cible relative
+        ("W25", "echo x > out.txt"),                  # redirection relative, aucun `cd`
+):
+    guard_refuses(f"guard-R4-write-{_cid}", [_X(_cid, _cmd)], f"{_cid}:")
+for _cid, _cmd in (
+        ("P1", "cat /etc/passwd > /tmp/bridge-test-0909/copy.txt"),   # SOURCE hors bac
+        ("P2", "head -5 /boot/firmware/config.txt > /tmp/bridge-test-0909/cfg"),
+        ("P3", "cp /etc/os-release /tmp/bridge-test-0909/os"),
+        ("P4", "ls -l /home/muchini/rm-notes"),       # `\brm\b` matchait « rm-notes »
+        ("P5", "cat /home/muchini/cp.txt"),
+        ("P6", "stat /home/muchini/dd"),
+        ("P7", "awk '$3 > 50 {print}' /home/muchini/x.log"),  # `>` entre guillemets
+        ("P8", "cd /tmp/bridge-test-0909 && rm -r -- stale"),
+        ("P9", "find /tmp/bridge-test-0909 -name '*.tmp' -exec rm -- {} +"),
+        ("P10", "echo x >> /tmp/bridge-test-0909/log"),
+        ("P11", "chmod 755 /tmp/bridge-test-0909/x"),
+        ("P12", "echo x > /run/systemd/system/bridge-test-0909.service"),
+        ("P13", "ls /etc/systemd/system/*.wants/ 2>/dev/null | grep -c bridge-test || true"),
+        ("P14", "ls /tmp/snapshot_bridge-test-0909_*.tar.gz 2>/dev/null | wc -l"),
+        ("P15", "journalctl -u k3s > /dev/null 2>&1"),
+        ("P16", "ls /etc 2>&1 | head"),
+        ("P17", "cd /tmp/bridge-test-0909 && echo x > out.txt"),   # relatif MAIS cwd dans le bac
+        ("P18", "cd /tmp/bridge-test-0909 && tee log.txt"),
+):
+    guard_passes(f"guard-R4-read-{_cid}", [_X(_cid, _cmd)])
+
+# --- R4-b : `systemctl stop` prend une LISTE, et `.search` ne voyait que la
+# première occurrence ; `--now disable`, `restart` et `service` échappaient ---
+for _cid, _cmd in (
+        ("S1", "systemctl stop bridge-test-0909.service k3s"),
+        ("S2", "systemctl stop bridge-test-0909.service; systemctl stop k3s"),
+        ("S3", "systemctl --now disable k3s"),
+        ("S4", "systemctl restart k3s"),
+        ("S5", "systemctl mask k3s"),
+        ("S6", "service k3s stop"),
+        ("S7", "systemctl stop"),                     # portée non bornée
+):
+    guard_refuses(f"guard-R4-systemctl-{_cid}", [_X(_cid, _cmd)], f"{_cid}:")
+for _cid, _cmd in (
+        ("SP1", "systemctl stop bridge-test-0909.service"),
+        ("SP2", "systemctl stop bridge-test-0909.service bridge-test-0909.timer"),
+        ("SP3", "systemctl daemon-reload"),           # ne doit PAS matcher `reload`
+        ("SP4", "systemctl status k3s"),
+        ("SP5", "systemctl is-active k3s"),
+        ("SP6", "systemctl list-units --failed"),
+):
+    guard_passes(f"guard-R4-systemctl-{_cid}", [_X(_cid, _cmd)])
+
+# --- R4-c : kill-family — en POSITION DE COMMANDE seulement ------------------
+for _cid, _cmd in (("K1", "pkill -f media-plex"), ("K2", "sudo kill -9 4242"),
+                   ("K3", "killall sshd")):
+    kw = {"sudo_reason": "sonde"} if _cid == "K2" else {}
+    guard_refuses(f"guard-R4-kill-{_cid}", [_X(_cid, _cmd, **kw)],
+                  "kill/pkill/killall dans command")
+# ... et les sondes légitimes de la lane C, qui DOIVENT contenir le littéral :
+# `k3s-killall` est une entrée de la blacklist vivante, une sonde qui la
+# mesure ne peut pas éviter le mot. Un garde qui les refuse n'empêche pas une
+# destruction, il empêche de mesurer le garde du produit.
+guard_passes("guard-R4-kill-probe-k3s-killall",
+    [_X("KP1", "echo k3s-killall guard probe", guard_probe=True)])
+guard_passes("guard-R4-kill-probe-quoted-pkill",
+    [_X("KP2", "echo 'pkill -9 -f k3s'", guard_probe=True)])
+guard_passes("guard-R4-kill-word-in-readonly-diag",
+    [_X("KP3", "grep -c kill /var/log/syslog")])
+guard_passes("guard-R4-dd-probe-stays-inert",
+    [_X("KP4", "echo dd if=/dev/zero of=/dev/null", guard_probe=True)])
+
+# --- R4-d : `pid` — la sentinelle N'EST PLUS la seule valeur admissible ------
+# §3.2 autorise un PID réel créé et confirmé dans le MÊME sous-lot ; le
+# `E-patch-pid.sh` commité réécrit `"pid": 0` en PID réel. N'accepter que la
+# sentinelle rendait ce flux — et le `ssh_perf_trace` READONLY — irrecevables.
+guard_refuses("guard-R4-pid-real-without-identity",
+    [{"id": "PID1", "tool": "ssh_process_kill", "yes": True, "paths": ["cli"],
+      "args": {"pid": 31337}, "expect": ["ok"]}],
+    "PID1: pid=31337 réel sans champ 'pid_identity'")
+guard_refuses("guard-R4-pid-not-an-integer",
+    [{"id": "PID2", "tool": "ssh_process_kill", "yes": True, "paths": ["cli"],
+      "args": {"pid": "abc"}, "expect": ["ok"]}],
+    "PID2: pid='abc' n'est pas un entier")
+guard_passes("guard-R4-pid-real-with-identity",
+    [{"id": "PID3", "tool": "ssh_process_kill", "yes": True, "paths": ["cli"],
+      "pid_identity": "E505b — ps -p <pid> -o args= == 'sleep 86400'",
+      "args": {"pid": 31337}, "expect": ["ok"]}])
+guard_passes("guard-R4-pid-zero-is-the-patch-template",
+    [{"id": "PID4", "tool": "ssh_process_kill", "yes": True, "paths": ["cli"],
+      "args": {"pid": 0}, "expect": ["exit=4"]}])
+guard_passes("guard-R4-pid-sentinel-still-passes",
+    [{"id": "PID5", "tool": "ssh_process_kill", "yes": True, "paths": ["cli"],
+      "args": {"pid": 2147483647}, "expect": ["ok"]}])
+guard_passes("guard-R4-pid-on-readonly-tool",
+    [{"id": "PID6", "tool": "ssh_perf_trace", "paths": ["cli"],
+      "args": {"pid": 31337}, "expect": ["ok"]}])
+
+# --- R4-e : Minor #11 — l'ARGUMENT d'assertion, validé AVANT exécution ------
+# Mesuré par la relecture : `bytes<=abc` tirait les TROIS cas du fichier puis
+# mourait dans un worker sur un ValueError, SANS rapport écrit — C-3 mot pour
+# mot, dans la ronde même qui corrigeait l'autre moitié de C-3.
+for _cid, _exp in (("M1", "bytes<=abc"), ("M2", "count=x"), ("M3", "re=(unclosed"),
+                   ("M4", "dur<=x"), ("M5", "exit"), ("M6", "lines>=deux"),
+                   ("M7", "trunc=beaucoup"), ("M8", "nore="), ("M9", "saved=")):
+    guard_refuses(f"guard-R4-expect-arg-{_cid}",
+        [{"id": _cid, "tool": "ssh_ls", "paths": ["cli"],
+          "args": {"path": "/tmp/bridge-test-0909"}, "expect": [_exp]}],
+        f"{_cid}:")
+# ... et les formes LÉGITIMES, massivement employées par le corpus committé :
+# `error=` nu veut dire « rc != 0, peu importe le message » (31 cas dans
+# A-host.json et B-k8s.json), `trunc` nu veut dire « au moins une ligne omise ».
+guard_passes("guard-R4-expect-arg-legit",
+    [{"id": "MOK", "tool": "ssh_ls", "paths": ["cli"],
+      "args": {"path": "/tmp/bridge-test-0909"},
+      "expect": ["error=", "eq=", "first=", "stderr=", "trunc", "notrunc",
+                 "bytes<=400", "dur<=5", "count=pod:2", "lines>=1", "exit=4",
+                 "re=^NAME", "nore=AKIA", "json", "ok"]}])
+
+# --- R4-f : `flaky` n'implique plus `ok` — un cas fini KO DOIT compter -------
+# Le défaut le plus grave possible ici : une lane sortant en 0 alors qu'un cas
+# a réellement échoué. `verdict_cell` est extrait de `main()` exactement pour
+# que cette règle soit testable.
+for _label, _v, _base, _isbase, _cell, _cnt in (
+        ("ok",             {"ok": True},                     False, True, " OK  ", 0),
+        ("flaky-ended-ok", {"ok": True, "flaky": True},       False, True, "FLAKY", 0),
+        ("flaky-ended-ko", {"ok": False, "flaky": True},      False, True, "KO*  ", 1),
+        ("ko",             {"ok": False},                     False, True, " KO  ", 1),
+        ("baseline-expected-ko", {"ok": False},               True, False, "KO(e)", 0),
+        ("baseline-flaky-ko",    {"ok": False, "flaky": True}, True, False, "KO(e)", 0),
+        ("baseline-base-ko",     {"ok": False},               True, True,  " KO  ", 1),
+        ("absent",         None,                              False, True, "  -  ", 0),
+):
+    _got = R.verdict_cell(_v, _base, _isbase)
+    if _got != (_cell, _cnt):
+        FAILS.append(f"verdict_cell {_label}: {_got} au lieu de {(_cell, _cnt)} — "
+                     "un cas fini KO doit compter dans `unexpected` quel que soit "
+                     "son étiquetage FLAKY")
 
 # =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
@@ -429,9 +667,36 @@ else:
             "n'est pas un objet créé par la campagne",
         "sudo sans sudo_reason (champ né avec cette campagne)":
             "sudo=true sans champ 'sudo_reason'",
-        "pid réel au lieu de la sentinelle 2147483647": "seule la sentinelle 2147483647",
+        "pid réel sans la garde d'identité §3.2": "réel sans champ 'pid_identity'",
         "sonde de blacklist sans guard_probe (champ né avec cette tâche)":
             "touche un motif interdit",
+        "redirection hors bac à sable (sonde 2026-09-06 vers /dev/mmcblk…)":
+            "redirection hors bac à sable",
+    }
+    # Fix round 4 (relecture : « la preuve R21 n'a pas de dents non plus »).
+    # L'appartenance à une classe ne pinne RIEN de quantitatif : mesuré,
+    # élargir `SANDBOX_PATH_RE` à l'orthographe morte faisait tomber
+    # D-sandbox.json de 38 lignes à 11 et la suite restait verte. On fige donc
+    # l'ENSEMBLE EXACT des ids refusés de chaque fichier (insensible à une
+    # reformulation de message, mais pas à un relâchement du garde), et on
+    # exige explicitement qu'au moins une ligne de C-security porte le motif
+    # R20 — la propriété que R21 nomme, et que rien ne pinnait.
+    REFUSED_IDS = {
+        "campaign/C-security.json": {
+            "C18", "C19", "C32", "C33", "C44", "C45", "C52", "C53", "C54",
+            "C55", "C56", "C58", "C59", "C72"},
+        "campaign/D-sandbox.json": {
+            "D01", "D02", "D04", "D06", "D07", "D09", "D10", "D12", "D15",
+            "D17", "D18", "D19", "D20", "D22", "D23", "D26", "D27", "D29",
+            "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40",
+            "D90"},
+    }
+    REQUIRED_TAGS = {
+        # R21 en toutes lettres : C-security est refusé PARCE QUE R20 interdit
+        # ssh_k8s_drain et ssh_pkg_remove — pas seulement « pour une raison ».
+        "campaign/C-security.json": ("ssh_k8s_drain est de classe (b)",
+                                     "ssh_pkg_remove est de classe (b)"),
+        "campaign/D-sandbox.json": ("hors du bac à sable",),
     }
     for _rel in ("campaign/C-security.json", "campaign/D-sandbox.json"):
         try:
@@ -449,8 +714,21 @@ else:
                         if not any(tag in ln for tag in REFUSAL_CLASSES.values())]
             if unclassed:
                 FAILS.append(f"régression corpus : {_rel} refusé pour une "
-                             f"raison HORS des six classes attendues (R21) — "
+                             f"raison HORS des classes attendues (R21) — "
                              f"nouvelle règle, ou vraie régression ? {unclassed}")
+            got_ids = {ln.strip().split(":")[0] for ln in reasons}
+            if got_ids != REFUSED_IDS[_rel]:
+                FAILS.append(
+                    f"régression corpus (R21) : {_rel} ne refuse plus exactement "
+                    f"les mêmes cas — en moins {sorted(REFUSED_IDS[_rel] - got_ids)}, "
+                    f"en plus {sorted(got_ids - REFUSED_IDS[_rel])}. Un cas qui CESSE "
+                    "d'être refusé veut dire que le garde-fou a été relâché ; ne pas "
+                    "réaligner cette liste sans une décision écrite du contrôleur")
+            for tag in REQUIRED_TAGS[_rel]:
+                if not any(tag in ln for ln in reasons):
+                    FAILS.append(f"régression corpus (R21) : {_rel} est refusé, mais "
+                                 f"AUCUNE ligne ne porte {tag!r} — le refus ne tient "
+                                 "donc plus à la règle que R21 nomme")
 
 for f in FAILS:
     print("FAIL " + f)
