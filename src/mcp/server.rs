@@ -7736,8 +7736,12 @@ rbac:
         config.hosts.insert(
             "prod".to_string(),
             crate::config::HostConfig {
-                hostname: "test.example.com".to_string(),
-                port: 22,
+                // An address literal, not a name. Nothing should reach this
+                // host — the limiter refuses before the connection — but if
+                // that ever regresses, a literal fails without a resolver and
+                // the failure says so, instead of reading as a DNS problem.
+                hostname: "127.0.0.1".to_string(),
+                port: 1,
                 user: "tester".to_string(),
                 auth: crate::config::AuthConfig::Agent,
                 description: None,
@@ -7764,13 +7768,28 @@ rbac:
 
         let params = json!({ "uri": "file://prod/etc/hosts" });
 
-        // First call consumes the single token; whatever it returns (success
-        // or an execution failure) is irrelevant to this test.
-        let _ = server
-            .handle_resources_read(Some(json!(1)), Some(params.clone()))
-            .await;
+        // Drain the bucket through the limiter itself, not through a call
+        // that has to reach a host first.
+        //
+        // The version this replaces spent its first call resolving
+        // `test.example.com`, and on a slow runner that took longer than the
+        // one-token-per-second bucket took to refill — so the second call
+        // passed the limiter and failed on DNS, which is what the Rust beta
+        // job reported from 2026-09-05. Draining with more calls does not fix
+        // it: an address literal still costs a connection timeout and three
+        // retries, measured here at ~30 seconds per call, which is thirty
+        // tokens of refill.
+        //
+        // `handle_resources_read` checks the limiter before it opens any
+        // connection, so a single call against an already-empty bucket is
+        // refused in microseconds. There is no wall clock between these two
+        // statements to race.
+        assert!(
+            server.rate_limiter.check("prod").is_ok(),
+            "the bucket must start with its one token, or this test proves nothing"
+        );
 
-        // Second call must hit the exhausted bucket.
+        // The next call must hit the exhausted bucket.
         let response = server
             .handle_resources_read(Some(json!(2)), Some(params))
             .await;
