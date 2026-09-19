@@ -61,10 +61,24 @@ après qu'un `ssh_pty_exec command="echo c > /proc/sysrq-trigger"` eut été mes
 PASSANT. Quatorze couples outil/clé sont couverts (ssh_exec, ssh_exec_multi,
 ssh_session_exec, ssh_pty_exec, ssh_pty_interact, ssh_canary_exec, ssh_rolling_exec,
 ssh_fleet_diff, ssh_docker_exec, ssh_crictl_exec, ssh_k8s_exec, ssh_cron_add).
-`working_dir` sert de répertoire courant à l'analyse. Une commande dont le texte porte
-une expansion shell non résolue (`$VAR`, `${IFS}`, `` ` ``) hors apostrophes est REFUSÉE
-— échec fermé : `rm${IFS}-rf${IFS}/etc/motd` et `CMD=rm; $CMD -rf /etc/motd` s'exécutent
-mais n'ont, statiquement, ni séparateur ni verbe visible.
+Toute cible d'écriture est RÉSOLUE contre le répertoire courant effectif — `working_dir`
+(que le produit émet comme `cd … && cmd`, ce qui donne à l'évasion `..` une seconde
+entrée en forme d'argument) puis chaque `cd` du texte, le dernier gagnant. Une cible
+qu'on ne peut pas résoudre — `~`, ou un chemin relatif sans cwd connu — est refusée.
+Une commande dont le texte porte une expansion shell non résolue est REFUSÉE — échec
+fermé : `rm${IFS}-rf${IFS}/etc/motd` et `CMD=rm; $CMD -rf /etc/motd` s'exécutent mais
+n'ont, statiquement, ni séparateur ni verbe visible. Seules comptent les formes qui
+portent un contenu arbitraire : `$NOM`, `${…}`, `$(…)` et les rétro-guillemets. Un `$`
+qui ne peut pas ouvrir une expansion reste littéral et PASSE — ancre de fin en regex
+(`grep -E "x$"`, `sed "s/$/x/"`) et paramètres spéciaux (`$?`, `$#`, `$!`, `$1`).
+Attention : `sh -c '…'` est descendu récursivement, donc les apostrophes NE protègent
+PAS une expansion qui sera faite par le shell interne — `sh -c 'echo $HOME'` est refusé,
+et c'est correct.
+
+Une clé de charge peut être une LISTE (le schéma l'autorise pour `argv`) : chaque
+élément est alors analysé comme une commande à part entière, ce qui échoue fermé sur un
+`command: ["rm","-r","--","/etc/motd"]` — au prix d'un message qui parle de « portée non
+bornée » plutôt que de la vraie forme.
 
 `command` est analysée par `scan_command()`,
 qui tokenise comme un shell et distingue CIBLE et SOURCE. Sont refusés : toute CIBLE
@@ -650,79 +664,101 @@ def _command_word(words):
     return None, []
 
 
-# Drapeaux qui emportent leur VALEUR dans le jeton suivant : sans eux,
-# `truncate -s 0 /x` comptait `0` comme un opérande (donc une cible relative).
-VALUE_FLAGS = {
-    "cp": {"-t", "--target-directory", "-S", "--suffix", "--preserve", "--reflink"},
-    "mv": {"-t", "--target-directory", "-S", "--suffix"},
-    "truncate": {"-s", "--size", "-r", "--reference"},
-    "mkdir": {"-m", "--mode", "-Z", "--context"},
+# Options COURTES qui emportent une valeur, par verbe (lettres), et options
+# LONGUES de même nature. Sans elles, `truncate -s 0 /x` comptait `0` comme un
+# opérande, donc comme une cible relative.
+SHORT_VALUE_OPTS = {"cp": "tS", "mv": "tS", "truncate": "sro", "mkdir": "mZ",
+                    "chmod": "", "chown": "", "tee": "", "rm": "", "dd": ""}
+LONG_VALUE_OPTS = {
+    "cp": {"--target-directory", "--suffix"},
+    "mv": {"--target-directory", "--suffix"},
+    "truncate": {"--size", "--reference", "--io-blocks"},
+    "mkdir": {"--mode", "--context"},
     "chmod": {"--reference"},
     "chown": {"--reference", "--from"},
     "tee": {"--output-error"},
-    "rm": set(),
-    "dd": set(),
 }
-# `-t DIR` / `--target-directory=DIR` place la DESTINATION EN PREMIER : la règle
-# « seul le dernier chemin est écrit » de `cp`/`mv` devenait alors fausse et
-# `cp -t /etc /tmp/bridge-test-0909/x` passait (mesuré au round 8).
-TARGET_DIR_FLAGS = ("-t", "--target-directory")
+TARGET_DIR_LONG = "--target-directory"
+TARGET_DIR_SHORT = "t"
 # Opérandes de `find -exec`/`-execdir` qui ne sont pas des chemins.
 EXEC_PLACEHOLDERS = frozenset({"{}", "+", ";", "\\;"})
 # Prédicats d'ACTION de `find` : `-exec` seul ne suffisait pas — `-execdir` et
 # la famille `-ok`/`-okdir` exécutent tout autant, et `-fprint`/`-fprintf`/`-fls`
-# ÉCRIVENT dans le fichier qui les suit (mesuré : `find /etc -execdir rm {} +`
-# et `find /etc -fprint /etc/out` passaient).
+# ÉCRIVENT dans le fichier qui les suit.
 FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir",
                           "-fprint", "-fprintf", "-fls"})
 FIND_FILE_ACTIONS = frozenset({"-fprint", "-fprintf", "-fls"})
 
 
-def _positional(verb, operands):
-    """Opérandes positionnels de `verb` : drapeaux retirés, valeurs de
-    drapeaux consommées, `--` termine les options, placeholders de `find -exec`
-    écartés."""
-    vflags = VALUE_FLAGS.get(verb, set())
-    out, i, end_of_flags = [], 0, False
+def _parse_operands(verb, operands):
+    """(positionnels, valeur de `-t`/`--target-directory`, options longues vues).
+
+    Fix round 9 (item 2) : le regroupement d'options courtes est traité
+    GÉNÉRALEMENT, pas en cherchant le littéral `-t`. `cp -rt /etc SRC` et
+    `mv -ft /etc SRC` passaient — l'inversion exacte du drapeau que le round 8
+    venait d'ajouter — parce que `-rt` ne s'écrit ni `-t` ni `--target-directory=`.
+    En POSIX, une lettre qui prend une valeur consomme le RESTE du groupe s'il
+    est non vide (`-t/etc`), sinon le jeton suivant (`-rt /etc`)."""
+    shorts = SHORT_VALUE_OPTS.get(verb, "")
+    longs = LONG_VALUE_OPTS.get(verb, set())
+    pos, target_dir, longs_seen = [], None, set()
+    i, end_of_flags = 0, False
     while i < len(operands):
         o = operands[i]
         if not end_of_flags and o == "--":
             end_of_flags = True
-        elif not end_of_flags and o.startswith("-") and o != "-":
-            if o in vflags:
-                i += 1                             # le drapeau emporte sa valeur
+        elif not end_of_flags and o.startswith("--") and len(o) > 2:
+            name, sep, val = o.partition("=")
+            longs_seen.add(name)
+            if name == TARGET_DIR_LONG:
+                if sep:
+                    target_dir = val
+                elif i + 1 < len(operands):
+                    target_dir = operands[i + 1]
+                    i += 1
+            elif name in longs and not sep and i + 1 < len(operands):
+                i += 1                            # l'option emporte sa valeur
+        elif not end_of_flags and o.startswith("-") and len(o) > 1:
+            cluster = o[1:]
+            for j, ch in enumerate(cluster):
+                if ch not in shorts:
+                    continue
+                rest = cluster[j + 1:]
+                if rest:                          # `-t/etc`, `-rt/etc`
+                    if ch == TARGET_DIR_SHORT:
+                        target_dir = rest
+                elif i + 1 < len(operands):       # `-rt /etc`
+                    if ch == TARGET_DIR_SHORT:
+                        target_dir = operands[i + 1]
+                    i += 1
+                break                             # la valeur consomme la fin du groupe
         elif o not in EXEC_PLACEHOLDERS:
-            out.append(o)
+            pos.append(o)
         i += 1
-    return out
+    return pos, target_dir, longs_seen
 
 
 def _verb_targets(verb, operands):
-    """Les opérandes ÉCRITS par `verb` — absolus ET relatifs.
-
-    Fix round 8 : l'ancienne version ne rendait que les chemins ABSOLUS et
-    prenait « le dernier absolu » pour `cp`/`mv`. Deux sous-détections
-    mesurées : `cp -t /etc /tmp/bridge-test-0909/x` (la destination est le
-    PREMIER opérande quand `-t` est présent) et `cp /tmp/bridge-test-0909/a
-    out.txt` (la vraie cible est relative, donc invisible à un filtre sur les
-    absolus — et l'unique chemin absolu, la SOURCE, était pris pour la cible).
-    On extrait désormais la position réelle, et l'appelant traite le relatif
-    comme une cible à part entière."""
+    """Les opérandes ÉCRITS par `verb` — absolus ET relatifs, à leur position
+    RÉELLE (le round 8 ne rendait que les absolus et prenait « le dernier »
+    pour `cp`/`mv`, ce que `-t DIR SRC` invalide : la destination est alors le
+    PREMIER opérande)."""
     if verb == "dd":
         return [o.partition("=")[2] for o in operands if o.startswith("of=")]
-    pos = _positional(verb, operands)
+    pos, target_dir, longs_seen = _parse_operands(verb, operands)
+    if verb == "mv":
+        # `mv` SUPPRIME sa source : elle est écrite au même titre que la
+        # destination. `cp`, lui, ne fait que la lire. Sans cette distinction,
+        # `mv ../../etc/motd x` sous un cwd sandboxé passait (round 9).
+        return ([target_dir] + pos) if target_dir is not None else pos
     if verb in COPY_VERBS:
-        for i, o in enumerate(operands):
-            if o in TARGET_DIR_FLAGS and i + 1 < len(operands):
-                return [operands[i + 1]]
-            for f in TARGET_DIR_FLAGS:
-                if o.startswith(f + "="):
-                    return [o.partition("=")[2]]
-            if o.startswith("-t") and len(o) > 2 and not o.startswith("--"):
-                return [o[2:]]
-        return pos[-1:]                            # sinon : le dernier positionnel
-    if verb in ("chmod", "chown", "chgrp"):
-        return pos[1:]                             # le premier opérande est le mode/propriétaire
+        return [target_dir] if target_dir is not None else pos[-1:]
+    if verb in ("chmod", "chown"):
+        # Sans `--reference`, le PREMIER positionnel est le mode/propriétaire et
+        # n'est pas une cible. AVEC `--reference FICHIER`, il n'y a pas
+        # d'opérande de mode : tous les positionnels sont des cibles — c'est ce
+        # qui laissait passer `chmod --reference SBX/r /etc/motd` (round 9).
+        return pos if "--reference" in longs_seen else pos[1:]
     return pos
 
 
@@ -782,59 +818,88 @@ def shell_payloads(c):
     return out
 
 
+EXPANSION_OPENER = re.compile(r"[A-Za-z_{(]")
+
+
 def unresolved_expansion(cmd):
-    """Message de refus si `cmd` contient une expansion que le shell résoudra
-    mais que l'analyse statique ne peut pas — sinon None.
+    """Message de refus si `cmd` porte une expansion que le shell résoudra mais
+    que l'analyse statique ne peut pas — sinon None.
 
-    Fix round 8. Deux sous-détections mesurées, de la même classe : le flux de
-    JETONS ne reflète pas ce que le shell fera.
+    Deux sous-détections du round 4 motivent ce contrôle, de la même classe :
+    le flux de JETONS ne reflète pas ce que le shell fera.
       - `rm${IFS}-rf${IFS}/etc/motd` : `$IFS` vaut « espace tabulation
-        retour-ligne », donc le shell voit `rm -rf /etc/motd` et découpe en
-        quatre mots. `shlex`, lui, voit UN seul jeton, dont le mot de commande
-        n'est aucun verbe connu.
-      - `CMD=rm; $CMD -rf /etc/motd` : le verbe n'existe QU'APRÈS expansion ;
-        statiquement, le mot de commande est `$CMD`.
-    Aucune analyse statique ne peut résoudre ces deux formes — la valeur vient
-    de l'environnement distant. Le garde ÉCHOUE DONC FERMÉ : il refuse, plutôt
-    que de laisser passer ce qu'il ne comprend pas. Ce n'est pas une gêne pour
-    la campagne : `run.py` substitue déjà les `${VAR}` de son propre bloc `vars`
-    AVANT d'appeler `guard()`, donc un `$` résiduel est forcément une variable
-    du shell DISTANT, jamais une variable de la campagne.
+        retour-ligne », donc le shell voit quatre mots là où `shlex` en voit un,
+        dont le mot de commande n'est aucun verbe connu.
+      - `CMD=rm; $CMD -rf /etc/motd` : le verbe n'existe QU'APRÈS expansion.
+    Aucune analyse statique ne peut les résoudre — la valeur vient de
+    l'environnement DISTANT. Le garde échoue donc FERMÉ. Ce n'est pas une gêne
+    pour la campagne : `run.py` substitue déjà les `${VAR}` de son bloc `vars`
+    AVANT `guard()`, donc un `$` résiduel est forcément une variable du shell
+    distant.
 
-    Le suivi d'état de guillemets est nécessaire et suffisant : entre
-    apostrophes simples le shell n'expanse RIEN, ce qui laisse passer
-    `awk '$3 > 50 {print}'` — une forme que la lane A emploie réellement.
-    Entre guillemets doubles, en revanche, `$` et `` ` `` expansent toujours."""
+    Fix round 9 (item 4) : un `$` n'ouvre une expansion QUE s'il est suivi d'un
+    nom de paramètre (`$VAR`), d'une accolade (`${…}`) ou d'une parenthèse
+    (`$(…)`). Partout ailleurs il est littéral pour le shell — ancre de fin en
+    regex (`grep -E "x$"`, `sed "s/$/x/"`), ou paramètre spécial (`$?`, `$#`,
+    `$!`, `$1`, `$$`, `$@`, `$*`), qui rend un nombre ou du vide et ne peut ni
+    introduire un verbe ni fabriquer un séparateur. La version du round 8
+    refusait TOUT `$` hors apostrophes et aurait bloqué les lanes dès leur
+    premier fichier.
+
+    Le suivi d'état de guillemets reste nécessaire : entre apostrophes simples
+    le shell n'expanse RIEN (`awk '$3 > 50 {print}'`, forme employée par la
+    lane A), alors qu'entre guillemets doubles `$` et `` ` `` expansent
+    toujours. La barre oblique inverse hors apostrophes échappe le caractère
+    suivant : sans ce saut, `echo \\'$HOME\\'` ouvrirait une fausse apostrophe
+    et le `$HOME` — qui, lui, expanse réellement — passerait."""
     i, n, quote = 0, len(cmd), None
     while i < n:
         ch = cmd[i]
+        nxt = cmd[i + 1] if i + 1 < n else ""
+        opens = ch == "`" or (ch == "$" and bool(EXPANSION_OPENER.match(nxt)))
         if quote == "'":
             if ch == "'":
                 quote = None
         elif quote == '"':
-            if ch == "\\" and i + 1 < n:
+            if ch == "\\" and nxt:
                 i += 1
             elif ch == '"':
                 quote = None
-            elif ch in "$`":
-                return (f"expansion shell non résolue ({ch!r} entre guillemets doubles) "
-                        "— le garde ne peut pas savoir ce que la commande fera après "
-                        "expansion et refuse plutôt que de deviner ; utilise une valeur "
-                        "littérale, ou des apostrophes simples si le texte est inerte")
+            elif opens:
+                return (f"expansion shell non résolue ({ch}{nxt} entre guillemets "
+                        "doubles) — le garde ne peut pas savoir ce que la commande "
+                        "fera après expansion et refuse plutôt que de deviner ; "
+                        "utilise une valeur littérale, ou des apostrophes simples")
         else:
-            if ch == "\\" and i + 1 < n:
+            if ch == "\\" and nxt:
                 i += 1
             elif ch in "'\"":
                 quote = ch
-            elif ch in "$`":
-                return (f"expansion shell non résolue ({ch!r} hors apostrophes) — le "
-                        "garde ne peut pas savoir ce que la commande fera après "
-                        "expansion (`$CMD -rf /etc/motd` n'a aucun verbe visible, "
-                        "`rm${IFS}-rf${IFS}/etc/motd` n'a aucun séparateur visible) et "
-                        "refuse plutôt que de deviner ; utilise une valeur littérale, "
-                        "ou des apostrophes simples si le texte est inerte")
+            elif opens:
+                return (f"expansion shell non résolue ({ch}{nxt}) — le garde ne peut "
+                        "pas savoir ce que la commande fera après expansion "
+                        "(`$CMD -rf /etc/motd` n'a aucun verbe visible, "
+                        "`rm${IFS}-rf${IFS}/etc/motd` aucun séparateur visible) et "
+                        "refuse plutôt que de deviner ; utilise une valeur "
+                        "littérale, ou des apostrophes simples")
         i += 1
     return None
+
+
+def _resolve_target(t, eff_cwd):
+    """(chemin absolu résolu, raison de non-résolution). Fix round 9 : une
+    cible RELATIVE était seulement conditionnée à « le cwd est-il dans le bac
+    à sable », jamais résolue — `../../etc/motd` sous un cwd sandboxé sortait
+    donc du bac à sable. Et `~` est une expansion que le shell résout sans
+    qu'aucun `$` ni rétro-guillemet n'apparaisse : même classe que `${IFS}`,
+    donc même traitement — échec fermé."""
+    if t.startswith("~"):
+        return None, "expansion `~` (répertoire personnel distant, inconnu ici)"
+    if t.startswith("/"):
+        return _norm(t), None
+    if eff_cwd is None:
+        return None, "répertoire courant inconnu"
+    return posixpath.normpath(posixpath.join(eff_cwd, t)), None
 
 
 def scan_command(cmd, depth=0, cwd=None, key="command"):
@@ -870,15 +935,23 @@ def scan_command(cmd, depth=0, cwd=None, key="command"):
         v, ops = _command_word(w)
         if v in ("cd", "pushd") and ops:
             cd_targets.append(ops[0])
-    if cd_targets:
-        cwd_sandboxed = all(t.startswith("/") and SANDBOX_PATH_RE.match(_norm(t))
-                            for t in cd_targets)
-    else:
-        # `working_dir` (ssh_exec / ssh_exec_multi) place la commande AILLEURS
-        # sans qu'aucun `cd` n'apparaisse dans le texte : même classe que
-        # `cd /var/log && rm -r -- syslog`, mais le déplacement vient d'un
-        # ARGUMENT, pas de la commande.
-        cwd_sandboxed = bool(cwd and SANDBOX_PATH_RE.match(_norm(cwd)))
+    # Répertoire courant EFFECTIF : `working_dir` (l'argument — le produit
+    # l'émet comme `cd … && cmd`) puis chaque `cd` du texte, dans l'ordre.
+    # Fix round 9 (item 1) : le round 8 se contentait de savoir SI le cwd était
+    # dans le bac à sable, sans jamais RÉSOUDRE la cible contre lui — d'où
+    # `working_dir=/tmp/bridge-test-0909` + `rm -r -- ../../etc/motd`, qui
+    # passait alors qu'il sort du bac à sable. `working_dir` donne à cette
+    # évasion `..` une seconde entrée, en forme d'argument.
+    eff_cwd = _norm(cwd) if (cwd and cwd.startswith("/")) else None
+    for _t in cd_targets:
+        if _t.startswith("/"):
+            eff_cwd = _norm(_t)
+        elif eff_cwd is not None and not _t.startswith("~"):
+            eff_cwd = posixpath.normpath(posixpath.join(eff_cwd, _t))
+        else:
+            eff_cwd = None                        # `cd ~`/`cd $X` : non résoluble
+            break
+    cwd_sandboxed = bool(eff_cwd and SANDBOX_PATH_RE.match(eff_cwd))
     for seg in segs:
         words, rtargets = _split_redirs(seg)
         redir_targets.extend(rtargets)
@@ -922,17 +995,13 @@ def scan_command(cmd, depth=0, cwd=None, key="command"):
             bad.append(f"`{verb}` sans aucune cible identifiable et sans `cd` dans "
                        "le bac à sable — portée non bornée")
         for t in targets:
-            if t.startswith("/"):
-                if not _write_target_ok(_norm(t)):
-                    bad.append(f"écriture hors bac à sable dans {key}: {t}")
-            elif not cwd_sandboxed:
-                # Cible RELATIVE : elle dépend du répertoire courant, que seul un
-                # `cd` DANS le bac à sable rend connu (`cd /var/log && rm -r --
-                # syslog` détruit /var/log/syslog sans qu'aucun chemin absolu
-                # dangereux n'apparaisse ; `cp /tmp/bridge-test-0909/a out.txt`
-                # écrit hors du bac sans en nommer la destination).
-                bad.append(f"`{verb}` vise la cible relative {t!r} sans `cd` dans le "
-                           "bac à sable — répertoire courant inconnu")
+            resolved, why = _resolve_target(t, eff_cwd)
+            if resolved is None:
+                bad.append(f"`{verb}` vise la cible {t!r} non résoluble ({why}) — "
+                           "le garde refuse plutôt que de deviner")
+            elif not _write_target_ok(resolved):
+                extra = f" (résolu en {resolved})" if resolved != t else ""
+                bad.append(f"écriture hors bac à sable dans {key}: {t}{extra}")
         # --- systemctl / service -----------------------------------------
         if verb == "systemctl":
             rest = [o for o in operands if not o.startswith("-")]
@@ -955,14 +1024,13 @@ def scan_command(cmd, depth=0, cwd=None, key="command"):
             bad.append(f"kill/pkill/killall dans {key} — utiliser "
                        "ssh_process_kill (liste blanche §3.2), pas une commande brute")
     for t in redir_targets:
-        if t.startswith("/"):
-            if not _write_target_ok(_norm(t)):
-                bad.append(f"redirection hors bac à sable dans {key}: {t}")
-        elif not cwd_sandboxed:
-            # `cd /var/log && echo x > syslog` écrase /var/log/syslog sans
-            # qu'aucun chemin absolu dangereux n'apparaisse dans la ligne.
-            bad.append(f"redirection vers un chemin relatif ({t}) sans `cd` dans le "
-                       "bac à sable — cible dépendante d'un répertoire courant inconnu")
+        resolved, why = _resolve_target(t, eff_cwd)
+        if resolved is None:
+            bad.append(f"redirection vers {t!r}, non résoluble ({why}) — le garde "
+                       "refuse plutôt que de deviner")
+        elif not _write_target_ok(resolved):
+            extra = f" (résolu en {resolved})" if resolved != t else ""
+            bad.append(f"redirection hors bac à sable dans {key}: {t}{extra}")
     return bad
 
 

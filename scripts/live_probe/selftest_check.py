@@ -971,6 +971,125 @@ guard_refuses("guard-R25-guard-probe-on-pty-not-inert",
       "expect": ["exit=4"]}], "R25q:")
 
 # =============================================================================
+# Fix round 9 (final) — la classe « cible non résolue » là où elle comptait le
+# plus, le regroupement d'options courtes, `~`, et le resserrement du contrôle
+# d'expansion qui refusait des formes que les lanes écriront tout de suite.
+# =============================================================================
+
+SBX = "/tmp/bridge-test-0909"
+
+
+def _X9(cid, cmd, **kw):
+    c = {"id": cid, "tool": "ssh_exec", "yes": True, "paths": ["cli"],
+         "args": {"command": cmd}, "expect": ["ok"]}
+    wd = kw.pop("wd", None)
+    if wd:
+        c["args"]["working_dir"] = wd
+    c.update(kw)
+    return c
+
+
+# --- item 1 : la cible relative doit être RÉSOLUE contre le cwd effectif ----
+# `working_dir` est émis par le produit comme `cd … && cmd` : il donne à
+# l'évasion `..` une seconde entrée, en forme d'ARGUMENT. Le round 8 vérifiait
+# SI le cwd était sandboxé, jamais OÙ la cible atterrissait.
+for _cid, _cmd in (
+        ("V1", "rm -r -- ../../etc/motd"),
+        ("V2", f"cp {SBX}/a ../../etc/motd"),
+        ("V3", "echo x > ../../etc/motd"),
+        ("V4", f"chmod --reference {SBX}/r /etc/motd"),
+        ("V5", "mv ../../etc/motd x"),          # `mv` SUPPRIME sa source
+        ("V6", "tee ../../etc/motd"),
+        ("V7", "mkdir -p ../../etc/evil"),
+        ("V8", "rm -r -- sub/../../../etc/motd"),
+):
+    guard_refuses(f"guard-R9-resolve-{_cid}", [_X9(_cid, _cmd, wd=SBX)], f"{_cid}:")
+# ... et les équivalents qui restent DANS le bac à sable une fois résolus :
+for _cid, _cmd in (
+        ("VP1", "rm -r -- stale"), ("VP2", "echo x > out.txt"),
+        ("VP3", "mkdir -p sub/x"), ("VP4", "cp a b"), ("VP5", "chmod 755 f"),
+        ("VP6", "rm -r -- sub/../stale"), ("VP7", "tee log.txt"),
+):
+    guard_passes(f"guard-R9-resolve-{_cid}", [_X9(_cid, _cmd, wd=SBX)])
+# Le même `..` par `cd` plutôt que par `working_dir`.
+guard_refuses("guard-R9-resolve-via-cd",
+    [_X9("V9", f"cd {SBX} && rm -r -- ../../etc/motd")], "V9:")
+# Un `cd` hors bac à sable APRÈS un `cd` dedans gagne (sémantique réelle).
+guard_refuses("guard-R9-last-cd-wins",
+    [_X9("V10", f"cd {SBX} && cd /var/log && rm -r -- syslog")], "V10:")
+
+# `cwd_sandboxed` ne sert plus qu'à la règle « verbe d'écriture SANS aucune
+# cible identifiable » (les cibles relatives sont désormais RÉSOLUES). Sans ce
+# couple, le mutant `cwd_sandboxed = False` survivait — mesuré.
+guard_passes("guard-R9-cwd-enables-targetless-verb",
+    [_X9("W1", "find . -name '*.tmp' | xargs rm", wd=SBX)])
+guard_refuses("guard-R9-targetless-verb-without-cwd",
+    [_X9("W2", "find /etc -name x | xargs rm")], "W2:")
+# La consommation de la VALEUR d'une option longue : sans elle, `755` et `0`
+# deviennent des opérandes, donc des cibles relatives non résolubles (mutant
+# `R8 flag values not consumed`, qui survivait aussi).
+guard_passes("guard-R9-long-flag-value-consumed-mkdir",
+    [_X9("W3", "mkdir --mode 755 /tmp/bridge-test-0909/d")])
+guard_passes("guard-R9-long-flag-value-consumed-truncate",
+    [_X9("W4", "truncate --size 0 /tmp/bridge-test-0909/x")])
+
+# --- item 2 : regroupement d'options courtes portant `-t` ------------------
+for _cid, _cmd in (
+        ("B1", f"cp -rt /etc {SBX}/x"), ("B2", f"mv -ft /etc {SBX}/x"),
+        ("B3", f"cp -vrt /etc {SBX}/x"), ("B4", f"cp -t/etc {SBX}/x"),
+        ("B5", f"cp --target-directory=/etc {SBX}/x"),
+):
+    guard_refuses(f"guard-R9-bundle-{_cid}", [_X9(_cid, _cmd)], f"{_cid}:")
+for _cid, _cmd in (
+        ("BP1", f"cp -rv /etc/os-release {SBX}/os"),
+        ("BP2", f"cp -rt {SBX} /etc/os-release"),      # groupé, cible SANDBOXÉE
+        ("BP3", f"mv -f {SBX}/a {SBX}/b"),
+        ("BP4", f"truncate -s 0 {SBX}/x"),             # `-s` emporte bien sa valeur
+):
+    guard_passes(f"guard-R9-bundle-{_cid}", [_X9(_cid, _cmd)])
+
+# --- item 3 : `~` s'expanse sans `$` ni rétro-guillemet --------------------
+for _cid, _cmd in (("T1", "rm -r -- ~/important"), ("T2", "echo x > ~/f"),
+                   ("T3", "cp a ~/f"), ("T4", "tee ~root/f"),
+                   ("T5", "cd ~ && rm -r -- important")):
+    guard_refuses(f"guard-R9-tilde-{_cid}", [_X9(_cid, _cmd, wd=SBX)], f"{_cid}:")
+
+# --- item 4 : un `$` qui ne peut PAS ouvrir une expansion n'en est pas une --
+# Ancre de fin en regex et paramètres spéciaux : le shell les rend littéraux ou
+# les remplace par un nombre/du vide — ils ne peuvent ni introduire un verbe ni
+# fabriquer un séparateur. Les lanes écriront ces formes dès leur premier
+# fichier ; le round 8 les refusait toutes.
+for _cid, _cmd in (
+        ("E1", 'grep -E "x$" /var/log/syslog'), ("E2", 'sed "s/$/x/" /etc/hosts'),
+        ("E3", "echo $?"), ("E4", 'echo "cost: 5$"'), ("E5", "echo $"),
+        ("E6", 'grep "a$|b" /etc/hosts'), ("E7", "echo $#"), ("E8", "echo $!"),
+        ("E9", "echo $1"), ("E10", 'awk "{print $3}" /etc/hosts'),
+):
+    guard_passes(f"guard-R9-dollar-ok-{_cid}", [_X9(_cid, _cmd)])
+# ... tandis que les trois formes qui portent un contenu ARBITRAIRE refusent :
+for _cid, _cmd in (
+        ("EK1", 'echo "$VAR"'), ("EK2", 'echo "${X}"'), ("EK3", 'echo "$(id)"'),
+        ("EK4", "echo $VAR"), ("EK5", "echo ${X}"), ("EK6", "echo $(id)"),
+        ("EK7", "rm${IFS}-rf${IFS}/etc/motd"), ("EK8", "CMD=rm; $CMD -rf /etc/motd"),
+        ("EK9", "echo `id`"), ("EK10", 'echo "`id`"'),
+):
+    guard_refuses(f"guard-R9-dollar-ko-{_cid}", [_X9(_cid, _cmd)], f"{_cid}:")
+
+# --- item 5 : les deux contrôles que la relecture a trouvés non épinglés ----
+# (a) l'extraction `of=` de `dd` : sans elle, `cd SBX && dd of=/etc/motd` passe.
+guard_refuses("guard-R9-pin-dd-of",
+    [_X9("P1", f"cd {SBX} && dd of=/etc/motd")],
+    "P1: écriture hors bac à sable")
+guard_passes("guard-R9-pin-dd-of-sandbox",
+    [_X9("P2", f"dd if=/dev/zero of={SBX}/x bs=1 count=1")])
+# (b) le saut d'échappement de `unresolved_expansion` : sans lui, le `\'` ouvre
+# une FAUSSE apostrophe et le `$HOME` — qui expanse réellement — passerait.
+guard_refuses("guard-R9-pin-backslash-escape",
+    [_X9("P3", "echo \\'$HOME\\'")], "P3: expansion shell non résolue")
+guard_passes("guard-R9-pin-real-single-quotes",
+    [_X9("P4", "echo '$HOME'")])          # vraies apostrophes : aucune expansion
+
+# =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
 # validation d'espèce/argstyle du C-3 itérait `c.get("expect", [])` sans
 # passer par `expectations()`. Sur un `expect` SCALAIRE (la forme des 357
