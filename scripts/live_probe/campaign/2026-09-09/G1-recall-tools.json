@@ -1,0 +1,1134 @@
+{
+ "vars": {
+  "SANDBOX": "/tmp/bridge-test-0909",
+  "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+  "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+  "NS": "bridge-test",
+  "SBXUSER": "btest0909",
+  "SBXGROUP": "btestgrp0909",
+  "CRON_MARK": "BRIDGE_TEST_0909",
+  "UNIT": "bridge-test-0909",
+  "SLEEPPID": "",
+  "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+  "PAUSE_IMAGE": "",
+  "BUSYBOX_OK": "",
+  "UFW_ABSENT": "true",
+  "HAD_CRONTAB": "true",
+  "BT_CID": ""
+ },
+ "cases": [
+  {
+   "id": "G000-setup-git-diff",
+   "owner": "discover",
+   "tool": "ssh_exec",
+   "args": {
+    "host": "raspberry",
+    "command": "echo bridge_test_0909_diff_probe >> ${SANDBOX}/repo/f.txt"
+   },
+   "expect": "ok",
+   "yes": true,
+   "paths": [
+    "cli"
+   ]
+  },
+  {
+   "id": "G001-ssh_apparmor_profiles",
+   "owner": "campaign",
+   "tool": "ssh_apparmor_profiles",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=AppArmor not available"
+  },
+  {
+   "id": "G002-ssh_apparmor_status",
+   "owner": "campaign",
+   "tool": "ssh_apparmor_status",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=AppArmor not available"
+  },
+  {
+   "id": "G003-ssh_at_jobs",
+   "owner": "campaign",
+   "tool": "ssh_at_jobs",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=at command not available"
+  },
+  {
+   "id": "G004-ssh_capacity_collect",
+   "owner": "campaign",
+   "tool": "ssh_capacity_collect",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=CPU"
+  },
+  {
+   "id": "G005-ssh_capacity_predict",
+   "owner": "campaign",
+   "tool": "ssh_capacity_predict",
+   "args": {
+    "host": "raspberry",
+    "resource": "all"
+   },
+   "expect": "re=Capacity Prediction"
+  },
+  {
+   "id": "G006-ssh_capacity_trend",
+   "owner": "campaign",
+   "tool": "ssh_capacity_trend",
+   "args": {
+    "host": "raspberry",
+    "days": 1
+   },
+   "expect": [
+    "re=CPU",
+    "lines>=3"
+   ]
+  },
+  {
+   "id": "G007-ssh_cert_check",
+   "owner": "campaign",
+   "tool": "ssh_cert_check",
+   "args": {
+    "host": "raspberry",
+    "target": "127.0.0.1",
+    "port": 6443
+   },
+   "expect": "re=subject="
+  },
+  {
+   "id": "G008-ssh_cert_expiry",
+   "owner": "campaign",
+   "tool": "ssh_cert_expiry",
+   "args": {
+    "host": "raspberry",
+    "target": "127.0.0.1:6443"
+   },
+   "expect": "re=notAfter="
+  },
+  {
+   "id": "G009-ssh_cert_info",
+   "owner": "campaign",
+   "tool": "ssh_cert_info",
+   "args": {
+    "host": "raspberry",
+    "path": "/var/lib/rancher/k3s/server/tls/server-ca.crt",
+    "sudo": true
+   },
+   "expect": [
+    "re=Certificate:",
+    "re=Public Key"
+   ]
+  },
+  {
+   "id": "G010-ssh_cis_benchmark",
+   "owner": "campaign",
+   "tool": "ssh_cis_benchmark",
+   "args": {
+    "host": "raspberry",
+    "category": "ssh",
+    "level": 1
+   },
+   "expect": "re=CIS Benchmark"
+  },
+  {
+   "id": "G011-ssh_compare_state",
+   "owner": "campaign",
+   "tool": "ssh_compare_state",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=PACKAGES"
+  },
+  {
+   "id": "G012-ssh_compliance_check",
+   "owner": "campaign",
+   "tool": "ssh_compliance_check",
+   "args": {
+    "host": "raspberry",
+    "profile": "basic"
+   },
+   "expect": "re=COMPLIANCE CHECK"
+  },
+  {
+   "id": "G013-ssh_compliance_report",
+   "owner": "campaign",
+   "tool": "ssh_compliance_report",
+   "args": {
+    "host": "raspberry",
+    "format": "json"
+   },
+   "expect": [
+    "json",
+    "re=compliance_report"
+   ]
+  },
+  {
+   "id": "G014-ssh_compliance_score",
+   "owner": "campaign",
+   "tool": "ssh_compliance_score",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=Compliance Score"
+  },
+  {
+   "id": "G015-ssh_container_events",
+   "owner": "campaign",
+   "tool": "ssh_container_events",
+   "args": {
+    "host": "raspberry",
+    "event_type": "container"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G016-ssh_container_health_history",
+   "owner": "campaign",
+   "tool": "ssh_container_health_history",
+   "args": {
+    "host": "raspberry",
+    "container": "bt-nonexistent-guard-probe"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G017-ssh_container_log_search",
+   "owner": "campaign",
+   "tool": "ssh_container_log_search",
+   "args": {
+    "host": "raspberry",
+    "container": "bt-nonexistent-guard-probe",
+    "pattern": "error"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G018-ssh_container_log_stats",
+   "owner": "campaign",
+   "tool": "ssh_container_log_stats",
+   "args": {
+    "host": "raspberry",
+    "container": "bt-nonexistent-guard-probe"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G019-ssh_crictl_info",
+   "owner": "campaign",
+   "tool": "ssh_crictl_info",
+   "args": {
+    "host": "raspberry",
+    "sudo": true
+   },
+   "expect": [
+    "json",
+    "re=cniconfig"
+   ]
+  },
+  {
+   "id": "G020-ssh_crictl_stats",
+   "owner": "campaign",
+   "tool": "ssh_crictl_stats",
+   "args": {
+    "host": "raspberry",
+    "sudo": true
+   },
+   "expect": [
+    "json",
+    "re=stats"
+   ]
+  },
+  {
+   "id": "G021-ssh_cron_analyze",
+   "owner": "campaign",
+   "tool": "ssh_cron_analyze",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=User Crontabs"
+  },
+  {
+   "id": "G022-ssh_diagnose",
+   "owner": "campaign",
+   "tool": "ssh_diagnose",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=UPTIME"
+  },
+  {
+   "id": "G023-ssh_docker_inspect",
+   "owner": "campaign",
+   "tool": "ssh_docker_inspect",
+   "args": {
+    "host": "raspberry",
+    "target": "bt-nonexistent-guard-probe"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G024-ssh_docker_logs",
+   "owner": "campaign",
+   "tool": "ssh_docker_logs",
+   "args": {
+    "host": "raspberry",
+    "container": "bt-nonexistent-guard-probe"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G025-ssh_docker_network_inspect",
+   "owner": "campaign",
+   "tool": "ssh_docker_network_inspect",
+   "args": {
+    "host": "raspberry",
+    "network": "bt-nonexistent-guard-probe"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G026-ssh_docker_volume_inspect",
+   "owner": "campaign",
+   "tool": "ssh_docker_volume_inspect",
+   "args": {
+    "host": "raspberry",
+    "volume": "bt-nonexistent-guard-probe"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "G027-ssh_env_diff",
+   "owner": "campaign",
+   "tool": "ssh_env_diff",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=ssh_env_snapshot"
+  },
+  {
+   "id": "G028-ssh_env_drift",
+   "owner": "campaign",
+   "tool": "ssh_env_drift",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=OS ==="
+  },
+  {
+   "id": "G029-ssh_env_snapshot",
+   "owner": "campaign",
+   "tool": "ssh_env_snapshot",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=OS ==="
+  },
+  {
+   "id": "G030-ssh_exec_multi",
+   "owner": "campaign",
+   "tool": "ssh_exec_multi",
+   "args": {
+    "command": "hostname",
+    "hosts": [
+     "raspberry"
+    ]
+   },
+   "expect": [
+    "json",
+    "re=\"succeeded\":1"
+   ]
+  },
+  {
+   "id": "G031-ssh_fail2ban_status",
+   "owner": "campaign",
+   "tool": "ssh_fail2ban_status",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=fail2ban not available"
+  },
+  {
+   "id": "G032-ssh_file_diff",
+   "owner": "campaign",
+   "tool": "ssh_file_diff",
+   "args": {
+    "host": "raspberry",
+    "file1": "/tmp/bridge-test-0909/tpl.conf",
+    "file2": "/tmp/bridge-test-0909/tpl.conf.bak"
+   },
+   "expect": "re=v1 bridge-test-0909"
+  },
+  {
+   "id": "G033-ssh_firewall_list",
+   "owner": "campaign",
+   "tool": "ssh_firewall_list",
+   "args": {
+    "host": "raspberry",
+    "sudo": true
+   },
+   "expect": "re=Chain INPUT"
+  },
+  {
+   "id": "G034-ssh_git_diff",
+   "owner": "campaign",
+   "tool": "ssh_git_diff",
+   "args": {
+    "host": "raspberry",
+    "path": "/tmp/bridge-test-0909/repo"
+   },
+   "expect": "re=bridge_test_0909_diff_probe"
+  },
+  {
+   "id": "G035-ssh_helm_diff",
+   "owner": "campaign",
+   "tool": "ssh_helm_diff",
+   "args": {
+    "host": "raspberry",
+    "release": "bt-nonexistent-guard-probe",
+    "subcommand": "release"
+   },
+   "expect": "re=helm-diff plugin not installed"
+  },
+  {
+   "id": "G036-ssh_helm_get",
+   "owner": "campaign",
+   "tool": "ssh_helm_get",
+   "args": {
+    "host": "raspberry",
+    "release": "bt-nonexistent-guard-probe",
+    "subcommand": "values"
+   },
+   "expect": "re=Kubernetes cluster unreachable"
+  },
+  {
+   "id": "G037-ssh_helm_lint",
+   "owner": "campaign",
+   "tool": "ssh_helm_lint",
+   "args": {
+    "host": "raspberry",
+    "chart_path": "/tmp/bridge-test-0909/chart/backup"
+   },
+   "expect": "re=chart\\(s\\) failed"
+  },
+  {
+   "id": "G038-ssh_helm_plugin_list",
+   "owner": "campaign",
+   "tool": "ssh_helm_plugin_list",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": [
+    "re=NAME",
+    "re=DESCRIPTION"
+   ]
+  },
+  {
+   "id": "G039-ssh_helm_search_repo",
+   "owner": "campaign",
+   "tool": "ssh_helm_search_repo",
+   "args": {
+    "host": "raspberry",
+    "keyword": "traefik"
+   },
+   "expect": "re=traefik/traefik"
+  },
+  {
+   "id": "G040-ssh_helm_show",
+   "owner": "campaign",
+   "tool": "ssh_helm_show",
+   "args": {
+    "host": "raspberry",
+    "chart": "traefik/traefik",
+    "subcommand": "chart"
+   },
+   "expect": "re=artifacthub"
+  },
+  {
+   "id": "G041-ssh_helm_status",
+   "owner": "campaign",
+   "tool": "ssh_helm_status",
+   "args": {
+    "host": "raspberry",
+    "release": "bt-nonexistent-guard-probe"
+   },
+   "expect": "re=Kubernetes cluster unreachable"
+  },
+  {
+   "id": "G042-ssh_incident_correlate",
+   "owner": "campaign",
+   "tool": "ssh_incident_correlate",
+   "args": {
+    "host": "raspberry",
+    "services": "k3s,sshd",
+    "since": "10 minutes ago"
+   },
+   "expect": "re=Service Correlation"
+  },
+  {
+   "id": "G043-ssh_incident_timeline",
+   "owner": "campaign",
+   "tool": "ssh_incident_timeline",
+   "args": {
+    "host": "raspberry",
+    "since": "10 minutes ago"
+   },
+   "expect": "re=Incident Timeline"
+  },
+  {
+   "id": "G044-ssh_incident_triage",
+   "owner": "campaign",
+   "tool": "ssh_incident_triage",
+   "args": {
+    "host": "raspberry",
+    "symptom": "performance",
+    "since": "10 minutes ago"
+   },
+   "expect": "re=TRIAGE: performance"
+  },
+  {
+   "id": "G045-ssh_inventory_sync",
+   "owner": "campaign",
+   "tool": "ssh_inventory_sync",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=Debian GNU/Linux"
+  },
+  {
+   "id": "G046-ssh_io_trace",
+   "owner": "campaign",
+   "tool": "ssh_io_trace",
+   "args": {
+    "host": "raspberry",
+    "duration": 2
+   },
+   "expect": "lines>=2"
+  },
+  {
+   "id": "G047-ssh_journal_disk_usage",
+   "owner": "campaign",
+   "tool": "ssh_journal_disk_usage",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=journals take up"
+  },
+  {
+   "id": "G048-ssh_journal_query",
+   "owner": "campaign",
+   "tool": "ssh_journal_query",
+   "args": {
+    "host": "raspberry",
+    "lines": 5
+   },
+   "expect": [
+    "lines>=1",
+    "re= server "
+   ]
+  },
+  {
+   "id": "G049-ssh_k3s_check_config",
+   "owner": "campaign",
+   "tool": "ssh_k3s_check_config",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=STATUS:"
+  },
+  {
+   "id": "G050-ssh_k3s_config_get",
+   "owner": "campaign",
+   "tool": "ssh_k3s_config_get",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=\\[exit:1\\]"
+  },
+  {
+   "id": "G051-ssh_k3s_etcd_status",
+   "owner": "campaign",
+   "tool": "ssh_k3s_etcd_status",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=datastore"
+  },
+  {
+   "id": "G052-ssh_k3s_kubeconfig_get",
+   "owner": "campaign",
+   "tool": "ssh_k3s_kubeconfig_get",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=apiVersion: v1"
+  },
+  {
+   "id": "G053-ssh_k8s_api_versions",
+   "owner": "campaign",
+   "tool": "ssh_k8s_api_versions",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=apps/v1"
+  },
+  {
+   "id": "G054-ssh_k8s_auth_can_i",
+   "owner": "campaign",
+   "tool": "ssh_k8s_auth_can_i",
+   "args": {
+    "host": "raspberry",
+    "resource": "pods",
+    "verb": "list",
+    "namespace": "bridge-test"
+   },
+   "expect": "eq=yes"
+  },
+  {
+   "id": "G055-ssh_k8s_auth_whoami",
+   "owner": "campaign",
+   "tool": "ssh_k8s_auth_whoami",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=SelfSubjectReview"
+  },
+  {
+   "id": "G056-ssh_k8s_cluster_info",
+   "owner": "campaign",
+   "tool": "ssh_k8s_cluster_info",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=control plane is running"
+  },
+  {
+   "id": "G057-ssh_k8s_crashloops",
+   "owner": "campaign",
+   "tool": "ssh_k8s_crashloops",
+   "args": {
+    "host": "raspberry",
+    "all_namespaces": true
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G058-ssh_k8s_diff",
+   "owner": "campaign",
+   "tool": "ssh_k8s_diff",
+   "args": {
+    "host": "raspberry",
+    "manifest": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bt-cm\n  namespace: bridge-test\ndata:\n  probe: bridge-test-0909-diff-g1\n"
+   },
+   "expect": "re=ConfigMap"
+  },
+  {
+   "id": "G059-ssh_k8s_get_raw",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get_raw",
+   "args": {
+    "host": "raspberry",
+    "path": "/healthz"
+   },
+   "expect": "eq=ok"
+  },
+  {
+   "id": "G060-ssh_k8s_healthz",
+   "owner": "campaign",
+   "tool": "ssh_k8s_healthz",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=ping ok"
+  },
+  {
+   "id": "G061-ssh_k8s_logs",
+   "owner": "campaign",
+   "tool": "ssh_k8s_logs",
+   "args": {
+    "host": "raspberry",
+    "pod": "coredns-74b7b4f7f8-vqnrf",
+    "namespace": "kube-system",
+    "tail": 5
+   },
+   "expect": "re=coredns"
+  },
+  {
+   "id": "G062-ssh_k8s_metrics_server_check",
+   "owner": "campaign",
+   "tool": "ssh_k8s_metrics_server_check",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=APIService"
+  },
+  {
+   "id": "G063-ssh_k8s_node_capacity",
+   "owner": "campaign",
+   "tool": "ssh_k8s_node_capacity",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G064-ssh_k8s_node_conditions",
+   "owner": "campaign",
+   "tool": "ssh_k8s_node_conditions",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G065-ssh_k8s_node_status",
+   "owner": "campaign",
+   "tool": "ssh_k8s_node_status",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G066-ssh_k8s_pending",
+   "owner": "campaign",
+   "tool": "ssh_k8s_pending",
+   "args": {
+    "host": "raspberry",
+    "all_namespaces": true
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G067-ssh_k8s_pod_health",
+   "owner": "campaign",
+   "tool": "ssh_k8s_pod_health",
+   "args": {
+    "host": "raspberry",
+    "namespace": "bridge-test"
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G068-ssh_k8s_port_forward",
+   "owner": "campaign",
+   "tool": "ssh_k8s_port_forward",
+   "args": {
+    "host": "raspberry",
+    "target": "svc/kube-dns",
+    "ports": "19153:9153",
+    "namespace": "kube-system",
+    "probe_path": "/metrics",
+    "wait_secs": 4
+   },
+   "expect": "re=port-forward UP",
+   "paths": [
+    "cli"
+   ]
+  },
+  {
+   "id": "G069-ssh_k8s_proxy_get",
+   "owner": "campaign",
+   "tool": "ssh_k8s_proxy_get",
+   "args": {
+    "host": "raspberry",
+    "resource": "services",
+    "name": "kube-dns",
+    "port": 9153,
+    "namespace": "kube-system",
+    "proxy_path": "/metrics"
+   },
+   "expect": "re=coredns_build_info"
+  },
+  {
+   "id": "G070-ssh_k8s_rbac_diagnose",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rbac_diagnose",
+   "args": {
+    "host": "raspberry",
+    "service_account": "bt-sa",
+    "namespace": "bridge-test"
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G071-ssh_k8s_secret_decode",
+   "owner": "campaign",
+   "tool": "ssh_k8s_secret_decode",
+   "args": {
+    "host": "raspberry",
+    "name": "bt-secret",
+    "namespace": "bridge-test",
+    "key": "fake",
+    "reveal": false
+   },
+   "expect": "error=Command denied"
+  },
+  {
+   "id": "G072-ssh_k8s_secret_export",
+   "owner": "campaign",
+   "tool": "ssh_k8s_secret_export",
+   "args": {
+    "host": "raspberry",
+    "name": "bt-secret",
+    "namespace": "bridge-test",
+    "reveal": false
+   },
+   "expect": "error=Command denied"
+  },
+  {
+   "id": "G073-ssh_k8s_secret_keys",
+   "owner": "campaign",
+   "tool": "ssh_k8s_secret_keys",
+   "args": {
+    "host": "raspberry",
+    "name": "bt-secret",
+    "namespace": "bridge-test"
+   },
+   "expect": "re=fake"
+  },
+  {
+   "id": "G074-ssh_k8s_triage",
+   "owner": "campaign",
+   "tool": "ssh_k8s_triage",
+   "args": {
+    "host": "raspberry",
+    "namespace": "bridge-test"
+   },
+   "expect": "re=jq not installed"
+  },
+  {
+   "id": "G075-ssh_k8s_wait",
+   "owner": "campaign",
+   "tool": "ssh_k8s_wait",
+   "args": {
+    "host": "raspberry",
+    "resource": "pod",
+    "name": "coredns-74b7b4f7f8-vqnrf",
+    "namespace": "kube-system",
+    "condition": "condition=Ready",
+    "timeout": "5s"
+   },
+   "expect": "re=condition met"
+  },
+  {
+   "id": "G076-ssh_k8s_watch",
+   "owner": "campaign",
+   "tool": "ssh_k8s_watch",
+   "args": {
+    "host": "raspberry",
+    "resource": "events",
+    "namespace": "bridge-test",
+    "watch_timeout_secs": 3
+   },
+   "expect": "re=watch ended"
+  },
+  {
+   "id": "G077-ssh_latency_test",
+   "owner": "campaign",
+   "tool": "ssh_latency_test",
+   "args": {
+    "host": "raspberry",
+    "target": "127.0.0.1",
+    "count": 2
+   },
+   "expect": "re=bytes from"
+  },
+  {
+   "id": "G078-ssh_letsencrypt_status",
+   "owner": "campaign",
+   "tool": "ssh_letsencrypt_status",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=certbot not installed"
+  },
+  {
+   "id": "G079-ssh_log_tail_multi",
+   "owner": "campaign",
+   "tool": "ssh_log_tail_multi",
+   "args": {
+    "host": "raspberry",
+    "lines": 5,
+    "log_files": "/var/log/dpkg.log"
+   },
+   "expect": "re=status installed"
+  },
+  {
+   "id": "G080-ssh_metrics_multi",
+   "owner": "campaign",
+   "tool": "ssh_metrics_multi",
+   "args": {
+    "hosts": [
+     "raspberry"
+    ],
+    "metrics": [
+     "cpu",
+     "memory"
+    ]
+   },
+   "expect": [
+    "json",
+    "re=\"succeeded\":1"
+   ]
+  },
+  {
+   "id": "G081-ssh_net_dns",
+   "owner": "campaign",
+   "tool": "ssh_net_dns",
+   "args": {
+    "host": "raspberry",
+    "domain": "localhost"
+   },
+   "expect": "re=Got answer"
+  },
+  {
+   "id": "G082-ssh_net_interfaces",
+   "owner": "campaign",
+   "tool": "ssh_net_interfaces",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=LOOPBACK"
+  },
+  {
+   "id": "G083-ssh_net_ping",
+   "owner": "campaign",
+   "tool": "ssh_net_ping",
+   "args": {
+    "host": "raspberry",
+    "target": "127.0.0.1",
+    "count": 2
+   },
+   "expect": "re=bytes from"
+  },
+  {
+   "id": "G084-ssh_net_routes",
+   "owner": "campaign",
+   "tool": "ssh_net_routes",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=default via"
+  },
+  {
+   "id": "G085-ssh_net_traceroute",
+   "owner": "campaign",
+   "tool": "ssh_net_traceroute",
+   "args": {
+    "host": "raspberry",
+    "target": "127.0.0.1",
+    "max_hops": 3
+   },
+   "expect": "re=command not found"
+  },
+  {
+   "id": "G086-ssh_output_fetch",
+   "owner": "campaign",
+   "tool": "ssh_output_fetch",
+   "args": {
+    "output_id": "out-nonexistent0909"
+   },
+   "expect": [
+    "exit=1",
+    "re=Output cache is not available"
+   ],
+   "paths": [
+    "cli"
+   ]
+  },
+  {
+   "id": "G087-ssh_perf_trace",
+   "owner": "campaign",
+   "tool": "ssh_perf_trace",
+   "args": {
+    "host": "raspberry",
+    "duration": 2
+   },
+   "expect": "re=syscall"
+  },
+  {
+   "id": "G088-ssh_pkg_list",
+   "owner": "campaign",
+   "tool": "ssh_pkg_list",
+   "args": {
+    "host": "raspberry",
+    "filter": "bash"
+   },
+   "expect": "re=bash"
+  },
+  {
+   "id": "G089-ssh_pkg_search",
+   "owner": "campaign",
+   "tool": "ssh_pkg_search",
+   "args": {
+    "host": "raspberry",
+    "query": "bash"
+   },
+   "expect": "re=bash"
+  },
+  {
+   "id": "G090-ssh_process_top",
+   "owner": "campaign",
+   "tool": "ssh_process_top",
+   "args": {
+    "host": "raspberry",
+    "count": 5
+   },
+   "expect": "re=COMMAND"
+  },
+  {
+   "id": "G091-ssh_runbook_list",
+   "owner": "campaign",
+   "tool": "ssh_runbook_list",
+   "args": {},
+   "expect": "re=disk_full_recovery"
+  },
+  {
+   "id": "G092-ssh_runbook_validate",
+   "owner": "campaign",
+   "tool": "ssh_runbook_validate",
+   "args": {
+    "runbook_name": "disk_full_recovery"
+   },
+   "expect": "re=VALID: Runbook"
+  },
+  {
+   "id": "G093-ssh_security_audit",
+   "owner": "campaign",
+   "tool": "ssh_security_audit",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=SUID binaries"
+  },
+  {
+   "id": "G094-ssh_selinux_status",
+   "owner": "campaign",
+   "tool": "ssh_selinux_status",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=SELinux not available"
+  },
+  {
+   "id": "G095-ssh_session_create",
+   "owner": "campaign",
+   "tool": "ssh_session_create",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=\"host\":\"raspberry\""
+  },
+  {
+   "id": "G096-ssh_session_exec",
+   "owner": "campaign",
+   "tool": "ssh_session_exec",
+   "args": {
+    "session_id": "bt-nonexistent-guard-probe-0909",
+    "command": "echo hi"
+   },
+   "expect": "re=Session not found"
+  },
+  {
+   "id": "G097-ssh_ssl_audit",
+   "owner": "campaign",
+   "tool": "ssh_ssl_audit",
+   "args": {
+    "host": "raspberry",
+    "target_host": "127.0.0.1",
+    "port": 6443
+   },
+   "expect": "re=Certificate:"
+  },
+  {
+   "id": "G098-ssh_status",
+   "owner": "campaign",
+   "tool": "ssh_status",
+   "args": {},
+   "expect": "re=Configured hosts"
+  },
+  {
+   "id": "G099-ssh_stig_check",
+   "owner": "campaign",
+   "tool": "ssh_stig_check",
+   "args": {
+    "host": "raspberry",
+    "stig_id": "V-nonexistent-guard-probe"
+   },
+   "expect": "re=DISA STIG Check"
+  },
+  {
+   "id": "G100-ssh_storage_fdisk",
+   "owner": "campaign",
+   "tool": "ssh_storage_fdisk",
+   "args": {
+    "host": "raspberry",
+    "sudo": true
+   },
+   "expect": "re=Disk /dev"
+  },
+  {
+   "id": "G101-ssh_storage_fstab",
+   "owner": "campaign",
+   "tool": "ssh_storage_fstab",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=proc"
+  },
+  {
+   "id": "G102-ssh_storage_lvm",
+   "owner": "campaign",
+   "tool": "ssh_storage_lvm",
+   "args": {
+    "host": "raspberry",
+    "sudo": true
+   },
+   "expect": "re=\\[exit:127\\]"
+  },
+  {
+   "id": "G103-ssh_template_show",
+   "owner": "campaign",
+   "tool": "ssh_template_show",
+   "args": {
+    "host": "raspberry",
+    "template_name": "nginx-static"
+   },
+   "expect": "re=Template: nginx-static"
+  },
+  {
+   "id": "G104-ssh_template_validate",
+   "owner": "campaign",
+   "tool": "ssh_template_validate",
+   "args": {
+    "host": "raspberry",
+    "service": "redis"
+   },
+   "expect": "re=command not found"
+  },
+  {
+   "id": "G105-ssh_tunnel_close",
+   "owner": "campaign",
+   "tool": "ssh_tunnel_close",
+   "args": {
+    "tunnel_id": "tunnel-nonexistent-0909-9999"
+   },
+   "expect": "re=Tunnel not found"
+  },
+  {
+   "id": "G106-ssh_vuln_scan",
+   "owner": "campaign",
+   "tool": "ssh_vuln_scan",
+   "args": {
+    "host": "raspberry"
+   },
+   "expect": "re=KERNEL VERSION"
+  }
+ ]
+}
