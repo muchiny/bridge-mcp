@@ -73,6 +73,46 @@ impl SshSessionExecHandler {
     }"#;
 }
 
+/// Build the (possibly elevated) command to run in the session.
+///
+/// L'élévation est une décision du domaine : `privilege::elevate*` enveloppe
+/// la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer ici n'élèverait
+/// que le premier processus — voir la documentation de
+/// `domain::privilege::elevate`.
+fn build_command(
+    args: &SshSessionExecArgs,
+    session_host_config: Option<&HostConfig>,
+    effective_shell: ShellType,
+) -> String {
+    if effective_shell != ShellType::Posix {
+        return args.command.clone();
+    }
+
+    let privilege = crate::domain::privilege::PrivilegeArgs {
+        sudo: args.sudo.unwrap_or(false),
+        sudo_user: args.sudo_user.clone(),
+    };
+    // Only cloned when elevation is actually requested: `sudo_password` is a
+    // `RedactedSecret` and this keeps its lifetime as narrow as the sudo
+    // branch it's used in, not every Posix command on this session.
+    let sudo_password = if privilege.sudo {
+        session_host_config.and_then(|h| h.sudo_password.clone())
+    } else {
+        None
+    };
+    if sudo_password.is_some() {
+        tracing::warn!(
+            "Using sudo with password via stdin. \
+             Consider configuring NOPASSWD in sudoers for better security."
+        );
+    }
+    crate::domain::privilege::elevate_with_password(
+        &args.command,
+        &privilege,
+        sudo_password.as_deref(),
+    )
+}
+
 #[async_trait]
 impl ToolHandler for SshSessionExecHandler {
     fn name(&self) -> &'static str {
@@ -135,30 +175,7 @@ impl ToolHandler for SshSessionExecHandler {
         let effective_shell =
             session_host_config.map_or(ShellType::Posix, HostConfig::effective_shell);
 
-        // L'élévation est une décision du domaine : `privilege::elevate*`
-        // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
-        // ici n'élèverait que le premier processus — voir la documentation de
-        // `domain::privilege::elevate`.
-        let command = if effective_shell == ShellType::Posix {
-            let privilege = crate::domain::privilege::PrivilegeArgs {
-                sudo: args.sudo.unwrap_or(false),
-                sudo_user: args.sudo_user.clone(),
-            };
-            let sudo_password = session_host_config.and_then(|h| h.sudo_password.clone());
-            if privilege.sudo && sudo_password.is_some() {
-                tracing::warn!(
-                    "Using sudo with password via stdin. \
-                     Consider configuring NOPASSWD in sudoers for better security."
-                );
-            }
-            crate::domain::privilege::elevate_with_password(
-                &args.command,
-                &privilege,
-                sudo_password.as_deref(),
-            )
-        } else {
-            args.command.clone()
-        };
+        let command = build_command(&args, session_host_config, effective_shell);
 
         info!(
             session_id = %args.session_id,

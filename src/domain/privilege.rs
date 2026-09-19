@@ -152,8 +152,16 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// about the real cause. `-n` turns that into an immediate, legible
 /// "a password is required".
 ///
-/// The command is single-quoted with POSIX escaping, so nothing inside it is
-/// interpreted by the outer shell.
+/// The command **and** the target user, when one is given, are single-quoted
+/// with POSIX escaping, so nothing inside either is interpreted by the outer
+/// shell. `sudo_user` reaches here as a plain `String` from three handlers
+/// that build their own `PrivilegeArgs` directly — unlike the ~90 tools that
+/// go through [`PrivilegeArgs::extract`] and its [`validate_sudo_user`], it is
+/// not constrained to `[A-Za-z0-9._-]` before it gets here. Escaping it is
+/// what keeps `-u <user>` from being a second injection point beside the
+/// command: for an ordinary name escaping is a no-op wrap (`root` becomes
+/// `'root'`, which `sudo -u` reads identically), and for anything else it
+/// keeps the payload a single, inert argument instead of a shell metacharacter.
 #[must_use]
 pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     if !args.sudo {
@@ -163,7 +171,10 @@ pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     let quoted = shell::escape(command, ShellType::Posix);
     args.sudo_user.as_ref().map_or_else(
         || format!("sudo -n bash -c {quoted}"),
-        |user| format!("sudo -n -u {user} bash -c {quoted}"),
+        |user| {
+            let user = shell::escape(user, ShellType::Posix);
+            format!("sudo -n -u {user} bash -c {quoted}")
+        },
     )
 }
 
@@ -192,7 +203,10 @@ pub fn elevate_with_password(
     let pw = shell::escape(password, ShellType::Posix);
     args.sudo_user.as_ref().map_or_else(
         || format!("printf '%s\\n' {pw} | sudo -S -p '' bash -c {quoted}"),
-        |user| format!("printf '%s\\n' {pw} | sudo -S -p '' -u {user} bash -c {quoted}"),
+        |user| {
+            let user = shell::escape(user, ShellType::Posix);
+            format!("printf '%s\\n' {pw} | sudo -S -p '' -u {user} bash -c {quoted}")
+        },
     )
 }
 
@@ -299,7 +313,47 @@ mod tests {
         };
         assert_eq!(
             elevate("psql -c 'select 1'", &args),
-            r"sudo -n -u postgres bash -c 'psql -c '\''select 1'\'''"
+            r"sudo -n -u 'postgres' bash -c 'psql -c '\''select 1'\'''"
+        );
+    }
+
+    /// `sudo_user` reaches three handlers as a plain `String` that never goes
+    /// through [`PrivilegeArgs::extract`]/[`validate_sudo_user`] — it must be
+    /// escaped, not just interpolated, or a value like `root; touch
+    /// /tmp/pwned` becomes a second command on the remote host, right next to
+    /// the command argument that is already escaped.
+    #[test]
+    fn elevate_escapes_a_malicious_sudo_user() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root; touch /tmp/pwned".to_string()),
+        };
+        let got = elevate("id", &args);
+        assert!(
+            !got.contains("; touch /tmp/pwned bash") && !got.contains("; touch /tmp/pwned\nbash"),
+            "the injected `;` must not escape the quoting around sudo_user: {got}"
+        );
+        assert_eq!(
+            got, r"sudo -n -u 'root; touch /tmp/pwned' bash -c 'id'",
+            "sudo_user must be single-quoted exactly like command: {got}"
+        );
+    }
+
+    /// Same injection, through the password-bearing wrapper.
+    #[test]
+    fn elevate_with_password_escapes_a_malicious_sudo_user() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root; touch /tmp/pwned".to_string()),
+        };
+        let got = elevate_with_password("id", &args, Some("hunter2"));
+        assert!(
+            !got.contains("; touch /tmp/pwned bash") && !got.contains("; touch /tmp/pwned\nbash"),
+            "the injected `;` must not escape the quoting around sudo_user: {got}"
+        );
+        assert!(
+            got.contains("-u 'root; touch /tmp/pwned' bash -c 'id'"),
+            "sudo_user must be single-quoted exactly like command: {got}"
         );
     }
 
@@ -338,7 +392,7 @@ mod tests {
         let got = elevate("rm -f -- /run/systemd/system/x && echo ok", &args);
         // La forme fautive — `sudo -n -u root rm -f -- … && echo ok` — n'élève que le `rm`.
         assert!(
-            got.starts_with("sudo -n -u root bash -c "),
+            got.starts_with("sudo -n -u 'root' bash -c "),
             "l'élévation doit envelopper, pas préfixer : {got}"
         );
         assert!(
