@@ -1,0 +1,435 @@
+{
+ "vars": {
+  "SANDBOX": "/tmp/bridge-test-0909",
+  "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+  "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+  "NS": "bridge-test",
+  "SBXUSER": "btest0909",
+  "SBXGROUP": "btestgrp0909",
+  "CRON_MARK": "BRIDGE_TEST_0909",
+  "UNIT": "bridge-test-0909",
+  "SLEEPPID": "",
+  "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+  "PAUSE_IMAGE": "docker.io/library/busybox:1.38",
+  "BUSYBOX_OK": "no",
+  "UFW_ABSENT": "yes",
+  "HAD_CRONTAB": "yes",
+  "BT_CID": ""
+ },
+ "cases": [
+  {
+   "id": "E301",
+   "owner": "campaign",
+   "tool": "ssh_group_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {},
+   "expect": "nore=btestgrp0909"
+  },
+  {
+   "id": "E302",
+   "owner": "campaign",
+   "tool": "ssh_group_add",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "${SBXGROUP}",
+    "system": true,
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E303",
+   "owner": "campaign",
+   "tool": "ssh_user_info",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "username": "${SBXUSER}"
+   },
+   "expect": "re=no such user"
+  },
+  {
+   "id": "E304",
+   "owner": "campaign",
+   "tool": "ssh_user_add",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "username": "${SBXUSER}",
+    "groups": "${SBXGROUP}",
+    "system": true,
+    "create_home": false,
+    "shell": "/usr/sbin/nologin",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E305",
+   "owner": "campaign",
+   "tool": "ssh_user_info",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "username": "${SBXUSER}"
+   },
+   "expect": "re=btest0909"
+  },
+  {
+   "id": "E306",
+   "owner": "campaign",
+   "tool": "ssh_user_modify",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "username": "${SBXUSER}",
+    "shell": "/bin/false",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E307",
+   "owner": "campaign",
+   "tool": "ssh_user_info",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "username": "${SBXUSER}"
+   },
+   "expect": "re=/bin/false"
+  },
+  {
+   "id": "E308",
+   "owner": "campaign",
+   "tool": "ssh_user_modify",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "username": "${SBXUSER}",
+    "lock": true,
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E308b",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "passwd -S btest0909",
+    "sudo": true
+   },
+   "sudo_reason": "passwd -S exige root pour lire /etc/shadow",
+   "expect": "re=^btest0909 L"
+  },
+  {
+   "id": "E312",
+   "owner": "campaign",
+   "tool": "ssh_user_delete",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "username": "${SBXUSER}",
+    "remove_home": true,
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E313",
+   "owner": "campaign",
+   "tool": "ssh_group_delete",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "${SBXGROUP}",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E316",
+   "owner": "campaign",
+   "tool": "ssh_cron_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {},
+   "expect": "nore=BRIDGE_TEST_0909|bridge-test-0909"
+  },
+  {
+   "id": "E317",
+   "owner": "campaign",
+   "tool": "ssh_cron_add",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "schedule": "17 4 * * *",
+    "command": "/bin/true # BRIDGE_TEST_0909",
+    "comment": "BRIDGE_TEST_0909"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E318",
+   "owner": "campaign",
+   "tool": "ssh_cron_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {},
+   "expect": "re=BRIDGE_TEST_0909"
+  },
+  {
+   "id": "E319",
+   "owner": "campaign",
+   "tool": "ssh_cron_remove",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pattern": "${CRON_MARK}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E319b",
+   "owner": "campaign",
+   "tool": "ssh_cron_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {},
+   "expect": "nore=BRIDGE_TEST_0909"
+  },
+  {
+   "id": "E320",
+   "owner": "campaign",
+   "tool": "ssh_service_status",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "service": "bridge-test-0909.service"
+   },
+   "expect": "re=could not be found"
+  },
+  {
+   "id": "E321",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "sudo": true,
+    "command": "bash -c 'printf \"%s\\n\" \"[Unit]\" \"Description=bridge-mcp campaign 2026-09-09 transient unit\" \"[Service]\" \"Type=oneshot\" \"ExecStart=/bin/true\" > /run/systemd/system/bridge-test-0909.service && printf \"%s\\n\" \"[Unit]\" \"Description=bridge-mcp campaign 2026-09-09 transient timer\" \"[Timer]\" \"OnCalendar=*-*-* 04:17:00\" \"Unit=bridge-test-0909.service\" \"[Install]\" \"WantedBy=timers.target\" > /run/systemd/system/bridge-test-0909.timer && echo units-written'"
+   },
+   "sudo_reason": "écriture de l'unité transitoire /run/systemd/system/bridge-test-0909.*, cinquième surface inscriptible nommée au §3.1, sous oui E-SYS",
+   "expect": "eq=units-written"
+  },
+  {
+   "id": "E322",
+   "owner": "campaign",
+   "tool": "ssh_service_daemon_reload",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E323",
+   "owner": "campaign",
+   "tool": "ssh_service_status",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "service": "bridge-test-0909.service"
+   },
+   "expect": "re=loaded"
+  },
+  {
+   "id": "E324",
+   "owner": "campaign",
+   "tool": "ssh_service_start",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "service": "bridge-test-0909",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E324b",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "systemctl show -p ExecMainStatus bridge-test-0909"
+   },
+   "expect": "eq=ExecMainStatus=0"
+  },
+  {
+   "id": "E325",
+   "owner": "campaign",
+   "tool": "ssh_service_restart",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "service": "bridge-test-0909",
+    "action": "restart",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E326",
+   "owner": "campaign",
+   "tool": "ssh_service_stop",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "service": "bridge-test-0909-nonexistent.service",
+    "sudo": true
+   },
+   "expect": "re=not loaded"
+  },
+  {
+   "id": "E327",
+   "owner": "campaign",
+   "tool": "ssh_service_enable",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "bridge-test-0909.timer",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E327b",
+   "owner": "campaign",
+   "tool": "ssh_timer_enable",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "timer": "bridge-test-0909.timer",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E327c",
+   "owner": "campaign",
+   "tool": "ssh_timer_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "all": true
+   },
+   "expect": "re=bridge-test-0909"
+  },
+  {
+   "id": "E327d",
+   "owner": "campaign",
+   "tool": "ssh_timer_info",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "timer": "bridge-test-0909.timer"
+   },
+   "expect": "re=bridge-test-0909"
+  },
+  {
+   "id": "E328",
+   "owner": "campaign",
+   "tool": "ssh_timer_trigger",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "timer": "bridge-test-0909.timer",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E329",
+   "owner": "campaign",
+   "tool": "ssh_timer_disable",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "timer": "bridge-test-0909.timer",
+    "now": true,
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E329b",
+   "owner": "campaign",
+   "tool": "ssh_service_disable",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "bridge-test-0909.timer",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E330",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "ls /etc/systemd/system/*.wants/ 2>/dev/null | grep -c bridge-test || true"
+   },
+   "expect": "eq=0"
+  }
+ ]
+}

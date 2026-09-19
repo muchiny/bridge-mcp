@@ -1,0 +1,170 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": "",
+    "SBX": "/tmp/bridge-test-0909/lane-b",
+    "SMALL": "/tmp/bridge-test-0909/lane-b/small.txt",
+    "MID": "/tmp/bridge-test-0909/lane-b/mid.txt",
+    "BIG": "/tmp/bridge-test-0909/lane-b/big.txt",
+    "ARC": "/tmp/bridge-test-0909/lane-b/arc.tar",
+    "OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "CHART_MULTI": "/home/muchini/media-stack-k8s/charts/plex",
+    "CHART_SINGLE": "/home/muchini/media-stack-k8s/charts/backup"
+  },
+  "cases": [
+    {
+      "id": "BO01",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "save_output": "${OUT}/df.txt"
+      },
+      "expect": [
+        "re=Full output saved to",
+        "saved=${OUT}/df.txt"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO05",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "columns": [
+          "FILESYSTEM"
+        ],
+        "save_output": "${OUT}/df2.txt"
+      },
+      "expect": "saved=${OUT}/df2.txt",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO06",
+      "owner": "campaign",
+      "tool": "ssh_k8s_version",
+      "args": {
+        "jq_filter": ".clientVersion",
+        "save_output": "${OUT}/kv.txt"
+      },
+      "expect": "saved=${OUT}/kv.txt",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO07",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${MID}",
+        "max_output": 200,
+        "save_output": "${OUT}/mid.txt"
+      },
+      "expect": [
+        "trunc",
+        "saved=${OUT}/mid.txt"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO09",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "save_output": "${OUT}/../evade.txt"
+      },
+      "expect": [
+        "exit=0",
+        "re=save_output error: File transfer error: Path traversal not allowed"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO11",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "save_output": "${OUT}/a/b/c/df.txt"
+      },
+      "expect": "saved=${OUT}/a/b/c/df.txt",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO13",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "save_output": "${OUT}/m.txt"
+      },
+      "expect": "error=Unknown argument `save_output`",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BO14",
+      "owner": "campaign",
+      "tool": "ssh_journal_boots",
+      "args": {
+        "save_output": "${OUT}/boots.txt"
+      },
+      "expect": "saved=${OUT}/boots.txt",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO15",
+      "owner": "discover",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${SBX}/absent.txt",
+        "save_output": "${OUT}/err.txt"
+      },
+      "expect": "exit=0",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BO16",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${SMALL}",
+        "save_output": "${OUT}/small.txt"
+      },
+      "expect": "saved=${OUT}/small.txt",
+      "paths": [
+        "cli"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+USER	UID	GID	HOME	SHELL
+muchini	1000	1000	/home/muchini	/bin/bash
+ghostuser	2000	2000	/home/ghostuser	/bin/bash

@@ -1,0 +1,325 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": "",
+    "SBX": "/tmp/bridge-test-0909/lane-b",
+    "SMALL": "/tmp/bridge-test-0909/lane-b/small.txt",
+    "MID": "/tmp/bridge-test-0909/lane-b/mid.txt",
+    "BIG": "/tmp/bridge-test-0909/lane-b/big.txt",
+    "ARC": "/tmp/bridge-test-0909/lane-b/arc.tar",
+    "OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "CHART_MULTI": "/home/muchini/media-stack-k8s/charts/plex",
+    "CHART_SINGLE": "/home/muchini/media-stack-k8s/charts/backup"
+  },
+  "cases": [
+    {
+      "id": "BF01",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".this | is | not ( valid"
+      },
+      "expect": "error=jq filter parse error in `"
+    },
+    {
+      "id": "BF02",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".this | is | not ( valid",
+        "output_format": "tsv"
+      },
+      "expect": "error=jq filter parse error:"
+    },
+    {
+      "id": "BF03",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".nope"
+      },
+      "expect": "eq=null"
+    },
+    {
+      "id": "BF04",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load | empty"
+      },
+      "expect": "eq="
+    },
+    {
+      "id": "BF05",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load | empty",
+        "output_format": "tsv"
+      },
+      "expect": "eq="
+    },
+    {
+      "id": "BF06",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load.load_1min | .[0]"
+      },
+      "expect": "re=jq error:"
+    },
+    {
+      "id": "BF07",
+      "owner": "campaign",
+      "tool": "ssh_k8s_describe",
+      "args": {
+        "resource": "deployment",
+        "name": "coredns",
+        "namespace": "kube-system",
+        "jq_filter": "."
+      },
+      "expect": "error=jq_filter requires JSON output, but command returned plain text"
+    },
+    {
+      "id": "BF08",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "jq_filter": "."
+      },
+      "expect": "error=jq_filter requires JSON output"
+    },
+    {
+      "id": "BF09",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "jq_filter": "."
+      },
+      "expect": "error=it returns Tabular output"
+    },
+    {
+      "id": "BF10",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "jq_filter": "."
+      },
+      "expect": "error=it returns RawText output"
+    },
+    {
+      "id": "BF11",
+      "owner": "discover",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "output_format": "tsv"
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BF12",
+      "owner": "discover",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "output_format": "xml"
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BF13",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": "[.load.load1]",
+        "output_format": "TSV"
+      },
+      "expect": "nore=^\\["
+    },
+    {
+      "id": "BF14",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load",
+        "output_format": "tsv"
+      },
+      "expect": "re=\\t"
+    },
+    {
+      "id": "BF15",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load.load1",
+        "output_format": "tsv"
+      },
+      "expect": "nore=^\""
+    },
+    {
+      "id": "BF16",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "yq_filter": ".a |"
+      },
+      "expect": "error=jq filter parse error"
+    },
+    {
+      "id": "BF17",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "yq_filter": ".nope"
+      },
+      "expect": "lines>=1"
+    },
+    {
+      "id": "BF18",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${SBX}/pas-une-charte",
+        "release": "probe-b",
+        "yq_filter": ".kind"
+      },
+      "expect": "error="
+    },
+    {
+      "id": "BF19",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "yq_filter": "."
+      },
+      "expect": "error=it returns Json output"
+    },
+    {
+      "id": "BF20",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "yaml",
+        "yq_filter": ".kind"
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BF21",
+      "owner": "discover",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "json",
+        "yq_filter": ".items | length"
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BF22",
+      "owner": "discover",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "json",
+        "jq_filter": ".kind",
+        "yq_filter": ".kind"
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BF23",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "limit": 0
+      },
+      "expect": "error=limit must be at least 1"
+    },
+    {
+      "id": "BF24",
+      "owner": "discover",
+      "tool": "ssh_storage_df",
+      "args": {
+        "limit": -1
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BF25",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "limit": 999999999
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BF26",
+      "owner": "discover",
+      "tool": "ssh_storage_df",
+      "args": {
+        "columns": []
+      },
+      "expect": "exit=0"
+    }
+  ]
+}

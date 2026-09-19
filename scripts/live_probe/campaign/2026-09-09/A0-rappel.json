@@ -1,0 +1,34 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": ""
+  },
+  "cases": [
+    {"id": "A001", "owner": "base", "tool": "ssh_health", "args": {}, "expect": "ok"},
+    {"id": "A002", "owner": "base", "tool": "ssh_k8s_get", "args": {"resource": "namespaces"}, "expect": "re=(?i)media-stack"},
+    {"id": "A003", "owner": "base", "tool": "ssh_k8s_get", "args": {"resource": "deployments", "namespace": "argocd"}, "expect": "re=(?i)argocd-server"},
+    {"id": "A004", "owner": "base", "tool": "ssh_k8s_get", "args": {"resource": "pods", "namespace": "argocd", "name": "argocd-application-controller-0"}, "expect": "re=(?i)argocd-application-controller-0"},
+    {"id": "A005", "owner": "base", "tool": "ssh_service_list", "args": {"state": "failed"}, "expect": "ok"},
+    {"id": "A006", "owner": "base", "tool": "ssh_timer_list", "args": {"all": true}, "expect": "re=(?i)fstrim"},
+    {"id": "A007", "owner": "base", "tool": "ssh_cron_list", "args": {}, "expect": "ok"},
+    {"id": "A008", "owner": "base", "tool": "ssh_group_list", "args": {}, "expect": "ok"},
+    {"id": "A009", "owner": "base", "tool": "ssh_user_list", "args": {}, "expect": "re=(?i)muchini"},
+    {"id": "A010", "owner": "base", "tool": "ssh_storage_df", "args": {}, "expect": "ok"},
+    {"id": "A011", "owner": "base", "tool": "ssh_tunnel_list", "args": {}, "expect": "re=No active tunnels"},
+    {"id": "A012", "owner": "base", "tool": "ssh_session_list", "args": {}, "expect": "ok"},
+    {"id": "A013", "owner": "base", "tool": "ssh_crictl_ps", "args": {"sudo": true}, "expect": "ok"}
+  ]
+}

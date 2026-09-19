@@ -1,0 +1,14 @@
+deployment.apps/argocd-applicationset-controller
+deployment.apps/argocd-dex-server
+deployment.apps/argocd-image-updater-controller
+deployment.apps/argocd-notifications-controller
+deployment.apps/argocd-redis
+deployment.apps/argocd-repo-server
+deployment.apps/argocd-server
+deployment.apps/coredns
+deployment.apps/local-path-provisioner
+deployment.apps/metrics-server
+deployment.apps/traefik
+deployment.apps/media-plex
+deployment.apps/media-qbittorrent
+
