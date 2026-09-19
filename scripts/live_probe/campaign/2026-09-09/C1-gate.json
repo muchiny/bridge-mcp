@@ -808,9 +808,9 @@
       ],
       "yes": true,
       "args": {
-        "pid": 1
+        "pid": 2147483647
       },
-      "expect": "error="
+      "expect": "re=No such process"
     }
   ]
 }
