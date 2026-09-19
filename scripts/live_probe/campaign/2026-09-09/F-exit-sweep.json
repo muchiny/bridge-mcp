@@ -1,0 +1,711 @@
+{
+  "vars": {
+    "ARC": "/tmp/bridge-test-0909/lane-b/arc.tar",
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "CID": "2fa48bdcf36e9a1fb9b48cc2bc4afe3b5a18ac1d2f95c6c7c11aa168b4dded33",
+    "SMALL": "/tmp/bridge-test-0909/lane-b/small.txt",
+    "CHART_MULTI": "/home/muchini/media-stack-k8s/charts/plex",
+    "NS": "bridge-test",
+    "SBX": "/tmp/bridge-test-0909/lane-c",
+    "SBXUSER": "btest0909"
+  },
+  "cases": [
+    {
+      "id": "FS-ssh_alert_list",
+      "owner": "base",
+      "tool": "ssh_alert_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_backup_list",
+      "owner": "base",
+      "tool": "ssh_backup_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "archive_file": "${ARC}",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_backup_verify",
+      "owner": "base",
+      "tool": "ssh_backup_verify",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "archive": "${SANDBOX}/bk.tar.gz",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_crictl_images",
+      "owner": "base",
+      "tool": "ssh_crictl_images",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_crictl_logs",
+      "owner": "base",
+      "tool": "ssh_crictl_logs",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "container_id": "${CID}",
+        "tail": 5,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_crictl_ps",
+      "owner": "base",
+      "tool": "ssh_crictl_ps",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_cron_history",
+      "owner": "base",
+      "tool": "ssh_cron_history",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "lines": 50,
+        "limit": 3,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_cron_list",
+      "owner": "base",
+      "tool": "ssh_cron_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_file_read",
+      "owner": "base",
+      "tool": "ssh_file_read",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "path": "${SMALL}",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_file_stat",
+      "owner": "base",
+      "tool": "ssh_file_stat",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "path": "${SANDBOX}/a.txt",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_firewall_status",
+      "owner": "base",
+      "tool": "ssh_firewall_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_fleet_diff",
+      "owner": "base",
+      "tool": "ssh_fleet_diff",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "command": "cat /etc/os-release",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_git_log",
+      "owner": "base",
+      "tool": "ssh_git_log",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "path": "${SANDBOX}/repo",
+        "max_count": 1,
+        "oneline": true,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_git_status",
+      "owner": "base",
+      "tool": "ssh_git_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "path": "${SANDBOX}/repo",
+        "short": true,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_group_list",
+      "owner": "base",
+      "tool": "ssh_group_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_helm_template",
+      "owner": "base",
+      "tool": "ssh_helm_template",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "yq_filter": ".nope",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_journal_boots",
+      "owner": "base",
+      "tool": "ssh_journal_boots",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k3s_status",
+      "owner": "base",
+      "tool": "ssh_k3s_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_api_resources",
+      "owner": "base",
+      "tool": "ssh_k8s_api_resources",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "limit": 5,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_describe",
+      "owner": "base",
+      "tool": "ssh_k8s_describe",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource": "deployment",
+        "name": "coredns",
+        "namespace": "kube-system",
+        "limit": 5,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_dns_check",
+      "owner": "base",
+      "tool": "ssh_k8s_dns_check",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resolve_name": "kubernetes.default.svc.cluster.local",
+        "namespace": "${NS}",
+        "kubectl_bin": "kubectl",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_get",
+      "owner": "base",
+      "tool": "ssh_k8s_get",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource": "namespaces",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_ingress_describe",
+      "owner": "base",
+      "tool": "ssh_k8s_ingress_describe",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "ingress": "bt-ing",
+        "namespace": "${NS}",
+        "kubectl_bin": "kubectl",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_localpath_inspect",
+      "owner": "base",
+      "tool": "ssh_k8s_localpath_inspect",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pv": "bt-pv",
+        "kubectl_bin": "kubectl",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_networkpolicy",
+      "owner": "base",
+      "tool": "ssh_k8s_networkpolicy",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "policy": "bt-netpol",
+        "namespace": "${NS}",
+        "kubectl_bin": "kubectl",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_pvc_status",
+      "owner": "base",
+      "tool": "ssh_k8s_pvc_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pvc": "bt-pvc",
+        "namespace": "${NS}",
+        "kubectl_bin": "kubectl",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_top",
+      "owner": "base",
+      "tool": "ssh_k8s_top",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource_type": "nodes",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_version",
+      "owner": "base",
+      "tool": "ssh_k8s_version",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "jq_filter": ".clientVersion.gitVersion",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_k8s_who_can",
+      "owner": "base",
+      "tool": "ssh_k8s_who_can",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "verb": "get",
+        "resource": "pods",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_log_aggregate",
+      "owner": "base",
+      "tool": "ssh_log_aggregate",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "log_files": "/var/log/syslog",
+        "limit": 2,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_log_search_multi",
+      "owner": "base",
+      "tool": "ssh_log_search_multi",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pattern": "shutdown",
+        "log_files": "${SBX}/c131.txt",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_net_connections",
+      "owner": "base",
+      "tool": "ssh_net_connections",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "listening": true,
+        "limit": 3,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_network_capture",
+      "owner": "base",
+      "tool": "ssh_network_capture",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "interface": "lo",
+        "count": 1,
+        "filter": "port 65432",
+        "timeout_seconds": 20,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_process_list",
+      "owner": "base",
+      "tool": "ssh_process_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "filter": "k3s",
+        "limit": 2,
+        "columns": [
+          "USER",
+          "%CPU"
+        ],
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_service_list",
+      "owner": "base",
+      "tool": "ssh_service_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "state": "failed",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_service_logs",
+      "owner": "base",
+      "tool": "ssh_service_logs",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "service": "k3s",
+        "lines": 5,
+        "limit": 2,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_service_status",
+      "owner": "base",
+      "tool": "ssh_service_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "service": "bridge-test-0909.service",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_storage_df",
+      "owner": "base",
+      "tool": "ssh_storage_df",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_storage_lsblk",
+      "owner": "base",
+      "tool": "ssh_storage_lsblk",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_template_diff",
+      "owner": "base",
+      "tool": "ssh_template_diff",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "current_path": "${SANDBOX}/tpl.conf",
+        "content": "v3 bridge-test-0909\n",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_template_list",
+      "owner": "base",
+      "tool": "ssh_template_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_timer_info",
+      "owner": "base",
+      "tool": "ssh_timer_info",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "timer": "bridge-test-0909.timer",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_timer_list",
+      "owner": "base",
+      "tool": "ssh_timer_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "all": true,
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_user_info",
+      "owner": "base",
+      "tool": "ssh_user_info",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "username": "${SBXUSER}",
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    },
+    {
+      "id": "FS-ssh_user_list",
+      "owner": "base",
+      "tool": "ssh_user_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "sudo_user": "bridgenouser"
+      },
+      "expect": "re=sudo: unknown user",
+      "sudo_reason": "D1 exit-sweep probe (Step 2): sudo -n -u bridgenouser refuses before running anything (unknown user) — the read-only command underneath never executes."
+    }
+  ]
+}

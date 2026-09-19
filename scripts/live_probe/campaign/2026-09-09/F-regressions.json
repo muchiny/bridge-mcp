@@ -1,0 +1,480 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "NS": "bridge-test",
+    "CID": "2fa48bdcf36e9a1fb9b48cc2bc4afe3b5a18ac1d2f95c6c7c11aa168b4dded33"
+  },
+  "cases": [
+    {
+      "id": "F01",
+      "owner": "base",
+      "tool": "ssh_k8s_get",
+      "paths": [
+        "cli",
+        "mcp"
+      ],
+      "args": {
+        "resource": "bridge-test-nokind"
+      },
+      "expect": "re=\\[exit:1\\]"
+    },
+    {
+      "id": "F02",
+      "owner": "base",
+      "tool": "ssh_service_status",
+      "paths": [
+        "cli",
+        "mcp"
+      ],
+      "args": {
+        "service": "bridge-test-nonexistent.service"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "F03",
+      "owner": "env",
+      "tool": "ssh_docker_ps",
+      "paths": [
+        "cli",
+        "mcp"
+      ],
+      "args": {},
+      "expect": [
+        "re=\\[exit:1\\]",
+        "re=Docker/Podman not installed on host"
+      ]
+    },
+    {
+      "id": "F04",
+      "owner": "base",
+      "tool": "ssh_helm_list",
+      "paths": [
+        "cli",
+        "mcp"
+      ],
+      "args": {},
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "F05",
+      "owner": "base",
+      "tool": "ssh_k3s_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "max_output": 50
+      },
+      "expect": "re=--- \\[truncated:"
+    },
+    {
+      "id": "F06",
+      "owner": "base",
+      "tool": "ssh_k3s_status",
+      "paths": [
+        "mcp"
+      ],
+      "args": {
+        "max_output": 50
+      },
+      "expect": "re=MORE DATA AVAILABLE"
+    },
+    {
+      "id": "F07",
+      "owner": "base",
+      "tool": "ssh_k8s_get",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "max_output": 50
+      },
+      "expect": "nore=truncated:"
+    },
+    {
+      "id": "F08",
+      "owner": "base",
+      "tool": "ssh_k8s_get",
+      "paths": [
+        "mcp"
+      ],
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "max_output": 50
+      },
+      "expect": "nore=MORE DATA AVAILABLE"
+    },
+    {
+      "id": "F09",
+      "owner": "base",
+      "tool": "ssh_storage_df",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "max_output": 50
+      },
+      "expect": "nore=truncated:"
+    },
+    {
+      "id": "F10",
+      "owner": "base",
+      "tool": "ssh_service_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "all": true,
+        "max_output": 50
+      },
+      "expect": "nore=truncated:"
+    },
+    {
+      "id": "F11",
+      "owner": "base",
+      "tool": "ssh_process_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "max_output": 50
+      },
+      "expect": "nore=truncated:"
+    },
+    {
+      "id": "F12",
+      "owner": "base",
+      "tool": "ssh_disk_usage",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "path": "/var",
+        "max_output": 50
+      },
+      "expect": "nore=truncated:"
+    },
+    {
+      "id": "F13",
+      "owner": "base",
+      "tool": "ssh_k8s_get",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource": "pods",
+        "jq_fitler": ".x"
+      },
+      "expect": [
+        "exit=1",
+        "stderr=Did you mean"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "F13b",
+      "owner": "base",
+      "tool": "ssh_k8s_get",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource": "pods",
+        "jq_fitler": ".x"
+      },
+      "expect": [
+        "exit=1",
+        "stderr=unknown field"
+      ],
+      "argstyle": "json-args"
+    },
+    {
+      "id": "F14",
+      "owner": "base",
+      "tool": "ssh_k8s_get",
+      "paths": [
+        "mcp"
+      ],
+      "args": {
+        "resource": "pods",
+        "jq_fitler": ".x"
+      },
+      "expect": "error=unknown field `jq_fitler`"
+    },
+    {
+      "id": "F15",
+      "owner": "base",
+      "tool": "ssh_exec",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "command": "true"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "F16",
+      "owner": "base",
+      "tool": "ssh_exec",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "command": "rm -rf /tmp/bridge-test-0909/f16-nonexistent"
+      },
+      "expect": "exit=4",
+      "yes": true,
+      "guard_probe": true
+    },
+    {
+      "id": "F17",
+      "owner": "base",
+      "tool": "ssh_k8s_endpoints",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "service": "argocd-server",
+        "namespace": "argocd"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F18",
+      "owner": "base",
+      "tool": "ssh_k8s_ingress_describe",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "ingress": "bridge-test-noingress",
+        "namespace": "default"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F19",
+      "owner": "base",
+      "tool": "ssh_k8s_networkpolicy",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "policy": "bridge-test-nopolicy",
+        "namespace": "default"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F20",
+      "owner": "base",
+      "tool": "ssh_k8s_dns_check",
+      "paths": [
+        "cli"
+      ],
+      "args": {},
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F21",
+      "owner": "base",
+      "tool": "ssh_k8s_service_describe",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "service": "argocd-server",
+        "namespace": "argocd"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F22",
+      "owner": "base",
+      "tool": "ssh_traefik_introspect",
+      "paths": [
+        "cli"
+      ],
+      "args": {},
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F23",
+      "owner": "base",
+      "tool": "ssh_traefik_ingressroute",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "route": "traefik-dashboard",
+        "namespace": "kube-system"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F24",
+      "owner": "base",
+      "tool": "ssh_k3s_servicelb_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {},
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F25",
+      "owner": "base",
+      "tool": "ssh_k3s_addon_manifests",
+      "paths": [
+        "cli"
+      ],
+      "args": {},
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F26",
+      "owner": "base",
+      "tool": "ssh_k8s_pvc_status",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pvc": "bridge-test-nopvc",
+        "namespace": "default"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F27",
+      "owner": "base",
+      "tool": "ssh_k8s_localpath_inspect",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pv": "bridge-test-nopv"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F28",
+      "owner": "base",
+      "tool": "ssh_k8s_pvc_usage",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "namespace": "default"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F29",
+      "owner": "base",
+      "tool": "ssh_k8s_events",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "namespace": "kube-system",
+        "for_kind": "Pod",
+        "for_name": "coredns"
+      },
+      "expect": "re=unknown flag: --for"
+    },
+    {
+      "id": "F30",
+      "owner": "base",
+      "tool": "ssh_crictl_inspect",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "sudo": true,
+        "kind": "container",
+        "id": "${CID}",
+        "output": "json"
+      },
+      "expect": "re=an error occurred when try to find container"
+    },
+    {
+      "id": "F31",
+      "owner": "base",
+      "tool": "ssh_file_patch",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "target_file": "${SANDBOX}/f31.txt",
+        "patch_content": "--- f31.txt\n+++ f31.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n"
+      },
+      "expect": "re=printf: --: invalid option",
+      "yes": true
+    },
+    {
+      "id": "F32",
+      "owner": "base",
+      "tool": "ssh_backup_list",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "archive_file": "${SANDBOX}/f32.tar.gz",
+        "verbose": true
+      },
+      "expect": [
+        "re=TMP/BRIDGE-TEST-0909",
+        "nore=(?m)^tmp/bridge-test-0909"
+      ]
+    },
+    {
+      "id": "F33",
+      "owner": "base",
+      "tool": "ssh_journal_follow",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "unit": "k3s",
+        "lines": 5,
+        "timeout_seconds": 5
+      },
+      "expect": [
+        "error=SSH command timeout after 5s",
+        "dur>=12"
+      ]
+    },
+    {
+      "id": "F34",
+      "owner": "base",
+      "tool": "ssh_k8s_dns_check",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resolve_name": "kubernetes.default",
+        "namespace": "${NS}"
+      },
+      "expect": "re=\\$\\(if: command not found"
+    },
+    {
+      "id": "F35",
+      "owner": "base",
+      "tool": "ssh_alert_check",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "metric": "cpu",
+        "threshold": 99,
+        "operator": ">"
+      },
+      "expect": "re=awk:"
+    }
+  ]
+}
