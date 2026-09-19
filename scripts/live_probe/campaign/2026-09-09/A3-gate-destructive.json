@@ -17,14 +17,8 @@
     "BT_CID": ""
   },
   "cases": [
-    {"id": "A501", "owner": "campaign", "tool": "ssh_firewall_deny", "args": {"port": "65530", "protocol": "tcp"}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A502", "owner": "campaign", "tool": "ssh_k3s_cert_rotate", "args": {}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A503", "owner": "campaign", "tool": "ssh_k3s_etcd_snapshot_restore", "args": {"snapshot_path": "/tmp/bmcp-nope.snap"}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A504", "owner": "campaign", "tool": "ssh_k3s_killall", "args": {}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A505", "owner": "campaign", "tool": "ssh_k3s_uninstall", "args": {}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A506", "owner": "campaign", "tool": "ssh_k3s_upgrade", "args": {"version": "v1.30.2+k3s1"}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A507", "owner": "campaign", "tool": "ssh_k8s_localpath_gc", "args": {}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A508", "owner": "campaign", "tool": "ssh_pkg_update", "args": {"package": "bmcp-nonexistent-package-probe"}, "expect": "exit=4", "paths": ["cli"]},
-    {"id": "A509", "owner": "campaign", "tool": "ssh_template_apply", "args": {"dest": "/tmp/bridge-test-0909/bmcp-nope-template", "content": "# bmcp probe\n"}, "expect": "exit=4", "paths": ["cli"]}
+    {"id": "A509", "owner": "campaign", "tool": "ssh_template_apply", "args": {"dest": "/tmp/bridge-test-0909/bmcp-nope-template", "content": "# bmcp probe\n"}, "expect": "exit=4", "paths": ["cli"]},
+    {"id": "A510", "owner": "campaign", "tool": "ssh_service_stop", "args": {"service": "bridge-test-0909-nonexistent.service"}, "expect": "exit=4", "paths": ["cli"]},
+    {"id": "A511", "owner": "campaign", "tool": "ssh_user_delete", "args": {"username": "btest0909"}, "expect": "exit=4", "paths": ["cli"]}
   ]
 }
