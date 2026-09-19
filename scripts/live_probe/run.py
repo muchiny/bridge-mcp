@@ -54,7 +54,19 @@ ssh_k8s_delete avec all/label_selector/field_selector, commande interdite
 d'assertion malformé (`bytes<=abc`, `count=x`, `re=(`), qui mourait auparavant dans un
 worker APRÈS que des cas avaient tiré, sans rapport écrit.
 
-`command` (ssh_exec/ssh_session_exec/ssh_exec_multi) est analysée par `scan_command()`,
+Toute CHARGE SHELL est analysée par `scan_command()`, quel que soit l'outil : le garde
+se clé sur la FORME des arguments (`command`, `commands`, `health_check`, `input`, plus
+`argv` re-cité jeton par jeton), jamais sur une liste de noms d'outils — ruling R25,
+après qu'un `ssh_pty_exec command="echo c > /proc/sysrq-trigger"` eut été mesuré comme
+PASSANT. Quatorze couples outil/clé sont couverts (ssh_exec, ssh_exec_multi,
+ssh_session_exec, ssh_pty_exec, ssh_pty_interact, ssh_canary_exec, ssh_rolling_exec,
+ssh_fleet_diff, ssh_docker_exec, ssh_crictl_exec, ssh_k8s_exec, ssh_cron_add).
+`working_dir` sert de répertoire courant à l'analyse. Une commande dont le texte porte
+une expansion shell non résolue (`$VAR`, `${IFS}`, `` ` ``) hors apostrophes est REFUSÉE
+— échec fermé : `rm${IFS}-rf${IFS}/etc/motd` et `CMD=rm; $CMD -rf /etc/motd` s'exécutent
+mais n'ont, statiquement, ni séparateur ni verbe visible.
+
+`command` est analysée par `scan_command()`,
 qui tokenise comme un shell et distingue CIBLE et SOURCE. Sont refusés : toute CIBLE
 d'écriture hors bac à sable — cible de redirection (`> /proc/sysrq-trigger`, y compris
 la forme bash `>& fichier`) ou opérande d'un verbe d'écriture (rm, mv, cp, chmod,
@@ -432,16 +444,21 @@ def is_inert_probe(c):
     lecture du texte brut qui la contredirait."""
     if not c.get("guard_probe"):
         return False
-    cmd = c["args"].get("command", "")
-    if not isinstance(cmd, str) or not cmd.strip():
+    payloads = shell_payloads(c)          # R25 : plus seulement la clé `command`
+    if not payloads:
         return False
-    if SHELL_SUBST.search(cmd):
-        return False
-    try:
-        segments = _segments(_tokenize(cmd))
-    except CommandUnparsable:
-        return False                      # guillemet non fermé : on ne devine pas
-    return bool(segments) and all(_segment_is_inert(s) for s in segments)
+    for _k, cmd in payloads:
+        if not isinstance(cmd, str) or not cmd.strip():
+            return False
+        if SHELL_SUBST.search(cmd) or unresolved_expansion(cmd):
+            return False                  # non résoluble statiquement (round 8)
+        try:
+            segments = _segments(_tokenize(cmd))
+        except CommandUnparsable:
+            return False                  # guillemet non fermé : on ne devine pas
+        if not segments or not all(_segment_is_inert(s) for s in segments):
+            return False
+    return True
 
 
 def _coverage():
@@ -633,15 +650,80 @@ def _command_word(words):
     return None, []
 
 
-def _abs_targets(verb, operands):
-    """Les opérandes ÉCRITS par `verb`, chemins absolus uniquement."""
-    absolute = [o for o in operands if o.startswith("/")]
+# Drapeaux qui emportent leur VALEUR dans le jeton suivant : sans eux,
+# `truncate -s 0 /x` comptait `0` comme un opérande (donc une cible relative).
+VALUE_FLAGS = {
+    "cp": {"-t", "--target-directory", "-S", "--suffix", "--preserve", "--reflink"},
+    "mv": {"-t", "--target-directory", "-S", "--suffix"},
+    "truncate": {"-s", "--size", "-r", "--reference"},
+    "mkdir": {"-m", "--mode", "-Z", "--context"},
+    "chmod": {"--reference"},
+    "chown": {"--reference", "--from"},
+    "tee": {"--output-error"},
+    "rm": set(),
+    "dd": set(),
+}
+# `-t DIR` / `--target-directory=DIR` place la DESTINATION EN PREMIER : la règle
+# « seul le dernier chemin est écrit » de `cp`/`mv` devenait alors fausse et
+# `cp -t /etc /tmp/bridge-test-0909/x` passait (mesuré au round 8).
+TARGET_DIR_FLAGS = ("-t", "--target-directory")
+# Opérandes de `find -exec`/`-execdir` qui ne sont pas des chemins.
+EXEC_PLACEHOLDERS = frozenset({"{}", "+", ";", "\\;"})
+# Prédicats d'ACTION de `find` : `-exec` seul ne suffisait pas — `-execdir` et
+# la famille `-ok`/`-okdir` exécutent tout autant, et `-fprint`/`-fprintf`/`-fls`
+# ÉCRIVENT dans le fichier qui les suit (mesuré : `find /etc -execdir rm {} +`
+# et `find /etc -fprint /etc/out` passaient).
+FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir",
+                          "-fprint", "-fprintf", "-fls"})
+FIND_FILE_ACTIONS = frozenset({"-fprint", "-fprintf", "-fls"})
+
+
+def _positional(verb, operands):
+    """Opérandes positionnels de `verb` : drapeaux retirés, valeurs de
+    drapeaux consommées, `--` termine les options, placeholders de `find -exec`
+    écartés."""
+    vflags = VALUE_FLAGS.get(verb, set())
+    out, i, end_of_flags = [], 0, False
+    while i < len(operands):
+        o = operands[i]
+        if not end_of_flags and o == "--":
+            end_of_flags = True
+        elif not end_of_flags and o.startswith("-") and o != "-":
+            if o in vflags:
+                i += 1                             # le drapeau emporte sa valeur
+        elif o not in EXEC_PLACEHOLDERS:
+            out.append(o)
+        i += 1
+    return out
+
+
+def _verb_targets(verb, operands):
+    """Les opérandes ÉCRITS par `verb` — absolus ET relatifs.
+
+    Fix round 8 : l'ancienne version ne rendait que les chemins ABSOLUS et
+    prenait « le dernier absolu » pour `cp`/`mv`. Deux sous-détections
+    mesurées : `cp -t /etc /tmp/bridge-test-0909/x` (la destination est le
+    PREMIER opérande quand `-t` est présent) et `cp /tmp/bridge-test-0909/a
+    out.txt` (la vraie cible est relative, donc invisible à un filtre sur les
+    absolus — et l'unique chemin absolu, la SOURCE, était pris pour la cible).
+    On extrait désormais la position réelle, et l'appelant traite le relatif
+    comme une cible à part entière."""
     if verb == "dd":
-        return [o.partition("=")[2] for o in operands if o.startswith("of=")
-                and o.partition("=")[2].startswith("/")]
+        return [o.partition("=")[2] for o in operands if o.startswith("of=")]
+    pos = _positional(verb, operands)
     if verb in COPY_VERBS:
-        return absolute[-1:]                       # seul le dernier est écrit
-    return absolute
+        for i, o in enumerate(operands):
+            if o in TARGET_DIR_FLAGS and i + 1 < len(operands):
+                return [operands[i + 1]]
+            for f in TARGET_DIR_FLAGS:
+                if o.startswith(f + "="):
+                    return [o.partition("=")[2]]
+            if o.startswith("-t") and len(o) > 2 and not o.startswith("--"):
+                return [o[2:]]
+        return pos[-1:]                            # sinon : le dernier positionnel
+    if verb in ("chmod", "chown", "chgrp"):
+        return pos[1:]                             # le premier opérande est le mode/propriétaire
+    return pos
 
 
 def _norm(p):
@@ -651,7 +733,111 @@ def _norm(p):
     return posixpath.normpath(p.split("*")[0]) if "*" in p else posixpath.normpath(p)
 
 
-def scan_command(cmd, depth=0):
+# --- Ruling R25 : le garde se clé sur la FORME des arguments ---------------
+# `scan_command()` ne tournait que pour `ssh_exec`, `ssh_session_exec` et
+# `ssh_exec_multi`. Mesuré : `ssh_pty_exec command="echo c > /proc/sysrq-trigger"`
+# PASSAIT. Une liste de trois noms d'outils est un garde qui cesse
+# silencieusement de garder dès qu'une lane choisit un autre outil — et les
+# lanes D et E emploieront les familles PTY et container-exec parce que le plan
+# le leur demande. Le jeu ci-dessous vient des schémas réels
+# (`bridge-mcp describe-tool`, local) : ce sont TOUTES les clés de l'inventaire
+# 353 outils dont la valeur est une charge shell exécutée sur l'hôte ou dans un
+# conteneur de l'hôte.
+#   command      ssh_exec, ssh_exec_multi, ssh_session_exec, ssh_pty_exec,
+#                ssh_canary_exec, ssh_rolling_exec, ssh_fleet_diff,
+#                ssh_docker_exec, ssh_crictl_exec (« sh -c <command> »),
+#                ssh_k8s_exec, ssh_cron_add
+#   health_check ssh_canary_exec, ssh_rolling_exec  (une 2e commande, exécutée
+#                après la principale — même surface exactement)
+#   input        ssh_pty_interact (texte envoyé au shell interactif : c'est
+#                bien du shell, frappé au clavier plutôt que passé en argument)
+#   commands     aucun outil activé aujourd'hui ; conservé pour qu'un groupe
+#                réactivé plus tard soit couvert d'emblée
+# `argv` (ssh_k8s_exec) est traité à part : c'est une liste DÉJÀ tokenisée,
+# exécutée sans shell. La re-citer avec `shlex.quote` préserve exactement ses
+# frontières de jetons, donc `argv=["rm","-rf","/etc/motd"]` est vu comme le
+# `rm` qu'il est, tandis que `argv=["echo","a > b"]` n'est pas lu comme une
+# redirection.
+#
+# DÉLIBÉRÉMENT EXCLUS, et pourquoi :
+#   ssh_user_add/ssh_user_modify `shell` — c'est le CHEMIN d'un shell de login
+#     (`/bin/bash`), pas une commande ; l'outil est par ailleurs borné par
+#     `username` dans NAME_KEYS.
+#   ssh_runbook_execute `runbook_name`/`params` — référence un runbook stocké
+#     côté serveur, pas une chaîne shell ; §3.2 le borne déjà à un nom
+#     inexistant ou à un runbook écrit par la campagne dans le bac à sable.
+#   `jq_filter`/`yq_filter` (des dizaines d'outils) — expressions jq/yq
+#     appliquées à la sortie côté bridge, jamais exécutées comme shell.
+SHELL_PAYLOAD_KEYS = frozenset({"command", "commands", "health_check", "input"})
+ARGV_KEY = "argv"
+
+
+def shell_payloads(c):
+    """[(clé, texte shell)] portés par ce cas, quel que soit l'outil."""
+    args = c.get("args", {})
+    out = [(k, v) for k, v in _walk_args(args) if k in SHELL_PAYLOAD_KEYS]
+    argv = args.get(ARGV_KEY)
+    if isinstance(argv, list) and argv and all(isinstance(x, str) for x in argv):
+        out.append((ARGV_KEY, " ".join(shlex.quote(x) for x in argv)))
+    return out
+
+
+def unresolved_expansion(cmd):
+    """Message de refus si `cmd` contient une expansion que le shell résoudra
+    mais que l'analyse statique ne peut pas — sinon None.
+
+    Fix round 8. Deux sous-détections mesurées, de la même classe : le flux de
+    JETONS ne reflète pas ce que le shell fera.
+      - `rm${IFS}-rf${IFS}/etc/motd` : `$IFS` vaut « espace tabulation
+        retour-ligne », donc le shell voit `rm -rf /etc/motd` et découpe en
+        quatre mots. `shlex`, lui, voit UN seul jeton, dont le mot de commande
+        n'est aucun verbe connu.
+      - `CMD=rm; $CMD -rf /etc/motd` : le verbe n'existe QU'APRÈS expansion ;
+        statiquement, le mot de commande est `$CMD`.
+    Aucune analyse statique ne peut résoudre ces deux formes — la valeur vient
+    de l'environnement distant. Le garde ÉCHOUE DONC FERMÉ : il refuse, plutôt
+    que de laisser passer ce qu'il ne comprend pas. Ce n'est pas une gêne pour
+    la campagne : `run.py` substitue déjà les `${VAR}` de son propre bloc `vars`
+    AVANT d'appeler `guard()`, donc un `$` résiduel est forcément une variable
+    du shell DISTANT, jamais une variable de la campagne.
+
+    Le suivi d'état de guillemets est nécessaire et suffisant : entre
+    apostrophes simples le shell n'expanse RIEN, ce qui laisse passer
+    `awk '$3 > 50 {print}'` — une forme que la lane A emploie réellement.
+    Entre guillemets doubles, en revanche, `$` et `` ` `` expansent toujours."""
+    i, n, quote = 0, len(cmd), None
+    while i < n:
+        ch = cmd[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == "\\" and i + 1 < n:
+                i += 1
+            elif ch == '"':
+                quote = None
+            elif ch in "$`":
+                return (f"expansion shell non résolue ({ch!r} entre guillemets doubles) "
+                        "— le garde ne peut pas savoir ce que la commande fera après "
+                        "expansion et refuse plutôt que de deviner ; utilise une valeur "
+                        "littérale, ou des apostrophes simples si le texte est inerte")
+        else:
+            if ch == "\\" and i + 1 < n:
+                i += 1
+            elif ch in "'\"":
+                quote = ch
+            elif ch in "$`":
+                return (f"expansion shell non résolue ({ch!r} hors apostrophes) — le "
+                        "garde ne peut pas savoir ce que la commande fera après "
+                        "expansion (`$CMD -rf /etc/motd` n'a aucun verbe visible, "
+                        "`rm${IFS}-rf${IFS}/etc/motd` n'a aucun séparateur visible) et "
+                        "refuse plutôt que de deviner ; utilise une valeur littérale, "
+                        "ou des apostrophes simples si le texte est inerte")
+        i += 1
+    return None
+
+
+def scan_command(cmd, depth=0, cwd=None, key="command"):
     """Analyse statique d'une `command` d'`ssh_exec`. Rend la liste des motifs
     de refus (vide = la commande n'écrit rien hors du bac à sable, ne coupe
     aucun service hors bac à sable, ne tue aucun processus).
@@ -664,6 +850,9 @@ def scan_command(cmd, depth=0):
     `bash -c 'rm -r -- /etc/x'` deviendrait un simple jeton entre guillemets."""
     if depth > 3:
         return ["commande imbriquée trop profondément pour être analysée"]
+    why = unresolved_expansion(cmd)
+    if why:
+        return [why]
     try:
         tokens = _tokenize(cmd)
     except CommandUnparsable as e:
@@ -681,9 +870,15 @@ def scan_command(cmd, depth=0):
         v, ops = _command_word(w)
         if v in ("cd", "pushd") and ops:
             cd_targets.append(ops[0])
-    cwd_sandboxed = (bool(cd_targets)
-                     and all(t.startswith("/") and SANDBOX_PATH_RE.match(_norm(t))
-                             for t in cd_targets))
+    if cd_targets:
+        cwd_sandboxed = all(t.startswith("/") and SANDBOX_PATH_RE.match(_norm(t))
+                            for t in cd_targets)
+    else:
+        # `working_dir` (ssh_exec / ssh_exec_multi) place la commande AILLEURS
+        # sans qu'aucun `cd` n'apparaisse dans le texte : même classe que
+        # `cd /var/log && rm -r -- syslog`, mais le déplacement vient d'un
+        # ARGUMENT, pas de la commande.
+        cwd_sandboxed = bool(cwd and SANDBOX_PATH_RE.match(_norm(cwd)))
     for seg in segs:
         words, rtargets = _split_redirs(seg)
         redir_targets.extend(rtargets)
@@ -693,40 +888,51 @@ def scan_command(cmd, depth=0):
         if verb in SHELLS and "-c" in operands:
             j = operands.index("-c")
             if j + 1 < len(operands):
-                bad.extend(scan_command(operands[j + 1], depth + 1))
+                bad.extend(scan_command(operands[j + 1], depth + 1, cwd, key))
         if verb == "eval" and operands:
-            bad.extend(scan_command(" ".join(operands), depth + 1))
+            bad.extend(scan_command(" ".join(operands), depth + 1, cwd, key))
         if verb == "xargs":
             inner = [o for o in operands if not o.startswith("-")]
             if inner:
-                bad.extend(scan_command(" ".join(inner), depth + 1))
+                bad.extend(scan_command(" ".join(inner), depth + 1, cwd, key))
         # --- cibles d'écriture -------------------------------------------
         cmd_is_write = verb in WRITE_VERBS
-        find_deletes = verb == "find" and any(o in ("-delete", "-exec") for o in operands)
+        find_writes = verb == "find" and any(o in FIND_ACTIONS for o in operands)
         targets = []
         # Un verbe d'écriture ailleurs qu'en tête compte aussi (`sudo -u x rm /etc/y`,
         # `find … -exec rm -- /etc/y +`) — mais par ÉGALITÉ DE JETON, jamais par
         # sous-chaîne : c'est ce qui rendait `ls -l /home/muchini/rm-notes` suspect.
         for idx, w in enumerate(words):
             if w in WRITE_VERBS:
-                targets.extend(_abs_targets(w, words[idx + 1:]))
-        if find_deletes:
-            targets.extend(o for o in operands if o.startswith("/"))
-        if cmd_is_write or find_deletes:
-            # Cible RELATIVE : elle dépend du répertoire courant, que seul un
-            # `cd` DANS le bac à sable rend connu (`cd /var/log && rm -r -- syslog`
-            # détruit /var/log/syslog sans qu'aucun chemin absolu dangereux
-            # n'apparaisse). Les opérandes relatifs ne sont pas classés un par un
-            # — `chmod 644 …`, `truncate -s 0 …` en portent qui ne sont pas des
-            # chemins ; c'est l'ABSENCE de toute cible absolue qui déclenche.
-            if (not targets and not cwd_sandboxed
-                    and not any(o.startswith("/") for o in operands)):
-                bad.append(f"`{verb}` sans cible absolue et sans `cd` dans le bac à "
-                           "sable — cible relative, donc dépendante d'un répertoire "
-                           "courant inconnu")
+                targets.extend(_verb_targets(w, words[idx + 1:]))
+        if find_writes:
+            # Les chemins parcourus par `find` sont ses opérandes positionnels
+            # (avant le premier prédicat) : c'est ce que `-delete`/`-execdir`
+            # détruira.
+            for o in operands:
+                if o.startswith("-"):
+                    break
+                targets.append(o)
+            # `-fprint FICHIER` / `-fprintf FICHIER FMT` / `-fls FICHIER`
+            # ÉCRIVENT dans le fichier qui suit le prédicat.
+            for idx, o in enumerate(operands):
+                if o in FIND_FILE_ACTIONS and idx + 1 < len(operands):
+                    targets.append(operands[idx + 1])
+        if (cmd_is_write or find_writes) and not targets and not cwd_sandboxed:
+            bad.append(f"`{verb}` sans aucune cible identifiable et sans `cd` dans "
+                       "le bac à sable — portée non bornée")
         for t in targets:
-            if not _write_target_ok(_norm(t)):
-                bad.append(f"écriture hors bac à sable dans command: {t}")
+            if t.startswith("/"):
+                if not _write_target_ok(_norm(t)):
+                    bad.append(f"écriture hors bac à sable dans {key}: {t}")
+            elif not cwd_sandboxed:
+                # Cible RELATIVE : elle dépend du répertoire courant, que seul un
+                # `cd` DANS le bac à sable rend connu (`cd /var/log && rm -r --
+                # syslog` détruit /var/log/syslog sans qu'aucun chemin absolu
+                # dangereux n'apparaisse ; `cp /tmp/bridge-test-0909/a out.txt`
+                # écrit hors du bac sans en nommer la destination).
+                bad.append(f"`{verb}` vise la cible relative {t!r} sans `cd` dans le "
+                           "bac à sable — répertoire courant inconnu")
         # --- systemctl / service -----------------------------------------
         if verb == "systemctl":
             rest = [o for o in operands if not o.startswith("-")]
@@ -734,7 +940,7 @@ def scan_command(cmd, depth=0):
                 for unit in rest[1:]:
                     if not unit.startswith("bridge-test-0909"):
                         bad.append(f"systemctl {rest[0]} hors bac à sable "
-                                   f"dans command: {unit}")
+                                   f"dans {key}: {unit}")
                 if len(rest) == 1:
                     bad.append(f"systemctl {rest[0]} sans unité nommée — "
                                "portée non bornée")
@@ -743,15 +949,15 @@ def scan_command(cmd, depth=0):
             if len(rest) >= 2 and rest[1] in SERVICE_DISRUPTIVE:
                 if not rest[0].startswith("bridge-test-0909"):
                     bad.append(f"service {rest[1]} hors bac à sable "
-                               f"dans command: {rest[0]}")
+                               f"dans {key}: {rest[0]}")
         # --- kill/pkill/killall ------------------------------------------
         if verb in KILL_VERBS:
-            bad.append("kill/pkill/killall dans command — utiliser "
+            bad.append(f"kill/pkill/killall dans {key} — utiliser "
                        "ssh_process_kill (liste blanche §3.2), pas une commande brute")
     for t in redir_targets:
         if t.startswith("/"):
             if not _write_target_ok(_norm(t)):
-                bad.append(f"redirection hors bac à sable dans command: {t}")
+                bad.append(f"redirection hors bac à sable dans {key}: {t}")
         elif not cwd_sandboxed:
             # `cd /var/log && echo x > syslog` écrase /var/log/syslog sans
             # qu'aucun chemin absolu dangereux n'apparaisse dans la ligne.
@@ -1033,19 +1239,20 @@ def guard(cases, inv):
         # cas de lecture des lanes A et B. C'est l'écriture que ce garde
         # surveille, pas la lecture (cf. la suppression de READ_ONLY_OK au
         # round 4).
-        if tool in ("ssh_exec", "ssh_session_exec", "ssh_exec_multi"):
-            cmdtext = c["args"].get("command", "")
-            if not isinstance(cmdtext, str):
-                bad.append(f"{cid}: command doit être une chaîne, pas {type(cmdtext).__name__}")
-            else:
-                if (c.get("sudo") or c["args"].get("sudo")) and not c.get("sudo_reason"):
-                    bad.append(f"{cid}: sudo=true sans champ 'sudo_reason' justifiant l'élévation")
-                for line in scan_command(cmdtext):
-                    bad.append(f"{cid}: {line}")
-        for k, v in _walk_args(c["args"]):
-            if k == "command" and isinstance(v, str) and COMMAND_DENY.search(v) \
-                    and not is_inert_probe(c):
-                bad.append(f"{cid}: command={v!r} touche un motif interdit "
+        for _k in SHELL_PAYLOAD_KEYS:
+            _raw = c["args"].get(_k)
+            if _raw is not None and not isinstance(_raw, (str, list)):
+                bad.append(f"{cid}: {_k} doit être une chaîne, pas {type(_raw).__name__}")
+        _cwd = c["args"].get("working_dir")
+        payloads = shell_payloads(c)       # R25 : par la forme, pas par le nom d'outil
+        if payloads and (c.get("sudo") or c["args"].get("sudo")) and not c.get("sudo_reason"):
+            bad.append(f"{cid}: sudo=true sans champ 'sudo_reason' justifiant l'élévation")
+        for k, v in payloads:
+            for line in scan_command(v, cwd=_cwd if isinstance(_cwd, str) else None,
+                                     key=k):
+                bad.append(f"{cid}: {line}")
+            if COMMAND_DENY.search(v) and not is_inert_probe(c):
+                bad.append(f"{cid}: {k}={v!r} touche un motif interdit "
                            "(ajouter `\"guard_probe\": true` SI et seulement si la charge "
                            "est inerte par construction, sur CHAQUE segment)")
         if inv.get(tool, {}).get("readonly"):

@@ -197,6 +197,19 @@ INV = {
     # readonly ET preneur de `pid` : la combinaison que le contrôle `pid` du
     # fix round 1 refusait, alors que le contrat 279/279 exige de l'exercer.
     "ssh_perf_trace":      {"group": "performance", "reduce": "-", "readonly": True,  "destructive": False},
+    # Ruling R25 : tous les outils porteurs d'une charge shell. `scan_command()`
+    # ne tournait que pour les trois premiers ; les autres passaient.
+    "ssh_pty_exec":        {"group": "pty",         "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_pty_interact":    {"group": "pty",         "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_canary_exec":     {"group": "orchestration", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_rolling_exec":    {"group": "orchestration", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_fleet_diff":      {"group": "orchestration", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_docker_exec":     {"group": "docker",      "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_crictl_exec":     {"group": "cri",         "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_k8s_exec":        {"group": "kubernetes",  "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_cron_add":        {"group": "cron",        "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_exec_multi":      {"group": "core",        "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_session_exec":    {"group": "session",     "reduce": "-", "readonly": False, "destructive": True},
 }
 
 
@@ -832,6 +845,132 @@ for _shape, _extra in R24_SHAPES:
     guard_passes(f"guard-R24-readonly-{_shape}", [_c])
 
 # =============================================================================
+# Fix round 8 — (a) quatre sous-détections du réécrit par jetons du round 4 ;
+# (b) ruling R25 : le garde était clé sur TROIS noms d'outils codés en dur.
+# =============================================================================
+
+# --- (a1) ordre des arguments et variantes de drapeau ----------------------
+# `cp`/`mv -t DIR SRC…` met la DESTINATION EN PREMIER, donc « le dernier chemin
+# est la cible » était faux ; `-execdir`/`-ok`/`-okdir` exécutent comme `-exec`,
+# et `-fprint`/`-fls` ÉCRIVENT dans le fichier qui les suit ; et une cible
+# RELATIVE (`cp /tmp/sbx/a out.txt`) était invisible à un filtre qui ne
+# regardait que les chemins absolus — pire, l'unique absolu (la SOURCE) était
+# alors pris pour la cible.
+for _cid, _cmd in (
+        ("U1", "cp -t /etc /tmp/bridge-test-0909/x"),
+        ("U2", "cp -t/etc /tmp/bridge-test-0909/x"),
+        ("U3", "cp --target-directory=/etc /tmp/bridge-test-0909/x"),
+        ("U4", "mv -t /etc /tmp/bridge-test-0909/x"),
+        ("U5", "find /etc -execdir rm {} +"),
+        ("U6", "find /etc -okdir rm {} \\;"),
+        ("U7", "find /etc -fprint /etc/out"),
+        ("U8", "find /etc -fls /etc/out"),
+        ("U9", "cp /tmp/bridge-test-0909/a out.txt"),
+        # Chemin parcouru SANDBOXÉ, fichier de sortie dangereux : seule la
+        # capture de l'opérande de `-fprint`/`-fls` l'attrape (sans elle le
+        # mutant survivait — la cible `/etc` de U7/U8 masquait le contrôle).
+        ("U15", "find /tmp/bridge-test-0909 -fprint /etc/out"),
+        ("U16", "find /tmp/bridge-test-0909 -fls /etc/out"),
+        ("U17", "find /tmp/bridge-test-0909 -fprintf /etc/out %p"),
+        # --- (a2) le flux de jetons ne reflète pas ce que le shell fera ----
+        ("U10", "rm${IFS}-rf${IFS}/etc/motd"),
+        ("U11", "CMD=rm; $CMD -rf /etc/motd"),
+        ("U12", 'echo "$DANGER"'),          # $ entre guillemets DOUBLES : expansé
+        ("U13", "echo `id`"),               # rétro-guillemets hors apostrophes
+        # --- (a3) le déplacement vient d'un ARGUMENT, pas de la commande ---
+):
+    for _shape, _extra in R23_SHAPES:
+        _c = {"id": _cid, "tool": "ssh_exec", "paths": ["cli"],
+              "args": {"command": _cmd}, "expect": ["ok"]}
+        _c.update(_extra)
+        guard_refuses(f"guard-R8-under-{_cid}-{_shape}", [_c], f"{_cid}:")
+guard_refuses("guard-R8-working-dir-outside",
+    [{"id": "U14", "tool": "ssh_exec", "yes": True, "paths": ["cli"],
+      "args": {"command": "rm -r -- syslog", "working_dir": "/var/log"},
+      "expect": ["ok"]}], "U14:")
+# ... et ce que la correction ne doit PAS refuser :
+for _cid, _cmd, _args in (
+        ("UP1", "cp /etc/os-release /tmp/bridge-test-0909/os", {}),
+        ("UP2", "cp -t /tmp/bridge-test-0909 /etc/os-release", {}),
+        ("UP3", "chmod 755 /tmp/bridge-test-0909/x", {}),
+        ("UP4", "truncate -s 0 /tmp/bridge-test-0909/x", {}),
+        ("UP5", "mkdir -p /tmp/bridge-test-0909/lane-c", {}),
+        ("UP6", "find /tmp/bridge-test-0909 -name '*.tmp' -exec rm -- {} +", {}),
+        # `$3` entre APOSTROPHES : le shell n'expanse rien, la lane A s'en sert
+        ("UP7", "awk '$3 > 50 {print}' /home/muchini/x.log", {}),
+        ("UP8", "grep -c '$HOME' /var/log/syslog", {}),
+        # cwd donné par `working_dir` au lieu d'un `cd`
+        ("UP9", "rm -r -- stale", {"working_dir": "/tmp/bridge-test-0909"}),
+):
+    guard_passes(f"guard-R8-ok-{_cid}",
+        [{"id": _cid, "tool": "ssh_exec", "yes": True, "paths": ["cli"],
+          "args": {"command": _cmd, **_args}, "expect": ["ok"]}])
+
+# --- (b) R25 : couverture par la FORME des arguments ----------------------
+# La charge sysrq doit refuser sur CHAQUE outil porteur, et une charge confinée
+# au bac à sable doit passer sur chacun. Une liste de noms d'outils codée en
+# dur cesse silencieusement de garder dès qu'une lane en choisit un autre.
+R25_SYSRQ = "echo c > /proc/sysrq-trigger"
+R25_SAFE = "echo ok > /tmp/bridge-test-0909/probe.txt"
+R25_CARRIERS = (
+    ("ssh_exec",         "command",      {}),
+    ("ssh_exec_multi",   "command",      {"hosts": ["raspberry"]}),
+    ("ssh_session_exec", "command",      {"session_id": "s1"}),
+    ("ssh_pty_exec",     "command",      {}),
+    ("ssh_pty_interact", "input",        {"session_id": "s1"}),
+    ("ssh_canary_exec",  "command",      {}),
+    ("ssh_canary_exec",  "health_check", {"command": "true"}),
+    ("ssh_rolling_exec", "command",      {}),
+    ("ssh_rolling_exec", "health_check", {"command": "true"}),
+    ("ssh_fleet_diff",   "command",      {}),
+    ("ssh_docker_exec",  "command",      {"container": "bridge-test-c"}),
+    ("ssh_crictl_exec",  "command",      {"container_id": "bridge-test-c"}),
+    ("ssh_k8s_exec",     "command",      {"pod": "bridge-test-pod"}),
+    ("ssh_cron_add",     "command",      {"schedule": "* * * * *",
+                                          "name": "bridge-test-0909"}),
+)
+if len(R25_CARRIERS) < 14:
+    FAILS.append("R25 : la liste des outils porteurs a rétréci — re-dériver des "
+                 "schémas (`bridge-mcp describe-tool`) avant de la réduire")
+for _tool, _key, _extra in R25_CARRIERS:
+    if _tool not in INV:
+        FAILS.append(f"R25 : {_tool} absent de l'inventaire synthétique — la preuve "
+                     "serait couverte par la branche « outil inexistant » (piège R20)")
+        continue
+    guard_refuses(f"guard-R25-{_tool}-{_key}-sysrq",
+        [{"id": "R25", "tool": _tool, "yes": True, "paths": ["cli"],
+          "args": {**_extra, _key: R25_SYSRQ}, "expect": ["ok"]}],
+        f"R25: redirection hors bac à sable dans {_key}: /proc/sysrq-trigger")
+    guard_passes(f"guard-R25-{_tool}-{_key}-sandbox",
+        [{"id": "R25", "tool": _tool, "yes": True, "paths": ["cli"],
+          "args": {**_extra, _key: R25_SAFE}, "expect": ["ok"]}])
+# `argv` est une liste DÉJÀ tokenisée : re-citée avec shlex.quote, ses
+# frontières de jetons sont préservées exactement.
+for _lbl, _argv, _must_refuse in (
+        ("rm-etc",      ["rm", "-r", "--", "/etc/motd"],            True),
+        ("sh-c-nested", ["sh", "-c", "rm -r -- /etc/motd"],         True),
+        ("rm-rf-sbx",   ["rm", "-rf", "/tmp/bridge-test-0909/x"],   True),   # §3.3 : rm -rf interdit partout
+        ("quoted-gt",   ["echo", "a > b"],                          False),  # le `>` n'est PAS un opérateur
+        ("rm-sbx",      ["rm", "-r", "--", "/tmp/bridge-test-0909/x"], False),
+):
+    _c = {"id": "R25v", "tool": "ssh_k8s_exec", "yes": True, "paths": ["cli"],
+          "args": {"pod": "bridge-test-pod", "argv": _argv}, "expect": ["ok"]}
+    if _must_refuse:
+        guard_refuses(f"guard-R25-argv-{_lbl}", [_c], "R25v:")
+    else:
+        guard_passes(f"guard-R25-argv-{_lbl}", [_c])
+# Une sonde `guard_probe` doit rester possible sur un outil porteur AUTRE que
+# ssh_exec — sinon la lane C ne peut pas mesurer la blacklist par le chemin PTY.
+guard_passes("guard-R25-guard-probe-on-pty",
+    [{"id": "R25p", "tool": "ssh_pty_exec", "yes": True, "guard_probe": True,
+      "paths": ["cli"], "args": {"command": "echo shutdown guard probe"},
+      "expect": ["exit=4"]}])
+guard_refuses("guard-R25-guard-probe-on-pty-not-inert",
+    [{"id": "R25q", "tool": "ssh_pty_exec", "yes": True, "guard_probe": True,
+      "paths": ["cli"], "args": {"command": "rm -rf /etc/motd"},
+      "expect": ["exit=4"]}], "R25q:")
+
+# =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
 # validation d'espèce/argstyle du C-3 itérait `c.get("expect", [])` sans
 # passer par `expectations()`. Sur un `expect` SCALAIRE (la forme des 357
@@ -922,6 +1061,8 @@ else:
             "touche un motif interdit",
         "redirection hors bac à sable (sonde 2026-09-06 vers /dev/mmcblk…)":
             "redirection hors bac à sable",
+        "expansion shell non résolue (round 8, échec fermé)":
+            "expansion shell non résolue",
     }
     # Fix round 4 (relecture : « la preuve R21 n'a pas de dents non plus »).
     # L'appartenance à une classe ne pinne RIEN de quantitatif : mesuré,
@@ -944,7 +1085,11 @@ else:
             "C20", "C21", "C22", "C23", "C24", "C25", "C26", "C27",
             "C28", "C29", "C30", "C31", "C32", "C33", "C34", "C35",
             "C36", "C37", "C42", "C43", "C44", "C45", "C52", "C53",
-            "C54", "C55", "C56", "C58", "C59", "C72"},
+            "C54", "C55", "C56", "C58", "C59", "C72",
+            # Fix round 8 : +C74, `echo $HOME; echo "$(id -un)"; echo 'a b'`.
+            # Le round 8 échoue FERMÉ sur une expansion shell non résolue ;
+            # cette sonde 2026-09-06 en porte deux. Renforcement voulu.
+            "C74"},
         "campaign/D-sandbox.json": {
             "D01", "D02", "D04", "D06", "D07", "D09", "D10", "D12", "D15",
             "D17", "D18", "D19", "D20", "D22", "D23", "D26", "D27", "D29",
