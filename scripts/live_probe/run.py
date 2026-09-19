@@ -61,6 +61,16 @@ après qu'un `ssh_pty_exec command="echo c > /proc/sysrq-trigger"` eut été mes
 PASSANT. Quatorze couples outil/clé sont couverts (ssh_exec, ssh_exec_multi,
 ssh_session_exec, ssh_pty_exec, ssh_pty_interact, ssh_canary_exec, ssh_rolling_exec,
 ssh_fleet_diff, ssh_docker_exec, ssh_crictl_exec, ssh_k8s_exec, ssh_cron_add).
+Verbes d'écriture reconnus : `rm mv cp chmod chown tee mkdir truncate dd` n'importe où
+dans le segment (par égalité de jeton, ce qui attrape `sudo -u x rm …` et
+`find … -exec rm …`), et — fix round 10 — `install tar rsync ln sed touch rmdir chgrp
+shred gzip gunzip` en POSITION DE COMMANDE seulement : ce sont des mots anglais
+courants, et `grep -c install /var/log/dpkg.log` doit rester licite. Les formes en
+LECTURE de ces verbes ne sont pas des écritures et passent — `sed` sans `-i`,
+`tar -t`/`--list`, `gzip -l|-t|-c`. Deux échecs fermés nommés : une destination `rsync`
+distante (`[user@]hôte:chemin`) sort du périmètre d'un garde qui ne raisonne que sur le
+système de fichiers du Pi, et un mode `tar` non reconnu rend une cible invérifiable.
+
 Toute cible d'écriture est RÉSOLUE contre le répertoire courant effectif — `working_dir`
 (que le produit émet comme `cd … && cmd`, ce qui donne à l'évasion `..` une seconde
 entrée en forme d'argument) puis chaque `cd` du texte, le dernier gagnant. Une cible
@@ -83,10 +93,8 @@ bornée » plutôt que de la vraie forme.
 `command` est analysée par `scan_command()`,
 qui tokenise comme un shell et distingue CIBLE et SOURCE. Sont refusés : toute CIBLE
 d'écriture hors bac à sable — cible de redirection (`> /proc/sysrq-trigger`, y compris
-la forme bash `>& fichier`) ou opérande d'un verbe d'écriture (rm, mv, cp, chmod,
-chown, tee, mkdir, truncate, dd, find -delete/-exec) — ; un verbe d'écriture sans cible
-absolue (répertoire courant inconnu) ; un `cd` hors bac à sable dans une commande qui
-écrit ; `systemctl <verbe disruptif>` ou `service … stop` sur une unité qui ne commence
+la forme bash `>& fichier`) ou opérande d'un verbe d'écriture — ; un verbe d'écriture
+sans cible identifiable ; `systemctl <verbe disruptif>` ou `service … stop` sur une unité qui ne commence
 pas par `bridge-test-0909` (TOUTES les unités de la liste, sur CHAQUE segment) ;
 `kill`/`pkill`/`killall` en position de commande. Les SOURCES lues ne sont pas
 contraintes : c'est ce qui rend `cat /etc/passwd > /tmp/bridge-test-0909/copie` licite
