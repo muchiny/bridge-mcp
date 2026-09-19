@@ -1090,6 +1090,112 @@ guard_passes("guard-R9-pin-real-single-quotes",
     [_X9("P4", "echo '$HOME'")])          # vraies apostrophes : aucune expansion
 
 # =============================================================================
+# Fix round 10 — les verbes d'écriture manquants. Huit écritures dans /etc
+# passaient (`shred /etc/motd`, `sed -i … /etc/motd`, `tar -C /etc -xf …`, …).
+# Extension de liste sur la machinerie d'opérandes positionnels du round 9.
+# =============================================================================
+
+# --- ÉVASIONS : doivent refuser ------------------------------------------
+for _cid, _cmd in (
+        ("G1", "sed -i s/a/b/ /etc/motd"),
+        ("G2", f"install {SBX}/x /etc/motd"),
+        ("G3", f"tar -C /etc -xf {SBX}/a.tar"),
+        ("G4", "ln -sf /tmp/x /etc/motd"),
+        ("G5", "touch /etc/motd"),
+        ("G6", "shred /etc/motd"),
+        ("G7", "rmdir /etc/foo"),
+        ("G8", "gzip /etc/motd"),
+        # variantes de la même famille, trouvées en cherchant la classe
+        ("G9", "sed --in-place=.bak s/a/b/ /etc/motd"),
+        ("G10", "sed -i.bak -e s/a/b/ /etc/motd"),
+        ("G11", "tar xf /etc/a.tar"),            # forme ancienne, sans tiret
+        ("G12", f"tar -cf /etc/out.tar {SBX}"),  # création : l'archive est la cible
+        ("G13", f"install -t /etc {SBX}/x"),
+        ("G14", "install -d /etc/newdir"),
+        ("G15", f"rsync -a {SBX}/ /etc/"),
+        ("G16", "ln -s /tmp/x /etc/motd"),
+        ("G17", "chgrp adm /etc/motd"),
+        ("G18", "gunzip /etc/motd.gz"),
+        ("G19", "touch -t 202601010000 /etc/motd"),   # `-t` = horodatage, pas destination
+        ("G20", "shred -n 3 /etc/motd"),
+        ("G21", "rmdir /etc/a /etc/b"),
+        ("G22", f"rsync -a {SBX}/ backup.example:/srv/"),  # destination DISTANTE
+        ("G23", "tar --extract --directory /etc -f a.tar"),
+):
+    for _shape, _extra in R23_SHAPES:
+        _c = {"id": _cid, "tool": "ssh_exec", "paths": ["cli"],
+              "args": {"command": _cmd}, "expect": ["ok"]}
+        _c.update(_extra)
+        guard_refuses(f"guard-R10-escape-{_cid}-{_shape}", [_c], f"{_cid}:")
+
+# --- cas ISOLANTS : chacun n'est attrapé que par UN contrôle ------------
+# Sans eux les mutants correspondants survivent, parce qu'un autre contrôle
+# (règle « aucune cible identifiable », ou cwd inconnu) refuse déjà la forme
+# évidente. Tous portent `working_dir` dans le bac à sable, ce qui neutralise
+# le filet de sécurité et laisse le contrôle visé seul en jeu.
+for _cid, _cmd in (
+        # seule la branche `--reference` voit /etc/motd (sinon le premier
+        # positionnel serait pris pour un mode et la liste serait vide)
+        ("I1", f"chmod --reference {SBX}/r /etc/motd"),
+        ("I2", f"chgrp --reference {SBX}/r /etc/motd"),
+        # seule la forme ancienne `tar cf` (sans tiret) donne le mode création
+        ("I3", "tar cf /etc/out.tar d"),
+        # seule la lecture de `-f` séparé donne l'archive : sinon c'est le
+        # premier opérande non-drapeau (ici sandboxé) qui serait pris
+        ("I4", f"tar -c -C {SBX} -f /etc/out.tar d"),
+        # `install -d` crée TOUS ses répertoires : le dernier est sandboxé,
+        # donc seule la branche `-d` voit le premier
+        ("I5", f"install -d /etc/a {SBX}/b"),
+        # destination distante : seul l'échec fermé la voit, sinon elle se
+        # résout comme un chemin relatif sous le bac à sable
+        ("I6", f"rsync -a {SBX}/ backup.example:/srv/"),
+):
+    guard_refuses(f"guard-R10-isolate-{_cid}", [_X9(_cid, _cmd, wd=SBX)], f"{_cid}:")
+
+# --- ÉCRITURES LÉGITIMES dans le bac à sable : doivent passer ------------
+for _cid, _cmd in (
+        ("GP1", f"sed -i s/a/b/ {SBX}/f"),
+        ("GP2", f"tar -C {SBX} -xf {SBX}/a.tar"),
+        ("GP3", f"touch {SBX}/x"),
+        ("GP4", f"ln -sf {SBX}/a {SBX}/b"),
+        ("GP5", f"install {SBX}/x {SBX}/y"),
+        ("GP6", f"install -d {SBX}/d"),
+        ("GP7", f"rsync -a {SBX}/a/ {SBX}/b/"),
+        ("GP8", f"shred {SBX}/x"),
+        ("GP9", f"gzip {SBX}/x"),
+        ("GP10", f"rmdir {SBX}/d"),
+        ("GP11", f"chgrp btestgrp0909 {SBX}/x"),
+        ("GP12", f"tar -cf {SBX}/out.tar {SBX}/d"),
+        ("GP13", f"touch -r {SBX}/ref {SBX}/x"),   # `-r` emporte sa valeur
+        ("GP14", f"install -m 755 {SBX}/x {SBX}/y"),
+        ("GP15", f"sed -i.bak -e s/a/b/ {SBX}/f"),
+        ("GP16", f"shred -n 3 {SBX}/x"),
+):
+    guard_passes(f"guard-R10-sandbox-{_cid}", [_X9(_cid, _cmd)])
+
+# --- FORMES EN LECTURE : elles ne doivent PAS devenir des écritures ------
+# `sed` sans `-i`, `tar -t`, `gzip -l|-t|-c` ne réécrivent rien. Un refus en
+# bloc de ces verbes aurait interdit des commandes de diagnostic ordinaires —
+# c'est précisément le mode d'échec que cette tâche traque depuis le round 4.
+for _cid, _cmd in (
+        ("GR1", "sed s/a/b/ /etc/os-release"),
+        ("GR2", "sed -n 1p /etc/hosts"),
+        ("GR3", "tar -tf /etc/a.tar"),
+        ("GR4", "tar --list -f /etc/a.tar"),
+        ("GR5", "gzip -l /etc/motd.gz"),
+        ("GR6", "gzip -c /etc/motd"),
+        ("GR7", "gunzip -t /etc/motd.gz"),
+        # `install`, `touch`, `tar`, `ln` sont des mots anglais courants : ils ne
+        # comptent qu'en POSITION DE COMMANDE, sinon un `grep` de journal serait
+        # refusé.
+        ("GR8", "grep -c install /var/log/dpkg.log"),
+        ("GR9", "grep -c touch /var/log/syslog"),
+        ("GR10", "awk '/tar/ {print}' /var/log/syslog"),
+        ("GR11", "ls -l /home/muchini/ln-notes"),
+):
+    guard_passes(f"guard-R10-read-{_cid}", [_X9(_cid, _cmd)])
+
+# =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
 # validation d'espèce/argstyle du C-3 itérait `c.get("expect", [])` sans
 # passer par `expectations()`. Sur un `expect` SCALAIRE (la forme des 357

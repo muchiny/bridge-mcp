@@ -530,8 +530,23 @@ def is_inert(c, inv):
 # contre les fuites en lecture est ailleurs (`nore=`, §3.7, et la blacklist
 # du produit), pas ici, et elle ne l'a jamais été (`cat /etc/shadow` n'était
 # pas plus refusé avant qu'après).
-WRITE_VERBS = frozenset({"rm", "mv", "cp", "chmod", "chown", "tee", "mkdir",
-                         "truncate", "dd"})
+# Verbes reconnus PARTOUT dans le segment, par égalité de jeton — c'est ce qui
+# attrape `sudo -u x rm /etc/y` et `find … -exec rm -- /etc/y +`.
+WRITE_VERBS_ANYWHERE = frozenset({"rm", "mv", "cp", "chmod", "chown", "tee",
+                                  "mkdir", "truncate", "dd"})
+# Fix round 10 : les verbes manquants, mesurés comme laissant passer huit
+# écritures dans /etc (`shred /etc/motd`, `sed -i … /etc/motd`, …). Ils ne sont
+# reconnus QU'EN POSITION DE COMMANDE, et non par égalité de jeton n'importe où
+# comme le jeu ci-dessus : `install`, `touch`, `tar` et `ln` sont des mots
+# anglais courants, et `grep -c install /var/log/dpkg.log` est une commande de
+# lane parfaitement légitime qu'une reconnaissance « n'importe où » refuserait.
+# Les enveloppes (`sudo`, `xargs`, `env`, `timeout`) sont traversées par
+# `_command_word()`, donc `sudo shred /etc/motd` est bien vu ; ce qui échappe,
+# c'est `find … -exec shred {} +` — mais là `find` porte déjà ses chemins
+# parcourus comme cibles, donc `find /etc -exec shred {} +` refuse quand même.
+WRITE_VERBS_CMDWORD = frozenset({"install", "tar", "rsync", "ln", "sed", "touch",
+                                 "rmdir", "chgrp", "shred", "gzip", "gunzip"})
+WRITE_VERBS = WRITE_VERBS_ANYWHERE | WRITE_VERBS_CMDWORD
 # `cp`/`mv` LISENT leur(s) premier(s) opérande(s) et n'ÉCRIVENT que le dernier.
 COPY_VERBS = frozenset({"cp", "mv"})
 KILL_VERBS = frozenset({"kill", "pkill", "killall"})
@@ -668,7 +683,15 @@ def _command_word(words):
 # LONGUES de même nature. Sans elles, `truncate -s 0 /x` comptait `0` comme un
 # opérande, donc comme une cible relative.
 SHORT_VALUE_OPTS = {"cp": "tS", "mv": "tS", "truncate": "sro", "mkdir": "mZ",
-                    "chmod": "", "chown": "", "tee": "", "rm": "", "dd": ""}
+                    "chmod": "", "chown": "", "tee": "", "rm": "", "dd": "",
+                    # round 10
+                    "install": "mogtSZ", "ln": "tS",
+                    # `sed -i` n'emporte JAMAIS d'argument séparé : le suffixe
+                    # est collé (`-i.bak`). L'y mettre faisait avaler le script
+                    # (`sed -i s/a/b/ FICHIER` perdait sa cible).
+                    "sed": "efl",
+                    "touch": "dtr", "shred": "ns", "gzip": "S", "gunzip": "S",
+                    "rsync": "e", "rmdir": "", "chgrp": "", "tar": "fCXTb"}
 LONG_VALUE_OPTS = {
     "cp": {"--target-directory", "--suffix"},
     "mv": {"--target-directory", "--suffix"},
@@ -677,7 +700,28 @@ LONG_VALUE_OPTS = {
     "chmod": {"--reference"},
     "chown": {"--reference", "--from"},
     "tee": {"--output-error"},
+    # round 10
+    "install": {"--mode", "--owner", "--group", "--target-directory", "--suffix",
+                "--context"},
+    "ln": {"--target-directory", "--suffix", "--backup"},
+    "sed": {"--expression", "--file", "--line-length"},
+    "touch": {"--date", "--reference", "--time"},
+    "shred": {"--iterations", "--size", "--random-source"},
+    "gzip": {"--suffix"}, "gunzip": {"--suffix"},
+    "rsync": {"--rsh", "--exclude", "--include", "--files-from", "--log-file"},
+    "tar": {"--file", "--directory", "--exclude", "--transform"},
 }
+# `-t VALEUR` ne désigne un RÉPERTOIRE DE DESTINATION que pour ces verbes-là.
+# Pour `touch`, `-t` est un horodatage ; pour `tar`, le mode « lister ».
+TARGET_DIR_VERBS = frozenset({"cp", "mv", "install", "ln"})
+# Drapeaux qui rendent l'invocation PUREMENT LISANTE : le verbe n'écrit alors
+# rien et ne doit pas être traité comme une écriture (sinon `tar -tf a.tar`,
+# `gzip -l x.gz` et `sed s/a/b/ f` — sans `-i` — seraient refusés à tort).
+READ_ONLY_INVOCATION = {
+    "gzip": ({"l", "t", "c"}, {"--list", "--test", "--stdout", "--to-stdout"}),
+    "gunzip": ({"l", "t", "c"}, {"--list", "--test", "--stdout", "--to-stdout"}),
+}
+SED_IN_PLACE_LONG = "--in-place"
 TARGET_DIR_LONG = "--target-directory"
 TARGET_DIR_SHORT = "t"
 # Opérandes de `find -exec`/`-execdir` qui ne sont pas des chemins.
@@ -701,7 +745,8 @@ def _parse_operands(verb, operands):
     est non vide (`-t/etc`), sinon le jeton suivant (`-rt /etc`)."""
     shorts = SHORT_VALUE_OPTS.get(verb, "")
     longs = LONG_VALUE_OPTS.get(verb, set())
-    pos, target_dir, longs_seen = [], None, set()
+    is_target_dir_verb = verb in TARGET_DIR_VERBS
+    pos, target_dir, longs_seen, shorts_seen = [], None, set(), set()
     i, end_of_flags = 0, False
     while i < len(operands):
         o = operands[i]
@@ -710,7 +755,7 @@ def _parse_operands(verb, operands):
         elif not end_of_flags and o.startswith("--") and len(o) > 2:
             name, sep, val = o.partition("=")
             longs_seen.add(name)
-            if name == TARGET_DIR_LONG:
+            if name == TARGET_DIR_LONG and is_target_dir_verb:
                 if sep:
                     target_dir = val
                 elif i + 1 < len(operands):
@@ -720,22 +765,73 @@ def _parse_operands(verb, operands):
                 i += 1                            # l'option emporte sa valeur
         elif not end_of_flags and o.startswith("-") and len(o) > 1:
             cluster = o[1:]
+            shorts_seen.update(cluster)
             for j, ch in enumerate(cluster):
                 if ch not in shorts:
                     continue
                 rest = cluster[j + 1:]
                 if rest:                          # `-t/etc`, `-rt/etc`
-                    if ch == TARGET_DIR_SHORT:
+                    if ch == TARGET_DIR_SHORT and is_target_dir_verb:
                         target_dir = rest
                 elif i + 1 < len(operands):       # `-rt /etc`
-                    if ch == TARGET_DIR_SHORT:
+                    if ch == TARGET_DIR_SHORT and is_target_dir_verb:
                         target_dir = operands[i + 1]
                     i += 1
                 break                             # la valeur consomme la fin du groupe
         elif o not in EXEC_PLACEHOLDERS:
             pos.append(o)
         i += 1
-    return pos, target_dir, longs_seen
+    return pos, target_dir, longs_seen, shorts_seen
+
+
+def _tar_targets(operands):
+    """Cibles de `tar`, ou None si l'invocation ne fait que LISTER.
+
+    `tar` n'écrit que dans trois modes : extraction (`-x`) — il écrit dans le
+    répertoire de `-C`, sinon dans le répertoire courant ; création
+    (`-c`) et ajout/mise à jour (`-r`, `-u`, `--delete`) — il écrit l'archive
+    désignée par `-f`. `-t`/`--list` ne fait que lire, et doit continuer de
+    passer. La forme ancienne sans tiret (`tar xf a.tar`) est acceptée par tar
+    et doit l'être ici aussi — c'est elle qui laissait passer
+    `tar xf /etc/a.tar`. Un mode non reconnu rend une cible relative
+    invérifiable : échec fermé."""
+    letters, longs, rest = set(), set(), []
+    for i, o in enumerate(operands):
+        if o.startswith("--"):
+            longs.add(o.partition("=")[0])
+        elif o.startswith("-") and len(o) > 1:
+            letters.update(o[1:])
+        elif i == 0 and re.fullmatch(r"[A-Za-z]+", o):
+            letters.update(o)                 # forme ancienne : `tar xf …`
+        else:
+            rest.append(o)
+    cdir = None
+    for i, o in enumerate(operands):
+        if o in ("-C", "--directory") and i + 1 < len(operands):
+            cdir = operands[i + 1]
+        elif o.startswith("--directory="):
+            cdir = o.partition("=")[2]
+        elif o.startswith("-C") and len(o) > 2:
+            cdir = o[2:]
+    if "x" in letters or {"--extract", "--get"} & longs:
+        return [cdir] if cdir else ["."]
+    if (letters & {"c", "r", "u"}) or (
+            {"--create", "--append", "--update", "--delete"} & longs):
+        if "f" in letters or "--file" in longs:
+            # `-f` emporte sa valeur : c'est le premier opérande non-drapeau
+            # dans la forme groupée (`tar -cf ARCHIVE …`, `tar cf ARCHIVE …`).
+            for i, o in enumerate(operands):
+                if o.startswith("--file="):
+                    return [o.partition("=")[2]]
+                if o in ("-f", "--file") and i + 1 < len(operands):
+                    return [operands[i + 1]]
+                if o.startswith("-f") and len(o) > 2 and not o.startswith("--"):
+                    return [o[2:]]
+            return rest[:1] or ["."]
+        return ["."]
+    if "t" in letters or "--list" in longs:
+        return None                           # lecture seule
+    return ["."]                              # mode inconnu : échec fermé
 
 
 def _verb_targets(verb, operands):
@@ -745,7 +841,46 @@ def _verb_targets(verb, operands):
     PREMIER opérande)."""
     if verb == "dd":
         return [o.partition("=")[2] for o in operands if o.startswith("of=")]
-    pos, target_dir, longs_seen = _parse_operands(verb, operands)
+    if verb == "tar":
+        return _tar_targets(operands)
+    pos, target_dir, longs_seen, shorts_seen = _parse_operands(verb, operands)
+    if verb in ("gzip", "gunzip"):
+        ro_short, ro_long = READ_ONLY_INVOCATION[verb]
+        if (ro_short & shorts_seen) or (ro_long & longs_seen):
+            return None                       # `-l`, `-t`, `-c` : ne réécrit rien
+        return pos
+    if verb == "sed":
+        # `sed` LIT, sauf `-i` / `--in-place[=SUF]` (qui réécrit ses fichiers).
+        in_place = "i" in shorts_seen or any(
+            n == SED_IN_PLACE_LONG for n in longs_seen)
+        if not in_place:
+            return None
+        # Le script est le PREMIER positionnel, sauf s'il a été donné par
+        # `-e`/`-f` (auquel cas tous les positionnels sont des fichiers).
+        scripted = "e" in shorts_seen or "f" in shorts_seen or bool(
+            {"--expression", "--file"} & longs_seen)
+        return pos if scripted else pos[1:]
+    if verb == "install":
+        if "d" in shorts_seen or "--directory" in longs_seen:
+            return pos                        # `install -d DIR…` crée les DIR
+        return [target_dir] if target_dir is not None else pos[-1:]
+    if verb == "ln":
+        if target_dir is not None:
+            return [target_dir]
+        # `ln CIBLE NOM` écrit NOM ; `ln CIBLE` écrit dans le répertoire courant.
+        return pos[-1:] if len(pos) >= 2 else ["."]
+    if verb == "rsync":
+        # La destination est le dernier opérande. Une destination DISTANTE
+        # (`[user@]hôte:chemin`) sort du périmètre de ce garde, qui ne raisonne
+        # que sur le système de fichiers du Pi : échec fermé plutôt que de la
+        # juger comme un chemin local.
+        dest = pos[-1:] if pos else []
+        for d in dest:
+            if re.match(r"^[^/]*:", d):
+                return ["~rsync-remote"]      # non résoluble -> refus
+        return dest
+    if verb in ("touch", "rmdir", "shred"):
+        return pos
     if verb == "mv":
         # `mv` SUPPRIME sa source : elle est écrite au même titre que la
         # destination. `cp`, lui, ne fait que la lire. Sans cette distinction,
@@ -753,7 +888,7 @@ def _verb_targets(verb, operands):
         return ([target_dir] + pos) if target_dir is not None else pos
     if verb in COPY_VERBS:
         return [target_dir] if target_dir is not None else pos[-1:]
-    if verb in ("chmod", "chown"):
+    if verb in ("chmod", "chown", "chgrp"):
         # Sans `--reference`, le PREMIER positionnel est le mode/propriétaire et
         # n'est pas une cible. AVEC `--reference FICHIER`, il n'y a pas
         # d'opérande de mode : tous les positionnels sont des cibles — c'est ce
@@ -969,15 +1104,25 @@ def scan_command(cmd, depth=0, cwd=None, key="command"):
             if inner:
                 bad.extend(scan_command(" ".join(inner), depth + 1, cwd, key))
         # --- cibles d'écriture -------------------------------------------
-        cmd_is_write = verb in WRITE_VERBS
         find_writes = verb == "find" and any(o in FIND_ACTIONS for o in operands)
-        targets = []
-        # Un verbe d'écriture ailleurs qu'en tête compte aussi (`sudo -u x rm /etc/y`,
-        # `find … -exec rm -- /etc/y +`) — mais par ÉGALITÉ DE JETON, jamais par
-        # sous-chaîne : c'est ce qui rendait `ls -l /home/muchini/rm-notes` suspect.
+        targets, cmd_is_write = [], False
+        # Un verbe du jeu « partout » compte où qu'il soit dans le segment
+        # (`sudo -u x rm /etc/y`, `find … -exec rm -- /etc/y +`) — mais par
+        # ÉGALITÉ DE JETON, jamais par sous-chaîne : c'est ce qui rendait
+        # `ls -l /home/muchini/rm-notes` suspect. Les verbes ajoutés au round 10
+        # ne comptent qu'en POSITION DE COMMANDE (cf. WRITE_VERBS_CMDWORD).
+        # `_verb_targets` rend None quand l'invocation ne fait que LIRE
+        # (`tar -tf`, `sed` sans `-i`, `gzip -l`) : ce n'est alors pas une
+        # écriture du tout, et la règle « aucune cible identifiable » ne doit
+        # pas s'y appliquer.
         for idx, w in enumerate(words):
-            if w in WRITE_VERBS:
-                targets.extend(_verb_targets(w, words[idx + 1:]))
+            if w in WRITE_VERBS_ANYWHERE or (w == verb and w in WRITE_VERBS_CMDWORD):
+                t = _verb_targets(w, words[idx + 1:])
+                if t is None:
+                    continue
+                targets.extend(t)
+                if w == verb:
+                    cmd_is_write = True
         if find_writes:
             # Les chemins parcourus par `find` sont ses opérandes positionnels
             # (avant le premier prédicat) : c'est ce que `-delete`/`-execdir`
