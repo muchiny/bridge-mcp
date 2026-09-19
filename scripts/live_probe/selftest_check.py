@@ -185,6 +185,7 @@ INV = {
     "ssh_exec":            {"group": "core",       "reduce": "-", "readonly": False, "destructive": True},
     "ssh_ls":              {"group": "file_ops",    "reduce": "-", "readonly": True,  "destructive": False},
     "ssh_file_write":      {"group": "file_ops",    "reduce": "-", "readonly": False, "destructive": True},
+    "ssh_file_patch":      {"group": "file_ops",    "reduce": "-", "readonly": False, "destructive": True},
     "ssh_files_write":     {"group": "file_ops",    "reduce": "-", "readonly": False, "destructive": True},
     "ssh_service_stop":    {"group": "systemd",     "reduce": "-", "readonly": False, "destructive": True},
     "ssh_pkg_install":     {"group": "package",     "reduce": "-", "readonly": False, "destructive": False},
@@ -757,6 +758,80 @@ for _cid, _cmd in (
         guard_passes(f"guard-R23-{_cid}-{_shape}", [_shape_case(_cid, _cmd, _extra)])
 
 # =============================================================================
+# Fix round 7 (ruling R24) — R23 étendu aux ARGUMENTS. Un outil
+# `destructiveHint` visant un chemin ou un objet hors bac à sable doit être
+# refusé MÊME SANS `yes` : sinon la sûreté du Pi repose encore sur la porte
+# destructive du produit, celle-là même dont la lane C cherche les trous.
+# Le court-circuit `readonly` reste, lui : lire n'agit sur rien.
+# =============================================================================
+
+# `guard_probe` est exclu de cette matrice : sur un outil sans clé `command`,
+# `is_inert_probe()` est faux par construction et le cas est refusé pour CETTE
+# raison-là — l'assertion ne prouverait alors pas ce qu'elle prétend (c'est le
+# piège de la preuve vacue de R20). Restent les trois formes utiles.
+R24_SHAPES = tuple((n, e) for n, e in R23_SHAPES if "guard_probe" not in e)
+
+# (id, outil, args hors bac à sable, fragment de message ATTENDU). Le fragment
+# est ce qui rend la preuve non vacue : le refus doit venir de PATH_KEYS /
+# NAME_KEYS, pas d'une autre règle qui passerait par là.
+for _cid, _tool, _args, _why in (
+        ("R24a", "ssh_file_write",      {"path": "/etc/motd", "content": "x"},
+         "path='/etc/motd' hors du bac à sable"),
+        ("R24b", "ssh_file_patch",      {"path": "/etc/hosts", "content": "x"},
+         "path='/etc/hosts' hors du bac à sable"),
+        ("R24c", "ssh_service_stop",    {"service": "k3s"},
+         "service='k3s' n'est pas un objet créé par la campagne"),
+        ("R24d", "ssh_user_delete",     {"username": "root"},
+         "username='root' n'est pas un objet créé par la campagne"),
+        ("R24e", "ssh_cron_remove",     {"pattern": ".*"},
+         "pattern='.*' n'est pas un objet créé par la campagne"),
+        ("R24f", "ssh_k8s_delete",      {"namespace": "kube-system", "name": "coredns",
+                                         "resource": "deployment"},
+         "namespace='kube-system' n'est pas un objet créé par la campagne"),
+        ("R24g", "ssh_helm_repo_remove", {"names": ["stable"]},
+         "names='stable' n'est pas un objet créé par la campagne"),
+        ("R24h", "ssh_files_write",     {"files": [{"path": "/etc/motd", "content": "x"}]},
+         "path='/etc/motd' hors du bac à sable"),
+):
+    if _tool not in INV:
+        FAILS.append(f"guard-R24-{_cid}: {_tool} absent de l'inventaire synthétique "
+                     "— la preuve serait couverte par la branche « outil inexistant » "
+                     "et ne prouverait rien (cf. R20)")
+        continue
+    if not INV[_tool]["destructive"] or INV[_tool]["readonly"]:
+        FAILS.append(f"guard-R24-{_cid}: {_tool} n'est plus destructif/non-readonly "
+                     "dans l'inventaire synthétique — la matrice ne teste plus R24")
+        continue
+    for _shape, _extra in R24_SHAPES:
+        _c = {"id": _cid, "tool": _tool, "paths": ["cli"], "args": dict(_args),
+              "expect": ["ok"]}
+        _c.update(_extra)
+        guard_refuses(f"guard-R24-{_cid}-{_shape}", [_c], f"{_cid}: {_why}")
+# ... et l'équivalent confiné au bac à sable doit passer dans les trois formes.
+for _cid, _tool, _args in (
+        ("R24p", "ssh_file_write",   {"path": "/tmp/bridge-test-0909/x", "content": "x"}),
+        ("R24q", "ssh_service_stop", {"service": "bridge-test-0909-nonexistent.service"}),
+        ("R24r", "ssh_user_delete",  {"username": "btest0909"}),
+        ("R24s", "ssh_cron_remove",  {"pattern": "BRIDGE_TEST_0909"}),
+        ("R24t", "ssh_k8s_delete",   {"namespace": "bridge-test", "name": "bridge-test-pod",
+                                      "resource": "pod"}),
+        ("R24u", "ssh_files_write",  {"files": [{"path": "/tmp/bridge-test-0909/y",
+                                                 "content": "x"}]}),
+):
+    for _shape, _extra in R24_SHAPES:
+        _c = {"id": _cid, "tool": _tool, "paths": ["cli"], "args": dict(_args),
+              "expect": ["ok"]}
+        _c.update(_extra)
+        guard_passes(f"guard-R24-{_cid}-{_shape}", [_c])
+# Un outil READONLY n'est pas concerné : lire /etc n'agit sur rien, et remonter
+# le court-circuit `readonly` refuserait la majorité des cas des lanes A et B.
+for _shape, _extra in R24_SHAPES:
+    _c = {"id": "R24ro", "tool": "ssh_ls", "paths": ["cli"],
+          "args": {"path": "/etc"}, "expect": ["ok"]}
+    _c.update(_extra)
+    guard_passes(f"guard-R24-readonly-{_shape}", [_c])
+
+# =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
 # validation d'espèce/argstyle du C-3 itérait `c.get("expect", [])` sans
 # passer par `expectations()`. Sur un `expect` SCALAIRE (la forme des 357
@@ -857,9 +932,19 @@ else:
     # exige explicitement qu'au moins une ligne de C-security porte le motif
     # R20 — la propriété que R21 nomme, et que rien ne pinnait.
     REFUSED_IDS = {
+        # Fix round 7 (ruling R24) : l'ensemble passe de 14 à 38 ids, 17 à 47
+        # lignes. Le delta est les 24 cas destructifs SANS `yes` portant une
+        # clé de chemin/nom hors bac à sable (C12-C17, C20-C31, C34-C37,
+        # C42-C43) — ils ne refusaient jusqu'ici que parce que `is_inert()`
+        # court-circuitait le contrôle avant de l'atteindre. C'est un
+        # RENFORCEMENT attendu, pas une régression : R21 garde de toute façon
+        # ce fichier refusé en bloc, et il n'est jamais exécuté.
         "campaign/C-security.json": {
-            "C18", "C19", "C32", "C33", "C44", "C45", "C52", "C53", "C54",
-            "C55", "C56", "C58", "C59", "C72"},
+            "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19",
+            "C20", "C21", "C22", "C23", "C24", "C25", "C26", "C27",
+            "C28", "C29", "C30", "C31", "C32", "C33", "C34", "C35",
+            "C36", "C37", "C42", "C43", "C44", "C45", "C52", "C53",
+            "C54", "C55", "C56", "C58", "C59", "C72"},
         "campaign/D-sandbox.json": {
             "D01", "D02", "D04", "D06", "D07", "D09", "D10", "D12", "D15",
             "D17", "D18", "D19", "D20", "D22", "D23", "D26", "D27", "D29",

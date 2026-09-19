@@ -923,6 +923,11 @@ def guard(cases, inv):
         if (any(isinstance(e, str) and e.startswith("saved=") for e in _expect_list(c))
                 and c.get("paths", ["cli", "mcp"]) != ["cli"]):
             bad.append(f"{cid}: saved= exige paths=['cli'] (sinon course cli/mcp — I-11)")
+        # Depuis R23/R24, `inert` ne court-circuite plus RIEN : c'est tout
+        # l'objet des deux rulings. Il ne sert plus qu'ici, où il est une
+        # condition de fond et pas une optimisation — un `--dry-run` de
+        # `ssh_pkg_install` n'installe rien, donc la forme du paquet lui est
+        # indifférente.
         inert = is_inert(c, inv)
         if tool == "ssh_pkg_install" and not inert:
             pkg = str(c["args"].get("package", ""))
@@ -1008,10 +1013,26 @@ def guard(cases, inv):
         # `COMMAND_DENY` monte pour la même raison : sans lui ici,
         # `shutdown -h now` (aucun chemin, aucun verbe d'écriture, aucun
         # systemctl, aucun kill — donc invisible à `scan_command`) restait
-        # refusé avec `yes` et passait sans. `PATH_KEYS`/`NAME_KEYS` restent en
-        # aval du court-circuit : le ruling ne les vise pas, et les y remonter
-        # soumettrait d'un coup les ~200 cas `destructiveHint`-sans-`yes` des
-        # lanes A et B à la convention de nommage du bac à sable.
+        # refusé avec `yes` et passait sans.
+        #
+        # Fix round 7 (ruling R24) : `PATH_KEYS`/`NAME_KEYS` montent AUSSI. Je
+        # les avais laissés en aval au round 6 en craignant de soumettre d'un
+        # coup « ~200 cas destructiveHint-sans-yes des lanes A et B » à la
+        # convention de nommage — crainte MESURÉE COMME FAUSSE par le
+        # contrôleur puis re-mesurée ici : A-host, A2-host-heavy et B-k8s ne
+        # portent AUCUN cas destructif ; D-sandbox en porte 7 et E9 4, tous
+        # avec `yes`. Le seul fichier touché est C-security.json, baseline
+        # 2026-09-06 gelée que R21 garde refusée en bloc de toute façon. Coût
+        # réel sur ce qui s'exécute : zéro — et la convention se trouve fixée
+        # AVANT que les lanes des Tasks 3-8 n'écrivent leurs ~1150 cas.
+        # `ssh_file_write path=/etc/motd` sans `yes` passait jusqu'ici : même
+        # défaut que R23, sur les arguments au lieu de `command`.
+        #
+        # Le court-circuit `readonly`, lui, RESTE : lire `/etc/os-release` avec
+        # `ssh_ls` n'agit sur rien, et le remonter refuserait la majorité des
+        # cas de lecture des lanes A et B. C'est l'écriture que ce garde
+        # surveille, pas la lecture (cf. la suppression de READ_ONLY_OK au
+        # round 4).
         if tool in ("ssh_exec", "ssh_session_exec", "ssh_exec_multi"):
             cmdtext = c["args"].get("command", "")
             if not isinstance(cmdtext, str):
@@ -1027,8 +1048,6 @@ def guard(cases, inv):
                 bad.append(f"{cid}: command={v!r} touche un motif interdit "
                            "(ajouter `\"guard_probe\": true` SI et seulement si la charge "
                            "est inerte par construction, sur CHAQUE segment)")
-        if inert:
-            continue
         if inv.get(tool, {}).get("readonly"):
             continue                                   # lecture seule : hors périmètre du garde-fou
         for k, v in _walk_args(c["args"]):
