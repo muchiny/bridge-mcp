@@ -1,0 +1,700 @@
+{
+ "vars": {
+  "SANDBOX": "/tmp/bridge-test-0909",
+  "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+  "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+  "NS": "bridge-test",
+  "SBXUSER": "btest0909",
+  "SBXGROUP": "btestgrp0909",
+  "CRON_MARK": "BRIDGE_TEST_0909",
+  "UNIT": "bridge-test-0909",
+  "SLEEPPID": "",
+  "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+  "PAUSE_IMAGE": "docker.io/library/busybox:1.38",
+  "BUSYBOX_OK": "no",
+  "UFW_ABSENT": "yes",
+  "HAD_CRONTAB": "yes",
+  "BT_CID": ""
+ },
+ "cases": [
+  {
+   "id": "E101",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "mkdir -p /tmp/bridge-test-0909/{sub,mnt,pv,restore,synced,chart} && cp -r /home/muchini/media-stack-k8s/charts/backup /tmp/bridge-test-0909/chart/ && echo made"
+   },
+   "expect": "eq=made"
+  },
+  {
+   "id": "E102",
+   "owner": "campaign",
+   "tool": "ssh_file_write",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt",
+    "content": "alpha\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E103",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli",
+    "mcp"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt"
+   },
+   "expect": "eq=alpha"
+  },
+  {
+   "id": "E104",
+   "owner": "campaign",
+   "tool": "ssh_file_write",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt",
+    "content": "beta\n",
+    "append": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E105",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt"
+   },
+   "expect": "eq=alpha\\nbeta"
+  },
+  {
+   "id": "E106",
+   "owner": "campaign",
+   "tool": "ssh_files_write",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "files": [
+     {
+      "remote_path": "/tmp/bridge-test-0909/b.txt",
+      "content": "b\n"
+     },
+     {
+      "remote_path": "/tmp/bridge-test-0909/c.txt",
+      "content": "c\n"
+     }
+    ]
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E107",
+   "owner": "campaign",
+   "tool": "ssh_ls",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}"
+   },
+   "expect": "re=b\\.txt"
+  },
+  {
+   "id": "E108",
+   "owner": "campaign",
+   "tool": "ssh_file_chmod",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt",
+    "mode": "600"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E109",
+   "owner": "campaign",
+   "tool": "ssh_file_stat",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt"
+   },
+   "expect": "re=600|-rw-------"
+  },
+  {
+   "id": "E110",
+   "owner": "campaign",
+   "tool": "ssh_file_chown",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt",
+    "owner": "btest0909",
+    "sudo": true
+   },
+   "sudo_reason": "chown vers l'utilisateur jetable de la campagne exige root",
+   "expect": "ok"
+  },
+  {
+   "id": "E111",
+   "owner": "campaign",
+   "tool": "ssh_file_stat",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt"
+   },
+   "expect": "re=btest0909"
+  },
+  {
+   "id": "E112",
+   "owner": "campaign",
+   "tool": "ssh_file_chown",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt",
+    "owner": "muchini",
+    "sudo": true
+   },
+   "sudo_reason": "restitution du propriétaire avant suppression du compte jetable",
+   "expect": "ok"
+  },
+  {
+   "id": "E113",
+   "owner": "campaign",
+   "tool": "ssh_file_write",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/t.tpl",
+    "content": "HELLO=${name}\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E114",
+   "owner": "campaign",
+   "tool": "ssh_file_template",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "template_path": "${SANDBOX}/t.tpl",
+    "output_path": "${SANDBOX}/out.txt",
+    "variables": {
+     "name": "bridge-test"
+    }
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E115",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/out.txt"
+   },
+   "expect": "eq=HELLO=bridge-test"
+  },
+  {
+   "id": "E116",
+   "owner": "campaign",
+   "tool": "ssh_template_apply",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "dest": "${SANDBOX}/tpl.conf",
+    "content": "v1 bridge-test-0909\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E117",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/tpl.conf"
+   },
+   "expect": "re=bridge-test-0909"
+  },
+  {
+   "id": "E118",
+   "owner": "campaign",
+   "tool": "ssh_template_apply",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "dest": "${SANDBOX}/tpl.conf",
+    "content": "v2 bridge-test-0909\n",
+    "backup": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E119",
+   "owner": "campaign",
+   "tool": "ssh_file_stat",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/tpl.conf.bak"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E120",
+   "owner": "campaign",
+   "tool": "ssh_template_diff",
+   "paths": [
+    "cli",
+    "mcp"
+   ],
+   "args": {
+    "current_path": "${SANDBOX}/tpl.conf",
+    "content": "v3 bridge-test-0909\n"
+   },
+   "expect": "re=^> v3 bridge-test-0909$"
+  },
+  {
+   "id": "E121",
+   "owner": "campaign",
+   "tool": "ssh_upload",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "local_path": "/tmp/bridge-test-0909-local/up.txt",
+    "remote_path": "${SANDBOX}/up.txt"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E122",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/up.txt"
+   },
+   "expect": "eq=uploaded"
+  },
+  {
+   "id": "E123",
+   "owner": "campaign",
+   "tool": "ssh_upload",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "local_path": "/tmp/bridge-test-0909-local/up.txt",
+    "remote_path": "${SANDBOX}/up.txt",
+    "mode": "fail_if_exists"
+   },
+   "expect": "error="
+  },
+  {
+   "id": "E124",
+   "owner": "campaign",
+   "tool": "ssh_upload",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "local_path": "/tmp/bridge-test-0909-local/up.txt",
+    "remote_path": "${SANDBOX}/up.txt",
+    "mode": "append"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E125",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/up.txt"
+   },
+   "expect": "eq=uploaded\\nuploaded"
+  },
+  {
+   "id": "E126",
+   "owner": "campaign",
+   "tool": "ssh_download",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "remote_path": "${SANDBOX}/a.txt",
+    "local_path": "/tmp/bridge-test-0909-local/down.txt"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E127",
+   "owner": "campaign",
+   "tool": "ssh_sync",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "direction": "upload",
+    "source": "/tmp/bridge-test-0909-local/synced",
+    "destination": "/tmp/bridge-test-0909/synced"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E128",
+   "owner": "campaign",
+   "tool": "ssh_ls",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/synced"
+   },
+   "expect": "re=s1\\.txt"
+  },
+  {
+   "id": "E129",
+   "owner": "campaign",
+   "tool": "ssh_sync",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "direction": "download",
+    "source": "/tmp/bridge-test-0909/synced",
+    "destination": "/tmp/bridge-test-0909-local/back"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E130",
+   "owner": "campaign",
+   "tool": "ssh_backup_create",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "output_file": "/tmp/bridge-test-0909/bk.tar.gz",
+    "source_paths": [
+     "/tmp/bridge-test-0909/a.txt",
+     "/tmp/bridge-test-0909/b.txt"
+    ],
+    "compress": "gzip"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E131",
+   "owner": "campaign",
+   "tool": "ssh_backup_verify",
+   "paths": [
+    "cli",
+    "mcp"
+   ],
+   "args": {
+    "archive": "${SANDBOX}/bk.tar.gz"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E132",
+   "owner": "campaign",
+   "tool": "ssh_backup_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "archive_file": "${SANDBOX}/bk.tar.gz"
+   },
+   "expect": "re=a\\.txt"
+  },
+  {
+   "id": "E133",
+   "owner": "campaign",
+   "tool": "ssh_backup_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "archive_file": "${SANDBOX}/bk.tar.gz"
+   },
+   "expect": "nore=A\\.TXT"
+  },
+  {
+   "id": "E133b",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "tar -tvf /tmp/bridge-test-0909/bk.tar.gz"
+   },
+   "expect": "count=.txt:2"
+  },
+  {
+   "id": "E134",
+   "owner": "campaign",
+   "tool": "ssh_backup_snapshot",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "paths": "/tmp/bridge-test-0909",
+    "label": "bridge-test-0909"
+   },
+   "expect": "re=/tmp/snapshot_bridge-test-0909_.*\\.tar\\.gz"
+  },
+  {
+   "id": "E135",
+   "owner": "campaign",
+   "tool": "ssh_backup_restore",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "archive_file": "${SANDBOX}/bk.tar.gz",
+    "destination": "/tmp/bridge-test-0909/restore",
+    "strip_components": 2
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E136",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/restore/a.txt"
+   },
+   "expect": "eq=alpha\\nbeta"
+  },
+  {
+   "id": "E137",
+   "owner": "campaign",
+   "tool": "ssh_backup_schedule",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "cron_expr": "23 4 * * *",
+    "dest": "/tmp/bridge-test-0909/BRIDGE_TEST_0909-sched",
+    "paths": "/tmp/bridge-test-0909/sub"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E138",
+   "owner": "campaign",
+   "tool": "ssh_cron_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {},
+   "expect": "re=BRIDGE_TEST_0909"
+  },
+  {
+   "id": "E139",
+   "owner": "campaign",
+   "tool": "ssh_alert_set",
+   "paths": [
+    "cli",
+    "mcp"
+   ],
+   "args": {
+    "metric": "disk",
+    "operator": ">",
+    "threshold": 99
+   },
+   "expect": "re=OK|ALERT"
+  },
+  {
+   "id": "E140",
+   "owner": "campaign",
+   "tool": "ssh_host_tags",
+   "paths": [
+    "cli",
+    "mcp"
+   ],
+   "args": {
+    "action": "list"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E141",
+   "owner": "campaign",
+   "tool": "ssh_host_tags",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "add"
+   },
+   "expect": "nore=Tags added"
+  },
+  {
+   "id": "E142",
+   "owner": "campaign",
+   "tool": "ssh_runbook_execute",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "runbook_name": "log_rotation",
+    "params": {
+     "log_dir": "/tmp/bridge-test-0909",
+     "days_to_keep": "1"
+    }
+   },
+   "expect": "re=Runbook Execution Plan"
+  },
+  {
+   "id": "E143",
+   "owner": "campaign",
+   "tool": "ssh_file_stat",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E144",
+   "owner": "campaign",
+   "tool": "ssh_benchmark",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "bench_type": "cpu"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E145",
+   "owner": "campaign",
+   "tool": "ssh_canary_exec",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "echo canary-ok"
+   },
+   "expect": "re=canary-ok"
+  },
+  {
+   "id": "E146",
+   "owner": "campaign",
+   "tool": "ssh_rolling_exec",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "echo rolling-ok"
+   },
+   "expect": "re=rolling-ok"
+  },
+  {
+   "id": "E147",
+   "owner": "campaign",
+   "tool": "ssh_pty_exec",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "tty; echo pty-ok"
+   },
+   "expect": "re=pty-ok"
+  },
+  {
+   "id": "E148",
+   "owner": "campaign",
+   "tool": "ssh_pty_interact",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "session_id": "unused",
+    "input": "pty-interact-ok"
+   },
+   "expect": "re=pty-interact-ok"
+  },
+  {
+   "id": "E149",
+   "owner": "campaign",
+   "tool": "ssh_pty_resize",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "rows": 40,
+    "cols": 120
+   },
+   "expect": "re=Inappropriate ioctl for device"
+  },
+  {
+   "id": "E150",
+   "owner": "campaign",
+   "tool": "ssh_selinux_booleans",
+   "paths": [
+    "cli"
+   ],
+   "args": {},
+   "expect": "re=getsebool: command not found"
+  }
+ ]
+}

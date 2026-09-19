@@ -1,0 +1,715 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": "",
+    "SBX": "/tmp/bridge-test-0909/lane-b",
+    "SMALL": "/tmp/bridge-test-0909/lane-b/small.txt",
+    "MID": "/tmp/bridge-test-0909/lane-b/mid.txt",
+    "BIG": "/tmp/bridge-test-0909/lane-b/big.txt",
+    "ARC": "/tmp/bridge-test-0909/lane-b/arc.tar",
+    "OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "CHART_MULTI": "/home/muchini/media-stack-k8s/charts/plex",
+    "CHART_SINGLE": "/home/muchini/media-stack-k8s/charts/backup"
+  },
+  "cases": [
+    {
+      "id": "BT01",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "max_output": 50
+      },
+      "expect": [
+        "trunc",
+        "bytes<=400"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT02",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "re=ssh_output_fetch\\(output_id=\"out-[0-9a-f]{4}\"",
+      "paths": [
+        "mcp"
+      ]
+    },
+    {
+      "id": "BT03",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "nore=💡 Better",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT04",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "max_output": 0
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT05",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "max_output": 100000
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT06",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${MID}"
+      },
+      "expect": [
+        "trunc",
+        "re=588895 →"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT07",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${MID}"
+      },
+      "expect": "re=ssh_output_fetch\\(output_id=\"out-[0-9a-f]{4}\"",
+      "paths": [
+        "mcp"
+      ]
+    },
+    {
+      "id": "BT08",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${MID}",
+        "max_output": 200
+      },
+      "expect": "re=truncated: 100000 lines total",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT09",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${MID}",
+        "max_output": 200
+      },
+      "expect": "re=588895 → [0-9]+ chars",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT10",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${BIG}"
+      },
+      "expect": "re=output stopped at the 1048576 byte transport limit",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT11",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${BIG}"
+      },
+      "expect": "re=the command produced 1288895 bytes",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT12",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${BIG}",
+        "max_output": 0
+      },
+      "expect": "re=transport limit",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT13",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${BIG}",
+        "save_output": "${OUT}/big.txt"
+      },
+      "expect": "saved=${OUT}/big.txt",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT14",
+      "owner": "campaign",
+      "tool": "ssh_tail",
+      "args": {
+        "file": "${BIG}",
+        "lines": 100000
+      },
+      "expect": [
+        "trunc",
+        "nore=transport limit"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT15",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "output": "json",
+        "max_output": 300
+      },
+      "expect": "re=💡 Better: re-run with jq_filter",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT16",
+      "owner": "discover",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "max_output": 1
+      },
+      "expect": "exit=0",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT17",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "output": "json",
+        "max_output": 300
+      },
+      "expect": "re=omitted, [0-9]{5,} →",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT18",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "output": "json",
+        "jq_filter": ".items[].metadata.name",
+        "max_output": 300
+      },
+      "expect": "re=omitted, [0-9]{2,4} →",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT19",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "output": "json",
+        "limit": 2,
+        "max_output": 300
+      },
+      "expect": [
+        "re=omitted, [0-9]{3,5} →"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT20",
+      "owner": "campaign",
+      "tool": "ssh_k8s_api_resources",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "trunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT21",
+      "owner": "campaign",
+      "tool": "ssh_k8s_api_resources",
+      "args": {
+        "columns": [
+          "NAME"
+        ],
+        "limit": 5,
+        "max_output": 50
+      },
+      "expect": "trunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT22",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "max_output": 50
+      },
+      "expect": [
+        "notrunc",
+        "bytes>=200"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT23",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "nore=MORE DATA AVAILABLE",
+      "paths": [
+        "mcp"
+      ]
+    },
+    {
+      "id": "BT24",
+      "owner": "campaign",
+      "tool": "ssh_service_list",
+      "args": {
+        "state": "running",
+        "max_output": 50
+      },
+      "expect": [
+        "notrunc",
+        "bytes>=1000"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT25",
+      "owner": "campaign",
+      "tool": "ssh_process_list",
+      "args": {
+        "max_output": 50
+      },
+      "expect": [
+        "notrunc",
+        "bytes>=2000"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT26",
+      "owner": "campaign",
+      "tool": "ssh_disk_usage",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT27",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "max_output": 50
+      },
+      "expect": [
+        "notrunc",
+        "bytes>=500"
+      ],
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT28",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "output": "json",
+        "jq_filter": ".items[].metadata.name",
+        "max_output": 50
+      },
+      "expect": "trunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT29",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "all_namespaces": true,
+        "output": "name",
+        "max_output": 50
+      },
+      "expect": "trunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT30",
+      "owner": "campaign",
+      "tool": "ssh_alert_list",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT31",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT32",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT33",
+      "owner": "campaign",
+      "tool": "ssh_group_list",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT34",
+      "owner": "campaign",
+      "tool": "ssh_journal_boots",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT35",
+      "owner": "campaign",
+      "tool": "ssh_net_connections",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT36",
+      "owner": "campaign",
+      "tool": "ssh_cron_history",
+      "args": {
+        "lines": 200,
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT37",
+      "owner": "campaign",
+      "tool": "ssh_log_aggregate",
+      "args": {
+        "log_files": "/var/log/syslog",
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT38",
+      "owner": "campaign",
+      "tool": "ssh_backup_list",
+      "args": {
+        "archive_file": "${ARC}",
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT39",
+      "owner": "campaign",
+      "tool": "ssh_k8s_top",
+      "args": {
+        "resource_type": "pods",
+        "all_namespaces": true,
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT40",
+      "owner": "campaign",
+      "tool": "ssh_port_scan",
+      "args": {
+        "target": "127.0.0.1",
+        "ports": "22",
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT41",
+      "owner": "campaign",
+      "tool": "ssh_discover_hosts",
+      "args": {
+        "network": "127.0.0.1/32",
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT42",
+      "owner": "env",
+      "tool": "ssh_sbom_generate",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT43",
+      "owner": "env",
+      "tool": "ssh_helm_history",
+      "args": {
+        "release": "media-plex",
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT44",
+      "owner": "env",
+      "tool": "ssh_helm_list",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT45",
+      "owner": "env",
+      "tool": "ssh_docker_ps",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT45a",
+      "owner": "env",
+      "tool": "ssh_docker_images",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT45b",
+      "owner": "env",
+      "tool": "ssh_docker_network_ls",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT45c",
+      "owner": "env",
+      "tool": "ssh_docker_stats",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT45d",
+      "owner": "env",
+      "tool": "ssh_docker_volume_ls",
+      "args": {
+        "max_output": 50
+      },
+      "expect": "notrunc",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BT46",
+      "owner": "campaign",
+      "tool": "ssh_backup_list",
+      "args": {
+        "archive_file": "${ARC}"
+      },
+      "expect": [
+        "re=SMALL\\.TXT",
+        "nore=(?m)^small\\.txt"
+      ],
+      "paths": [
+        "cli",
+        "mcp"
+      ]
+    },
+    {
+      "id": "BT47",
+      "owner": "campaign",
+      "tool": "ssh_backup_list",
+      "args": {
+        "archive_file": "${ARC}",
+        "limit": 2
+      },
+      "expect": [
+        "lines=3",
+        "re=SMALL\\.TXT"
+      ],
+      "paths": [
+        "cli",
+        "mcp"
+      ]
+    }
+  ]
+}

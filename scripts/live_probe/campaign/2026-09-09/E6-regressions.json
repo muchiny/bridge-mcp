@@ -1,0 +1,316 @@
+{
+ "vars": {
+  "SANDBOX": "/tmp/bridge-test-0909",
+  "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+  "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+  "NS": "bridge-test",
+  "SBXUSER": "btest0909",
+  "SBXGROUP": "btestgrp0909",
+  "CRON_MARK": "BRIDGE_TEST_0909",
+  "UNIT": "bridge-test-0909",
+  "SLEEPPID": "",
+  "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+  "PAUSE_IMAGE": "docker.io/library/busybox:1.38",
+  "BUSYBOX_OK": "no",
+  "UFW_ABSENT": "yes",
+  "HAD_CRONTAB": "yes",
+  "BT_CID": ""
+ },
+ "cases": [
+  {
+   "id": "E601",
+   "owner": "campaign",
+   "tool": "ssh_crictl_images",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E602",
+   "owner": "campaign",
+   "tool": "ssh_k8s_dns_check",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resolve_name": "kubernetes.default.svc.cluster.local",
+    "namespace": "${NS}",
+    "kubectl_bin": "kubectl"
+   },
+   "expect": "re=Address"
+  },
+  {
+   "id": "E603",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "pods",
+    "namespace": "${NS}",
+    "output": "name"
+   },
+   "expect": "nore=dns-probe"
+  },
+  {
+   "id": "E604",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "pods",
+    "namespace": "${NS}",
+    "output": "name"
+   },
+   "expect": "nore=dns-probe"
+  },
+  {
+   "id": "E605",
+   "owner": "campaign",
+   "tool": "ssh_k8s_dns_check",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "namespace": "${NS}"
+   },
+   "expect": "nore=command not found"
+  },
+  {
+   "id": "E605b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_dns_check",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "namespace": "${NS}",
+    "kubectl_bin": "kubectl"
+   },
+   "expect": "re=CoreDNS"
+  },
+  {
+   "id": "E606",
+   "owner": "campaign",
+   "tool": "ssh_k8s_pvc_status",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pvc": "bt-pvc",
+    "namespace": "${NS}"
+   },
+   "expect": "nore=command not found"
+  },
+  {
+   "id": "E606b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_pvc_status",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pvc": "bt-pvc",
+    "namespace": "${NS}",
+    "kubectl_bin": "kubectl"
+   },
+   "expect": "re=bt-pvc"
+  },
+  {
+   "id": "E607",
+   "owner": "campaign",
+   "tool": "ssh_k8s_networkpolicy",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "policy": "bt-netpol",
+    "namespace": "${NS}"
+   },
+   "expect": "nore=command not found"
+  },
+  {
+   "id": "E607b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_networkpolicy",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "policy": "bt-netpol",
+    "namespace": "${NS}",
+    "kubectl_bin": "kubectl"
+   },
+   "expect": "re=bt-netpol"
+  },
+  {
+   "id": "E608",
+   "owner": "campaign",
+   "tool": "ssh_k8s_ingress_describe",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "ingress": "bt-ing",
+    "namespace": "${NS}"
+   },
+   "expect": "nore=command not found"
+  },
+  {
+   "id": "E608b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_ingress_describe",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "ingress": "bt-ing",
+    "namespace": "${NS}",
+    "kubectl_bin": "kubectl"
+   },
+   "expect": "re=bt-ing"
+  },
+  {
+   "id": "E609",
+   "owner": "campaign",
+   "tool": "ssh_k8s_localpath_inspect",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pv": "bt-pv"
+   },
+   "expect": "nore=command not found"
+  },
+  {
+   "id": "E609b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_localpath_inspect",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pv": "bt-pv",
+    "kubectl_bin": "kubectl"
+   },
+   "expect": "re=bt-pv"
+  },
+  {
+   "id": "E610",
+   "owner": "campaign",
+   "tool": "ssh_file_write",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt",
+    "content": "alpha\nbeta\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E611",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt"
+   },
+   "expect": "eq=alpha\\nbeta"
+  },
+  {
+   "id": "E612",
+   "owner": "campaign",
+   "tool": "ssh_file_patch",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "target_file": "${SANDBOX}/a.txt",
+    "dry_run": true,
+    "patch_content": "--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n"
+   },
+   "expect": "re=dry run"
+  },
+  {
+   "id": "E613",
+   "owner": "campaign",
+   "tool": "ssh_file_patch",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "target_file": "${SANDBOX}/a.txt",
+    "patch_content": "--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E614",
+   "owner": "campaign",
+   "tool": "ssh_file_read",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/a.txt"
+   },
+   "expect": "eq=alpha\\ngamma"
+  },
+  {
+   "id": "E615",
+   "owner": "campaign",
+   "tool": "ssh_crictl_inspect",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "kind": "container",
+    "id": "2fa48bdcf36e9a1fb9b48cc2bc4afe3b5a18ac1d2f95c6c7c11aa168b4dded33",
+    "output": "json",
+    "sudo": true
+   },
+   "expect": "json"
+  },
+  {
+   "id": "E616",
+   "owner": "campaign",
+   "tool": "ssh_crictl_inspect",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "kind": "container",
+    "id": "2fa48bdcf36e9a1fb9b48cc2bc4afe3b5a18ac1d2f95c6c7c11aa168b4dded33",
+    "output": "json",
+    "sudo": true
+   },
+   "expect": "nore=Incorrect Usage|flag provided but not defined|unknown flag"
+  },
+  {
+   "id": "E617",
+   "owner": "campaign",
+   "tool": "ssh_download",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "remote_path": "${SANDBOX}/a.txt",
+    "local_path": "/tmp/bridge-test-0909-local/patched.txt"
+   },
+   "expect": "ok"
+  }
+ ]
+}

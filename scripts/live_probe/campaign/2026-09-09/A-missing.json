@@ -1,0 +1,425 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": "",
+    "CID": "2fa48bdcf36e9a1fb9b48cc2bc4afe3b5a18ac1d2f95c6c7c11aa168b4dded33"
+  },
+  "cases": [
+    {
+      "id": "A301",
+      "owner": "campaign",
+      "tool": "ssh_k8s_connectivity_test",
+      "args": {
+        "target_host": "127.0.0.1",
+        "target_port": 0
+      },
+      "expect": "error=port must be in range"
+    },
+    {
+      "id": "A302",
+      "owner": "campaign",
+      "tool": "ssh_k8s_cordon",
+      "args": {
+        "node": "bmcp-nope-node"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A303",
+      "owner": "campaign",
+      "tool": "ssh_k8s_uncordon",
+      "args": {
+        "node": "bmcp-nope-node"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A304",
+      "owner": "campaign",
+      "tool": "ssh_k8s_create_secret",
+      "args": {
+        "name": "bmcp-probe-secret",
+        "namespace": "bridge-test",
+        "from_literal": [
+          {
+            "key": "k",
+            "value": "v"
+          }
+        ],
+        "dry_run": "client"
+      },
+      "expect": "re=(?i)bmcp-probe-secret"
+    },
+    {
+      "id": "A305",
+      "owner": "campaign",
+      "tool": "ssh_k8s_create_token",
+      "args": {
+        "service_account": "bmcp-nope-sa",
+        "namespace": "bridge-test",
+        "duration": "10m"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A306",
+      "owner": "campaign",
+      "tool": "ssh_k8s_kubeconfig_generate",
+      "args": {
+        "service_account": "bmcp-nope-sa",
+        "namespace": "bridge-test"
+      },
+      "expect": "re=failed to create token"
+    },
+    {
+      "id": "A307",
+      "owner": "campaign",
+      "tool": "ssh_k8s_patch",
+      "args": {
+        "target": "deployment/bmcp-nope",
+        "namespace": "bridge-test",
+        "patch_type": "merge",
+        "patch": "{\"metadata\":{\"labels\":{\"bmcp\":\"probe\"}}}"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A308",
+      "owner": "campaign",
+      "tool": "ssh_k8s_rbac_create",
+      "args": {
+        "kind": "role",
+        "name": "bmcp-probe-role",
+        "namespace": "bridge-test",
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "resources": [
+          "pods"
+        ],
+        "dry_run": true,
+        "output": "yaml"
+      },
+      "expect": "re=(?i)bmcp-probe-role"
+    },
+    {
+      "id": "A309",
+      "owner": "campaign",
+      "tool": "ssh_k8s_scale",
+      "args": {
+        "resource": "deployment/bmcp-nope",
+        "namespace": "bridge-test",
+        "replicas": 1
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A310",
+      "owner": "campaign",
+      "tool": "ssh_k8s_set",
+      "args": {
+        "subcommand": "image",
+        "target": "deployment/bmcp-nope",
+        "namespace": "bridge-test",
+        "assignments": [
+          "app=nginx:1.27"
+        ]
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A311",
+      "owner": "campaign",
+      "tool": "ssh_k8s_volume_expand",
+      "args": {
+        "pvc": "bmcp-nope-pvc",
+        "namespace": "bridge-test",
+        "size": "2Gi"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A312",
+      "owner": "campaign",
+      "tool": "ssh_service_start",
+      "args": {
+        "service": "bmcp-nope.service"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A313",
+      "owner": "campaign",
+      "tool": "ssh_service_restart",
+      "args": {
+        "service": "bmcp-nope.service",
+        "action": "reload-or-restart"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A314",
+      "owner": "campaign",
+      "tool": "ssh_service_enable",
+      "args": {
+        "name": "bmcp-nope.service"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A315",
+      "owner": "campaign",
+      "tool": "ssh_service_disable",
+      "args": {
+        "name": "bmcp-nope.service"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A316",
+      "owner": "campaign",
+      "tool": "ssh_service_daemon_reload",
+      "args": {},
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A317",
+      "owner": "campaign",
+      "tool": "ssh_canary_exec",
+      "args": {
+        "command": "uname -srm",
+        "health_check": "test -d /etc"
+      },
+      "expect": "re=aarch64"
+    },
+    {
+      "id": "A318",
+      "owner": "campaign",
+      "tool": "ssh_rolling_exec",
+      "args": {
+        "command": "uname -srm"
+      },
+      "expect": "re=no health check configured"
+    },
+    {
+      "id": "A319",
+      "owner": "campaign",
+      "tool": "ssh_fleet_diff",
+      "args": {
+        "command": "cat /etc/os-release"
+      },
+      "expect": "re=^ID=debian"
+    },
+    {
+      "id": "A320",
+      "owner": "defect",
+      "tool": "ssh_crictl_inspect",
+      "args": {
+        "kind": "container",
+        "id": "${CID}",
+        "sudo": true,
+        "output": "json"
+      },
+      "expect": "json"
+    },
+    {
+      "id": "A321",
+      "owner": "campaign",
+      "tool": "ssh_crictl_logs",
+      "args": {
+        "container_id": "${CID}",
+        "tail": 5,
+        "sudo": true
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "A322",
+      "owner": "campaign",
+      "tool": "ssh_crictl_exec",
+      "args": {
+        "container_id": "bmcp-nope-container",
+        "command": "true",
+        "sudo": true
+      },
+      "expect": "re=\\[exit:",
+      "sudo_reason": "crictl est root-only sur ce Pi (HOST GAP deja etabli par A320/A321) ; container_id est de toute facon inexistant"
+    },
+    {
+      "id": "A323",
+      "owner": "campaign",
+      "tool": "ssh_group_add",
+      "args": {
+        "name": "bmcp-probe-nogroup"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A324",
+      "owner": "campaign",
+      "tool": "ssh_user_add",
+      "args": {
+        "username": "bmcp-probe-nouser",
+        "create_home": false
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A325",
+      "owner": "campaign",
+      "tool": "ssh_user_modify",
+      "args": {
+        "username": "bmcp-probe-nouser",
+        "shell": "/usr/sbin/nologin"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A326",
+      "owner": "campaign",
+      "tool": "ssh_timer_enable",
+      "args": {
+        "timer": "bmcp-nope.timer"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A327",
+      "owner": "campaign",
+      "tool": "ssh_timer_disable",
+      "args": {
+        "timer": "bmcp-nope.timer"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A328",
+      "owner": "campaign",
+      "tool": "ssh_timer_trigger",
+      "args": {
+        "timer": "bmcp-nope.timer"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A329",
+      "owner": "campaign",
+      "tool": "ssh_firewall_allow",
+      "args": {
+        "port": "65530",
+        "protocol": "tcp"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A330",
+      "owner": "campaign",
+      "tool": "ssh_pty_interact",
+      "args": {
+        "session_id": "ignored",
+        "input": "bmcp-probe-A"
+      },
+      "expect": "eq=bmcp-probe-A"
+    },
+    {
+      "id": "A331",
+      "owner": "campaign",
+      "tool": "ssh_pty_resize",
+      "args": {
+        "rows": 40,
+        "cols": 120
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A332",
+      "owner": "campaign",
+      "tool": "ssh_storage_mount",
+      "args": {
+        "device": "/dev/bmcp-nope",
+        "mount_point": "/tmp/bridge-test-0909/bmcp-nope-mnt"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A333",
+      "owner": "campaign",
+      "tool": "ssh_storage_umount",
+      "args": {
+        "path": "/tmp/bridge-test-0909/bmcp-nope-mnt"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A334",
+      "owner": "campaign",
+      "tool": "ssh_backup_schedule",
+      "args": {
+        "cron_expr": "bad",
+        "paths": "/tmp/bridge-test-0909/bmcp-nope",
+        "dest": "/tmp/bridge-test-0909/bmcp-nope"
+      },
+      "expect": "error=Invalid cron expression: expected 5 fields"
+    },
+    {
+      "id": "A335",
+      "owner": "campaign",
+      "tool": "ssh_cron_add",
+      "args": {
+        "schedule": "bad",
+        "command": "true"
+      },
+      "expect": "error=Invalid cron schedule: expected 5 fields"
+    },
+    {
+      "id": "A336",
+      "owner": "campaign",
+      "tool": "ssh_docker_exec",
+      "args": {
+        "container": "bmcp-nope",
+        "command": "true"
+      },
+      "expect": "re=Docker/Podman not installed on host"
+    },
+    {
+      "id": "A337",
+      "owner": "campaign",
+      "tool": "ssh_git_checkout",
+      "args": {
+        "path": "/tmp/bridge-test-0909",
+        "target": "main"
+      },
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A338",
+      "owner": "campaign",
+      "tool": "ssh_selinux_booleans",
+      "args": {},
+      "expect": "re=\\[exit:"
+    },
+    {
+      "id": "A339",
+      "owner": "defect",
+      "tool": "ssh_session_close",
+      "args": {
+        "session_id": "bmcp-nope"
+      },
+      "expect": "error=unknown field `host`"
+    }
+  ]
+}

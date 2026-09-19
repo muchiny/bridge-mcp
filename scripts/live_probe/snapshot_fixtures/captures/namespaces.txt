@@ -1,0 +1,7 @@
+namespace/argocd
+namespace/default
+namespace/kube-node-lease
+namespace/kube-public
+namespace/kube-system
+namespace/media-stack
+
