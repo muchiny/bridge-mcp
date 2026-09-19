@@ -629,25 +629,19 @@ def run_p4(s, H, sbx):
     bt = bad.get("error", {}).get("message", "") or text_of(bad)
     check("P4-17", is_err and "inexistant" in bt, f"unknown session id -> {bt[:150]}")
 
-    t0 = time.monotonic()
-    to = s.tool("ssh_session_exec", {"session_id": sid, "command": marked("sleep 20"), "timeout_seconds": 3}, meta=True)
-    elapsed = time.monotonic() - t0
-    to_text = text_of(to)
-    is_err = to.get("error") is not None or to.get("result", {}).get("isError")
-    check("P4-18", is_err and elapsed < 10.0 and "not found" not in to_text.lower(),
-          f"session timeout honored -> isError={is_err} elapsed={elapsed:.1f}s text={to_text[:120]!r}")
-
-    # CASE edit (§3.8 category 3, reordered — property preserved: "does a
-    # bare `exit` inside a session command kill the session, and does close
-    # still bypass the destructive gate"). The brief's own order runs P4-13
-    # (exit 7) mid-sequence, then P4-15..P4-18 on the SAME session S1. Live
-    # behaviour (see P4-13/P4-14 below) is that `exit` kills the underlying
-    # shell channel and the session manager evicts S1 entirely, so every
-    # later S1 call in the brief's order would fail with "Session not
-    # found" for a reason having nothing to do with what P4-15/16/17/18
-    # are actually testing. Moving the exit-7 probe to be S1's LAST action,
-    # and using S2 (never exit'd) for the P4-21 clean-close assertion,
-    # keeps every other case testing the property it names.
+    # Fix round 1 (reviewer-flagged): P4-13's evidence must isolate `exit`
+    # from the timeout mechanism at P4-18. Both paths converge on the SAME
+    # eviction call (read_until_marker_inclusive returning ANY Err --
+    # EOF/closed-channel OR timeout -- evicts and closes the session,
+    # src/ssh/session.rs:219-227) but they are two DIFFERENT triggers, and
+    # running the exit probe on S1 *after* a timeout on that same S1 (the
+    # original order here) means S1 is already dead from the timeout by
+    # the time "exit 7" runs -- P4-13 would then just be re-observing the
+    # timeout's eviction, not exit's. So the exit probe runs HERE, on S1,
+    # which is still alive (only cd/env/umask/write/sudo/blacklist/unknown-
+    # session-id have touched it so far -- none of those are fatal). The
+    # timeout probe (P4-18) moves below onto ITS OWN fresh session S3, so
+    # neither probe's evidence is contaminated by the other's eviction.
     ex = sess_exec("exit 7")
     exj = {}
     ex_text = text_of(ex)
@@ -661,13 +655,50 @@ def run_p4(s, H, sbx):
 
     pwd_after_exit = text_of(sess_exec("pwd"))
     session_survived = sbx in pwd_after_exit
-    note("P4-14", f"DISCOVERED CONTRACT: a bare 'exit N' inside ssh_session_exec's command KILLS the session (channel closes; session manager evicts it) -- session_survived={session_survived}, next call -> {pwd_after_exit!r}")
+    note("P4-14", f"DISCOVERED CONTRACT: a bare 'exit N' inside ssh_session_exec's command KILLS the session (channel closes; session manager evicts it) -- session_survived={session_survived}, next call -> {pwd_after_exit!r}. "
+         "Mechanism per source: build_exec_wrapper (session.rs:423-436) runs the command with NO subshell isolation, so `exit` terminates the persistent shell itself; that closes the channel, "
+         "read_until_marker_inclusive sees EOF and returns Err(\"Shell session closed unexpectedly\") (session.rs:502-506); execute_in_session's `if let Err(e) = ...` (session.rs:219-227) evicts and "
+         "closes the session on ANY such Err, unconditionally.")
     check("P4-14", not session_survived and "not found" in pwd_after_exit.lower(),
           f"session does NOT survive a bare 'exit N' -> {pwd_after_exit}")
 
+    # DISCOVERED DEFECT (reviewer-flagged, own id P4-TO): the SAME eviction
+    # at session.rs:219-227 fires on ANY Err from read_until_marker_inclusive,
+    # and a timeout is ALSO an Err (SshTimeout, session.rs:516-518) -- the
+    # comment at the eviction site says "Shell is dead", but a command that
+    # merely ran long is not necessarily a dead shell. A fresh session S3
+    # isolates this from the exit probe above: verify it survives a
+    # NON-fatal blocking wait, then time it out, then check whether it
+    # still answers.
+    sess3 = text_of(s.tool("ssh_session_create", {"host": H}))
+    try:
+        sid3 = json.loads(sess3).get("id")
+    except ValueError:
+        sid3 = None
+
+    def sess3_exec(cmd, **kw):
+        return s.tool("ssh_session_exec", {"session_id": sid3, "command": marked(cmd), **kw})
+
+    t0 = time.monotonic()
+    to = sess3_exec("sleep 20", timeout_seconds=3)
+    elapsed = time.monotonic() - t0
+    to_text = text_of(to)
+    is_err = to.get("error") is not None or to.get("result", {}).get("isError")
+    check("P4-18", is_err and elapsed < 10.0 and "not found" not in to_text.lower(),
+          f"S3 (fresh) timeout honored -> isError={is_err} elapsed={elapsed:.1f}s text={to_text[:120]!r}")
+
+    after_timeout = sess3_exec("true") if sid3 else {}
+    at_text = text_of(after_timeout)
+    at_is_err = after_timeout.get("error") is not None or after_timeout.get("result", {}).get("isError")
+    note("P4-TO", f"DISCOVERED DEFECT: a plain timeout (not an exit) ALSO destroys the session -- src/ssh/session.rs:219-227 evicts on ANY Err from read_until_marker_inclusive, and SshTimeout "
+         f"(session.rs:516-518) is such an Err. The eviction site's own comment says \"Shell is dead\", but the remote shell may be perfectly alive, just slow -- this permanently destroys a "
+         f"persistent session for a merely-slow command. next call on S3 -> isError={at_is_err} text={at_text[:150]!r}")
+    check("P4-TO", at_is_err and "not found" in at_text.lower(),
+          f"S3 does NOT survive a timeout (same eviction path as exit, different trigger) -> {at_text}")
+
     # P4-21: clean close, no destructive-gate detour. Tested on S2 (never
-    # exit'd) rather than S1 (dead from P4-13/14 above) so this assertion
-    # is not collateral damage from the exit-kills-session discovery.
+    # exit'd/timed-out) rather than S1 or S3 so this assertion is not
+    # collateral damage from either eviction discovery above.
     cl1 = s.tool("ssh_session_close", {"session_id": sid2}) if sid2 else {}
     cl1r = cl1.get("result", {})
     check("P4-21", bool(sid2) and cl1r.get("resultType") != "input_required" and not cl1r.get("isError"), f"session_close (S2) -> {json.dumps(cl1)[:200]}")
@@ -675,6 +706,12 @@ def run_p4(s, H, sbx):
     after = s.tool("ssh_session_exec", {"session_id": sid, "command": marked("true")})
     is_err = after.get("error") is not None or after.get("result", {}).get("isError")
     check("P4-22", is_err, f"exec on S1 after it self-destructed via exit -> isError={is_err} (session is genuinely gone, not merely delisted)")
+
+    # Defensive: S3 should already be dead from its own timeout eviction
+    # (P4-TO), but close it explicitly in case that ever changes, so a fix
+    # to the eviction bug doesn't silently leave an orphan session behind.
+    if sid3:
+        s.tool("ssh_session_close", {"session_id": sid3})
 
     final_list_text = text_of(s.tool("ssh_session_list", {}))
     # Empty state is the friendly string "No active sessions.", not "[]"
@@ -809,9 +846,48 @@ def run_p6a(s, H):
     counter_msg, _ = s.wait_async(counter_mid, timeout=5)
     check("P6-05", counter_msg.get("error", {}).get("code") == -32021, f"tasks/get without extension -> {counter_msg.get('error')}")
 
-    # Drain the second batch of 6 before moving on, so P7/P8 don't inherit load.
+    # Drain the 5 in-flight sleeps (not 6 -- P6-04's fix cut this batch to 5,
+    # see the comment above) before moving on, so P7/P8 don't inherit load.
     for mid in ids2:
         s.wait_async(mid, timeout=20)
+
+
+LOCK_DIR = "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/.lane-exclusive"
+
+
+class ExclusiveLock:
+    """Campaign-wide mutual exclusion for P6-P8 (brief step "Poser un verrou
+    de campagne", .superpowers/sdd/2026-09-09-raspberry-full-campaign/
+    task-6-brief.md Parallelisme section). P8 starts a daemon on the
+    default socket path; every other lane's `bridge-mcp tool` call gets
+    silently rerouted to it the moment that socket exists
+    (try_forward_to_daemon, src/cli/runner.rs:87-132) -- an unlocked P8 can
+    hijack another lane's CLI calls mid-run. `os.mkdir` is atomic (fails if
+    the directory already exists), so this both detects real contention
+    from another lane and survives a lane_d_proto.py + lane_d_cli.sh
+    handoff: acquire() refuses to steal a lock it did not create, and
+    release() only ever removes a lock this instance created."""
+
+    def __init__(self, path=LOCK_DIR):
+        self.path = path
+        self.owned = False
+
+    def acquire(self):
+        try:
+            os.mkdir(self.path)
+            self.owned = True
+        except FileExistsError:
+            print(f"ABORT: {self.path} already held by another lane/run -- "
+                  "P6-P8 are exclusive, refusing to start.", file=sys.stderr)
+            sys.exit(1)
+
+    def release(self):
+        if self.owned:
+            try:
+                os.rmdir(self.path)
+            except OSError as e:
+                print(f"WARNING: could not remove lock {self.path}: {e}", file=sys.stderr)
+            self.owned = False
 
 
 def main():
@@ -840,7 +916,12 @@ def main():
         if "p5" in only:
             run_p5(s, H)
         if "p6a" in only:
-            run_p6a(s, H)
+            lock = ExclusiveLock()
+            lock.acquire()
+            try:
+                run_p6a(s, H)
+            finally:
+                lock.release()
     finally:
         s.close()
 

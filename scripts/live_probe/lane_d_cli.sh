@@ -27,6 +27,29 @@ record() {
 has() { [ "${ONLY/,/}" != "${ONLY/$1/}" ] || [[ ",$ONLY," == *",$1,"* ]]; }
 run_lane() { [[ ",$ONLY," == *",$1,"* ]]; }
 
+# ============================ campaign-wide exclusive lock ============================
+# P6-P8 are exclusive (task-6-brief.md, Parallelisme section): P8 starts a
+# daemon on the default socket path, and the instant that socket exists,
+# every OTHER lane's `bridge-mcp tool` call gets silently rerouted to it
+# (try_forward_to_daemon, src/cli/runner.rs:87-132) -- an unlocked P8 can
+# hijack another lane's CLI calls mid-run. `mkdir` is atomic: it fails if
+# the directory already exists, so this both refuses to run against a
+# genuinely contended lock (another lane's P6-P8, or a leftover from a
+# crashed prior run) and never steals/removes a lock this invocation did
+# not itself create.
+LOCK_DIR="/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/.lane-exclusive"
+LOCK_OWNED=0
+if run_lane p6b || run_lane p7 || run_lane p8; then
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_OWNED=1
+  else
+    echo "ABORT: $LOCK_DIR already held by another lane/run -- P6-P8 are exclusive, refusing to start." >&2
+    exit 1
+  fi
+  release_lock() { [ "$LOCK_OWNED" -eq 1 ] && rmdir "$LOCK_DIR" 2>/dev/null; }
+  trap release_lock EXIT
+fi
+
 # =========================== P6b — concurrency, CLI half ===========================
 if run_lane p6b; then
   echo "=== P6b — concurrency (CLI half) ==="
@@ -294,6 +317,36 @@ else:
   out=$(RUST_LOG=error "$BIN" describe-tool ssh_podman_ps </dev/null 2>&1); rc=$?
   if [ "$rc" -eq 1 ] && echo "$out" | grep -qi "MCP unknown tool: ssh_podman_ps"; then v=PASS; else v=FAIL; fi
   record "P7-37" "$v" "describe-tool on registered-but-disabled-group tool -> rc=$rc (differs from P7-32's rc=2 for the SAME underlying McpUnknownTool error -- map_exit_code only wired on the Tool arm) out=${out:0:150}"
+
+  # DISCOVERED DEFECT (own id P7-HINT, reviewer-flagged sibling of P7-37): the
+  # CLI `tool` subcommand -- not just `describe-tool` -- ALSO drops the
+  # "registered but its group is not enabled" hint. `Registry::execute`
+  # (src/mcp/registry.rs:156-166) builds a bare `McpUnknownTool { tool }`
+  # with no message text at all; only the MCP protocol layer
+  # (`handle_tools_call`, src/mcp/server.rs:2750-2754) calls
+  # `unknown_tool_message(tool)` to build the rich, distinguishing text
+  # (P1-16 vs P1-17 on the wire). Neither CLI path (`run_tool` via
+  # `registry.execute`, nor `run_describe_tool`'s own bare McpUnknownTool at
+  # runner.rs:1796-1800) ever calls that function, so BOTH CLI paths render
+  # the SAME generic "MCP unknown tool: X" for a disabled-group tool as for
+  # a name that does not exist at all -- the exact distinction P1-16/P1-17
+  # prove exists on the wire is invisible from the CLI.
+  # The two messages can never be byte-identical (each names its own tool),
+  # so the check is on TEMPLATE shape: does the disabled-group case say
+  # anything about "group"/"not enabled" (the P1-17 wire distinction), or
+  # is it just the same generic "MCP unknown tool: X" the nonexistent-name
+  # case gets?
+  out_disabled=$(RUST_LOG=error "$BIN" tool ssh_podman_ps host="$HOST" </dev/null 2>&1); rc_disabled=$?
+  out_nonexist=$(RUST_LOG=error "$BIN" tool ssh_nexiste_pas_du_tout host="$HOST" </dev/null 2>&1); rc_nonexist=$?
+  template_disabled=$(echo "$out_disabled" | sed 's/ssh_podman_ps/<tool>/')
+  template_nonexist=$(echo "$out_nonexist" | sed 's/ssh_nexiste_pas_du_tout/<tool>/')
+  if [ "$template_disabled" = "$template_nonexist" ] && [ "$rc_disabled" -eq "$rc_nonexist" ] \
+     && ! echo "$out_disabled" | grep -qi "not enabled\|group"; then
+    v=PASS
+  else
+    v=FAIL
+  fi
+  record "P7-HINT" "$v" "DEFECT: 'tool ssh_podman_ps' (disabled group) -> '$out_disabled' (rc=$rc_disabled) and 'tool ssh_nexiste_pas_du_tout' (does not exist) -> '$out_nonexist' (rc=$rc_nonexist) share the IDENTICAL template 'MCP unknown tool: <name>' -- neither mentions the disabled group at all, unlike P1-17's wire message. The CLI 'tool' subcommand loses the same hint 'describe-tool' loses (P7-37)"
 
   out1=$(RUST_LOG=error "$BIN" --config /nexiste-pas.yaml validate </dev/null 2>&1); rc1=$?
   out2=$(RUST_LOG=error "$BIN" --pas-un-flag </dev/null 2>&1); rc2=$?
