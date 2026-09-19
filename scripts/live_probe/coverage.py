@@ -222,6 +222,16 @@ def buckets(lin, used, owners, outcomes, waivers, extra):
     exercised = named - env_blocked
     never_probed = set(lin) - exercised - env_blocked
 
+    # HONNETETE SUR CES QUATRE ASSERTIONS : seules A3 et A4 peuvent reellement
+    # echouer, et c'est prouve (corpus 2026-09-06 -> exit 1 ; entrees truquees).
+    # A1 et A2 sont VRAIES PAR ALGEBRE DES ENSEMBLES : `never_probed` est calcule
+    # comme le complement, et `env_blocked` est un sous-ensemble de `named`, lui
+    # meme filtre sur `lin`. L'union vaut donc `lin` et les seaux sont disjoints
+    # quelles que soient les entrees. C'est exactement le reproche que le plan
+    # adressait a l'ancienne `len(a)+len(b)+len(c) == 279`, et il vaut aussi ici :
+    # A1 et A2 DOCUMENTENT la partition, elles ne la gardent pas. Elles restent
+    # parce qu'elles rendent la definition lisible et qu'elles se declencheraient
+    # si un futur refactor calculait `never_probed` autrement qu'en complement.
     union = exercised | env_blocked | never_probed
     assert union == set(lin), \
         "partition incomplete: " + repr(sorted(set(lin) ^ union))
@@ -386,7 +396,7 @@ def main():
               + (f"  {sorted(env_blocked)}" if env_blocked else ""))
         print(f"  never_probed {len(never_probed):>3}  {sorted(never_probed)}")
         print(f"  TOTAL        {len(exercised) + len(env_blocked) + len(never_probed):>3}"
-              f" / {len(lin)}  (4 assertions dures passees)")
+              f" / {len(lin)}  (A3 + A4 passees ; A1/A2 structurelles)")
         if a.tsv:
             n = write_tsv(a.tsv, lin, exercised, env_blocked, never_probed, used,
                           outcomes, waivers, extra)
