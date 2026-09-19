@@ -15,8 +15,6 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 use crate::config::{HostConfig, ShellType};
 
-use super::utils::shell_escape;
-
 /// Arguments for `ssh_session_exec` tool
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,26 +135,21 @@ impl ToolHandler for SshSessionExecHandler {
         let effective_shell =
             session_host_config.map_or(ShellType::Posix, HostConfig::effective_shell);
 
-        // Wrap command with sudo if requested (POSIX only; no-op on Windows)
-        let command = if args.sudo.unwrap_or(false) && effective_shell == ShellType::Posix {
-            let sudo_user = args.sudo_user.as_deref().unwrap_or("root");
+        // L'élévation est une décision du domaine : `privilege::elevate*`
+        // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
+        // ici n'élèverait que le premier processus — voir la documentation de
+        // `domain::privilege::elevate`.
+        let command = if effective_shell == ShellType::Posix {
+            let privilege = crate::domain::privilege::PrivilegeArgs {
+                sudo: args.sudo.unwrap_or(false),
+                sudo_user: args.sudo_user.clone(),
+            };
             let sudo_password = session_host_config.and_then(|h| h.sudo_password.clone());
-
-            if let Some(ref password) = sudo_password {
-                tracing::warn!(
-                    "Using sudo with password via stdin. \
-                     Consider configuring NOPASSWD in sudoers for better security."
-                );
-                // Use printf in a subshell to reduce password visibility in process list
-                format!(
-                    "printf '%s\\n' {} | sudo -S -u {} {}",
-                    shell_escape(password),
-                    shell_escape(sudo_user),
-                    args.command
-                )
-            } else {
-                format!("sudo -n -u {} {}", shell_escape(sudo_user), args.command)
-            }
+            crate::domain::privilege::elevate_with_password(
+                &args.command,
+                &privilege,
+                sudo_password.as_deref(),
+            )
         } else {
             args.command.clone()
         };

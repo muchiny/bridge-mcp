@@ -37,6 +37,14 @@ extend-ignore-identifiers-re = [
 nore = "nore"
 # French words used in documentation
 projet = "projet"
+# `domain::privilege::elevate{,_with_password}` doc comments and their handler
+# call-site comments (src/domain/privilege.rs, src/mcp/tool_handlers/ssh_exec*.rs):
+# "enveloppe" (wraps) reads as "envelope", "raison" (reason) as "reason", "sur"
+# (on/about) as "sure", "reste" (remains) as "reset"/"rest"/"rests".
+enveloppe = "enveloppe"
+raison = "raison"
+sur = "sur"
+reste = "reste"
 # Legitimate code patterns
 secur = "secur"
 routeros = "routeros"

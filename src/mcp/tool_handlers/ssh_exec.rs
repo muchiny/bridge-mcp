@@ -17,8 +17,6 @@ use crate::ssh::{is_retryable_error_for, with_retry_if};
 use crate::config::ShellType;
 use crate::domain::use_cases::shell;
 
-use super::utils::shell_escape;
-
 /// Arguments for `ssh_exec` tool
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,19 +160,20 @@ impl ToolHandler for SshExecHandler {
         // Derive effective shell for this host
         let effective_shell = host_config.effective_shell();
 
-        // Wrap command with sudo if requested (POSIX only; no-op on Windows)
-        let command = if args.sudo.unwrap_or(false) && effective_shell == ShellType::Posix {
-            let sudo_user = args.sudo_user.as_deref().unwrap_or("root");
-            if let Some(ref password) = host_config.sudo_password {
-                format!(
-                    "echo {} | sudo -S -u {} {}",
-                    shell_escape(password),
-                    shell_escape(sudo_user),
-                    args.command
-                )
-            } else {
-                format!("sudo -n -u {} {}", shell_escape(sudo_user), args.command)
-            }
+        // L'élévation est une décision du domaine : `privilege::elevate*`
+        // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
+        // ici n'élèverait que le premier processus — voir la documentation de
+        // `domain::privilege::elevate`.
+        let command = if effective_shell == ShellType::Posix {
+            let privilege = crate::domain::privilege::PrivilegeArgs {
+                sudo: args.sudo.unwrap_or(false),
+                sudo_user: args.sudo_user.clone(),
+            };
+            crate::domain::privilege::elevate_with_password(
+                &args.command,
+                &privilege,
+                host_config.sudo_password.as_deref(),
+            )
         } else {
             args.command.clone()
         };

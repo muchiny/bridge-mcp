@@ -97,17 +97,6 @@ pub const fn null_device(shell: ShellType) -> &'static str {
     }
 }
 
-/// Optionally wrap a command with `sudo` (POSIX only).
-///
-/// On Windows shells, `sudo` does not exist; the command is returned as-is.
-#[must_use]
-pub fn elevate(cmd: &str, shell: ShellType) -> String {
-    match shell {
-        ShellType::Posix => format!("sudo {cmd}"),
-        ShellType::Cmd | ShellType::PowerShell => cmd.to_string(),
-    }
-}
-
 /// Return the stderr-to-null redirect suffix for the given shell.
 ///
 /// - **Posix**: `2>/dev/null`
@@ -253,25 +242,6 @@ mod tests {
         assert_eq!(null_device(ShellType::Posix), "/dev/null");
         assert_eq!(null_device(ShellType::Cmd), "NUL");
         assert_eq!(null_device(ShellType::PowerShell), "$null");
-    }
-
-    // ===== elevate =====
-
-    #[test]
-    fn test_elevate_posix() {
-        assert_eq!(
-            elevate("systemctl restart nginx", ShellType::Posix),
-            "sudo systemctl restart nginx"
-        );
-    }
-
-    #[test]
-    fn test_elevate_windows() {
-        assert_eq!(elevate("net start", ShellType::Cmd), "net start");
-        assert_eq!(
-            elevate("Restart-Service", ShellType::PowerShell),
-            "Restart-Service"
-        );
     }
 
     // ===== stderr_to_null =====

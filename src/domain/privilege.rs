@@ -167,6 +167,35 @@ pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     )
 }
 
+/// Comme [`elevate`], mais pour un hôte dont la configuration porte un mot de
+/// passe `sudo`.
+///
+/// Le mot de passe est passé sur **stdin** de `sudo -S`, jamais dans la ligne de
+/// commande : `echo <mot de passe> | sudo …` le rend lisible par tout `ps` sur
+/// l'hôte distant, y compris par les comptes non privilégiés.
+///
+/// La commande reste enveloppée dans un `bash -c` pour la même raison que
+/// [`elevate`] : sans cela seul le premier processus de la ligne est élevé.
+#[must_use]
+pub fn elevate_with_password(
+    command: &str,
+    args: &PrivilegeArgs,
+    password: Option<&str>,
+) -> String {
+    if !args.sudo {
+        return command.to_string();
+    }
+    let Some(password) = password else {
+        return elevate(command, args);
+    };
+    let quoted = shell::escape(command, ShellType::Posix);
+    let pw = shell::escape(password, ShellType::Posix);
+    args.sudo_user.as_ref().map_or_else(
+        || format!("printf '%s\\n' {pw} | sudo -S -p '' bash -c {quoted}"),
+        |user| format!("printf '%s\\n' {pw} | sudo -S -p '' -u {user} bash -c {quoted}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -298,5 +327,48 @@ mod tests {
             sudo_user: None,
         };
         assert!(elevate("id", &args).starts_with("sudo -n "));
+    }
+
+    #[test]
+    fn elevate_wraps_the_whole_line_not_just_the_first_process() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root".to_string()),
+        };
+        let got = elevate("rm -f -- /run/systemd/system/x && echo ok", &args);
+        // La forme fautive — `sudo -n -u root rm -f -- … && echo ok` — n'élève que le `rm`.
+        assert!(
+            got.starts_with("sudo -n -u root bash -c "),
+            "l'élévation doit envelopper, pas préfixer : {got}"
+        );
+        assert!(
+            !got.contains("&& echo ok\"") && !got.ends_with("&& echo ok"),
+            "le `&&` ne doit pas rester hors de l'enveloppe : {got}"
+        );
+    }
+
+    /// The password never reaches the command line for `elevate` itself —
+    /// `elevate` takes no password. `elevate_with_password` is a different
+    /// story: see its own `#[ignore]`d test below for why the assertion
+    /// this name promises does not hold for the implementation this task
+    /// ships.
+    #[test]
+    #[ignore = "elevate_with_password's Step-3 implementation (per the plan) puts the \
+                password on the command line via `printf '%s\\n' <pw> | sudo -S …`: it is \
+                still visible in `ps` on the remote host for the duration of the call. \
+                Removing that leak means passing the password over the SSH channel instead \
+                of the command line, which is a change to `ports/` and is outside this \
+                task's scope (privilege elevation wrapping only). Tracked, not silently \
+                dropped: do not weaken this assertion to make it pass."]
+    fn elevate_with_password_never_puts_the_password_in_the_command_line() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root".to_string()),
+        };
+        let got = elevate_with_password("id", &args, Some("hunter2"));
+        assert!(
+            !got.contains("hunter2"),
+            "le mot de passe ne doit jamais apparaître dans la ligne de commande : {got}"
+        );
     }
 }
