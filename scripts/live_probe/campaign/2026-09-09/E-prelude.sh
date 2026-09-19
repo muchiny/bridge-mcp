@@ -70,6 +70,12 @@ echo "fixture: $SANDBOX_LOCAL/up.txt ($(wc -c < "$SANDBOX_LOCAL/up.txt") bytes)"
 echo "fixture: $SANDBOX_LOCAL/synced/s1.txt ($(wc -c < "$SANDBOX_LOCAL/synced/s1.txt") bytes)"
 
 # ------------------------------------------------------------ the seven probes
+# Probes 4 and 5 deliberately go through `ssh_exec sudo=true 'crictl …'` and NOT through
+# ssh_crictl_images / ssh_crictl_ps: those two tools return JSON, and the PAUSE_IMAGE /
+# CID derivations below parse the `repository tag …` TABLE that raw crictl prints. The
+# two tools themselves are exercised as real tool calls elsewhere in the lane —
+# ssh_crictl_images by E601 (the D11 image lock) and ssh_crictl_ps by E509c — so nothing
+# is lost. The echoed labels say what actually ran.
 P1=$(mut ssh_exec host="$HOST" command='findmnt -n -o FSTYPE /tmp' | grep -E '^[a-z0-9]+$' | head -1)
 echo "probe 1: findmnt -n -o FSTYPE /tmp            -> ${P1:-<empty>}"
 
@@ -80,10 +86,10 @@ P3=$(mut ssh_exec host="$HOST" command='crontab -l >/dev/null 2>&1 && echo has-c
 echo "probe 3: crontab -l                           -> ${P3:-<empty>}"
 
 IMAGES=$(mut ssh_exec host="$HOST" sudo=true command='crictl images 2>/dev/null')
-echo "probe 4: ssh_crictl_images sudo=true          -> $(printf '%s\n' "$IMAGES" | grep -c . ) line(s)"
+echo "probe 4: ssh_exec sudo=true 'crictl images'      -> $(printf '%s\n' "$IMAGES" | grep -c . ) line(s)"
 
 PS_OUT=$(mut ssh_exec host="$HOST" sudo=true command='crictl ps 2>/dev/null')
-echo "probe 5: ssh_crictl_ps sudo=true              -> $(printf '%s\n' "$PS_OUT" | grep -c . ) line(s)"
+echo "probe 5: ssh_exec sudo=true 'crictl ps'          -> $(printf '%s\n' "$PS_OUT" | grep -c . ) line(s)"
 
 ETCD=$(ro ssh_k3s_etcd_status host="$HOST" | grep -A1 '== datastore ==' | tail -1)
 echo "probe 6: ssh_k3s_etcd_status (datastore)      -> ${ETCD:-<empty>}"

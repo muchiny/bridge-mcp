@@ -292,7 +292,7 @@
     "current_path": "${SANDBOX}/tpl.conf",
     "content": "v3 bridge-test-0909\n"
    },
-   "expect": "ok"
+   "expect": "re=^> v3 bridge-test-0909$"
   },
   {
    "id": "E121",
