@@ -209,6 +209,25 @@ INV = {
     "ssh_k8s_exec":        {"group": "kubernetes",  "reduce": "-", "readonly": False, "destructive": False},
     "ssh_cron_add":        {"group": "cron",        "reduce": "-", "readonly": False, "destructive": False},
     "ssh_exec_multi":      {"group": "core",        "reduce": "-", "readonly": False, "destructive": False},
+    # Fix round 11 : les outils dont le contrôle de chemin est devenu
+    # tool-aware. `readonly`/`destructive` recopiés de l'inventaire réel — un
+    # outil absent d'ici serait refusé par la branche « outil inexistant » et
+    # la preuve ne prouverait rien (piège R20).
+    "ssh_k8s_set":         {"group": "kubernetes", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_k8s_patch":       {"group": "kubernetes", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_git_checkout":    {"group": "git", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_git_branch":      {"group": "git", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_helm_dependency": {"group": "kubernetes", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_download":        {"group": "file_transfer", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_upload":          {"group": "file_transfer", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_sync":            {"group": "file_transfer", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_file_template":   {"group": "file_ops", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_backup_schedule": {"group": "backup", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_docker_compose":  {"group": "docker", "reduce": "-", "readonly": False, "destructive": True},
+    "ssh_backup_restore":  {"group": "backup", "reduce": "-", "readonly": False, "destructive": True},
+    "ssh_backup_snapshot": {"group": "backup", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_firewall_allow":  {"group": "firewall", "reduce": "-", "readonly": False, "destructive": False},
+    "ssh_template_apply":  {"group": "templates", "reduce": "-", "readonly": False, "destructive": True},
     "ssh_session_exec":    {"group": "session",     "reduce": "-", "readonly": False, "destructive": True},
 }
 
@@ -1196,6 +1215,116 @@ for _cid, _cmd in (
     guard_passes(f"guard-R10-read-{_cid}", [_X9(_cid, _cmd)])
 
 # =============================================================================
+# Fix round 11 — `PATH_KEYS` était un jeu de NOMS appliqué sans regarder
+# l'outil. Deux défauts sur la même ligne, mesurés en direct par la lane A :
+# un même nom de clé ne désigne pas la même chose partout (`target` = branche,
+# sélecteur de champ, ressource k8s…), et un chemin seulement LU était jugé
+# comme une écriture alors que le bac à sable borne les ÉCRITURES.
+# =============================================================================
+
+def _R11(cid, tool, args):
+    return {"id": cid, "tool": tool, "yes": True, "paths": ["cli"],
+            "args": dict(args), "expect": ["ok"]}
+
+
+_CHART = "/home/muchini/media-stack-k8s/charts/plex"
+
+# --- les faux refus rapportés par la lane A, et leurs voisins --------------
+for _cid, _tool, _args in (
+        # `target` = sélecteur de champ / ressource k8s, pas un chemin
+        ("Y1", "ssh_k8s_set", {"subcommand": "image", "target": "image",
+                               "namespace": "bridge-test", "assignments": ["a=b"]}),
+        ("Y2", "ssh_k8s_set", {"subcommand": "image", "target": "deployment/bmcp-nope",
+                               "namespace": "bridge-test", "assignments": ["a=b"]}),
+        ("Y3", "ssh_k8s_patch", {"target": "deployment/bmcp-nope",
+                                 "namespace": "bridge-test", "patch": "{}"}),
+        # `target` = nom de branche
+        ("Y4", "ssh_git_checkout", {"path": SBX, "target": "main"}),
+        # chemin LU : le chart que les contraintes globales nomment comme
+        # entrée licite
+        ("Y5", "ssh_helm_dependency", {"chart_path": _CHART, "subcommand": "list"}),
+        ("Y6", "ssh_git_branch", {"path": _CHART, "action": "list"}),
+        # sources lues, destinations écrites dans le bac à sable
+        ("Y7", "ssh_download", {"remote_path": "/etc/os-release",
+                                "local_path": SBX + "-local/x"}),
+        ("Y8", "ssh_upload", {"local_path": "/home/muchini/x",
+                              "remote_path": SBX + "/x"}),
+        ("Y9", "ssh_sync", {"source": "/etc/os-release", "destination": SBX + "/o",
+                            "direction": "upload"}),
+        ("Y10", "ssh_file_template", {"template_path": "/etc/skel/tpl",
+                                      "output_path": SBX + "/out"}),
+        ("Y11", "ssh_backup_schedule", {"paths": "/etc /var/data", "dest": SBX,
+                                        "name": "bridge-test-0909", "schedule": "daily"}),
+        ("Y12", "ssh_docker_compose", {"project_dir": SBX + "/nonexistent",
+                                       "file": "docker-compose.yml", "action": "ps"}),
+):
+    guard_passes(f"guard-R11-read-{_cid}", [_R11(_cid, _tool, _args)])
+
+# --- le CÔTÉ ÉCRITURE de chacun de ces mêmes outils refuse toujours --------
+# C'est la moitié qui empêche la correction d'être une relaxation en bloc :
+# pour chaque outil relaxé, une écriture hors bac à sable construite à la main.
+for _cid, _tool, _args in (
+        ("Z1", "ssh_git_checkout", {"path": "/home/muchini/repo", "target": "main"}),
+        ("Z2", "ssh_helm_dependency", {"chart_path": _CHART, "subcommand": "update"}),
+        ("Z3", "ssh_helm_dependency", {"chart_path": _CHART, "subcommand": "build"}),
+        ("Z4", "ssh_git_branch", {"path": _CHART, "action": "create",
+                                  "name": "bridge-test-b"}),
+        ("Z5", "ssh_git_branch", {"path": _CHART, "action": "delete",
+                                  "name": "bridge-test-b"}),
+        ("Z6", "ssh_k8s_set", {"subcommand": "image", "target": "deployment/x",
+                               "namespace": "kube-system", "assignments": ["a=b"]}),
+        ("Z7", "ssh_k8s_patch", {"target": "deployment/x", "namespace": "kube-system",
+                                 "patch": "{}"}),
+        ("Z8", "ssh_download", {"remote_path": "/etc/os-release",
+                                "local_path": "/home/muchini/x"}),
+        ("Z9", "ssh_upload", {"local_path": "/home/muchini/x", "remote_path": "/etc/motd"}),
+        ("Z10", "ssh_sync", {"source": "/etc/os-release", "destination": "/etc/motd",
+                             "direction": "upload"}),
+        ("Z11", "ssh_file_template", {"template_path": "/etc/skel/tpl",
+                                      "output_path": "/etc/motd"}),
+        ("Z12", "ssh_backup_schedule", {"paths": "/etc", "dest": "/var/backups",
+                                        "name": "bridge-test-0909", "schedule": "daily"}),
+        ("Z13", "ssh_docker_compose", {"project_dir": "/home/muchini/stack",
+                                       "file": "docker-compose.yml", "action": "up"}),
+        # non relaxés à dessein : §3.2 exige `archive_file` dans le bac à sable,
+        # et `paths` est la SEULE clé surveillée de ssh_backup_snapshot
+        ("Z14", "ssh_backup_restore", {"archive_file": "/var/backups/a.tar.gz",
+                                       "destination": SBX}),
+        ("Z15", "ssh_backup_snapshot", {"paths": "/etc", "label": "bridge-test-0909"}),
+        # idem pour le pare-feu : `source` est son seul argument surveillé
+        ("Z16", "ssh_firewall_allow", {"source": "0.0.0.0/0", "port": "22"}),
+):
+    guard_refuses(f"guard-R11-write-{_cid}", [_R11(_cid, _tool, _args)], f"{_cid}:")
+
+# --- la propriété de classe : UN MÊME NOM, DEUX OUTILS, DEUX VERDICTS ------
+# C'est elle qui empêche la classe de revenir en silence. `target` est un
+# chemin pour `ssh_template_apply`… non : prenons `path`, qui est un vrai
+# chemin pour `ssh_file_write` et un chemin d'API pour `ssh_k8s_get_raw`, et
+# `target`, branche pour `ssh_git_checkout` et chemin nulle part ailleurs.
+_SAME_KEY = (
+    # Axe 1 — CHEMIN vs PAS UN CHEMIN, sur la clé `target` :
+    #   `ssh_template_apply` l'écrit, `ssh_git_checkout` y met une branche.
+    ("target-chemin-ou-non",
+     "ssh_template_apply", {"dest": "/etc/motd", "target": "/etc/motd", "template": "t"},
+     "ssh_git_checkout", {"path": SBX, "target": "main"}),
+    # Axe 2 — ÉCRITURE vs LECTURE, sur la clé `path`, les deux fois un vrai
+    # chemin : `ssh_file_write` y écrit, `ssh_git_branch action=list` le lit.
+    ("path-ecriture-ou-lecture",
+     "ssh_file_write", {"path": "/etc/motd", "content": "x"},
+     "ssh_git_branch", {"path": "/home/muchini/repo", "action": "list"}),
+)
+for _key, _wtool, _wargs, _rtool, _rargs in _SAME_KEY:
+    guard_refuses(f"guard-R11-samekey-{_key}-path-side",
+                  [_R11("S1", _wtool, _wargs)], "S1:")
+    guard_passes(f"guard-R11-samekey-{_key}-nonpath-side",
+                 [_R11("S2", _rtool, _rargs)])
+# Et le défaut par DÉFAUT reste « écriture » : un couple (outil, clé) absent de
+# la table garde exactement le comportement d'avant ce round.
+if R.path_key_role("ssh_some_future_tool", "path", {}) != "write":
+    FAILS.append("R11 : le rôle par défaut n'est plus 'write' — un outil non "
+                 "listé serait relaxé par omission, l'inverse d'un échec fermé")
+
+# =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
 # validation d'espèce/argstyle du C-3 itérait `c.get("expect", [])` sans
 # passer par `expectations()`. Sur un `expect` SCALAIRE (la forme des 357
@@ -1318,7 +1447,15 @@ else:
         "campaign/D-sandbox.json": {
             "D01", "D02", "D04", "D06", "D07", "D09", "D10", "D12", "D15",
             "D17", "D18", "D19", "D20", "D22", "D23", "D26", "D27", "D29",
-            "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40",
+            "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D40",
+            # Fix round 11 : D39 (`ssh_git_branch path=… action=list`) ne
+            # refuse plus — `action: list` ne touche pas au dépôt, c'est une
+            # LECTURE, et le bac à sable borne les écritures. `create` et
+            # `delete` sur le même chemin refusent toujours (assertions
+            # guard-R11-*). Les autres ids sont inchangés ; seul le NOMBRE de
+            # lignes baisse (38 -> 31) parce qu'un cas qui portait à la fois
+            # une source lue et une destination écrite ne produit plus qu'une
+            # ligne, celle de l'écriture.
             "D90"},
     }
     REQUIRED_TAGS = {

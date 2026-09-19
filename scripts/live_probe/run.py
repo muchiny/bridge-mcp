@@ -361,6 +361,78 @@ PATH_KEYS = frozenset({"path", "paths", "source", "destination", "dest", "target
                        # clés réellement employées par les cas mutants des lanes C/E :
                        "output_file", "archive_file", "mount_point", "template_path",
                        "output_path", "chart_path", "project_dir"})
+# --- Fix round 11 : le contrôle de chemin est TOOL-AWARE --------------------
+# `PATH_KEYS` est un jeu de NOMS de clés appliqué sans regarder l'outil. Or un
+# même nom ne désigne pas la même chose partout, et la lane A l'a payé en
+# direct : `ssh_k8s_set target='image'` (un SÉLECTEUR DE CHAMP),
+# `ssh_git_checkout target='main'` (un NOM DE BRANCHE) et
+# `ssh_k8s_patch target='deployment/bmcp-nope'` (une RESSOURCE) étaient refusés
+# comme « hors du bac à sable » alors qu'aucun n'est un chemin. Second défaut de
+# la même ligne : un chemin seulement LU était jugé comme une écriture —
+# `ssh_helm_dependency chart_path=/home/muchini/media-stack-k8s/charts/plex`,
+# que les contraintes globales nomment pourtant comme entrée de lecture licite.
+# Le bac à sable existe pour empêcher la campagne d'ÉCRIRE hors de `$SANDBOX`.
+#
+# Les trois rôles ci-dessous sont dérivés des schémas réels
+# (`bridge-mcp describe-tool`, local et gratuit — la méthode qui a servi à bâtir
+# les 14 couples de R25), pour les 38 couples (outil, clé-chemin) portés par un
+# outil NON-readonly — les seuls qui atteignent ce contrôle, `guard()`
+# court-circuitant les outils readonly juste avant.
+#
+# DÉFAUT : "write". Tout couple non listé — outil futur, groupe désactivé —
+# garde donc exactement le comportement d'avant ce round. Aucune relaxation
+# n'arrive par omission ; elles sont toutes explicites et énumérées.
+PATH_KEY_NONPATH = frozenset({
+    # `target` = ressource Kubernetes (`deployment/api`), pas un chemin
+    ("ssh_k8s_patch", "target"), ("ssh_k8s_set", "target"),
+    # `target` = branche, étiquette ou commit
+    ("ssh_git_checkout", "target"),
+})
+# DÉLIBÉRÉMENT PAS relaxés, bien que `source` y soit une IP/CIDR et non un
+# chemin : `ssh_firewall_allow` et `ssh_firewall_deny` n'ont AUCUN autre
+# argument surveillé, donc ce contrôle-ci est le seul qui les arrête — et §3.1
+# interdit toute action sur le pare-feu. La protection est accidentelle, mais
+# elle est réelle : la retirer ouvrirait `ssh_firewall_allow` en grand pour
+# corriger un faux positif qu'aucune lane ne rencontre.
+# Règle appliquée à toute entrée ci-dessous, et deux fois violée dans un premier
+# jet : on ne relaxe JAMAIS (a) une clé que §3.2 nomme explicitement comme
+# devant être dans le bac à sable, ni (b) la SEULE clé surveillée d'un outil —
+# la relaxer laisserait l'outil entièrement sans garde. C'est ce qui exclut
+# `ssh_backup_restore archive_file` (§3.2 exige `archive_file` ET `destination`
+# sous `$SANDBOX`), `ssh_backup_snapshot paths` (aucun autre argument surveillé :
+# la destination du snapshot n'est pas un argument) et le `source` des deux
+# outils de pare-feu.
+PATH_KEY_READ = frozenset({
+    ("ssh_backup_schedule", "paths"),         # ce qui est sauvegardé ; `dest` reste une écriture
+    ("ssh_docker_compose", "file"),           # nom du fichier compose, lu ; `project_dir` reste une écriture
+    ("ssh_download", "remote_path"),          # source sur le Pi ; `local_path` reste une écriture
+    ("ssh_file_template", "template_path"),   # le gabarit est lu ; `output_path` reste une écriture
+    ("ssh_sync", "source"),                   # `destination` reste une écriture
+    ("ssh_upload", "local_path"),             # source sur la machine bridge ; `remote_path` reste une écriture
+})
+# Rôle conditionné par un AUTRE argument, quand l'énumération du schéma le dit
+# sans ambiguïté : {(outil, clé): (clé de condition, valeurs qui rendent la
+# lecture certaine)}. Toute autre valeur retombe sur "write" (échec fermé).
+PATH_KEY_READ_IF = {
+    # subcommand ∈ {build, update, list} : seul `list` ne touche pas au chart
+    ("ssh_helm_dependency", "chart_path"): ("subcommand", frozenset({"list"})),
+    # action ∈ {list, create, delete} : seul `list` ne touche pas au dépôt
+    ("ssh_git_branch", "path"): ("action", frozenset({"list"})),
+}
+
+
+def path_key_role(tool, key, args):
+    """'nonpath', 'read' ou 'write'. Défaut 'write' : échec fermé."""
+    if (tool, key) in PATH_KEY_NONPATH:
+        return "nonpath"
+    if (tool, key) in PATH_KEY_READ:
+        return "read"
+    cond = PATH_KEY_READ_IF.get((tool, key))
+    if cond and str(args.get(cond[0], "")) in cond[1]:
+        return "read"
+    return "write"
+
+
 NAME_KEYS = frozenset({"name", "names", "username", "group", "service", "unit",
                        "namespace", "release", "pattern"})
 # Fix round 1 (review C-3/R20): les espèces d'assertion et les valeurs d'argstyle
@@ -1479,7 +1551,8 @@ def guard(cases, inv):
         if inv.get(tool, {}).get("readonly"):
             continue                                   # lecture seule : hors périmètre du garde-fou
         for k, v in _walk_args(c["args"]):
-            if k in PATH_KEYS and not SANDBOX_PATH_RE.match(v):
+            if (k in PATH_KEYS and path_key_role(tool, k, c["args"]) == "write"
+                    and not SANDBOX_PATH_RE.match(v)):
                 bad.append(f"{cid}: {k}={v!r} hors du bac à sable {SANDBOX_PATH_RE.pattern}")
             elif (k in NAME_KEYS and not SANDBOX_NAME_RE.match(v)
                   and cid not in GUARD_EXPECTED_REFUSAL):
