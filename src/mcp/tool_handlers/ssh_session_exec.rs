@@ -145,6 +145,12 @@ impl ToolHandler for SshSessionExecHandler {
                 sudo_user: args.sudo_user.clone(),
             };
             let sudo_password = session_host_config.and_then(|h| h.sudo_password.clone());
+            if privilege.sudo && sudo_password.is_some() {
+                tracing::warn!(
+                    "Using sudo with password via stdin. \
+                     Consider configuring NOPASSWD in sudoers for better security."
+                );
+            }
             crate::domain::privilege::elevate_with_password(
                 &args.command,
                 &privilege,
