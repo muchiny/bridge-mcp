@@ -690,6 +690,73 @@ for _cid, _cmd in (
           "paths": ["cli"], "args": {"command": _cmd}, "expect": ["exit=4"]}])
 
 # =============================================================================
+# Fix round 6 (ruling R23) — le verdict du garde ne doit PAS dépendre de `yes`.
+# Mesuré au round 5 : les cinq charges dangereuses ne refusaient qu'avec
+# `yes: true`, parce que les contrôles de `command` vivaient derrière le
+# court-circuit `inert`. Le raisonnement (« sans --yes la porte destructive du
+# produit refuse, exit 4 ») est exact mais inapplicable ICI : §3.3 exige que
+# toute sonde soit inoffensive *si le garde tombe*, et la lane C existe pour
+# chercher les trous de cette porte-là (D1, D5). Le garde du harnais ne peut
+# pas faire reposer la sûreté du Pi sur le mécanisme que la campagne teste.
+# Cette matrice est l'assertion permanente : aucune évolution future ne peut
+# réintroduire un garde dépendant de `yes`.
+# =============================================================================
+
+R23_SHAPES = (
+    ("yes=F/gp=F", {}),
+    ("yes=T/gp=F", {"yes": True}),
+    ("yes=T/gp=T", {"yes": True, "guard_probe": True}),
+    # `--dry-run` rend aussi le cas `inert` : même court-circuit, même risque.
+    ("dry-run",    {"flags": ["--dry-run"], "paths": ["cli"]}),
+)
+
+
+def _shape_case(cid, cmd, extra):
+    c = {"id": cid, "tool": "ssh_exec", "paths": ["cli"],
+         "args": {"command": cmd}, "expect": ["ok"]}
+    c.update(extra)
+    return c
+
+
+# Doivent refuser dans les QUATRE formes. Les cinq premières sont les charges
+# que le contrôleur a mesurées comme ne refusant qu'avec `yes`. `shutdown -h now`
+# est le cas qui a obligé à remonter AUSSI `COMMAND_DENY` : il ne porte aucun
+# chemin, aucun verbe d'écriture, aucun systemctl, aucun kill — `scan_command`
+# ne le voit pas, seule la blacklist par nom l'attrape.
+for _cid, _cmd in (
+        ("R23a", "echo c > /proc/sysrq-trigger"),
+        ("R23b", "rm -r -- /usr/local/bin/foo"),
+        ("R23c", "tee /var/log/evil.log"),
+        ("R23d", "echo pwned >& /etc/motd"),
+        ("R23e", "systemctl stop bridge-test-0909.service k3s"),
+        ("R23f", "shutdown -h now"),
+        ("R23g", "rm -rf /etc/motd"),
+        ("R23h", "pkill -f media-plex"),
+        ("R23i", "find /usr -name foo -delete"),
+        ("R23j", "bash -c 'rm -r -- /etc/motd'"),
+):
+    for _shape, _extra in R23_SHAPES:
+        guard_refuses(f"guard-R23-{_cid}-{_shape}",
+                      [_shape_case(_cid, _cmd, _extra)], f"{_cid}:")
+
+# Doivent passer dans toutes les formes SAUF `gp=T` — `guard_probe` impose en
+# plus l'inertie §3.3, qui est une contrainte d'écriture de sonde, pas de
+# sûreté (cf. la section « item parké » du rapport).
+for _cid, _cmd in (
+        ("R23p", "cat /etc/passwd > /tmp/bridge-test-0909/copy.txt"),
+        ("R23q", "mv /tmp/bridge-test-0909/a /tmp/bridge-test-0909/b"),
+        ("R23r", "systemctl stop bridge-test-0909.service"),
+        # les quatre commandes RÉELLES d'E9-teardown-proof.json
+        ("R23s", "ls /etc/systemd/system/*.wants/ 2>/dev/null | grep -c bridge-test || true"),
+        ("R23t", "findmnt -n /tmp/bridge-test-0909/mnt || echo unmounted"),
+        ("R23u", "ls /tmp/snapshot_bridge-test-0909_*.tar.gz 2>/dev/null | wc -l"),
+):
+    for _shape, _extra in R23_SHAPES:
+        if _shape == "yes=T/gp=T":
+            continue
+        guard_passes(f"guard-R23-{_cid}-{_shape}", [_shape_case(_cid, _cmd, _extra)])
+
+# =============================================================================
 # Fix round 2 — le bug qui aurait dû rendre TOUT le round 1 inutile : la
 # validation d'espèce/argstyle du C-3 itérait `c.get("expect", [])` sans
 # passer par `expectations()`. Sur un `expect` SCALAIRE (la forme des 357

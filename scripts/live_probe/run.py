@@ -932,7 +932,10 @@ def guard(cases, inv):
         if c.get("guard_probe") and not is_inert_probe(c):
             bad.append(f"{cid}: guard_probe déclaré mais la charge n'est pas inerte "
                        "(ni un `echo` intégral sans effet de bord, ni confinée au bac à "
-                       "sable / aux cibles suffixées -nonexistent, sur CHAQUE segment)")
+                       "sable / aux cibles suffixées -nonexistent, sur CHAQUE segment). "
+                       "§3.3 : une sonde ne nomme AUCUN fichier réel — si la charge ne "
+                       "contient en fait aucun motif de blacklist, `guard_probe` n'exempte "
+                       "rien et doit simplement être retiré du cas")
         if tool == "ssh_k8s_delete" and ({"all", "label_selector", "field_selector"}
                                          & set(c["args"])):
             # validate_delete (kubernetes.rs:920-936) ne protège les namespaces
@@ -985,10 +988,30 @@ def guard(cases, inv):
                            "garde d'identité E505a/E505b dans le MÊME sous-lot ; "
                            "nomme-la dans `pid_identity`, ou utilise la sentinelle "
                            "2147483647")
-        if inert:
-            continue
-        if inv.get(tool, {}).get("readonly"):
-            continue                                   # lecture seule : hors périmètre du garde-fou
+        # Fix round 6 (ruling R23 du contrôleur) : ces contrôles-ci tournent
+        # AVANT le court-circuit `inert`, donc quel que soit `yes` et quel que
+        # soit `--dry-run`.
+        #
+        # Ils étaient jusqu'ici derrière `if inert: continue`, au motif — exact
+        # en soi — qu'un `ssh_exec` sans `--yes` est refusé par la porte
+        # destructive du produit (pas de terminal, `stdin=DEVNULL`, exit 4) et
+        # n'exécute donc rien. Mesuré au round 5 : les cinq charges dangereuses
+        # ne refusaient QU'AVEC `yes: true`. Le contrôleur a tranché contre ce
+        # compromis, et il a raison POUR CETTE CAMPAGNE : §3.3 exige que toute
+        # sonde soit inoffensive *si le garde tombe*, et la lane C existe
+        # précisément pour chercher les trous de cette porte destructive (D1 et
+        # D5 sont ouverts dans cette zone). Faire dépendre la sûreté du Pi du
+        # mécanisme même que la campagne teste, c'est le supposer correct pour
+        # pouvoir mesurer s'il l'est. Le garde du harnais est la couche qui ne
+        # doit pas faire cette hypothèse.
+        #
+        # `COMMAND_DENY` monte pour la même raison : sans lui ici,
+        # `shutdown -h now` (aucun chemin, aucun verbe d'écriture, aucun
+        # systemctl, aucun kill — donc invisible à `scan_command`) restait
+        # refusé avec `yes` et passait sans. `PATH_KEYS`/`NAME_KEYS` restent en
+        # aval du court-circuit : le ruling ne les vise pas, et les y remonter
+        # soumettrait d'un coup les ~200 cas `destructiveHint`-sans-`yes` des
+        # lanes A et B à la convention de nommage du bac à sable.
         if tool in ("ssh_exec", "ssh_session_exec", "ssh_exec_multi"):
             cmdtext = c["args"].get("command", "")
             if not isinstance(cmdtext, str):
@@ -999,15 +1022,21 @@ def guard(cases, inv):
                 for line in scan_command(cmdtext):
                     bad.append(f"{cid}: {line}")
         for k, v in _walk_args(c["args"]):
+            if k == "command" and isinstance(v, str) and COMMAND_DENY.search(v) \
+                    and not is_inert_probe(c):
+                bad.append(f"{cid}: command={v!r} touche un motif interdit "
+                           "(ajouter `\"guard_probe\": true` SI et seulement si la charge "
+                           "est inerte par construction, sur CHAQUE segment)")
+        if inert:
+            continue
+        if inv.get(tool, {}).get("readonly"):
+            continue                                   # lecture seule : hors périmètre du garde-fou
+        for k, v in _walk_args(c["args"]):
             if k in PATH_KEYS and not SANDBOX_PATH_RE.match(v):
                 bad.append(f"{cid}: {k}={v!r} hors du bac à sable {SANDBOX_PATH_RE.pattern}")
             elif (k in NAME_KEYS and not SANDBOX_NAME_RE.match(v)
                   and cid not in GUARD_EXPECTED_REFUSAL):
                 bad.append(f"{cid}: {k}={v!r} n'est pas un objet créé par la campagne")
-            elif k == "command" and COMMAND_DENY.search(v) and not is_inert_probe(c):
-                bad.append(f"{cid}: command={v!r} touche un motif interdit "
-                           "(ajouter `\"guard_probe\": true` SI et seulement si la charge "
-                           "est inerte par construction, sur CHAQUE segment)")
     if bad:
         raise SystemExit("GARDE-FOU — aucun cas n'a été exécuté :\n  " + "\n  ".join(bad))
 
