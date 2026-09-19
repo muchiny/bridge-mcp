@@ -141,6 +141,126 @@ def ran_case_ids(report_paths):
     return ran
 
 
+def owners_by_tool(paths):
+    """{outil: {owner, ...}} sur l'union des fichiers de cas.
+
+    `owner` est la SOURCE MACHINE du seau `env_blocked` (Task 9 Step 1) :
+    vocabulaire fermé, obligatoire dans toutes les lanes. Un cas sans `owner`
+    contribue le sentinelle "<none>", qui n'est jamais "env" — un fichier de cas
+    négligent ne peut donc pas faire basculer un outil dans `env_blocked` par
+    omission.
+    """
+    owners = {}
+    for p in paths:
+        for c in json.loads(Path(p).read_text())["cases"]:
+            owners.setdefault(c["tool"], set()).add(c.get("owner", "<none>"))
+    return owners
+
+
+def run_outcomes(report_paths):
+    """{outil: {"ko": n, "total": n, "why": "<chaîne décisive>"}} lue dans les
+    rapports `run.py`. Aucun sous-processus, aucune connexion : lecture pure.
+
+    Les rapports n'indexent QUE par id de cas, pas par outil ; le lien
+    id -> outil vient du fichier de cas que le rapport nomme dans `cases_file`.
+    Un rapport sans `cases_file` est refusé par `ran_case_ids` en amont, pour la
+    même raison, et l'est ici aussi plutôt que d'être compté à moitié.
+    """
+    out = {}
+    for rp in report_paths:
+        data = json.loads(Path(rp).read_text())
+        cf = data.get("cases_file")
+        if not cf:
+            raise SystemExit(f"coverage: le rapport {rp} ne porte pas de champ "
+                             "'cases_file' — impossible de rattacher ses ids à un outil")
+        cpath = Path(cf)
+        if not cpath.is_absolute():
+            cpath = Path(rp).parent / cf
+        if not cpath.exists():
+            cpath = Path("scripts/live_probe/campaign/2026-09-09") / Path(cf).name
+        if not cpath.exists():
+            continue
+        by_id = {c["id"]: c["tool"] for c in json.loads(cpath.read_text())["cases"]}
+        for cid, paths in (data.get("results") or {}).items():
+            tool = by_id.get(cid)
+            if not tool:
+                continue
+            d = out.setdefault(tool, {"ko": 0, "total": 0, "why": ""})
+            for res in (paths or {}).values():
+                if not isinstance(res, dict) or "ok" not in res:
+                    continue
+                d["total"] += 1
+                if not res.get("ok"):
+                    d["ko"] += 1
+                    if not d["why"]:
+                        blob = (res.get("err") or "") + " " + (res.get("out") or "")
+                        d["why"] = " ".join(blob.split())[:160]
+    return out
+
+
+def buckets(lin, used, owners, outcomes, waivers, extra):
+    """Partitionne les 279 outils Linux en TROIS seaux disjoints (Task 9 Step 1).
+
+    Définitions disjointes et calculables, dans cet ordre — l'ordre compte, car
+    la première rédaction laissait un outil dont tous les runs échouaient
+    satisfaire `exercised` ET `env_blocked` en même temps :
+      * env_blocked : TOUS ses runs sont KO ET son unique `owner` est "env" ;
+      * exercised   : nommé par au moins un cas (fichier de cas OU
+                      extra-covered) ET non env_blocked ;
+      * never_probed: tout le reste.
+    """
+    named = {t for t in used if t in lin} | {t for t in extra if t in lin}
+    env_blocked = set()
+    for t in named:
+        if owners.get(t) != {"env"}:
+            continue
+        o = outcomes.get(t)
+        if o is None or o["total"] == 0:
+            continue                      # aucun run observé : on ne suppose rien
+        if o["ko"] == o["total"]:
+            env_blocked.add(t)
+    exercised = named - env_blocked
+    never_probed = set(lin) - exercised - env_blocked
+
+    union = exercised | env_blocked | never_probed
+    assert union == set(lin), \
+        "partition incomplete: " + repr(sorted(set(lin) ^ union))
+    assert (not exercised & env_blocked
+            and not exercised & never_probed
+            and not env_blocked & never_probed), "seaux non disjoints"
+    assert all(t in waivers for t in never_probed), \
+        f"never_probed sans regle nommee: {sorted(never_probed - set(waivers))}"
+    assert len(exercised) >= 240, f"seulement {len(exercised)} outils reellement atteints"
+    return exercised, env_blocked, never_probed
+
+
+def write_tsv(path, lin, exercised, env_blocked, never_probed, used, outcomes,
+              waivers, extra):
+    """coverage.tsv : groupe, outil, classe, reduce, seau, lane, preuve."""
+    rows = ["\t".join(("groupe", "outil", "classe", "reduce", "seau", "lane", "preuve"))]
+    for t in sorted(lin):
+        v = lin[t]
+        klass = ("destructive" if v["destructive"]
+                 else "readonly" if v["readonly"] else "mutating")
+        ids = used.get(t, [])
+        lanes = sorted({i.split(":", 1)[0] for i in ids}) or (
+            ["extra-covered"] if t in extra else ["-"])
+        if t in env_blocked:
+            seau, preuve = "env_blocked", (outcomes.get(t, {}).get("why") or "-")
+        elif t in never_probed:
+            seau, preuve = "never_probed", waivers.get(t, "SANS REGLE")
+        else:
+            seau = "exercised"
+            preuve = ids[0] if ids else f"extra-covered: {extra.get(t, '-')}"
+            if isinstance(preuve, dict):
+                preuve = json.dumps(preuve, ensure_ascii=False)
+        rows.append("\t".join((v["group"], t, klass, v["reduce"], seau,
+                                ",".join(lanes), " ".join(str(preuve).split())[:200])))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text("\n".join(rows) + "\n")
+    return len(rows) - 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("binary")
@@ -148,6 +268,14 @@ def main():
     ap.add_argument("--waivers", default="",
                     help='JSON {"ssh_docker_ps": "ENV: pas de Docker sur le Pi"}')
     ap.add_argument("--report", default="")
+    ap.add_argument("--buckets", action="store_true",
+                    help="Task 9 Step 1 : partitionne les 279 outils Linux en trois "
+                         "seaux disjoints (exercised / env_blocked / never_probed) et "
+                         "termine par quatre assertions dures")
+    ap.add_argument("--extra-covered", default="",
+                    help="JSON des outils exerces HORS de tout fichier de cas "
+                         "(cles prefixees par _ ignorees, ce sont des metadonnees)")
+    ap.add_argument("--tsv", default="", help="chemin de coverage.tsv (implique --buckets)")
     ap.add_argument("--reports", nargs="*", default=[],
                     help="fix round 1 (I-2) : rapports JSON run.py ; si fournis, un "
                          "outil n'est compté « couvert » que si l'un de ses cas a "
@@ -237,6 +365,32 @@ def main():
              "stale_waivers": stale_waivers, "reports": a.reports},
             indent=2, ensure_ascii=False))
         print(f"report: {a.report}")
+
+    if a.buckets or a.tsv:
+        extra = {}
+        if a.extra_covered:
+            extra = {k: v for k, v in
+                     json.loads(Path(a.extra_covered).read_text()).items()
+                     if not k.startswith("_")}
+        owners = owners_by_tool(a.cases)
+        outcomes = run_outcomes(a.reports) if a.reports else {}
+        try:
+            exercised, env_blocked, never_probed = buckets(
+                lin, used, owners, outcomes, waivers, extra)
+        except AssertionError as exc:
+            print(f"\nASSERTION seaux: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print("\n-- trois seaux (Task 9 Step 1) --")
+        print(f"  exercised    {len(exercised):>3}")
+        print(f"  env_blocked  {len(env_blocked):>3}"
+              + (f"  {sorted(env_blocked)}" if env_blocked else ""))
+        print(f"  never_probed {len(never_probed):>3}  {sorted(never_probed)}")
+        print(f"  TOTAL        {len(exercised) + len(env_blocked) + len(never_probed):>3}"
+              f" / {len(lin)}  (4 assertions dures passees)")
+        if a.tsv:
+            n = write_tsv(a.tsv, lin, exercised, env_blocked, never_probed, used,
+                          outcomes, waivers, extra)
+            print(f"tsv: {a.tsv} ({n} lignes)")
 
     sys.exit(min(len(unwaived) + len(unknown) + len(windows_touched), 255))
 

@@ -51,4 +51,13 @@ extend-exclude = [
     "PLAN.md",
     # Internal French research/planning artifact — prose, not shipped docs
     "docs/feature-research-2026-06.md",
+    # Live-probe harness and campaign case files: French prose in docstrings and
+    # comments, same rationale as the line above — internal test scaffolding, not
+    # shipped docs. `typos` reads `sur`/`mesure`/`groupe`/`classe` as English
+    # misspellings and flags ~340 of them across run.py, selftest_check.py and
+    # coverage.py. Correcting them would mean translating the harness's own
+    # documentation, which is deliberately written in French like the campaign
+    # reports it produces. Scoped to this directory rather than allowing the
+    # individual words, which would disable those corrections repository-wide.
+    "scripts/live_probe/",
 ]
