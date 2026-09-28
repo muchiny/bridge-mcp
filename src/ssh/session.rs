@@ -623,6 +623,10 @@ impl SessionManager {
     ///   `cat <<EOF` / `exit` / `EOF` is refused although the `exit` is only
     ///   text. Over-refusal returns a clear error; under-refusal silently
     ///   destroys the session, so this is the safe direction.
+    /// - **Over-refusal, accepted:** `ls | exit` is refused although bash runs
+    ///   every stage of a pipeline in a subshell, so there it would be harmless.
+    ///   Whether the last stage runs in the current shell is shell- and
+    ///   option-dependent (`lastpipe`, zsh, ksh), so this refuses it everywhere.
     /// - **Under-refusal, accepted:** indirection is not followed. `eval exit`,
     ///   `$CMD` expanding to `exit`, or a script that ends in `exit` are
     ///   allowed through.
