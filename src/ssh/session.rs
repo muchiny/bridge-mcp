@@ -648,8 +648,11 @@ impl SessionManager {
     /// it surfaces as a timeout rather than as a lost session. Several rows
     /// allowed below are that, not a survival.
     ///
-    /// **Over-refusals** (refused here, bash survives them). A clear error is
-    /// the safe direction: under-refusal destroys the session in silence.
+    /// **Over-refusals** — refused here although the shell would have survived.
+    /// Measured on bash except for the marked row, where bash *dies* and the
+    /// refusal is therefore right on bash and wrong only on `cmd.exe`. A clear
+    /// error is the safe direction: under-refusal destroys the session in
+    /// silence.
     ///
     /// - A here-document body is not recognised, so `cat <<EOF` / `exit` /
     ///   `EOF` is refused although the `exit` is only text.
@@ -684,10 +687,14 @@ impl SessionManager {
     ///   `case $x in (a) exit;; esac`, looks like a subshell to the depth
     ///   counter. The common form without the leading paren is caught.
     /// - An unbalanced quote makes the rest of the command look quoted, hiding
-    ///   a later separator. The way to get one from valid shell that is known
-    ///   here is a here-document body holding an apostrophe — `cat <<EOF` /
-    ///   `don't` / `EOF` / `exit 1`. Comments and `$'…'` were two others and
-    ///   are handled now; this list does not claim to be exhaustive.
+    ///   a later separator. The imbalance can come from the input — a
+    ///   here-document body holding an apostrophe, `cat <<EOF` / `don't` /
+    ///   `EOF` / `exit 1`, which is the source known here — **or this lexer can
+    ///   manufacture it** out of a perfectly balanced command by tracking a
+    ///   construct it does not model wrongly. That is not hypothetical: it is what a
+    ///   quote-blind brace counter did to `${x:-"}"}`, and what the ordinary
+    ///   single-quote state did to `$'don\'t'`. Both are fixed; the general
+    ///   hazard is why this list does not claim to be exhaustive.
     /// - A **sourced** script: `. deploy.sh` or `source deploy.sh` runs in this
     ///   shell, so its `exit` ends the session. (A script run the ordinary way
     ///   is a child process and cannot end the session — an earlier version of
@@ -729,6 +736,10 @@ impl SessionManager {
         let mut segments = Vec::new();
         let mut segment = String::new();
         let mut depth: usize = 0;
+        // How many `${` parameter expansions are open. Separate from `depth`
+        // because a `#` inside `( … )` IS a comment and a `#` inside `${ … }`
+        // is an operator.
+        let mut expansion_depth: usize = 0;
         let mut in_single = false;
         let mut in_double = false;
         let mut in_backtick = false;
@@ -775,7 +786,7 @@ impl SessionManager {
                 // segment is closed only at depth 0, because closing it deeper
                 // would make `echo $(ls # c\nexit )` look like a top-level
                 // `exit` when that `exit` is inside the substitution.
-                '#' if starts_word => {
+                '#' if starts_word && expansion_depth == 0 => {
                     for skipped in chars.by_ref() {
                         if skipped == '\n' {
                             break;
@@ -786,16 +797,20 @@ impl SessionManager {
                     }
                     at_word_start = true;
                 }
-                // `${…}` is a parameter expansion, not a command. A `#` inside
-                // it is an operator — `${#x}`, `${x#pat}`, `${x:- #}` — and
-                // never a comment, so the comment arm above used to skip to
-                // end-of-line from inside one and swallow the separator and the
-                // `exit` behind it. Consumed whole, counting nested braces: no
-                // syntax inside a parameter expansion can start a command in
-                // the session's shell, so none of it needs to be read.
+                // `${…}` opens a parameter expansion, not a command. Counted
+                // rather than consumed: the loop's own quote, escape and `$'…'`
+                // handling then applies inside it for free, which is what a
+                // separate brace-counting consumer got wrong — it could not see
+                // that the `}` in `${x:-"}"}` is quoted, so it ended the
+                // expansion early and the leftover quote swallowed the
+                // separator and the `exit` behind it.
+                //
+                // Only `${` counts, never a bare `{`, so a quoted brace can
+                // never raise the count either.
                 '$' if chars.peek() == Some(&'{') => {
-                    Self::consume_parameter_expansion(&mut chars, &mut segment);
-                    at_word_start = false;
+                    chars.next();
+                    segment.push_str("${");
+                    expansion_depth += 1;
                 }
                 // `$'…'` is ANSI-C quoting, where a backslash escapes — `\'`
                 // included, so the closing quote is not the first `'` seen.
@@ -821,7 +836,18 @@ impl SessionManager {
                     depth -= 1;
                     segment.push(c);
                 }
-                ')' | ';' | '&' | '|' | '\n' if depth == 0 => {
+                // Closes a parameter expansion. Reached only when the `}` is
+                // outside quotes, because the quote arms above run first — which
+                // is the whole point of counting here instead of consuming.
+                '}' if expansion_depth > 0 => {
+                    expansion_depth -= 1;
+                    segment.push(c);
+                }
+                // `expansion_depth == 0` because a separator inside `${…}` is
+                // ordinary text, not a separator: bash prints ` ;exit ` for
+                // `echo ${x:- ;exit }` and lives. Without this the counting
+                // above would split there and refuse it.
+                ')' | ';' | '&' | '|' | '\n' if depth == 0 && expansion_depth == 0 => {
                     segments.push(std::mem::take(&mut segment));
                 }
                 _ => segment.push(c),
@@ -829,37 +855,6 @@ impl SessionManager {
         }
         segments.push(segment);
         segments
-    }
-
-    /// Consume a `${…}` parameter expansion whole, appending it to `segment`.
-    ///
-    /// The opening `$` is already consumed and the `{` is next. Nested braces
-    /// are counted and a backslash escapes, so the expansion ends at its own
-    /// closing brace. Nothing inside is interpreted: no syntax in a parameter
-    /// expansion can start a command in the session's shell, and reading one as
-    /// if it could is what made `echo ${x:- #} ; exit` look like a comment that
-    /// swallowed the `exit`.
-    fn consume_parameter_expansion(
-        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-        segment: &mut String,
-    ) {
-        chars.next();
-        segment.push_str("${");
-        let mut braces = 1_usize;
-        while braces > 0 {
-            let Some(inner) = chars.next() else { break };
-            segment.push(inner);
-            match inner {
-                '{' => braces += 1,
-                '}' => braces -= 1,
-                '\\' => {
-                    if let Some(escaped_char) = chars.next() {
-                        segment.push(escaped_char);
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Consume a `$'…'` ANSI-C quoted string whole, appending it to `segment`.
@@ -2280,6 +2275,46 @@ mod tests {
             assert!(
                 SessionManager::command_runs_exit_in_session_shell(refused),
                 "a `#` inside ${{…}} is an operator, and the exit behind it is real: {refused}"
+            );
+        }
+    }
+
+    /// A quoted brace inside `${…}` must not end the expansion. Counting braces
+    /// without looking at quotes ended it early, and the leftover quote then
+    /// swallowed the separator and the `exit` behind it — a regression this task
+    /// introduced and then removed, not a pre-existing gap. bash dies on every
+    /// row below, each at the return code its `exit` names.
+    #[test]
+    fn a_quoted_brace_inside_a_parameter_expansion_does_not_hide_the_exit() {
+        for refused in [
+            "echo ${x:-\"}\"} ; exit",
+            "echo ${x:-'}'} ; exit",
+            "echo ${x:-\"{\"} ; exit 29",
+            "echo ${x:-'{'} ; exit 30",
+            "echo ${x#\"}\"} ; exit 32",
+            "echo ${x:-$'}'} ; exit 35",
+            "VAR=${OTHER:-\"}\"} ; exit 43",
+            // Balanced pairs were never the problem, and must stay refused.
+            "echo ${JSON:-\"{}\"} ; exit 31",
+            // A brace inside a substitution inside the expansion: bash dies on
+            // both of these too (rc 44 and rc 45).
+            "echo ${x:-$(echo {)} ; exit 44",
+            "echo ${x:-$(echo })} ; exit 45",
+            // The expansion closes, and the separator AFTER it still splits.
+            "echo ${x:-a;exit} ; exit 46",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a quoted brace must not end the expansion early: {refused}"
+            );
+        }
+
+        // A separator INSIDE `${…}` is ordinary text: bash prints these and
+        // lives, so splitting there would be over-refusal.
+        for allowed in ["echo ${x:- ;exit }", "echo ${x:-a;exit}"] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "a `;` inside ${{…}} is text, not a separator: {allowed}"
             );
         }
     }
