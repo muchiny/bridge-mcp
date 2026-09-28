@@ -25,6 +25,23 @@ use super::client::SshClient;
 /// Marker prefix used to delimit command output in interactive shells
 const MARKER_PREFIX: &str = "---SSHB_";
 
+/// How long the next command waits for a timed-out command's leftover output
+/// to finish arriving before the session is given up as unusable.
+///
+/// A command that overran its deadline is still running, and its output plus
+/// its markers are still on their way down the same channel. They have to be
+/// read and discarded before the next command reads anything, or they would be
+/// returned as *its* output. This is the grace the drain gets; past it there is
+/// real evidence the session cannot be reused, and it is closed.
+const STALE_OUTPUT_DRAIN_TIMEOUT_SECS: u64 = 10;
+
+/// Shell keywords that can lead a command segment without moving the command
+/// into a child shell, so an `exit` behind one of them still ends the session's
+/// own shell. `(` is deliberately absent: a subshell *does* isolate.
+const SAME_SHELL_LEADING_KEYWORDS: &[&str] = &[
+    "{", "!", "if", "then", "elif", "else", "while", "until", "do", "time",
+];
+
 /// Active shell session with a persistent channel
 struct ShellSession {
     id: String,
@@ -35,6 +52,15 @@ struct ShellSession {
     cwd: String,
     created_at: Instant,
     last_used: Instant,
+    /// End marker of a command that overran its deadline and whose output has
+    /// therefore not been read yet.
+    ///
+    /// `Some` means the channel still holds bytes that belong to a *previous*
+    /// command. They are drained before the next command is sent; without that,
+    /// the next `parse_exec_output` would split on the first occurrence of the
+    /// new begin marker and hand the stale text back as the new command's
+    /// output — a wrong result reported as a correct one.
+    pending_end_marker: Option<String>,
 }
 
 /// Session information returned by list operations
@@ -148,6 +174,7 @@ impl SessionManager {
             cwd,
             created_at: now,
             last_used: now,
+            pending_end_marker: None,
         };
 
         self.sessions.lock().await.insert(info.id.clone(), session);
@@ -158,11 +185,22 @@ impl SessionManager {
 
     /// Execute a command in an existing session
     ///
+    /// A command that overruns its deadline does **not** destroy the session:
+    /// the shell is still there, the command is merely slow. What the timeout
+    /// does leave behind is unread output, so the end marker of that command is
+    /// remembered and drained before the next command runs — otherwise the next
+    /// `parse_exec_output` would hand the previous command's bytes back as this
+    /// one's result.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The session ID is not found
     /// - The session has expired (max age or idle timeout exceeded)
+    /// - The command would run `exit` in the session's own shell, which would
+    ///   end the session instead of the command
+    /// - An earlier command in the session timed out and still has not
+    ///   finished, so its leftover output could not be drained first
     /// - Sending the command to the shell fails
     /// - The command times out
     #[allow(clippy::significant_drop_tightening)]
@@ -192,6 +230,50 @@ impl SessionManager {
 
         session.last_used = Instant::now();
 
+        // A top-level `exit` is fed to the session's own shell and ends it, so
+        // the session — not the command — is what would exit.
+        Self::refuse_command_that_ends_the_session(session_id, session.shell, command)?;
+
+        // A previous command in this session overran its deadline. It is still
+        // running, so its output and its markers are still on their way down
+        // this same channel: read them out and throw them away before sending
+        // anything, or they would come back as *this* command's output.
+        if let Err(e) = Self::drain_stale_output(session).await {
+            // The channel gave EOF or closed while draining. *That* is evidence
+            // the shell is gone — the same rule as below, at its other site.
+            if Self::read_error_proves_shell_is_gone(&e) {
+                if let Some(dead_session) = sessions.remove(session_id) {
+                    let _ = dead_session.client.close().await;
+                }
+                return Err(BridgeError::SshExec {
+                    reason: format!(
+                        "the session's shell closed while discarding the output of an earlier \
+                         command that had timed out ({e}); the session is gone. Create a new one."
+                    ),
+                });
+            }
+            // Only a deadline again: the earlier command still has not
+            // finished. Nothing may be sent, because its bytes are still ahead
+            // of this command's — but that is no more evidence that the shell is
+            // dead than the first timeout was, so the session and its pending
+            // marker are kept and the caller may retry. An abandoned session is
+            // collected by the idle reaper.
+            warn!(
+                session_id = %session_id,
+                "An earlier command in this session has still not finished; refusing to send \
+                 a new one whose output could not be told apart from it"
+            );
+            return Err(BridgeError::SshExec {
+                reason: format!(
+                    "an earlier command in this session timed out and has still not finished \
+                     {STALE_OUTPUT_DRAIN_TIMEOUT_SECS}s later. Its output is still arriving on \
+                     this session's channel, so a new command's output could not be told apart \
+                     from it. Retry once it has finished, or close the session with \
+                     ssh_session_close."
+                ),
+            });
+        }
+
         let exec_id = Uuid::new_v4().to_string();
         let begin_marker = format!("{MARKER_PREFIX}B_{exec_id}---");
         let end_marker = format!("{MARKER_PREFIX}E_{exec_id}---");
@@ -219,9 +301,24 @@ impl SessionManager {
         {
             Ok(output) => output,
             Err(e) => {
-                // Shell is dead - remove and close the zombie session
-                if let Some(dead_session) = sessions.remove(session_id) {
-                    let _ = dead_session.client.close().await;
+                if Self::read_error_proves_shell_is_gone(&e) {
+                    // The channel gave EOF or closed: the shell really is gone.
+                    // Remove and close the zombie session.
+                    if let Some(dead_session) = sessions.remove(session_id) {
+                        let _ = dead_session.client.close().await;
+                    }
+                } else {
+                    // Only the deadline expired. That says nothing about the
+                    // shell — the command is merely slow — so the session
+                    // stays. What it does say is that this command's output has
+                    // not been read: remember its end marker so the next
+                    // command drains it instead of receiving it as its own.
+                    session.pending_end_marker = Some(end_marker.clone());
+                    warn!(
+                        session_id = %session_id,
+                        "Command timed out; the session is kept and its leftover output will \
+                         be discarded before the next command"
+                    );
                 }
                 return Err(e);
             }
@@ -419,6 +516,255 @@ impl SessionManager {
         }
     }
 
+    /// Refuse a command that would end the session's own shell instead of
+    /// itself, and tell the caller how to run it without doing that.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::McpInvalidRequest`] when the command runs a
+    /// top-level `exit`. Deliberately *not* `CommandDenied`: this is not a
+    /// security denial, and `CommandDenied` maps to a different CLI exit code.
+    fn refuse_command_that_ends_the_session(
+        session_id: &str,
+        shell: ShellType,
+        command: &str,
+    ) -> Result<()> {
+        if !Self::command_runs_exit_in_session_shell(command) {
+            return Ok(());
+        }
+        let hint = Self::exit_isolation_hint(shell);
+        warn!(
+            session_id = %session_id,
+            "Refused a command that would have ended the session's shell"
+        );
+        // The command itself is deliberately NOT quoted back: after elevation
+        // it can carry a sudo password.
+        Err(BridgeError::McpInvalidRequest(format!(
+            "this command runs `exit` in the session's own shell, which would end the session \
+             instead of the command — every later call on it would then fail. If the exit \
+             status is what you want, {hint}. For a one-shot command outside any session, use \
+             ssh_exec."
+        )))
+    }
+
+    /// Read and discard the output of a command that overran its deadline.
+    ///
+    /// A command that timed out is still running, so its output and its
+    /// begin/end markers are still on their way down the session's channel.
+    /// The next command reads from that same channel, and `parse_exec_output`
+    /// splits on the first occurrence of the *new* begin marker — so every
+    /// stale byte still in flight would be returned as the next command's
+    /// output. Reading up to the stale end marker and throwing it away is what
+    /// keeps the next result the next command's own.
+    ///
+    /// Does nothing when no command timed out. `pending_end_marker` is cleared
+    /// only on success: a drain that only got part way must be resumed, because
+    /// the marker is still ahead in the channel.
+    ///
+    /// Known narrow limit: the bytes the timed-out read had already consumed are
+    /// gone, so if the deadline expired between two channel messages that split
+    /// the end marker itself, the drain can never match it and the session stays
+    /// unusable until the idle reaper collects it. That fails loudly — every
+    /// call returns the error below — and never returns another command's
+    /// output. Closing it means carrying the partial read forward, which this
+    /// change does not do.
+    ///
+    /// # Errors
+    ///
+    /// Returns the read error: [`BridgeError::SshTimeout`] when the earlier
+    /// command still has not finished within
+    /// `STALE_OUTPUT_DRAIN_TIMEOUT_SECS`, or [`BridgeError::SshExec`] when the
+    /// channel gave EOF or closed. The caller decides what each one means for
+    /// the session.
+    async fn drain_stale_output(session: &mut ShellSession) -> Result<()> {
+        let Some(stale_marker) = session.pending_end_marker.clone() else {
+            return Ok(());
+        };
+
+        let stale = Self::read_until_marker_inclusive(
+            &mut session.channel,
+            &stale_marker,
+            STALE_OUTPUT_DRAIN_TIMEOUT_SECS,
+        )
+        .await?;
+
+        session.pending_end_marker = None;
+        info!(
+            session_id = %session.id,
+            discarded_bytes = stale.len(),
+            "Discarded the leftover output of a command that had timed out"
+        );
+        Ok(())
+    }
+
+    /// Does `command` run `exit` in the session's **own** shell?
+    ///
+    /// The session is an interactive shell held open across calls, and the
+    /// command is fed to that shell as-is. A top-level `exit` therefore ends
+    /// the shell itself: the session is destroyed, and every later call on it
+    /// fails. The caller is told so and given the isolated forms instead;
+    /// refusing is the only way to keep the promise the session makes.
+    ///
+    /// The rule is **"the first word of a top-level command segment is
+    /// `exit`"**, not "the text contains `exit`". Segments are split on `;`,
+    /// `&`, `|` and newlines that are outside quotes and outside anything that
+    /// runs in a child shell (`( … )`, `$( … )`, backticks). Leading words that
+    /// introduce a command without leaving the current shell (`{`, `then`,
+    /// `do`, `time`, a `NAME=value` assignment, a bare redirection) are stepped
+    /// over; `(` is not, because a subshell genuinely isolates. Matching
+    /// ignores letter case, since `cmd.exe` and PowerShell do.
+    ///
+    /// # Stated limits
+    ///
+    /// This is a lexical rule, not a shell parser. The limits are deliberate,
+    /// and each one is pinned by a test:
+    ///
+    /// - **Over-refusal, accepted:** a here-document body is not recognised, so
+    ///   `cat <<EOF` / `exit` / `EOF` is refused although the `exit` is only
+    ///   text. Over-refusal returns a clear error; under-refusal silently
+    ///   destroys the session, so this is the safe direction.
+    /// - **Under-refusal, accepted:** indirection is not followed. `eval exit`,
+    ///   `$CMD` expanding to `exit`, or a script that ends in `exit` are
+    ///   allowed through.
+    /// - **Under-refusal, accepted:** an unbalanced quote makes the rest of the
+    ///   command look quoted, hiding a later separator. Such a command is not
+    ///   valid shell anyway.
+    /// - **Out of scope:** `logout`, and `exec <cmd>` (which replaces the
+    ///   shell), end a session shell the same way and are *not* detected here.
+    /// - Non-POSIX escaping (`^` in `cmd.exe`, the backtick in PowerShell) is
+    ///   not modelled. Tracking it wrongly there loses a separator, which can
+    ///   only miss an `exit`, never invent one.
+    fn command_runs_exit_in_session_shell(command: &str) -> bool {
+        Self::top_level_segments(command)
+            .iter()
+            .any(|segment| Self::segment_runs_exit(segment))
+    }
+
+    /// Split a command into the segments that run in the session's own shell.
+    ///
+    /// Everything inside quotes, a subshell, a command substitution or
+    /// backticks stays inside the segment it belongs to, because an `exit`
+    /// there cannot reach the session shell.
+    fn top_level_segments(command: &str) -> Vec<String> {
+        let mut segments = Vec::new();
+        let mut segment = String::new();
+        let mut depth: usize = 0;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut in_backtick = false;
+        let mut escaped = false;
+        let mut chars = command.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if escaped {
+                segment.push(c);
+                escaped = false;
+                continue;
+            }
+            match c {
+                '\\' if !in_single => {
+                    escaped = true;
+                    segment.push(c);
+                }
+                '\'' if !in_double && !in_backtick => {
+                    in_single = !in_single;
+                    segment.push(c);
+                }
+                '"' if !in_single && !in_backtick => {
+                    in_double = !in_double;
+                    segment.push(c);
+                }
+                _ if in_single || in_double => segment.push(c),
+                '`' => {
+                    in_backtick = !in_backtick;
+                    segment.push(c);
+                }
+                _ if in_backtick => segment.push(c),
+                '$' if chars.peek() == Some(&'(') => {
+                    chars.next();
+                    depth += 1;
+                    segment.push_str("$(");
+                }
+                '(' => {
+                    depth += 1;
+                    segment.push(c);
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    segment.push(c);
+                }
+                ';' | '&' | '|' | '\n' if depth == 0 => {
+                    segments.push(std::mem::take(&mut segment));
+                }
+                _ => segment.push(c),
+            }
+        }
+        segments.push(segment);
+        segments
+    }
+
+    /// Is the command this segment runs `exit`?
+    ///
+    /// Steps over the leading words that do not move the command into a child
+    /// shell, then compares the next word — whole, not as a prefix.
+    fn segment_runs_exit(segment: &str) -> bool {
+        for word in segment.split_whitespace() {
+            // A redirection glued to the command name (`exit>x`) is not part
+            // of the name; a bare redirection token (`>x`) is not a name at
+            // all and the name follows it.
+            let word = word.split(['<', '>']).next().unwrap_or(word);
+            if word.eq_ignore_ascii_case("exit") {
+                return true;
+            }
+            if word.is_empty()
+                || SAME_SHELL_LEADING_KEYWORDS.contains(&word)
+                || Self::is_assignment_prefix(word)
+            {
+                continue;
+            }
+            return false;
+        }
+        false
+    }
+
+    /// Is `word` a `NAME=value` assignment prefix, as in `FOO=bar exit 1`?
+    fn is_assignment_prefix(word: &str) -> bool {
+        let Some((name, _)) = word.split_once('=') else {
+            return false;
+        };
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// How to run an `exit` without ending the session, per shell.
+    fn exit_isolation_hint(shell: ShellType) -> &'static str {
+        match shell {
+            ShellType::Posix => {
+                "wrap it in a subshell — `( exit 7 )` — or run it in a child shell — \
+                 `sh -c 'exit 7'`"
+            }
+            ShellType::Cmd => "run it in a child interpreter — `cmd /c \"exit 7\"`",
+            ShellType::PowerShell => {
+                "run it in a child interpreter — `powershell -Command 'exit 7'`"
+            }
+        }
+    }
+
+    /// Does this error from reading a command's output prove the session shell
+    /// is gone?
+    ///
+    /// A deadline that expired does not prove it: the command may simply be
+    /// slow and the shell is still there, waiting for it to finish. Every other
+    /// error on this path comes from the channel itself — EOF or a close — and
+    /// that does prove it. The rule reads the **variant**; the message text
+    /// says nothing reliable about which case this is.
+    fn read_error_proves_shell_is_gone(err: &BridgeError) -> bool {
+        !matches!(err, BridgeError::SshTimeout { .. })
+    }
+
     /// Build the exec wrapper that captures exit code and cwd after a command.
     fn build_exec_wrapper(
         shell: ShellType,
@@ -532,9 +878,14 @@ impl SessionManager {
     #[allow(clippy::option_if_let_else)]
     fn parse_exec_output(raw: &str, begin_marker: &str) -> (String, u32, String) {
         if let Some(begin_pos) = raw.find(begin_marker) {
-            // Command output is everything before the begin marker line
-            let line_start = raw[..begin_pos].rfind('\n').map_or(0, |p| p + 1);
-            let command_output = raw[..line_start].trim_end().to_string();
+            // The output is everything that precedes the marker. The previous
+            // split walked back to the last `\n` BEFORE the marker, which
+            // returned the empty string whenever the command did not end its
+            // output with a newline: the marker then shared the line, `rfind`
+            // returned None, `line_start` was 0, and everything was thrown
+            // away — a `printf` without `\n`, or a `cat` of a file with no
+            // final newline, looked as if it had produced nothing at all.
+            let command_output = raw[..begin_pos].trim_end().to_string();
 
             // After begin marker: exit code and cwd
             let after_begin = begin_pos + begin_marker.len();
@@ -1472,5 +1823,288 @@ mod tests {
             }
             other => panic!("Expected SessionNotFound, got: {other:?}"),
         }
+    }
+
+    // ============== Task 4: output without a trailing newline ==============
+
+    #[test]
+    fn output_without_a_trailing_newline_is_not_swallowed() {
+        let begin = "__BEGIN__";
+        // The command wrote "sans-nl" with no `\n`, so the marker shares the line.
+        let raw = format!("sans-nl{begin}\n0\n/home/muchini\n");
+        let (out, rc, cwd) = SessionManager::parse_exec_output(&raw, begin);
+        assert_eq!(
+            out, "sans-nl",
+            "output without a trailing newline was thrown away"
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(cwd, "/home/muchini");
+    }
+
+    #[test]
+    fn output_with_a_trailing_newline_still_parses() {
+        let begin = "__BEGIN__";
+        let raw = format!("avec-nl\n{begin}\n0\n/home/muchini\n");
+        let (out, rc, _) = SessionManager::parse_exec_output(&raw, begin);
+        assert_eq!(out, "avec-nl");
+        assert_eq!(rc, 0);
+    }
+
+    // ============== Task 4: a top-level `exit` is refused, not run ==============
+
+    /// The table of ruling R5, one row per case, verbatim.
+    #[test]
+    fn top_level_exit_detection_matches_the_required_table() {
+        for refused in ["exit", "exit 7", "cd /tmp && exit 1"] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "must be refused, it would kill the session shell: {refused}"
+            );
+        }
+        for allowed in [
+            "grep exit /etc/passwd",
+            "cd /tmp",
+            "echo done",
+            "( exit 7 )",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "must be allowed: {allowed}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_is_detected_after_every_top_level_separator() {
+        for refused in [
+            "ls; exit",
+            "ls || exit 2",
+            "ls | exit",
+            "ls\nexit 3",
+            "ls;exit",
+            "exit;ls",
+            "exit & ",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "must be refused: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_inside_a_child_shell_is_allowed() {
+        for allowed in [
+            "( exit 7 )",
+            "(exit 7)",
+            "ls; ( exit 7 )",
+            "echo $(exit 7)",
+            "echo `exit 7`",
+            "sh -c 'exit 7'",
+            "bash -c \"exit 7\"",
+            "sudo -n bash -c 'exit 7'",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "the caller isolated it deliberately, it cannot kill the session: {allowed}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_inside_a_quoted_string_is_not_a_command() {
+        for allowed in [
+            "echo \"a; exit\"",
+            "echo 'a; exit'",
+            "echo 'exit'",
+            "grep -E '^exit$' /etc/profile",
+            "awk '{print $1}' f; echo ok",
+            "echo \"don't\"; echo ok",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "must be allowed, the `exit` is quoted text: {allowed}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_must_be_the_whole_word_not_a_prefix() {
+        for allowed in [
+            "exitcode=1",
+            "exit7",
+            "exiting",
+            "./exit_handler",
+            "systemctl status exit.service",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "must be allowed, `exit` is only a prefix here: {allowed}"
+            );
+        }
+    }
+
+    /// `{ … }`, `then`, `do` and `time` run the command in the *same* shell,
+    /// so an `exit` behind them still kills the session. `( … )` does not.
+    #[test]
+    fn exit_behind_a_same_shell_keyword_is_still_refused() {
+        for refused in [
+            "{ exit 7; }",
+            "if true; then exit 1; fi",
+            "for i in 1 2; do exit 1; done",
+            "time exit 1",
+            "! exit 1",
+            "FOO=bar exit 1",
+            "exit>/dev/null",
+            ">/tmp/x exit 1",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "must be refused, this `exit` runs in the session's own shell: {refused}"
+            );
+        }
+    }
+
+    /// The stated limits of the rule (see the function's doc comment). These
+    /// are pinned so the limit is a decision, not a surprise.
+    #[test]
+    fn the_stated_limits_of_exit_detection_are_pinned() {
+        // Over-refusal: a here-document body is not parsed.
+        assert!(
+            SessionManager::command_runs_exit_in_session_shell("cat <<EOF\nexit\nEOF"),
+            "documented limit: a here-doc body is refused although it is only text"
+        );
+        // Under-refusal: indirection is not followed.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("eval exit"),
+            "documented limit: `eval exit` is not detected"
+        );
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("$CMD"),
+            "documented limit: an expansion that yields `exit` is not detected"
+        );
+        // Under-refusal: `logout` and `exec` end a session shell too and are
+        // out of this task's scope.
+        assert!(!SessionManager::command_runs_exit_in_session_shell(
+            "logout"
+        ));
+        assert!(!SessionManager::command_runs_exit_in_session_shell(
+            "exec sh"
+        ));
+    }
+
+    #[test]
+    fn exit_detection_ignores_letter_case() {
+        // cmd.exe and PowerShell are case-insensitive, and this rule guards
+        // every shell type.
+        assert!(SessionManager::command_runs_exit_in_session_shell("Exit"));
+        assert!(SessionManager::command_runs_exit_in_session_shell("EXIT 1"));
+    }
+
+    #[test]
+    fn ordinary_commands_are_never_refused() {
+        for allowed in [
+            "",
+            "   ",
+            "ls -la",
+            "printf sans-nl",
+            "cd /app && npm install",
+            "kubectl get pods -o json | jq '.items[0]'",
+            "systemctl is-active --quiet nginx && echo up || echo down",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "must be allowed: {allowed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_isolation_hint_names_a_child_shell_for_every_shell_type() {
+        assert!(SessionManager::exit_isolation_hint(ShellType::Posix).contains("sh -c"));
+        assert!(SessionManager::exit_isolation_hint(ShellType::Cmd).contains("cmd /c"));
+        assert!(SessionManager::exit_isolation_hint(ShellType::PowerShell).contains("powershell"));
+    }
+
+    #[test]
+    fn a_session_ending_exit_is_refused_as_an_invalid_request_not_a_denial() {
+        let err =
+            SessionManager::refuse_command_that_ends_the_session("s1", ShellType::Posix, "exit 7")
+                .expect_err("a top-level exit must be refused");
+        match err {
+            // Not `CommandDenied`: that variant means a security denial and
+            // maps to a different CLI exit code.
+            BridgeError::McpInvalidRequest(msg) => {
+                assert!(
+                    msg.contains("sh -c"),
+                    "the refusal must name a way to run it safely: {msg}"
+                );
+            }
+            other => panic!("Expected McpInvalidRequest, got: {other:?}"),
+        }
+    }
+
+    /// After elevation the command can carry a sudo password, and the refusal
+    /// is both logged and returned to the caller.
+    #[test]
+    fn the_refusal_never_quotes_the_command_back() {
+        let err = SessionManager::refuse_command_that_ends_the_session(
+            "s1",
+            ShellType::Posix,
+            "SUPERSECRET=hunter2 exit 7",
+        )
+        .expect_err("a top-level exit must be refused");
+        assert!(
+            !err.to_string().contains("hunter2"),
+            "the refusal echoed the command back: {err}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_command_is_not_refused() {
+        SessionManager::refuse_command_that_ends_the_session(
+            "s1",
+            ShellType::Posix,
+            "cd /app && npm install",
+        )
+        .expect("an ordinary command must be allowed through");
+    }
+
+    // ============== Task 4: a timeout no longer evicts the session ==============
+
+    #[test]
+    fn a_timeout_does_not_prove_the_shell_is_gone() {
+        assert!(!SessionManager::read_error_proves_shell_is_gone(
+            &BridgeError::SshTimeout { seconds: 30 }
+        ));
+    }
+
+    #[test]
+    fn a_closed_channel_does_prove_the_shell_is_gone() {
+        assert!(SessionManager::read_error_proves_shell_is_gone(
+            &BridgeError::SshExec {
+                reason: "Shell session closed unexpectedly".to_string(),
+            }
+        ));
+    }
+
+    /// The rule reads the error *variant*, never the message text: an
+    /// `SshExec` whose reason happens to say "timeout" still evicts, and an
+    /// `SshTimeout` whose message says nothing of the sort still does not.
+    #[test]
+    fn the_eviction_rule_reads_the_variant_not_the_message() {
+        assert!(SessionManager::read_error_proves_shell_is_gone(
+            &BridgeError::SshExec {
+                reason: "timeout while reading".to_string(),
+            }
+        ));
+        assert!(!SessionManager::read_error_proves_shell_is_gone(
+            &BridgeError::SshTimeout { seconds: 1 }
+        ));
+        // Any other error from this path is treated as fatal: the rule is
+        // closed, only the timeout is exempt.
+        assert!(SessionManager::read_error_proves_shell_is_gone(
+            &BridgeError::SshOutputTooLarge { limit_bytes: 10 }
+        ));
     }
 }
