@@ -619,8 +619,10 @@ impl SessionManager {
     /// terminator), all outside quotes and outside anything that runs in a child
     /// shell (`( … )`, `$( … )`, backticks); a `#` that starts a word ends the
     /// line at any depth, `$'…'` is read as ANSI-C quoting, where a backslash
-    /// escapes, and `${…}` is consumed whole, because a `#` inside a parameter
-    /// expansion is an operator and not a comment.
+    /// escapes, and `${…}` is counted, so that inside a parameter expansion a
+    /// `#` is an operator rather than a comment, a separator is text, and a bare
+    /// `(` is text — while quotes, nested braces, `$( … )`, backticks and `$'…'`
+    /// stay live there, as bash has them.
     /// Leading words that introduce a command without leaving the current
     /// shell (`{`, `then`, `do`, `time`, `command`, `builtin`, a `NAME=value`
     /// assignment, a redirection and its target) are stepped over; `(` is not,
@@ -671,6 +673,9 @@ impl SessionManager {
     /// - A multi-line function body is refused — `func() {` / `exit 1` / `}` —
     ///   while the one-line `func() { exit 1; }` is allowed. Asymmetric, and
     ///   bash survives both, since neither *runs* the body.
+    /// - A bad substitution is refused: `echo ${x(} ; exit 120` and its kin have
+    ///   no operator, so bash aborts the whole line — the `exit` with it — and
+    ///   lives. Refusing costs nothing, because no valid command contains one.
     /// - **Reasoned, not measured:** on `cmd.exe`, `^` escapes a separator and
     ///   this rule does not know it, so `echo a^& exit` is refused although
     ///   cmd.exe would pass `exit` to `echo`. There is no cmd.exe oracle here;
@@ -695,6 +700,15 @@ impl SessionManager {
     ///   quote-blind brace counter did to `${x:-"}"}`, and what the ordinary
     ///   single-quote state did to `$'don\'t'`. Both are fixed; the general
     ///   hazard is why this list does not claim to be exhaustive.
+    /// - An **unterminated `${`** raises the expansion count for the rest of the
+    ///   input, and a separator inside an expansion is text, so every later
+    ///   separator is swallowed with it. Usually harmless, because an unmatched
+    ///   `${` is a syntax error and bash answers `unexpected EOF` without dying —
+    ///   but not always: `cat <<EOF` / `${x` / `EOF` / `exit 98` makes bash
+    ///   report a bad substitution for that line, carry on, and exit 98.
+    ///   Pre-existing — allowed identically before and after the `${…}` work —
+    ///   and named rather than fixed, because closing it needs the here-document
+    ///   bodies this rule does not parse.
     /// - A **sourced** script: `. deploy.sh` or `source deploy.sh` runs in this
     ///   shell, so its `exit` ends the session. (A script run the ordinary way
     ///   is a child process and cannot end the session — an earlier version of
@@ -739,6 +753,32 @@ impl SessionManager {
         // How many `${` parameter expansions are open. Separate from `depth`
         // because a `#` inside `( … )` IS a comment and a `#` inside `${ … }`
         // is an operator.
+        //
+        // What is live inside a parameter expansion was **measured against
+        // bash**, by checking where the expansion ends rather than by reasoning
+        // about it (`echo A${x:-…}B` shows it: `A(B` means the `}` closed the
+        // expansion, `A}B` means it did not):
+        //
+        // | inside `${…}`      | live?  | probe result        |
+        // |--------------------|--------|---------------------|
+        // | `'…'` / `"…"`      | live   | `A}B`               |
+        // | `${…}` (nested)    | live   | —                   |
+        // | `$( … )`           | live   | `A}B`               |
+        // | backtick           | live   | `A}B`               |
+        // | `$'…'`             | live   | `A}B`               |
+        // | **bare `(`**       | `text` | **`A(B`**           |
+        //
+        // So exactly one arm needs the guard: the bare `(`, which must not
+        // raise `depth`. Everything else stays as it is. A comment and a
+        // separator are also text inside an expansion, and are guarded where
+        // they are handled.
+        //
+        // Getting that set wrong is what the two previous bugs were, each from
+        // the opposite side. A brace-counting consumer treated *all* of these
+        // as text — right about `(`, wrong about quotes. Counting braces while
+        // leaving every state live saw quotes — right — but let the unmatched
+        // `(` in `${PATH//(/_}` raise `depth` forever, so the separator guard
+        // never fired again and the `exit` behind it was swallowed.
         let mut expansion_depth: usize = 0;
         let mut in_single = false;
         let mut in_double = false;
@@ -825,7 +865,7 @@ impl SessionManager {
                     depth += 1;
                     segment.push_str("$(");
                 }
-                '(' => {
+                '(' if expansion_depth == 0 => {
                     depth += 1;
                     segment.push(c);
                 }
@@ -2309,6 +2349,53 @@ mod tests {
             );
         }
 
+        // A bare `(` inside `${…}` is text in bash, so it must not raise the
+        // paren depth — when it did, the separator guard never fired again and
+        // the `exit` behind it was swallowed. bash dies at each rc below.
+        for refused in [
+            "echo ${PATH//(/_} ; exit 134",
+            "echo ${x/(/y} ; exit 133",
+            "echo ${x#(} ; exit 132",
+            "echo ${x:-a(b} ; exit 135",
+            "VAR=${OTHER:-(} ; exit 136",
+            "echo ${x:-${y//(/}} ; exit 155",
+            "echo ${x:-(} ; exit 130",
+            "( echo ${x:-(} ) ; exit 87",
+            "if true; then echo ${x:-(}; fi ; exit 89",
+            "printf %s ${x:-(} ; exit 90",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a bare `(` inside ${{…}} must not raise the paren depth: {refused}"
+            );
+        }
+        // …while a substitution inside an expansion stays LIVE, which is what
+        // bash does — `echo A${x:-$(echo })}B` prints `A}B`, so its `}` does not
+        // close the expansion. Guarding these too would have allowed 28 rows
+        // that bash kills.
+        for refused in [
+            "echo ${x:-$(echo hi)} ; exit 5",
+            "echo ${x:-`echo hi`} ; exit 11",
+            "echo ${x:-$'hi'} ; exit 12",
+            "echo ${x:-`echo }`} ; exit 67",
+            "echo ${x:-$( ( ls ) )} ; exit 1",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a substitution inside ${{…}} is live, and the exit after it is real: {refused}"
+            );
+        }
+        // The bare paren really is text, so this stays allowed: bash prints A(B.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("echo A${x:-(}B"),
+            "a bare `(` inside ${{…}} is text, not a subshell"
+        );
+        // An `exit` inside a substitution inside an expansion is not top level.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("echo ${x:-$(ls; exit)}"),
+            "that `exit` runs inside the substitution"
+        );
+
         // A separator INSIDE `${…}` is ordinary text: bash prints these and
         // lives, so splitting there would be over-refusal.
         for allowed in ["echo ${x:- ;exit }", "echo ${x:-a;exit}"] {
@@ -2438,6 +2525,13 @@ mod tests {
             !SessionManager::command_runs_exit_in_session_shell("cat <<EOF\ndon't\nEOF\nexit 1"),
             "documented limit: an apostrophe in a here-doc body still hides a later exit"
         );
+        // Under-refusal: an unterminated `${` swallows every later separator.
+        // bash reports a bad substitution for that line, carries on, and really
+        // does exit 98. Pre-existing: allowed at b7856fb too.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("cat <<EOF\n${x\nEOF\nexit 98"),
+            "documented limit: an unterminated ${{ in a here-doc body hides the exit"
+        );
         // Under-refusal: a *sourced* script's `exit` ends the session shell
         // (bash dies on `. script` and on `source script`). A script run the
         // ordinary way is a child process and cannot, which is why the limit
@@ -2457,6 +2551,12 @@ mod tests {
         assert!(
             !SessionManager::command_runs_exit_in_session_shell("Write-Host `; exit"),
             "documented limit: a PowerShell backtick escape hides the exit after it"
+        );
+        // Over-refusal on input no valid command contains: `${x(}` has no
+        // operator, so bash aborts the line — `exit` included — and lives.
+        assert!(
+            SessionManager::command_runs_exit_in_session_shell("echo ${x(} ; exit 120"),
+            "documented limit: a bad substitution is refused"
         );
         // Over-refusal: an async list runs in a subshell, so bash survives
         // `exit &` — this refuses it anyway.
