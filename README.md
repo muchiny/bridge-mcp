@@ -798,6 +798,10 @@ failure through a `StandardTool` tool exits 6. Bringing those 52 into line is
 tracked as follow-up work; until then, treat exit 6 as "this tool told me the
 remote command failed", never exit 0 as "the remote command succeeded".
 
+The live-host sweep that found this measured 44 affected tools, and all 44 are
+pipeline tools, so the measured defect is closed — but the defect *class* is
+not, and the 52 above are its unmeasured remainder (CHANGELOG has the chain).
+
 Two further limits:
 
 - **Only the `tool` subcommand distinguishes 6.** `bridge-mcp exec` exits 1 on

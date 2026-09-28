@@ -40,9 +40,12 @@ reading it. Every item below was reproduced before the fix and measured after.
   **The measured defect is closed; the defect class is not.** Every tool the
   campaign could probe is a `StandardTool`-pipeline tool, so all 44 are fixed.
   The chain, so you can check it rather than take it: the sweep skipped 14 tools
-  because their schema advertises no `sudo_user` property, and `sudo_user` is
-  injected by `PrivilegeArgs::extract`, which has exactly **one** production call
-  site — `src/mcp/standard_tool.rs:339`. A probed tool therefore went through the
+  because their schema advertises no `sudo_user` property
+  (`waivers-F.json`, key `_d1_sweep_14_no_sudo_user`, and `report.md:242-245`, in
+  `.superpowers/campaign/2026-09-09/` — gitignored, and present only in the main
+  checkout, not in a worktree), and `sudo_user` is injected by
+  `PrivilegeArgs::extract`, which has exactly **one** production call site —
+  `src/mcp/standard_tool.rs:339`. A probed tool therefore went through the
   pipeline by construction.
 
   **What is not closed:** 52 handlers implement `ToolHandler` directly, run their
