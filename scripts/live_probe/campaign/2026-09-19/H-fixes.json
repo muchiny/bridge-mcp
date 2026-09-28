@@ -1,0 +1,59 @@
+{"about": [
+  "Live non-regression of the four root-cause fixes of the 2026-09-19 plan.",
+  "Everything this file creates lives under ${SANDBOX} and nowhere else. The campaign's",
+  "namespace, user, group and systemd unit are NOT recreated: none of the four fixes touch them.",
+  "Teardown is `rm -r --`, never `rm -rf`: `rm\\s+-rf` is the first blacklist pattern, so `rm -rf`",
+  "is refused with exit 4 and the directory would stay while the run looked clean.",
+  "",
+  "Run it in three phases, not in one shot. run.py dispatches its cases through a thread pool,",
+  "so with --jobs 2 the setup, the write cases and the teardown would race:",
+  "  python3 scripts/live_probe/run.py BIN --cases <this> --path both --jobs 2 --only H00",
+  "  python3 scripts/live_probe/run.py BIN --cases <this> --path both --jobs 2 --only H01,H01b,H03,H03b,H07,H07b",
+  "  python3 scripts/live_probe/run.py BIN --cases <this> --path both --jobs 2 --only H90,H91",
+  "No sudo case creates ${SANDBOX}: a `mkdir -p` under `sudo` would make the directory root-owned,",
+  "and /tmp is sticky, so the unprivileged teardown could then no longer remove it.",
+  "",
+  "H02, H04, H05 and H06 are NOT here and cannot be. H02 asserts on the bridge host's own audit",
+  "log, not on a tool's output. H04/H05/H06 need several tool calls inside ONE server process,",
+  "because a session lives in the SessionManager of that process and run.py spawns one process per",
+  "case (same reason mcp_probe.py exists). They run from H-session.py in this directory."],
+
+ "vars": {"SANDBOX": "/tmp/bridge-fix-0919"},
+
+ "cases": [
+  {"id": "H00", "owner": "fixes", "tool": "ssh_exec", "yes": true, "paths": ["cli"],
+   "args": {"command": "mkdir -p ${SANDBOX} && echo made"}, "expect": "eq=made",
+   "note": "Minimal sandbox. Unprivileged on purpose, so H90 can remove it."},
+
+  {"id": "H01", "owner": "fixes", "tool": "ssh_exec", "yes": true, "paths": ["cli"],
+   "args": {"command": "touch ${SANDBOX}/a && echo ok", "sudo": true}, "expect": "re=^ok$",
+   "note": "Task 1, the report's own command. Shows the compound still runs under elevation."},
+
+  {"id": "H01b", "owner": "fixes", "tool": "ssh_exec", "yes": true, "paths": ["cli"],
+   "args": {"command": "id -u && id -u", "sudo": true}, "expect": "eq=0\\n0",
+   "note": "Task 1, the DISCRIMINATING case. H01 alone cannot fail: the old prefix form (`sudo -n touch … && echo ok`) elevates the first process and still prints ok. Only a SECOND element that needs root separates them — prefix gives 0\\n1000, the shipped wrap `sudo -n bash -c '<all>'` gives 0\\n0."},
+
+  {"id": "H03", "owner": "fixes", "tool": "ssh_user_info", "paths": ["cli"],
+   "args": {"username": "nexistepas"}, "expect": "exit=6",
+   "note": "Task 3. 6 = EXIT_REMOTE_FAILURE (src/cli/runner.rs), distinct from the bridge's own 1-5. `exit=` and not `error=`: run.py's `error=` needs rc != 0, which is the very thing D1 used not to deliver."},
+
+  {"id": "H03b", "owner": "fixes", "tool": "ssh_user_info", "paths": ["mcp"],
+   "args": {"username": "nexistepas"}, "expect": "error=",
+   "note": "Task 3 on the MCP path: the result carries isError, which run.py reports as rc != 0. The process exit code 6 is a CLI-only contract, so `exit=6` would be wrong here."},
+
+  {"id": "H07", "owner": "fixes", "tool": "ssh_service_status", "paths": ["cli"],
+   "args": {"service": "apt-daily.service"}, "expect": "exit=0",
+   "note": "Ruling R20, live. apt-daily.service is loaded and normally inactive (dead), so `systemctl status` exits 3 and Task 3's blanket rule turns a correct, read-only answer into a failure. StandardTool has the opt-out for exactly this (NONZERO_EXIT_IS_ERROR = false, 'a probe whose verdict IS the code') and no tool in the tree sets it. This case asserts the RIGHT answer, so it fails until the opt-out is applied."},
+
+  {"id": "H07b", "owner": "fixes", "tool": "ssh_service_status", "paths": ["mcp"],
+   "args": {"service": "apt-daily.service"}, "expect": "ok",
+   "note": "Same defect seen from the MCP path: isError on a status query that answered."},
+
+  {"id": "H90", "owner": "fixes", "tool": "ssh_exec", "yes": true, "paths": ["cli"],
+   "args": {"command": "rm -r -- ${SANDBOX} && echo removed"}, "expect": "eq=removed",
+   "note": "Teardown. `rm -r --`, never `rm -rf`."},
+
+  {"id": "H91", "owner": "fixes", "tool": "ssh_ls", "paths": ["cli"],
+   "args": {"path": "${SANDBOX}"}, "expect": "error=",
+   "note": "Teardown proof: the sandbox is gone."}
+ ]}
