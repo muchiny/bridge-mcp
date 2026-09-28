@@ -27,27 +27,55 @@ reading it. Every item below was reproduced before the fix and measured after.
   unguarded one. The gate follows
   `security.require_elicitation_on_destructive`; set it false to disable.
 
-- **A remote command that fails now makes `bridge-mcp tool` exit non-zero**,
-  with a code of its own: **6**, "the command ran on the target host and exited
-  non-zero", distinct from 1-5, which are the bridge's own failures. **This is
-  the most user-visible change in this release.** A script doing
-  `bridge-mcp tool … && next` used to run `next` after a remote failure,
-  because the pipeline wrote the failure into the response *text* as `[exit:N]`
-  and nowhere a caller could test it; the process exited 0. Measured on a live
-  host: 44 of the 45 `readOnlyHint` tools that were probed behaved this way.
-  Two boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when a
-  `bridge-mcp daemon` serves the call the CLI reads the result back off the MCP
-  wire, which does not carry the remote/bridge distinction — a remote failure
-  then exits 1 rather than 6. Non-zero either way, so `&&` behaves the same.
+- **A remote command that fails now makes `bridge-mcp tool` exit non-zero — for
+  `StandardTool`-pipeline tools.** The code is **6**, "the command ran on the
+  target host and exited non-zero", distinct from 1-5, which are the bridge's
+  own failures. **This is the most user-visible change in this release.** A
+  script doing `bridge-mcp tool … && next` used to run `next` after a remote
+  failure, because the pipeline wrote the failure into the response *text* as
+  `[exit:N]` and nowhere a caller could test it; the process exited 0. Measured
+  on a live host: 44 of the 45 `readOnlyHint` tools that were probed behaved
+  this way.
+
+  **The scope is the shared pipeline, not every tool.** 52 handlers implement
+  `ToolHandler` directly, run their remote command outside that pipeline, and
+  **still exit 0 when it fails**: `ssh_exec`, `ssh_exec_multi`,
+  `ssh_session_exec`, `ssh_find`, `ssh_tail`, `ssh_metrics`,
+  `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, and the 43
+  `ssh_awx_*` tools. So `bridge-mcp tool ssh_exec host=x command=false` exits 0
+  while the same failure through a `StandardTool` tool exits 6. Two of them
+  (`ssh_tail`, `ssh_metrics`) carry `readOnlyHint`, so part of the measured
+  population above is **not** covered by this change.
+
+  Two further boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when
+  a `bridge-mcp daemon` serves the call the CLI reads the result back off the
+  MCP wire, which does not carry the remote/bridge distinction — a remote
+  failure then exits 1 rather than 6. Non-zero either way, so `&&` behaves the
+  same; a caller branching on `$? -eq 6` specifically is environment-dependent.
 
 - **An MCP tool result now carries `isError: true` when its remote command
-  failed.** A client that treated every `tools/call` answer as a success, and
-  read the outcome out of the text, will start seeing errors it did not see
-  before — for calls that were already failing. Tools whose command answers
-  *by* its exit status can opt out with the new
-  `StandardTool::NONZERO_EXIT_IS_ERROR = false`; no tool in the tree needs it
-  today, because the builders that want a non-zero exit ignored already say so
-  in the command itself (`diff -u … || true`).
+  failed** — again, for `StandardTool`-pipeline tools only; the 52 handlers
+  listed above are unchanged. A client that treated every `tools/call` answer
+  as a success, and read the outcome out of the text, will start seeing errors
+  it did not see before, for calls that were already failing.
+
+  **Four tools report a normal answer as an error because of this**, and it is
+  the intended trade-off rather than an oversight: `ssh_service_status` and
+  `ssh_timer_info` (`systemctl status` exits **3** for a unit that exists and
+  is stopped), `ssh_k8s_diff` (`kubectl diff` exits **1** when there *are*
+  differences) and `ssh_helm_diff` with `detailed_exitcode=true` (exits **2**
+  when there are changes). An MCP client asking `ssh_service_status` about a
+  stopped unit now gets an error result where it previously got a success, and
+  the CLI exits 6. Each of those commands uses non-zero for both "here is your
+  answer" and "I failed" — `systemctl` also exits 4 for "no such unit",
+  `kubectl diff` >1 for a real failure, and `ssh_helm_diff`'s own guard exits 4
+  when the plugin is missing — so the fail-closed reading was chosen: a
+  spurious non-zero is visible, a spurious zero is the defect being removed.
+  The new `StandardTool::NONZERO_EXIT_IS_ERROR = false` is the opt-out for a
+  tool whose non-zero exit is *always* a normal answer; no tool sets it, because
+  a per-tool boolean cannot separate those two meanings, and where the codebase
+  does want a non-zero exit ignored it already says so in the command
+  (`diff -u … || true`).
 
 - **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
   struct-literal construction outside this crate must add it;
@@ -236,6 +264,28 @@ reading it. Every item below was reproduced before the fix and measured after.
   CLI; the docs previously implied otherwise.
 - `limits.max_concurrent_commands` does not apply to CLI invocations, which are
   one process each.
+- **52 handlers still exit 0 when their remote command fails**, because they run
+  it outside the `StandardTool` pipeline that the exit-code fix above lives in.
+  They implement `ToolHandler` directly, and each one still does `warn!(…)` on a
+  non-zero exit and then returns `ToolCallResult::text(…)`, whose `is_error` is
+  `None`. The list: `ssh_exec` (`src/mcp/tool_handlers/ssh_exec.rs:246-279`),
+  `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`, `ssh_metrics`,
+  `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, and the 43
+  `ssh_awx_*` tools. Two of them (`ssh_tail`, `ssh_metrics`) carry
+  `readOnlyHint`, so part of the campaign's measured population is still
+  affected.
+
+  **Shape of the fix:** a mechanical sweep, one edit per handler — after the
+  result is built, `if response.exit_code != 0 { result = result
+  .with_remote_exit_code(i32::try_from(response.exit_code).unwrap_or(1)); }`,
+  the same line the pipeline's step 19 runs, placed last so a post-processing
+  hook cannot mask it. The builder already exists and is public. Watch for the
+  handlers where a non-zero exit is the *answer* rather than a failure — the same
+  judgment the `NONZERO_EXIT_IS_ERROR` note above describes, which for a direct
+  handler has to be made per call site since there is no trait const to set.
+  `ssh_exec` is the one to think hardest about: it runs whatever the caller
+  asked for, so its exit code is the caller's to interpret — but exiting 0 on a
+  failed `command=false` is what the fix above exists to stop.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 

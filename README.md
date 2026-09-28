@@ -774,12 +774,31 @@ bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 
 Codes 1-5 are the bridge's *own* failures: it could not run your command.
 Code 6 means the opposite — the command ran on the target host and exited
-non-zero. The distinction matters because until 3.0.1 `bridge-mcp tool` exited
-**0** in that case, so `bridge-mcp tool … && next` ran `next` after a failure.
+non-zero. The distinction matters because before this release `bridge-mcp tool`
+exited **0** in that case, so `bridge-mcp tool … && next` ran `next` after a
+failure.
 
 The remote command's own exit code is not returned as a separate field; it
 appears in the result text as the `[exit:N]` prefix, and `--json` marks the
-call `"isError": true`. Two limits worth knowing:
+call `"isError": true`.
+
+**Which tools emit 6 — read this before relying on it.** Code 6 comes from the
+shared `StandardTool` pipeline, which is most of the catalogue but not all of
+it. **52 handlers run their remote command outside that pipeline and still exit
+0 when it fails**, including the ones you are most likely to script:
+
+| Still exits 0 on a remote failure | Count |
+|---|---|
+| `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec` — the free-form escape hatches | 3 |
+| `ssh_find`, `ssh_tail`, `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write` | 6 |
+| the `ssh_awx_*` family | 43 |
+
+So `bridge-mcp tool ssh_exec host=x command=false` exits 0, while the same
+failure through a `StandardTool` tool exits 6. Bringing those 52 into line is
+tracked as follow-up work; until then, treat exit 6 as "this tool told me the
+remote command failed", never exit 0 as "the remote command succeeded".
+
+Two further limits:
 
 - **Only the `tool` subcommand distinguishes 6.** `bridge-mcp exec` exits 1 on
   a failed remote command, as it always has.
@@ -787,7 +806,9 @@ call `"isError": true`. Two limits worth knowing:
   CLI forwards the call and reads the MCP result back off the wire, where the
   remote/bridge distinction is not carried — a remote failure then exits 1, not
   6. Still non-zero, so `&&` behaves the same either way; only the
-  discrimination is lost.
+  discrimination is lost. A caller branching on `$? -eq 6` is therefore
+  environment-dependent; branch on `$? -ne 0` unless you control whether a
+  daemon is running.
 
 ### Shell completions
 

@@ -137,11 +137,21 @@ pub struct ToolCallResult {
     /// remote failure on a signal that cannot establish one would be the very
     /// fault this field exists to remove.
     ///
-    /// `Some(n)` therefore means: a command ran on the target host and exited
-    /// `n`, and the tool treats that as a failure (see
-    /// `StandardTool::NONZERO_EXIT_IS_ERROR`). `None` means no such claim is
-    /// being made — either nothing ran remotely, or its exit code was 0, or
-    /// the tool counts a non-zero exit as a normal answer.
+    /// The three states, in full:
+    /// * `None` — no claim about a remote exit code. Either nothing ran
+    ///   remotely, or the tool counts a non-zero exit as a normal answer
+    ///   (`StandardTool::NONZERO_EXIT_IS_ERROR = false`), or the handler
+    ///   simply does not report one. **This is what a successful call carries**,
+    ///   and it is what every handler outside the `StandardTool` pipeline
+    ///   carries today — see the note on that pipeline's step 19.
+    /// * `Some(0)` — a command ran on the target host and succeeded. A
+    ///   coherent statement, and the CLI reads it as success, but nothing in
+    ///   the tree emits it: the pipeline only records a code when it is
+    ///   non-zero, so `Some(0)` exists as a total contract rather than as a
+    ///   reachable state.
+    /// * `Some(n)`, `n != 0` — a command ran on the target host, exited `n`,
+    ///   and the tool treats that as a failure. `is_error` is `Some(true)`
+    ///   alongside it.
     ///
     /// **Not part of the MCP wire format.** `#[serde(skip)]` keeps it out of
     /// every serialized result and out of every `outputSchema`: it is an
@@ -288,13 +298,18 @@ impl ToolCallResult {
         self
     }
 
-    /// Mark this result as failing *because the remote command exited `code`*,
-    /// and record that code.
+    /// Record that a command ran on the target host and exited `code`.
     ///
-    /// Sets `is_error` too: a remote command that failed is a failed tool
-    /// call, which is what an MCP client tests. See
+    /// For `code != 0` this also sets `is_error`: a remote command that failed
+    /// is a failed tool call, which is what an MCP client tests. See
     /// [`Self::remote_exit_code`] for why the two signals are not
     /// interchangeable.
+    ///
+    /// `code == 0` records the code and leaves `is_error` alone, because a
+    /// command that succeeded is not an error. That is deliberate rather than
+    /// a half-state — [`Self::remote_exit_code`] documents all three states —
+    /// but no caller passes 0 today, since the pipeline records a code only
+    /// when it is non-zero.
     #[must_use]
     pub const fn with_remote_exit_code(mut self, code: i32) -> Self {
         self.remote_exit_code = Some(code);
