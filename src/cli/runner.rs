@@ -30,6 +30,37 @@ use crate::ssh::{
     with_retry_if,
 };
 
+/// Process exit code for **the remote command failed**, as opposed to the
+/// bridge failing to run it.
+///
+/// `map_exit_code` in `src/main.rs` and the exit-code table in `README.md`
+/// already own 1-5 for the bridge's *own* failures: 1 execution error,
+/// 2 CLI usage, 3 SSH connection, 4 security denial, 5 configuration. Reusing
+/// any of them for a remote failure would leave a caller unable to tell
+/// "the bridge could not run your command" from "your command ran and said
+/// no" — the same conflation, one storey up, that this code exists to remove.
+/// So a remote failure gets a code of its own.
+pub const EXIT_REMOTE_FAILURE: i32 = 6;
+
+/// Derive the process exit code for `bridge-mcp tool` from a tool result.
+///
+/// Three outcomes, and the order matters:
+/// * `remote_exit_code: Some(n)`, `n != 0` — a command ran on the target host
+///   and failed. [`EXIT_REMOTE_FAILURE`].
+/// * otherwise `is_error` — the *bridge* refused or failed (rate limit, denied
+///   command, declined confirmation). 1, matching `map_exit_code`.
+/// * otherwise success. 0.
+///
+/// `is_error` alone cannot separate the first two cases, which is why the
+/// remote code travels beside it (see
+/// [`crate::ports::protocol::ToolCallResult::remote_exit_code`]).
+fn tool_exit_code(result: &crate::mcp::protocol::ToolCallResult) -> i32 {
+    match result.remote_exit_code {
+        Some(code) if code != 0 => EXIT_REMOTE_FAILURE,
+        _ => i32::from(result.is_error.unwrap_or(false)),
+    }
+}
+
 /// Try to forward a `tools/call` request to a running daemon over its
 /// Unix socket.
 ///
@@ -1628,8 +1659,7 @@ async fn run_tool_in_context(
     // `jq_filter` had just reduced. `structured_content` survives, as there.
     let result = registry.execute(tool_name, args, ctx).await?.without_apps();
 
-    let is_error = result.is_error.unwrap_or(false);
-    let exit_code = i32::from(is_error);
+    let exit_code = tool_exit_code(&result);
 
     if json_output {
         let json = serde_json::to_string_pretty(&result)
@@ -4387,5 +4417,84 @@ mod tests {
         });
         let code = print_daemon_response(&resp, false).unwrap();
         assert_eq!(code, 0);
+    }
+
+    // ===== `bridge-mcp tool` exit code: remote failure vs bridge failure =====
+
+    /// The defect this task removes: a tool whose remote command exited
+    /// non-zero produced process exit 0, so `bridge-mcp tool … && next` ran
+    /// `next` after a failure.
+    #[test]
+    fn a_remote_failure_leaves_a_non_zero_process_exit_code() {
+        let result = crate::mcp::protocol::ToolCallResult::text("[exit:1]\nno such user")
+            .with_remote_exit_code(1);
+        assert_eq!(
+            tool_exit_code(&result),
+            EXIT_REMOTE_FAILURE,
+            "a non-zero remote exit must not be reported as success"
+        );
+    }
+
+    /// The trap: `is_error` is *also* true for bridge-side refusals (rate
+    /// limit, denied command). Those must keep exit 1 — labelling them 6
+    /// would announce a remote failure that never happened.
+    #[test]
+    fn a_bridge_side_error_is_not_reported_as_a_remote_failure() {
+        let result = crate::mcp::protocol::ToolCallResult::error(
+            "Rate limit exceeded for host 'raspberry'.",
+        );
+        assert_eq!(
+            tool_exit_code(&result),
+            1,
+            "a bridge-side error is code 1, not the remote-failure code"
+        );
+    }
+
+    /// Exit 6 is reserved: it must be distinct from every code the CLI
+    /// already uses for its own errors (1 execution, 2 usage, 3 SSH,
+    /// 4 security, 5 config — `map_exit_code` in `src/main.rs`).
+    #[test]
+    fn the_remote_failure_code_does_not_collide_with_the_cli_s_own_codes() {
+        assert!(
+            !(0..=5).contains(&EXIT_REMOTE_FAILURE),
+            "EXIT_REMOTE_FAILURE={EXIT_REMOTE_FAILURE} collides with a CLI error code"
+        );
+    }
+
+    /// Known and documented gap, pinned so it cannot change unnoticed: the
+    /// daemon path reads the result back off the MCP wire, where
+    /// `remote_exit_code` is not carried (`#[serde(skip)]`). It can only see
+    /// `isError`, so it cannot tell a remote failure from a bridge-side one
+    /// and reports 1. Still non-zero — `&&` behaves the same — but the
+    /// discrimination is lost. Closing it would mean putting the code on the
+    /// wire, which is a protocol change, not a CLI fix.
+    #[test]
+    fn the_daemon_path_cannot_distinguish_a_remote_failure_and_says_so_with_1() {
+        let resp = serde_json::json!({
+            "result": {"isError": true, "content": [{"type": "text", "text": "[exit:3]\nboom"}]}
+        });
+        let code = print_daemon_response(&resp, false).unwrap();
+        assert_eq!(
+            code, 1,
+            "the daemon path must report 1, not claim a remote failure it cannot establish"
+        );
+        assert_ne!(
+            code, EXIT_REMOTE_FAILURE,
+            "and it must not borrow the remote-failure code on a signal that does not prove one"
+        );
+    }
+
+    /// A successful call stays 0 even though `remote_exit_code` is carried.
+    #[test]
+    fn a_successful_tool_call_still_exits_zero() {
+        let ok = crate::mcp::protocol::ToolCallResult::text("all good");
+        assert_eq!(tool_exit_code(&ok), 0);
+        let ok_zero =
+            crate::mcp::protocol::ToolCallResult::text("all good").with_remote_exit_code(0);
+        assert_eq!(
+            tool_exit_code(&ok_zero),
+            0,
+            "a remote exit code of 0 is a success, not a failure"
+        );
     }
 }

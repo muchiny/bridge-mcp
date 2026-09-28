@@ -79,6 +79,27 @@ pub trait StandardTool: Send + Sync + 'static {
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::RawText;
 
+    /// Whether a non-zero exit code from the remote command means this tool
+    /// call **failed**.
+    ///
+    /// `true` (the default) is the honest reading for almost every tool here:
+    /// `systemctl status` on a missing unit, `id` on a missing user, `kubectl
+    /// get` on a missing resource — the command reports failure and the tool
+    /// has nothing to return. Until this const existed the pipeline only
+    /// `warn!`ed on a non-zero exit and still built a plain
+    /// `ToolCallResult::text`, whose `is_error` is `None`: the failure was
+    /// written into the response *text* as `[exit:N]` and nowhere a caller
+    /// could test it, so `bridge-mcp tool … && next` ran `next` after a
+    /// failure.
+    ///
+    /// Set it to `false` for the handful of tools whose command answers **by**
+    /// its exit status, where a non-zero exit is a normal result and not an
+    /// error: a search that found nothing, a comparison that found a
+    /// difference, a probe whose verdict *is* the code. Opting out means the
+    /// tool call is reported as a success, and the exit code stays visible in
+    /// the text (`format_for_llm`'s `[exit:N]`) and in the audit event.
+    const NONZERO_EXIT_IS_ERROR: bool = true;
+
     /// Optional JSON Schema (2020-12) string describing this tool's
     /// `structuredContent` return value. `None` (default) = no contract.
     ///
@@ -618,6 +639,30 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // structured() returned None (backward-compat with App-based tools).
         if result.structured_content.is_none() {
             result = auto_populate_structured_content(result);
+        }
+
+        // Step 19: A failed remote command becomes a failed tool call.
+        //
+        // Step 14 above only `warn!`s. Without this step the response for a
+        // command that exited non-zero was an ordinary `ToolCallResult::text`
+        // with `is_error: None` — the failure appeared solely as the
+        // `[exit:N]` prefix `format_for_llm` writes into the text, which is
+        // presentation, not something a caller can test. The CLI derived its
+        // process exit code from `is_error` and so exited 0, and
+        // `bridge-mcp tool … && next` kept going after a failure.
+        //
+        // This runs last, after `post_process` / `enrich`, because the remote
+        // exit code is the authoritative statement about whether the command
+        // worked; a presentation hook must not be able to talk over it. Tools
+        // whose command answers *by* its exit status opt out through
+        // `NONZERO_EXIT_IS_ERROR` — for them nothing here applies and the code
+        // stays in the text only.
+        if T::NONZERO_EXIT_IS_ERROR && response.exit_code != 0 {
+            // `unwrap_or(1)` mirrors `run_exec_in_context`: no real process
+            // exit code overflows `i32`, and any value that did would still
+            // have to read as a failure rather than as a success.
+            let code = i32::try_from(response.exit_code).unwrap_or(1);
+            result = result.with_remote_exit_code(code);
         }
 
         Ok(result)
@@ -1903,6 +1948,138 @@ mod tests {
         };
         // Non-zero exit should include exit code in output
         assert!(text.contains("exit") || text.contains("error output"));
+    }
+
+    /// The defect: the pipeline only `warn!`ed on a non-zero remote exit and
+    /// returned an ordinary `ToolCallResult::text`, whose `is_error` is
+    /// `None`. The failure existed only as the `[exit:N]` text prefix, so the
+    /// CLI derived exit 0 and an MCP client saw a successful call.
+    #[tokio::test]
+    async fn a_failed_remote_command_produces_a_failed_tool_call() {
+        let handler = StandardToolHandler::<MockTool>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output_with_exit("boom", 3),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "a remote command that exited 3 must mark the tool call as failed"
+        );
+        assert_eq!(
+            result.remote_exit_code,
+            Some(3),
+            "and the remote code must travel as data, so the CLI can tell it \
+             apart from a bridge-side error"
+        );
+    }
+
+    /// A success must not be labelled a failure, and must make no claim about
+    /// a remote exit code: `Some(0)` would be harmless for the CLI but it
+    /// would still be asserting something the field is not for.
+    #[tokio::test]
+    async fn a_successful_remote_command_makes_no_failure_claim() {
+        let handler = StandardToolHandler::<MockTool>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("fine"),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, None, "a successful call is not an error");
+        assert_eq!(result.remote_exit_code, None);
+    }
+
+    /// The opt-out: a tool whose command answers *by* its exit status (a
+    /// search that found nothing, a comparison that found a difference) sets
+    /// `NONZERO_EXIT_IS_ERROR = false`, and a non-zero exit stays a normal
+    /// result. Without a working opt-out the blanket rule would turn every
+    /// such answer into a failed call and a non-zero process exit.
+    #[tokio::test]
+    async fn a_tool_that_answers_by_its_exit_status_can_opt_out() {
+        struct MockExitStatusIsTheAnswer;
+        impl StandardTool for MockExitStatusIsTheAnswer {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_exit_status_answer";
+            const DESCRIPTION: &'static str = "Mock tool whose exit code is the answer";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            const NONZERO_EXIT_IS_ERROR: bool = false;
+            fn build_command(_a: &MockArgs, _h: &HostConfig) -> Result<String> {
+                Ok("echo".to_string())
+            }
+        }
+
+        let handler = StandardToolHandler::<MockExitStatusIsTheAnswer>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output_with_exit("nothing matched", 1),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.is_error, None,
+            "an opted-out tool's non-zero exit is a normal answer"
+        );
+        assert_eq!(
+            result.remote_exit_code, None,
+            "and it must not be reported to the CLI as a remote failure"
+        );
+        // The code is still visible to a reader — nothing was removed.
+        let crate::ports::protocol::ToolContent::Text { text } = &result.content[0] else {
+            panic!("Expected text content")
+        };
+        assert!(
+            text.starts_with("[exit:1]"),
+            "the [exit:N] text stays for the reader, got {text:?}"
+        );
+    }
+
+    /// The remote exit code is authoritative: it is applied after
+    /// `post_process` and `enrich`, so a presentation hook cannot talk over a
+    /// failure by returning a result of its own.
+    #[tokio::test]
+    async fn a_post_process_hook_cannot_mask_a_remote_failure() {
+        struct MockMaskingTool;
+        impl StandardTool for MockMaskingTool {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_masking";
+            const DESCRIPTION: &'static str = "Mock tool whose post_process rebuilds the result";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            fn build_command(_a: &MockArgs, _h: &HostConfig) -> Result<String> {
+                Ok("echo".to_string())
+            }
+            fn post_process(
+                _result: ToolCallResult,
+                _args: &MockArgs,
+                _output: &str,
+                _dr: &crate::domain::data_reduction::DataReductionArgs,
+            ) -> ToolCallResult {
+                // A fresh result: `is_error` is `None` again.
+                ToolCallResult::text("looks fine to me")
+            }
+        }
+
+        let handler = StandardToolHandler::<MockMaskingTool>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output_with_exit("boom", 2),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.remote_exit_code, Some(2));
     }
 
     #[tokio::test]

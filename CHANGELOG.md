@@ -27,9 +27,36 @@ reading it. Every item below was reproduced before the fix and measured after.
   unguarded one. The gate follows
   `security.require_elicitation_on_destructive`; set it false to disable.
 
+- **A remote command that fails now makes `bridge-mcp tool` exit non-zero**,
+  with a code of its own: **6**, "the command ran on the target host and exited
+  non-zero", distinct from 1-5, which are the bridge's own failures. **This is
+  the most user-visible change in this release.** A script doing
+  `bridge-mcp tool … && next` used to run `next` after a remote failure,
+  because the pipeline wrote the failure into the response *text* as `[exit:N]`
+  and nowhere a caller could test it; the process exited 0. Measured on a live
+  host: 44 of the 45 `readOnlyHint` tools that were probed behaved this way.
+  Two boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when a
+  `bridge-mcp daemon` serves the call the CLI reads the result back off the MCP
+  wire, which does not carry the remote/bridge distinction — a remote failure
+  then exits 1 rather than 6. Non-zero either way, so `&&` behaves the same.
+
+- **An MCP tool result now carries `isError: true` when its remote command
+  failed.** A client that treated every `tools/call` answer as a success, and
+  read the outcome out of the text, will start seeing errors it did not see
+  before — for calls that were already failing. Tools whose command answers
+  *by* its exit status can opt out with the new
+  `StandardTool::NONZERO_EXIT_IS_ERROR = false`; no tool in the tree needs it
+  today, because the builders that want a non-zero exit ignored already say so
+  in the command itself (`diff -u … || true`).
+
 - **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
   struct-literal construction outside this crate must add it;
   `AuditEvent::new` and `AuditEvent::denied` set it empty.
+
+- **`ToolCallResult` gains a public field `remote_exit_code: Option<i32>`.** Any
+  struct-literal construction outside this crate must add it; `ToolCallResult::
+  text` and `::error` set it `None`. It is `#[serde(skip)]`, so no serialized
+  result and no `outputSchema` changes.
 
 - **`ExecuteCommandUseCase::process_success_for_tool` takes a new
   `reduction: &[&'static str]` parameter.** Existing callers must pass the

@@ -125,6 +125,32 @@ pub struct ToolCallResult {
     /// Must conform to the tool's `outputSchema` if defined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
+    /// The **remote** command's own exit code, when this result failed
+    /// *because the remote command failed*.
+    ///
+    /// This is the discriminator `is_error` alone cannot provide.
+    /// [`Self::error`] sets `is_error` for bridge-side refusals too — a rate
+    /// limit, a denied command, a declined confirmation — so "`is_error` is
+    /// true" cannot tell "the bridge refused" from "the target host said no".
+    /// The CLI needs that distinction to report a distinct process exit code
+    /// (see `EXIT_REMOTE_FAILURE` in `crate::cli::runner`), and announcing a
+    /// remote failure on a signal that cannot establish one would be the very
+    /// fault this field exists to remove.
+    ///
+    /// `Some(n)` therefore means: a command ran on the target host and exited
+    /// `n`, and the tool treats that as a failure (see
+    /// `StandardTool::NONZERO_EXIT_IS_ERROR`). `None` means no such claim is
+    /// being made — either nothing ran remotely, or its exit code was 0, or
+    /// the tool counts a non-zero exit as a normal answer.
+    ///
+    /// **Not part of the MCP wire format.** `#[serde(skip)]` keeps it out of
+    /// every serialized result and out of every `outputSchema`: it is an
+    /// in-process channel from the handler to the CLI, not a protocol
+    /// extension. One consequence, deliberate and documented: the
+    /// daemon-forwarding CLI path reads the response back off the wire and so
+    /// cannot see this field — it falls back to exit 1.
+    #[serde(skip)]
+    pub remote_exit_code: Option<i32>,
 }
 
 /// Content block within a tool result.
@@ -216,6 +242,7 @@ impl ToolCallResult {
             content: vec![ToolContent::Text { text: text.into() }],
             is_error: None,
             structured_content: None,
+            remote_exit_code: None,
         }
     }
 
@@ -225,6 +252,10 @@ impl ToolCallResult {
             content: vec![ToolContent::Text { text: text.into() }],
             is_error: Some(true),
             structured_content: None,
+            // Deliberately `None`: `error` is the bridge's own refusal
+            // channel. Claiming a remote exit code here is what would
+            // conflate "the bridge said no" with "the host said no".
+            remote_exit_code: None,
         }
     }
 
@@ -254,6 +285,22 @@ impl ToolCallResult {
     #[must_use]
     pub fn with_structured(mut self, data: serde_json::Value) -> Self {
         self.structured_content = Some(data);
+        self
+    }
+
+    /// Mark this result as failing *because the remote command exited `code`*,
+    /// and record that code.
+    ///
+    /// Sets `is_error` too: a remote command that failed is a failed tool
+    /// call, which is what an MCP client tests. See
+    /// [`Self::remote_exit_code`] for why the two signals are not
+    /// interchangeable.
+    #[must_use]
+    pub const fn with_remote_exit_code(mut self, code: i32) -> Self {
+        self.remote_exit_code = Some(code);
+        if code != 0 {
+            self.is_error = Some(true);
+        }
         self
     }
 }

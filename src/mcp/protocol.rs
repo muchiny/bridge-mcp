@@ -2396,6 +2396,7 @@ mod tests {
             }],
             is_error: None,
             structured_content: Some(json!({"status": "running", "uptime": 3600})),
+            remote_exit_code: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("structuredContent"));

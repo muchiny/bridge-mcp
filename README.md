@@ -770,6 +770,24 @@ bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 | 3 | SSH connection error |
 | 4 | Security denial |
 | 5 | Configuration error |
+| 6 | The remote command itself failed (non-zero exit on the target host) |
+
+Codes 1-5 are the bridge's *own* failures: it could not run your command.
+Code 6 means the opposite — the command ran on the target host and exited
+non-zero. The distinction matters because until 3.0.1 `bridge-mcp tool` exited
+**0** in that case, so `bridge-mcp tool … && next` ran `next` after a failure.
+
+The remote command's own exit code is not returned as a separate field; it
+appears in the result text as the `[exit:N]` prefix, and `--json` marks the
+call `"isError": true`. Two limits worth knowing:
+
+- **Only the `tool` subcommand distinguishes 6.** `bridge-mcp exec` exits 1 on
+  a failed remote command, as it always has.
+- **Not when a daemon serves the call.** With `bridge-mcp daemon` running, the
+  CLI forwards the call and reads the MCP result back off the wire, where the
+  remote/bridge distinction is not carried — a remote failure then exits 1, not
+  6. Still non-zero, so `&&` behaves the same either way; only the
+  discrimination is lost.
 
 ### Shell completions
 

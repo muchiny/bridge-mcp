@@ -387,6 +387,40 @@ mod tests {
         )
     }
 
+    /// A remote failure must be readable as **data** — `exit_code` on the
+    /// response — not only as the `[exit:N]` prefix `format_for_llm` writes
+    /// into the text a human reads.
+    ///
+    /// The field already exists and `finish_success` already fills it, so
+    /// this test is a **lock, not a driver**: it pins the data path so a
+    /// later change cannot quietly turn the remote exit code back into
+    /// presentation only. The genuine red for this task is one layer up, in
+    /// `cli::runner`, where the code was being dropped on the floor.
+    #[test]
+    fn a_remote_failure_is_visible_as_data_not_only_as_text() {
+        let uc = test_use_case();
+        let out = CommandOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "no such user".into(),
+            duration_ms: 1,
+        };
+        let resp = uc.process_success("ssh_user_info", "raspberry", "id btest", &out, &[]);
+        assert_eq!(
+            resp.exit_code, 1,
+            "the remote exit code must be data, not only a text prefix"
+        );
+        // The text is unchanged: `format_for_llm` still leads with the
+        // `[exit:N]` marker. Note it is `format_for_llm` that carries that
+        // prefix, not `resp.output` — the latter is `format_output`'s
+        // verbose `Host:/Command:/Exit code:` block.
+        let text = resp.format_for_llm(&resp.stdout);
+        assert!(
+            text.starts_with("[exit:1]"),
+            "the [exit:N] text stays for the reader, got {text:?}"
+        );
+    }
+
     #[test]
     fn every_audit_event_carries_the_tool_that_produced_it() {
         let uc = test_use_case();
