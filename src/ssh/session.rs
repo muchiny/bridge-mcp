@@ -618,8 +618,10 @@ impl SessionManager {
     /// `&`, `|`, newlines, and a `)` at depth 0 (a `case` arm's pattern
     /// terminator), all outside quotes and outside anything that runs in a child
     /// shell (`( … )`, `$( … )`, backticks); a `#` that starts a word ends the
-    /// line at any depth, and `$'…'` is read as ANSI-C quoting, where a
-    /// backslash escapes. Leading words that introduce a command without leaving the current
+    /// line at any depth, `$'…'` is read as ANSI-C quoting, where a backslash
+    /// escapes, and `${…}` is consumed whole, because a `#` inside a parameter
+    /// expansion is an operator and not a comment.
+    /// Leading words that introduce a command without leaving the current
     /// shell (`{`, `then`, `do`, `time`, `command`, `builtin`, a `NAME=value`
     /// assignment, a redirection and its target) are stepped over; `(` is not,
     /// because a subshell genuinely isolates. Matching ignores letter case,
@@ -632,9 +634,19 @@ impl SessionManager {
     /// pinned by a test, so none of them is a guarantee the code does not make.
     ///
     /// Each row below was checked against bash used as an oracle — the command
-    /// written into a shell's stdin, then `echo` — so "bash survives" and "bash
-    /// dies" are measured, not deduced from how this lexer looks. The one
-    /// exception is marked.
+    /// written into a non-interactive shell's stdin, then `echo`, with a
+    /// distinct `exit N` so that a returned `N` proves the branch really ran —
+    /// so "bash survives" and "bash dies" are measured, not deduced from how
+    /// this lexer looks. `bash -c` cannot model it: there the shell under test
+    /// terminates either way. **Two rows are about shells there is no oracle
+    /// for here — `cmd.exe` and PowerShell — and both are marked "Reasoned, not
+    /// measured".**
+    ///
+    /// One thing the oracle shows that reading cannot: an *unterminated*
+    /// construct is not a death. bash answers rc 2 with `unexpected EOF`, and a
+    /// session shell fed one stays alive consuming the wrapper that follows, so
+    /// it surfaces as a timeout rather than as a lost session. Several rows
+    /// allowed below are that, not a survival.
     ///
     /// **Over-refusals** (refused here, bash survives them). A clear error is
     /// the safe direction: under-refusal destroys the session in silence.
@@ -661,7 +673,8 @@ impl SessionManager {
     ///   cmd.exe would pass `exit` to `echo`. There is no cmd.exe oracle here;
     ///   on bash the same text really does exit, so the refusal is right there.
     ///
-    /// **Under-refusals** (allowed here, bash dies). These can still destroy a
+    /// **Under-refusals** (allowed here, and the shell really does end —
+    /// measured on bash except for the marked row). These can still destroy a
     /// session:
     ///
     /// - Indirection is not followed: `eval exit`, and `command -p exit` — the
@@ -679,10 +692,13 @@ impl SessionManager {
     ///   shell, so its `exit` ends the session. (A script run the ordinary way
     ///   is a child process and cannot end the session — an earlier version of
     ///   this list said "a script that ends in `exit`", which was wrong.)
-    /// - PowerShell's backtick is an escape character, but this lexer reads it
-    ///   as command substitution, so a separator behind it is swallowed:
-    ///   ``Write-Host `; exit`` is allowed, and on PowerShell that `exit` ends
-    ///   the session.
+    /// - **Reasoned, not measured:** PowerShell's backtick is an escape
+    ///   character, but this lexer reads it as command substitution, so a
+    ///   separator behind it is swallowed and ``Write-Host `; exit`` is allowed.
+    ///   On PowerShell that `exit` ends the session. No PowerShell oracle was
+    ///   run here, and bash cannot stand in for one: there the same text is an
+    ///   unterminated backtick (rc 2, `unexpected EOF`), not a death, so bash
+    ///   cannot adjudicate this row either way.
     /// - **Out of scope:** `logout`, and `exec <cmd>` (which replaces the
     ///   shell), end a session shell the same way and are not detected here.
     fn command_runs_exit_in_session_shell(command: &str) -> bool {
@@ -770,23 +786,23 @@ impl SessionManager {
                     }
                     at_word_start = true;
                 }
+                // `${…}` is a parameter expansion, not a command. A `#` inside
+                // it is an operator — `${#x}`, `${x#pat}`, `${x:- #}` — and
+                // never a comment, so the comment arm above used to skip to
+                // end-of-line from inside one and swallow the separator and the
+                // `exit` behind it. Consumed whole, counting nested braces: no
+                // syntax inside a parameter expansion can start a command in
+                // the session's shell, so none of it needs to be read.
+                '$' if chars.peek() == Some(&'{') => {
+                    Self::consume_parameter_expansion(&mut chars, &mut segment);
+                    at_word_start = false;
+                }
                 // `$'…'` is ANSI-C quoting, where a backslash escapes — `\'`
                 // included, so the closing quote is not the first `'` seen.
                 // Reading it with the ordinary single-quote state mistracked it
                 // and swallowed the next separator, `exit` and all.
                 '$' if chars.peek() == Some(&'\'') => {
-                    chars.next();
-                    segment.push_str("$'");
-                    while let Some(quoted) = chars.next() {
-                        segment.push(quoted);
-                        if quoted == '\\' {
-                            if let Some(escaped_char) = chars.next() {
-                                segment.push(escaped_char);
-                            }
-                        } else if quoted == '\'' {
-                            break;
-                        }
-                    }
+                    Self::consume_ansi_c_quoted(&mut chars, &mut segment);
                     at_word_start = false;
                 }
                 '$' if chars.peek() == Some(&'(') => {
@@ -813,6 +829,62 @@ impl SessionManager {
         }
         segments.push(segment);
         segments
+    }
+
+    /// Consume a `${…}` parameter expansion whole, appending it to `segment`.
+    ///
+    /// The opening `$` is already consumed and the `{` is next. Nested braces
+    /// are counted and a backslash escapes, so the expansion ends at its own
+    /// closing brace. Nothing inside is interpreted: no syntax in a parameter
+    /// expansion can start a command in the session's shell, and reading one as
+    /// if it could is what made `echo ${x:- #} ; exit` look like a comment that
+    /// swallowed the `exit`.
+    fn consume_parameter_expansion(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        segment: &mut String,
+    ) {
+        chars.next();
+        segment.push_str("${");
+        let mut braces = 1_usize;
+        while braces > 0 {
+            let Some(inner) = chars.next() else { break };
+            segment.push(inner);
+            match inner {
+                '{' => braces += 1,
+                '}' => braces -= 1,
+                '\\' => {
+                    if let Some(escaped_char) = chars.next() {
+                        segment.push(escaped_char);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Consume a `$'…'` ANSI-C quoted string whole, appending it to `segment`.
+    ///
+    /// The opening `$` is already consumed and the `'` is next. A backslash
+    /// escapes the character after it, `\'` included, so the closing quote is
+    /// not the first `'` seen — which is what the ordinary single-quote state
+    /// got wrong, swallowing the separator after `$'don\'t'` and the `exit`
+    /// behind it.
+    fn consume_ansi_c_quoted(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        segment: &mut String,
+    ) {
+        chars.next();
+        segment.push_str("$'");
+        while let Some(quoted) = chars.next() {
+            segment.push(quoted);
+            if quoted == '\\' {
+                if let Some(escaped_char) = chars.next() {
+                    segment.push(escaped_char);
+                }
+            } else if quoted == '\'' {
+                break;
+            }
+        }
     }
 
     /// Is the command this segment runs `exit`?
@@ -2192,6 +2264,45 @@ mod tests {
         );
     }
 
+    /// A `#` inside `${…}` is an operator, not a comment, so skipping to
+    /// end-of-line from inside one swallowed the separator and the `exit`
+    /// behind it. Re-review round 3, minor 1. Each input below was confirmed
+    /// against bash with a distinct `exit N`: the process really returned `N`,
+    /// which proves the branch ran rather than merely that the shell is gone.
+    #[test]
+    fn a_hash_inside_a_parameter_expansion_does_not_hide_the_exit() {
+        for refused in [
+            "echo ${x:- #} ; exit",
+            "echo ${UNSET:- #hi} ; exit 4",
+            "echo ${PATH/ #/X} ; exit 6",
+            "echo ${x:- #} ; exit 7",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a `#` inside ${{…}} is an operator, and the exit behind it is real: {refused}"
+            );
+        }
+    }
+
+    /// …and a parameter expansion that merely *uses* `#` as its operator must
+    /// stay allowed. bash keeps every one of these alive.
+    #[test]
+    fn a_parameter_expansion_using_hash_as_an_operator_is_allowed() {
+        for allowed in [
+            "( echo ${x#prefix} )",
+            "( echo ${x#exit} )",
+            "echo ${#PATH}",
+            "echo $((2#101))",
+            "x=1; echo ${x#1}",
+            "echo \"${x:- #}\"",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "consuming ${{…}} whole must not refuse this: {allowed}"
+            );
+        }
+    }
+
     /// `$'…'` is ANSI-C quoting: `\'` is an escaped apostrophe, not the closing
     /// quote. Reading it as an ordinary single-quoted string mistracked the
     /// state and ate the separator. Re-review, B. bash: both of these die.
@@ -2302,9 +2413,12 @@ mod tests {
                 "documented limit: a sourced script's exit is not detected: {sourced}"
             );
         }
-        // Under-refusal: PowerShell's backtick is an escape character, but this
-        // lexer reads it as command substitution, so the separator after it is
-        // swallowed and the `exit` behind it is missed.
+        // Under-refusal, REASONED not measured: PowerShell's backtick is an
+        // escape character, but this lexer reads it as command substitution, so
+        // the separator after it is swallowed. On PowerShell that `exit` ends
+        // the session; no PowerShell oracle was run, and bash cannot stand in —
+        // there the same text is an unterminated backtick (rc 2, `unexpected
+        // EOF`), not a death.
         assert!(
             !SessionManager::command_runs_exit_in_session_shell("Write-Host `; exit"),
             "documented limit: a PowerShell backtick escape hides the exit after it"
