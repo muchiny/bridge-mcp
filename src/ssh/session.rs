@@ -35,11 +35,13 @@ const MARKER_PREFIX: &str = "---SSHB_";
 /// real evidence the session cannot be reused, and it is closed.
 const STALE_OUTPUT_DRAIN_TIMEOUT_SECS: u64 = 10;
 
-/// Shell keywords that can lead a command segment without moving the command
-/// into a child shell, so an `exit` behind one of them still ends the session's
-/// own shell. `(` is deliberately absent: a subshell *does* isolate.
+/// Shell keywords and command prefixes that can lead a command segment without
+/// moving the command into a child shell, so an `exit` behind one of them still
+/// ends the session's own shell. `(` is deliberately absent: a subshell *does*
+/// isolate. `command` and `builtin` are here because they run their argument in
+/// the current shell, not a child one.
 const SAME_SHELL_LEADING_KEYWORDS: &[&str] = &[
-    "{", "!", "if", "then", "elif", "else", "while", "until", "do", "time",
+    "{", "!", "if", "then", "elif", "else", "while", "until", "do", "time", "command", "builtin",
 ];
 
 /// Active shell session with a persistent channel
@@ -228,8 +230,6 @@ impl SessionManager {
             return Err(BridgeError::SessionExpired { session_id: id });
         }
 
-        session.last_used = Instant::now();
-
         // A top-level `exit` is fed to the session's own shell and ends it, so
         // the session — not the command — is what would exit.
         Self::refuse_command_that_ends_the_session(session_id, session.shell, command)?;
@@ -273,6 +273,14 @@ impl SessionManager {
                 ),
             });
         }
+
+        // Only now, once this call is actually going to run a command. Marking
+        // the session used before the two guards above would keep a session
+        // that every call refuses out of reach of the idle reaper: a caller
+        // retrying a blocked drain would renew it forever, so it would hold a
+        // `max_sessions` slot until `max_age_seconds` — twelve times longer
+        // than `idle_timeout_seconds` under the defaults.
+        session.last_used = Instant::now();
 
         let exec_id = Uuid::new_v4().to_string();
         let begin_marker = format!("{MARKER_PREFIX}B_{exec_id}---");
@@ -607,17 +615,20 @@ impl SessionManager {
     ///
     /// The rule is **"the first word of a top-level command segment is
     /// `exit`"**, not "the text contains `exit`". Segments are split on `;`,
-    /// `&`, `|` and newlines that are outside quotes and outside anything that
-    /// runs in a child shell (`( … )`, `$( … )`, backticks). Leading words that
-    /// introduce a command without leaving the current shell (`{`, `then`,
-    /// `do`, `time`, a `NAME=value` assignment, a bare redirection) are stepped
-    /// over; `(` is not, because a subshell genuinely isolates. Matching
-    /// ignores letter case, since `cmd.exe` and PowerShell do.
+    /// `&`, `|`, newlines, and a `)` at depth 0 (a `case` arm's pattern
+    /// terminator), all outside quotes and outside anything that runs in a child
+    /// shell (`( … )`, `$( … )`, backticks); a `#` that starts a word ends the
+    /// line. Leading words that introduce a command without leaving the current
+    /// shell (`{`, `then`, `do`, `time`, `command`, `builtin`, a `NAME=value`
+    /// assignment, a redirection and its target) are stepped over; `(` is not,
+    /// because a subshell genuinely isolates. Matching ignores letter case,
+    /// since `cmd.exe` and PowerShell do.
     ///
     /// # Stated limits
     ///
-    /// This is a lexical rule, not a shell parser. The limits are deliberate,
-    /// and each one is pinned by a test:
+    /// This is a lexical rule, not a shell parser. It is a heuristic, and the
+    /// point of this list is that every gap known to it is named here **and**
+    /// pinned by a test, so none of them is a guarantee the code does not make:
     ///
     /// - **Over-refusal, accepted:** a here-document body is not recognised, so
     ///   `cat <<EOF` / `exit` / `EOF` is refused although the `exit` is only
@@ -627,12 +638,23 @@ impl SessionManager {
     ///   every stage of a pipeline in a subshell, so there it would be harmless.
     ///   Whether the last stage runs in the current shell is shell- and
     ///   option-dependent (`lastpipe`, zsh, ksh), so this refuses it everywhere.
+    /// - **Over-refusal, accepted:** matching ignores letter case, so `EXIT 1`
+    ///   is refused on POSIX although the builtin is only ever spelled `exit`
+    ///   there. The cost is nil — no such command exists — and it is what makes
+    ///   the rule hold for the case-insensitive `cmd.exe` and PowerShell.
     /// - **Under-refusal, accepted:** indirection is not followed. `eval exit`,
-    ///   `$CMD` expanding to `exit`, or a script that ends in `exit` are
-    ///   allowed through.
+    ///   `command -p exit` (the flagged form; the bare `command exit` *is*
+    ///   caught), `$CMD` expanding to `exit`, or a script that ends in `exit`
+    ///   are allowed through.
+    /// - **Under-refusal, accepted:** a `case` pattern written in its optional
+    ///   leading-paren form — `case $x in (a) exit;; esac` — looks like a
+    ///   subshell to the depth counter, so that arm's `exit` is missed. The
+    ///   common form without the leading paren is caught.
     /// - **Under-refusal, accepted:** an unbalanced quote makes the rest of the
-    ///   command look quoted, hiding a later separator. Such a command is not
-    ///   valid shell anyway.
+    ///   command look quoted, which hides a later separator. Comments are no
+    ///   longer a source of this (they are skipped), so what remains is a
+    ///   here-document body holding an apostrophe — `cat <<EOF` / `don't` /
+    ///   `EOF` / `exit 1`. That is valid shell, and this rule misses it.
     /// - **Out of scope:** `logout`, and `exec <cmd>` (which replaces the
     ///   shell), end a session shell the same way and are *not* detected here.
     /// - Non-POSIX escaping (`^` in `cmd.exe`, the backtick in PowerShell) is
@@ -649,6 +671,19 @@ impl SessionManager {
     /// Everything inside quotes, a subshell, a command substitution or
     /// backticks stays inside the segment it belongs to, because an `exit`
     /// there cannot reach the session shell.
+    ///
+    /// Two splits are less obvious than the rest and each closes a hole found
+    /// by review:
+    ///
+    /// - A `)` **at depth 0** cannot be closing a `(`, so it is a `case` arm's
+    ///   pattern terminator and the arm's body is a new segment. That is what
+    ///   catches `case $x in a) exit;; esac`, whose `exit` follows no separator.
+    ///   The depth test is what keeps `( exit 7 )` and `echo $(date) exit`
+    ///   allowed: there the `)` closes a paren and merely lowers the depth.
+    /// - A `#` that starts a word outside quotes is a comment, and the shell
+    ///   ignores the rest of the line. Skipping it is not cosmetic: a comment
+    ///   holding an apostrophe (`# don't ask`) or a `(` used to open a quote or
+    ///   a paren state that swallowed the newline and every command after it.
     fn top_level_segments(command: &str) -> Vec<String> {
         let mut segments = Vec::new();
         let mut segment = String::new();
@@ -657,12 +692,19 @@ impl SessionManager {
         let mut in_double = false;
         let mut in_backtick = false;
         let mut escaped = false;
+        // True when the next character would begin a word, which is the only
+        // position where `#` introduces a comment.
+        let mut at_word_start = true;
         let mut chars = command.chars().peekable();
 
         while let Some(c) = chars.next() {
+            let starts_word = at_word_start;
+            at_word_start = c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')');
+
             if escaped {
                 segment.push(c);
                 escaped = false;
+                at_word_start = false;
                 continue;
             }
             match c {
@@ -684,6 +726,18 @@ impl SessionManager {
                     segment.push(c);
                 }
                 _ if in_backtick => segment.push(c),
+                // A comment: the shell ignores the rest of the line, and so
+                // must this, or an apostrophe or paren inside it would change
+                // how everything after the newline is read.
+                '#' if starts_word && depth == 0 => {
+                    for skipped in chars.by_ref() {
+                        if skipped == '\n' {
+                            break;
+                        }
+                    }
+                    segments.push(std::mem::take(&mut segment));
+                    at_word_start = true;
+                }
                 '$' if chars.peek() == Some(&'(') => {
                     chars.next();
                     depth += 1;
@@ -693,11 +747,14 @@ impl SessionManager {
                     depth += 1;
                     segment.push(c);
                 }
-                ')' => {
-                    depth = depth.saturating_sub(1);
+                // Closing a paren only lowers the depth. At depth 0 there is no
+                // paren to close, so this terminates a `case` arm's pattern and
+                // what follows is a command in the session's own shell.
+                ')' if depth > 0 => {
+                    depth -= 1;
                     segment.push(c);
                 }
-                ';' | '&' | '|' | '\n' if depth == 0 => {
+                ')' | ';' | '&' | '|' | '\n' if depth == 0 => {
                     segments.push(std::mem::take(&mut segment));
                 }
                 _ => segment.push(c),
@@ -712,15 +769,27 @@ impl SessionManager {
     /// Steps over the leading words that do not move the command into a child
     /// shell, then compares the next word — whole, not as a prefix.
     fn segment_runs_exit(segment: &str) -> bool {
-        for word in segment.split_whitespace() {
-            // A redirection glued to the command name (`exit>x`) is not part
-            // of the name; a bare redirection token (`>x`) is not a name at
-            // all and the name follows it.
-            let word = word.split(['<', '>']).next().unwrap_or(word);
+        // Set when a word ended on `<` or `>`: the word after it is the
+        // redirection's target, not the command name (`1> /tmp/x exit`).
+        let mut expect_redirect_target = false;
+
+        for raw_word in segment.split_whitespace() {
+            if expect_redirect_target {
+                expect_redirect_target = false;
+                continue;
+            }
+            expect_redirect_target = raw_word.ends_with(['<', '>']);
+
+            // A redirection glued to the command name (`exit>x`) is not part of
+            // the name; a redirection written before it (`>x`, `2>/dev/null`) is
+            // not a name at all and the name follows it. What is left of the
+            // word before the operator is a file descriptor number, if anything.
+            let word = raw_word.split(['<', '>']).next().unwrap_or(raw_word);
             if word.eq_ignore_ascii_case("exit") {
                 return true;
             }
             if word.is_empty()
+                || word.bytes().all(|b| b.is_ascii_digit())
                 || SAME_SHELL_LEADING_KEYWORDS.contains(&word)
                 || Self::is_assignment_prefix(word)
             {
@@ -1969,6 +2038,106 @@ mod tests {
         }
     }
 
+    /// A `case` arm's body runs in the session's own shell, and its `exit`
+    /// follows a `)` rather than a separator. Review finding, Important 1.
+    #[test]
+    fn exit_in_a_case_arm_is_refused() {
+        for refused in [
+            "case $x in a) exit;; esac",
+            "case \"$x\" in *) exit 1;; esac",
+            "case $x in a|b) exit;; esac",
+            "case $x in a) cd /tmp;; b) exit 1;; esac",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a case arm runs in the session's own shell: {refused}"
+            );
+        }
+    }
+
+    /// A `)` that closes a `(` is not a case-arm terminator: the paren forms
+    /// must stay allowed, which is why the split is made where the depth is
+    /// known rather than on the word.
+    #[test]
+    fn a_closing_subshell_paren_is_not_a_case_arm_terminator() {
+        for allowed in [
+            "( exit 7 )",
+            "(exit 7)",
+            "echo $(exit 7)",
+            "echo $(date) exit",
+            "f() ( exit )",
+            "(( 1 > 0 )) && echo ok",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "a `)` closing a `(` must not turn into a segment break: {allowed}"
+            );
+        }
+    }
+
+    /// A `#` comment used to open a quote or a paren that swallowed the rest
+    /// of the command, `exit` included. Review finding, Important 2.
+    #[test]
+    fn a_comment_does_not_hide_the_exit_after_it() {
+        for refused in [
+            "cd /app  # don't ask\nexit 1",
+            "echo hi # note (paren\nexit",
+            "ls # comment\nexit 7",
+            "ls #\nexit",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a comment must not hide the command after it: {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hash_that_is_not_a_comment_is_left_alone() {
+        for allowed in [
+            "echo '#not a comment; exit'",
+            "echo \"#exit\"",
+            "curl http://example.test/page#frag",
+            "echo a#b",
+            "grep '#' /etc/hosts",
+            "# just a comment",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "must be allowed, the `#` is not a comment introducing an exit: {allowed}"
+            );
+        }
+    }
+
+    /// A numbered file descriptor made the first word non-empty, so the walk
+    /// stopped before the command name. Review finding, minor.
+    #[test]
+    fn a_redirection_prefix_does_not_hide_the_exit() {
+        for refused in [
+            ">/tmp/x exit 1",
+            "2>/dev/null exit 1",
+            "2>&1 exit",
+            "1> /tmp/x exit",
+            "2>> /tmp/x exit 3",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a redirection before the command name must be stepped over: {refused}"
+            );
+        }
+    }
+
+    /// `command` and `builtin` run their argument in the current shell.
+    #[test]
+    fn exit_behind_a_same_shell_command_prefix_is_refused() {
+        for refused in ["command exit 7", "builtin exit", "command exit"] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "`command`/`builtin` do not start a child shell: {refused}"
+            );
+        }
+    }
+
     /// The stated limits of the rule (see the function's doc comment). These
     /// are pinned so the limit is a decision, not a surprise.
     #[test]
@@ -1982,6 +2151,29 @@ mod tests {
         assert!(
             !SessionManager::command_runs_exit_in_session_shell("eval exit"),
             "documented limit: `eval exit` is not detected"
+        );
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("command -p exit 7"),
+            "documented limit: a flagged `command -p exit` is not detected"
+        );
+        // Under-refusal: a case pattern written in its optional leading-paren
+        // form looks like a subshell to the lexer.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("case $x in (a) exit;; esac"),
+            "documented limit: the `(pattern)` form of a case arm is not detected"
+        );
+        // Over-refusal: matching ignores case, so `EXIT` is refused on POSIX
+        // where it is not the builtin.
+        assert!(
+            SessionManager::command_runs_exit_in_session_shell("EXIT 1"),
+            "documented limit: `EXIT` is refused although POSIX has no such builtin"
+        );
+        // Under-refusal: an apostrophe in a here-document body is the one
+        // remaining valid-shell way to open an unbalanced quote, now that
+        // comments are skipped.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("cat <<EOF\ndon't\nEOF\nexit 1"),
+            "documented limit: an apostrophe in a here-doc body still hides a later exit"
         );
         assert!(
             !SessionManager::command_runs_exit_in_session_shell("$CMD"),
@@ -2015,6 +2207,9 @@ mod tests {
             "cd /app && npm install",
             "kubectl get pods -o json | jq '.items[0]'",
             "systemctl is-active --quiet nginx && echo up || echo down",
+            "command -v jq >/dev/null",
+            "echo hi > /tmp/out",
+            "case $x in a) cd /tmp;; *) echo other;; esac",
         ] {
             assert!(
                 !SessionManager::command_runs_exit_in_session_shell(allowed),

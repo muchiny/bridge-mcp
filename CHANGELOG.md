@@ -113,7 +113,39 @@ reading it. Every item below was reproduced before the fix and measured after.
   `reduction: &[&'static str]` parameter.** Existing callers must pass the
   reduction params actually used, or `&[]`.
 
+- **`ssh_session_exec` refuses a command whose top-level word is `exit`**,
+  returning an invalid-request error (CLI exit 1) instead of running it. It used
+  to be run — and since the command is fed to the session's own interactive
+  shell, that ended the *session*, so every later call on it failed with
+  "session not found". The error names the isolated forms that do what the caller
+  meant: `( exit 7 )` for a subshell, `sh -c 'exit 7'` for a child shell.
+  `sudo`-elevated commands are unaffected, because elevation already wraps them
+  in a child shell. The rule is "the first word of a top-level command segment is
+  `exit`" — quote-, comment- and subshell-aware, so `grep exit /etc/passwd` and
+  `( exit 7 )` still run — and every gap known to it is listed and pinned by a
+  test on `command_runs_exit_in_session_shell`. It applies to `cmd.exe` and
+  PowerShell sessions too, where `exit` ends the shell the same way.
+
 ### Fixed
+
+- **A slow command no longer destroys its session.** Every `Err` from reading a
+  session's output evicted and closed the session, under a comment asserting
+  "Shell is dead" — a diagnosis the code had never made. A deadline expiring
+  proves nothing about the shell, so eviction now happens only on a channel EOF
+  or close, decided by error **variant** and never by message text. What a
+  timeout does leave behind is handled too: the timed-out command is still
+  running, and its output and its markers arrive later on the same channel, so
+  its end marker is remembered and drained before the next command is sent.
+  Without that, the next call's result would have been the previous command's
+  bytes — a wrong answer where there had been a loud failure. If the earlier
+  command still has not finished 10 s into the drain, the session is kept and the
+  call is refused with a message saying so; only a closed channel closes it.
+
+- **Session output that does not end in a newline is no longer lost.**
+  `parse_exec_output` cut the output back to the last `\n` before the marker, so
+  when a command had not ended its output with one the marker shared that line
+  and the whole output became the empty string. `printf sans-nl`, and any `cat`
+  of a file with no final newline, looked as if they had produced nothing at all.
 
 - **A redacted secrets YAML parses again.** The entropy marker replaced a
   base64 token but left its `=` padding behind (`tls.key:
