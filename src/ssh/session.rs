@@ -618,7 +618,8 @@ impl SessionManager {
     /// `&`, `|`, newlines, and a `)` at depth 0 (a `case` arm's pattern
     /// terminator), all outside quotes and outside anything that runs in a child
     /// shell (`( … )`, `$( … )`, backticks); a `#` that starts a word ends the
-    /// line. Leading words that introduce a command without leaving the current
+    /// line at any depth, and `$'…'` is read as ANSI-C quoting, where a
+    /// backslash escapes. Leading words that introduce a command without leaving the current
     /// shell (`{`, `then`, `do`, `time`, `command`, `builtin`, a `NAME=value`
     /// assignment, a redirection and its target) are stepped over; `(` is not,
     /// because a subshell genuinely isolates. Matching ignores letter case,
@@ -628,38 +629,62 @@ impl SessionManager {
     ///
     /// This is a lexical rule, not a shell parser. It is a heuristic, and the
     /// point of this list is that every gap known to it is named here **and**
-    /// pinned by a test, so none of them is a guarantee the code does not make:
+    /// pinned by a test, so none of them is a guarantee the code does not make.
     ///
-    /// - **Over-refusal, accepted:** a here-document body is not recognised, so
-    ///   `cat <<EOF` / `exit` / `EOF` is refused although the `exit` is only
-    ///   text. Over-refusal returns a clear error; under-refusal silently
-    ///   destroys the session, so this is the safe direction.
-    /// - **Over-refusal, accepted:** `ls | exit` is refused although bash runs
-    ///   every stage of a pipeline in a subshell, so there it would be harmless.
-    ///   Whether the last stage runs in the current shell is shell- and
-    ///   option-dependent (`lastpipe`, zsh, ksh), so this refuses it everywhere.
-    /// - **Over-refusal, accepted:** matching ignores letter case, so `EXIT 1`
-    ///   is refused on POSIX although the builtin is only ever spelled `exit`
-    ///   there. The cost is nil — no such command exists — and it is what makes
-    ///   the rule hold for the case-insensitive `cmd.exe` and PowerShell.
-    /// - **Under-refusal, accepted:** indirection is not followed. `eval exit`,
-    ///   `command -p exit` (the flagged form; the bare `command exit` *is*
-    ///   caught), `$CMD` expanding to `exit`, or a script that ends in `exit`
-    ///   are allowed through.
-    /// - **Under-refusal, accepted:** a `case` pattern written in its optional
-    ///   leading-paren form — `case $x in (a) exit;; esac` — looks like a
-    ///   subshell to the depth counter, so that arm's `exit` is missed. The
-    ///   common form without the leading paren is caught.
-    /// - **Under-refusal, accepted:** an unbalanced quote makes the rest of the
-    ///   command look quoted, which hides a later separator. Comments are no
-    ///   longer a source of this (they are skipped), so what remains is a
-    ///   here-document body holding an apostrophe — `cat <<EOF` / `don't` /
-    ///   `EOF` / `exit 1`. That is valid shell, and this rule misses it.
+    /// Each row below was checked against bash used as an oracle — the command
+    /// written into a shell's stdin, then `echo` — so "bash survives" and "bash
+    /// dies" are measured, not deduced from how this lexer looks. The one
+    /// exception is marked.
+    ///
+    /// **Over-refusals** (refused here, bash survives them). A clear error is
+    /// the safe direction: under-refusal destroys the session in silence.
+    ///
+    /// - A here-document body is not recognised, so `cat <<EOF` / `exit` /
+    ///   `EOF` is refused although the `exit` is only text.
+    /// - `ls | exit` is refused although bash runs every stage of a pipeline in
+    ///   a subshell. Whether the last stage runs in the current shell is shell-
+    ///   and option-dependent (`lastpipe`, zsh, ksh), so it is refused
+    ///   everywhere.
+    /// - Matching ignores letter case, so `EXIT 1` is refused although POSIX
+    ///   has no such builtin. The cost is nil — no such command exists — and it
+    ///   is what makes the rule hold for `cmd.exe` and PowerShell.
+    /// - `exit &` and `exit 0 &` are refused although an async list runs in a
+    ///   subshell.
+    /// - A bare leading number is refused: `1 exit` and `007 exit` look like a
+    ///   file descriptor before a command, and nothing here can tell them from
+    ///   an ordinary first word.
+    /// - A multi-line function body is refused — `func() {` / `exit 1` / `}` —
+    ///   while the one-line `func() { exit 1; }` is allowed. Asymmetric, and
+    ///   bash survives both, since neither *runs* the body.
+    /// - **Reasoned, not measured:** on `cmd.exe`, `^` escapes a separator and
+    ///   this rule does not know it, so `echo a^& exit` is refused although
+    ///   cmd.exe would pass `exit` to `echo`. There is no cmd.exe oracle here;
+    ///   on bash the same text really does exit, so the refusal is right there.
+    ///
+    /// **Under-refusals** (allowed here, bash dies). These can still destroy a
+    /// session:
+    ///
+    /// - Indirection is not followed: `eval exit`, and `command -p exit` — the
+    ///   flagged form; the bare `command exit` *is* caught. `$CMD` expanding to
+    ///   `exit` likewise.
+    /// - A `case` pattern in its optional leading-paren form,
+    ///   `case $x in (a) exit;; esac`, looks like a subshell to the depth
+    ///   counter. The common form without the leading paren is caught.
+    /// - An unbalanced quote makes the rest of the command look quoted, hiding
+    ///   a later separator. The way to get one from valid shell that is known
+    ///   here is a here-document body holding an apostrophe — `cat <<EOF` /
+    ///   `don't` / `EOF` / `exit 1`. Comments and `$'…'` were two others and
+    ///   are handled now; this list does not claim to be exhaustive.
+    /// - A **sourced** script: `. deploy.sh` or `source deploy.sh` runs in this
+    ///   shell, so its `exit` ends the session. (A script run the ordinary way
+    ///   is a child process and cannot end the session — an earlier version of
+    ///   this list said "a script that ends in `exit`", which was wrong.)
+    /// - PowerShell's backtick is an escape character, but this lexer reads it
+    ///   as command substitution, so a separator behind it is swallowed:
+    ///   ``Write-Host `; exit`` is allowed, and on PowerShell that `exit` ends
+    ///   the session.
     /// - **Out of scope:** `logout`, and `exec <cmd>` (which replaces the
-    ///   shell), end a session shell the same way and are *not* detected here.
-    /// - Non-POSIX escaping (`^` in `cmd.exe`, the backtick in PowerShell) is
-    ///   not modelled. Tracking it wrongly there loses a separator, which can
-    ///   only miss an `exit`, never invent one.
+    ///   shell), end a session shell the same way and are not detected here.
     fn command_runs_exit_in_session_shell(command: &str) -> bool {
         Self::top_level_segments(command)
             .iter()
@@ -728,15 +753,41 @@ impl SessionManager {
                 _ if in_backtick => segment.push(c),
                 // A comment: the shell ignores the rest of the line, and so
                 // must this, or an apostrophe or paren inside it would change
-                // how everything after the newline is read.
-                '#' if starts_word && depth == 0 => {
+                // how everything after the newline is read. Skipped at **any**
+                // depth — a comment inside `( … )` or `$( … )` swallowed the
+                // newline and every command after it just as well — but the
+                // segment is closed only at depth 0, because closing it deeper
+                // would make `echo $(ls # c\nexit )` look like a top-level
+                // `exit` when that `exit` is inside the substitution.
+                '#' if starts_word => {
                     for skipped in chars.by_ref() {
                         if skipped == '\n' {
                             break;
                         }
                     }
-                    segments.push(std::mem::take(&mut segment));
+                    if depth == 0 {
+                        segments.push(std::mem::take(&mut segment));
+                    }
                     at_word_start = true;
+                }
+                // `$'…'` is ANSI-C quoting, where a backslash escapes — `\'`
+                // included, so the closing quote is not the first `'` seen.
+                // Reading it with the ordinary single-quote state mistracked it
+                // and swallowed the next separator, `exit` and all.
+                '$' if chars.peek() == Some(&'\'') => {
+                    chars.next();
+                    segment.push_str("$'");
+                    while let Some(quoted) = chars.next() {
+                        segment.push(quoted);
+                        if quoted == '\\' {
+                            if let Some(escaped_char) = chars.next() {
+                                segment.push(escaped_char);
+                            }
+                        } else if quoted == '\'' {
+                            break;
+                        }
+                    }
+                    at_word_start = false;
                 }
                 '$' if chars.peek() == Some(&'(') => {
                     chars.next();
@@ -2092,6 +2143,73 @@ mod tests {
         }
     }
 
+    /// A comment inside `( … )` or `$( … )` swallowed the newline and the
+    /// command after it just as well as one at top level. Re-review, A.
+    /// Every input here was confirmed against bash: a shell fed it on stdin
+    /// dies, so refusing is correct and not over-refusal.
+    #[test]
+    fn a_comment_inside_a_subshell_does_not_hide_the_exit_after_it() {
+        for refused in [
+            "( ls # don't\n) ; exit",
+            "echo $(ls # don't\n) ; exit",
+            "echo $(ls | # don't\ncat) ; exit",
+            "( ls # note (paren\n) ; exit",
+            "if true; then ( ls # don't\n) ; fi ; exit",
+            "( echo A # don't\n) ; exit 9",
+        ] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "a comment inside a paren must not hide the command after it: {refused:?}"
+            );
+        }
+    }
+
+    /// The other half of that fix: the comment is skipped at any depth, but the
+    /// segment is closed only at depth 0, or the `exit` *inside* the
+    /// substitution would look like a top-level one. Every input here was
+    /// confirmed alive in bash, so refusing any of them would be over-refusal.
+    #[test]
+    fn an_exit_inside_a_commented_substitution_is_still_allowed() {
+        for allowed in [
+            "echo $(ls # c\nexit )",
+            "( # comment\n echo hi )",
+            "( # comment\n exit )",
+            "( echo ${x#prefix} )",
+            "echo ${#PATH}",
+            "( grep -c '#' /etc/hosts )",
+            "( echo a#b )",
+        ] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(allowed),
+                "skipping comments at depth must not break this: {allowed:?}"
+            );
+        }
+        // `$'…'` is not ANSI-C quoting inside double quotes, and the separator
+        // after it must still split. bash dies on this one.
+        assert!(
+            SessionManager::command_runs_exit_in_session_shell("echo \"$'x'\" ; exit"),
+            "a `$'` inside double quotes is literal, and the `;` still separates"
+        );
+    }
+
+    /// `$'…'` is ANSI-C quoting: `\'` is an escaped apostrophe, not the closing
+    /// quote. Reading it as an ordinary single-quoted string mistracked the
+    /// state and ate the separator. Re-review, B. bash: both of these die.
+    #[test]
+    fn ansi_c_quoting_does_not_hide_the_exit_after_it() {
+        for refused in ["echo $'don\\'t' ; exit 9", "echo $'a\\'b' ; exit"] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(refused),
+                "an escaped apostrophe inside $'…' must not hide the exit: {refused:?}"
+            );
+        }
+        // …without refusing the ordinary case.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("echo $'x' exit"),
+            "`exit` is an argument to echo here"
+        );
+    }
+
     #[test]
     fn a_hash_that_is_not_a_comment_is_left_alone() {
         for allowed in [
@@ -2168,12 +2286,67 @@ mod tests {
             SessionManager::command_runs_exit_in_session_shell("EXIT 1"),
             "documented limit: `EXIT` is refused although POSIX has no such builtin"
         );
-        // Under-refusal: an apostrophe in a here-document body is the one
-        // remaining valid-shell way to open an unbalanced quote, now that
-        // comments are skipped.
+        // Under-refusal: an apostrophe in a here-document body opens an
+        // unbalanced quote. bash dies on this one; the rule misses it.
         assert!(
             !SessionManager::command_runs_exit_in_session_shell("cat <<EOF\ndon't\nEOF\nexit 1"),
             "documented limit: an apostrophe in a here-doc body still hides a later exit"
+        );
+        // Under-refusal: a *sourced* script's `exit` ends the session shell
+        // (bash dies on `. script` and on `source script`). A script run the
+        // ordinary way is a child process and cannot, which is why the limit
+        // names sourcing and not "a script that ends in exit".
+        for sourced in [". /tmp/deploy.sh", "source /tmp/deploy.sh"] {
+            assert!(
+                !SessionManager::command_runs_exit_in_session_shell(sourced),
+                "documented limit: a sourced script's exit is not detected: {sourced}"
+            );
+        }
+        // Under-refusal: PowerShell's backtick is an escape character, but this
+        // lexer reads it as command substitution, so the separator after it is
+        // swallowed and the `exit` behind it is missed.
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("Write-Host `; exit"),
+            "documented limit: a PowerShell backtick escape hides the exit after it"
+        );
+        // Over-refusal: an async list runs in a subshell, so bash survives
+        // `exit &` — this refuses it anyway.
+        for asynchronous in ["exit &", "exit 0 &"] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(asynchronous),
+                "documented limit: an async `exit` is refused although it cannot kill the \
+                 shell: {asynchronous}"
+            );
+        }
+        // Over-refusal: stepping over a file-descriptor number cannot tell one
+        // from an ordinary first word, so a bare leading number is refused.
+        // bash survives `1 exit` — `1` is simply not a command.
+        for numeric in ["1 exit", "007 exit"] {
+            assert!(
+                SessionManager::command_runs_exit_in_session_shell(numeric),
+                "documented limit: a bare leading number is treated as an fd: {numeric}"
+            );
+        }
+        // Over-refusal, and asymmetric: a multi-line function body is refused
+        // while the one-liner is allowed. bash survives both — neither *runs*
+        // the body.
+        assert!(
+            SessionManager::command_runs_exit_in_session_shell("func() {\n exit 1\n}"),
+            "documented limit: a multi-line function body is refused"
+        );
+        assert!(
+            !SessionManager::command_runs_exit_in_session_shell("func() { exit 1; }"),
+            "documented limit: the one-line form of the same definition is allowed"
+        );
+        // Over-refusal on `cmd.exe` only: `^` escapes a separator there and
+        // this rule does not know it, so `exit` after an escaped `&` is
+        // refused although cmd.exe would pass it as an argument. Reasoned from
+        // cmd.exe's escaping rules, NOT measured — there is no cmd.exe oracle
+        // here. On bash the same text really does exit, so the refusal is
+        // correct there.
+        assert!(
+            SessionManager::command_runs_exit_in_session_shell("echo a^& exit"),
+            "documented limit: a cmd.exe `^`-escaped separator still splits"
         );
         assert!(
             !SessionManager::command_runs_exit_in_session_shell("$CMD"),
