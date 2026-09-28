@@ -133,7 +133,7 @@ impl ToolHandler for SshExecHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(&args.host, &args.command, &reason);
+                .log_denied(self.name(), &args.host, &args.command, &reason);
             return Err(e);
         }
 
@@ -226,14 +226,22 @@ impl ToolHandler for SshExecHandler {
         .await;
 
         let output = output.inspect_err(|e| {
-            ctx.execute_use_case
-                .log_failure(&args.host, &args.command, &e.to_string());
+            ctx.execute_use_case.log_failure(
+                self.name(),
+                &args.host,
+                &args.command,
+                &e.to_string(),
+            );
         })?;
 
         // Process success using the use case (handles audit, history, formatting, sanitization)
-        let response =
-            ctx.execute_use_case
-                .process_success(&args.host, &args.command, &output.into());
+        let response = ctx.execute_use_case.process_success(
+            self.name(),
+            &args.host,
+            &args.command,
+            &output.into(),
+            &[],
+        );
 
         if response.exit_code != 0 {
             warn!(

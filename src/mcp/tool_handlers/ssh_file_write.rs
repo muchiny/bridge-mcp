@@ -215,7 +215,7 @@ impl SshFileWriteHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(&args.host, &command, &reason);
+                .log_denied(self.name(), &args.host, &command, &reason);
             return Err(e);
         }
 
@@ -269,13 +269,13 @@ impl SshFileWriteHandler {
 
         let output = output.inspect_err(|e| {
             ctx.execute_use_case
-                .log_failure(&host, &command, &e.to_string());
+                .log_failure(self.name(), &host, &command, &e.to_string());
         })?;
 
         // Process success (audit + history + sanitize)
-        let response = ctx
-            .execute_use_case
-            .process_success(&host, &command, &output.into());
+        let response =
+            ctx.execute_use_case
+                .process_success(self.name(), &host, &command, &output.into(), &[]);
 
         if response.exit_code != 0 {
             warn!(

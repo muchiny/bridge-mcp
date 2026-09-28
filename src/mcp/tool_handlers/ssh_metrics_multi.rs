@@ -300,6 +300,7 @@ impl ToolHandler for SshMetricsMultiHandler {
         for result in &sorted_results {
             if result.success {
                 let _ = ctx.execute_use_case.process_success(
+                    self.name(),
                     &result.host,
                     &command,
                     &CommandOutput {
@@ -308,6 +309,7 @@ impl ToolHandler for SshMetricsMultiHandler {
                         exit_code: 0,
                         duration_ms: result.duration_ms.unwrap_or(0),
                     },
+                    &[],
                 );
             }
         }

@@ -160,7 +160,7 @@ impl ToolHandler for SshSessionExecHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(audit_host, &args.command, &reason);
+                .log_denied(self.name(), audit_host, &args.command, &reason);
             return Err(e);
         }
 
@@ -189,8 +189,12 @@ impl ToolHandler for SshSessionExecHandler {
             .exec(&args.session_id, &command, timeout_secs)
             .await
             .inspect_err(|e| {
-                ctx.execute_use_case
-                    .log_failure(audit_host, &args.command, &e.to_string());
+                ctx.execute_use_case.log_failure(
+                    self.name(),
+                    audit_host,
+                    &args.command,
+                    &e.to_string(),
+                );
             })?;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -198,8 +202,13 @@ impl ToolHandler for SshSessionExecHandler {
         // own response, so it must record the trace itself. `args.command` —
         // not `command` — because the latter carries the shell wrapper the
         // handler added, and the audit answers "what did the caller ask for".
-        ctx.execute_use_case
-            .log_success(audit_host, &args.command, result.exit_code, duration_ms);
+        ctx.execute_use_case.log_success(
+            self.name(),
+            audit_host,
+            &args.command,
+            result.exit_code,
+            duration_ms,
+        );
 
         if result.exit_code != 0 {
             warn!(

@@ -127,7 +127,7 @@ impl ToolHandler for SshAwxProjectUpdateStdoutHandler {
 
         let raw = ctx
             .execute_use_case
-            .process_success(host, &cmd, &output.into())
+            .process_success(self.name(), host, &cmd, &output.into(), &[])
             .stdout;
         let stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         Ok(ToolCallResult::text(stdout))

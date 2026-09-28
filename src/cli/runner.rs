@@ -727,7 +727,8 @@ async fn run_exec_in_context(
             BridgeError::CommandDenied { reason } => reason.clone(),
             _ => e.to_string(),
         };
-        ctx.execute_use_case.log_denied(host, command, &reason);
+        ctx.execute_use_case
+            .log_denied("ssh_exec", host, command, &reason);
         return Err(e);
     }
 
@@ -780,13 +781,13 @@ async fn run_exec_in_context(
 
     let output = output.inspect_err(|e| {
         ctx.execute_use_case
-            .log_failure(host, command, &e.to_string());
+            .log_failure("ssh_exec", host, command, &e.to_string());
     })?;
 
     // Process success
-    let response = ctx
-        .execute_use_case
-        .process_success(host, command, &output.into());
+    let response =
+        ctx.execute_use_case
+            .process_success("ssh_exec", host, command, &output.into(), &[]);
 
     if response.exit_code != 0 {
         warn!(

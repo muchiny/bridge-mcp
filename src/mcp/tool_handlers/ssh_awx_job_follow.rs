@@ -241,7 +241,7 @@ echo '{{"job_id":'$JOB_ID',"status":"timeout","elapsed":'$ELAPSED',"message":"Jo
 
         let stdout = ctx
             .execute_use_case
-            .process_success(host, "ssh_awx_job_follow", &output.into())
+            .process_success(self.name(), host, "ssh_awx_job_follow", &output.into(), &[])
             .stdout;
 
         let mut stdout = stdout;

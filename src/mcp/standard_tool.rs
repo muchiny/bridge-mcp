@@ -205,17 +205,26 @@ pub trait StandardTool: Send + Sync + 'static {
 /// string is `ssh_exec` in disguise, and must call this from `pre_execute` so
 /// it is subject to the same whitelist `ssh_exec` is subject to.
 ///
+/// `tool` is the caller's own name (its `StandardTool::NAME`) — see
+/// `ExecuteCommandUseCase::log_denied` for why it is mandatory.
+///
 /// # Errors
 ///
 /// Returns [`BridgeError::CommandDenied`] when the security policy rejects the
 /// fragment.
-pub fn validate_free_form_command(ctx: &ToolContext, host: &str, command: &str) -> Result<()> {
+pub fn validate_free_form_command(
+    ctx: &ToolContext,
+    tool: &str,
+    host: &str,
+    command: &str,
+) -> Result<()> {
     if let Err(e) = ctx.execute_use_case.validate(command) {
         let reason = match &e {
             BridgeError::CommandDenied { reason } => reason.clone(),
             _ => e.to_string(),
         };
-        ctx.execute_use_case.log_denied(host, command, &reason);
+        ctx.execute_use_case
+            .log_denied(tool, host, command, &reason);
         return Err(e);
     }
     Ok(())
@@ -385,7 +394,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied_for_tool(T::NAME, &host, &command, &reason);
+                .log_denied(T::NAME, &host, &command, &reason);
             return Err(e);
         }
 
@@ -500,11 +509,11 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // Step 12: Log failure
         let output = output.inspect_err(|e| {
             ctx.execute_use_case
-                .log_failure_for_tool(T::NAME, &host, &command, &e.to_string());
+                .log_failure(T::NAME, &host, &command, &e.to_string());
         })?;
 
         // Step 13: Process success (audit + history + sanitize)
-        let mut response = ctx.execute_use_case.process_success_for_tool(
+        let mut response = ctx.execute_use_case.process_success(
             T::NAME,
             &host,
             &command,

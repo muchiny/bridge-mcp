@@ -486,7 +486,13 @@ async fn execute_on_host(
 
     match output {
         Ok(output) => {
-            let response = execute_use_case.process_success(&host_name, &command, &output.into());
+            let response = execute_use_case.process_success(
+                "ssh_exec_multi",
+                &host_name,
+                &command,
+                &output.into(),
+                &[],
+            );
             let truncated = truncate_output_with_cache(
                 &response.output,
                 max_chars,
@@ -509,7 +515,7 @@ async fn execute_on_host(
             }
         }
         Err(e) => {
-            execute_use_case.log_failure(&host_name, &command, &e.to_string());
+            execute_use_case.log_failure("ssh_exec_multi", &host_name, &command, &e.to_string());
 
             if fail_fast {
                 cancel_token.cancel();

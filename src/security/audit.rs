@@ -95,6 +95,13 @@ pub struct AuditLogger {
     /// `cleanup_old_audit_files` with the real clock directly.
     #[cfg(test)]
     now_fn: fn() -> DateTime<Utc>,
+    /// In-memory copy of every event passed to `log`, kept only when the
+    /// logger was built via `for_test`. Lets a use-case test assert on
+    /// exactly what would have been audited (`tool_name` included) without
+    /// standing up a writer task or touching the filesystem. `disabled` and
+    /// `new` both leave this `None`, so they behave exactly as before.
+    #[cfg(test)]
+    captured: Option<std::sync::Mutex<Vec<AuditEvent>>>,
 }
 
 /// Background task that writes audit events to a file
@@ -442,6 +449,8 @@ impl AuditLogger {
             sanitizer: None,
             #[cfg(test)]
             now_fn: Utc::now,
+            #[cfg(test)]
+            captured: None,
         };
 
         let task = AuditWriterTask {
@@ -496,7 +505,37 @@ impl AuditLogger {
             sanitizer: None,
             #[cfg(test)]
             now_fn: Utc::now,
+            #[cfg(test)]
+            captured: None,
         }
+    }
+
+    /// Create a disabled audit logger that also keeps every logged event
+    /// in memory, so a use-case test can assert on the exact `AuditEvent`
+    /// (including `tool_name`) that a call produced. See `drain_for_test`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_test() -> Self {
+        Self {
+            captured: Some(std::sync::Mutex::new(Vec::new())),
+            ..Self::disabled()
+        }
+    }
+
+    /// Take every event captured so far, leaving the logger empty.
+    ///
+    /// Panics if this logger was not built with `for_test` — a test that
+    /// calls this on a plain `disabled()` logger has a bug in the test
+    /// itself, not in the code under test.
+    #[cfg(test)]
+    pub fn drain_for_test(&self) -> Vec<AuditEvent> {
+        let mut guard = self
+            .captured
+            .as_ref()
+            .expect("drain_for_test called on a logger not built with AuditLogger::for_test()")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *guard)
     }
 
     /// Test-only clock override so retention-boundary behavior is
@@ -520,6 +559,14 @@ impl AuditLogger {
 
         // Always log to tracing (fast, synchronous)
         Self::log_to_tracing(&event);
+
+        #[cfg(test)]
+        if let Some(ref captured) = self.captured {
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
+        }
 
         // Send to channel for async file writing
         if let Some(ref sender) = self.sender {

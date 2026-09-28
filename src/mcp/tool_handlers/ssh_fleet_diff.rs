@@ -89,7 +89,8 @@ impl StandardTool for FleetDiffTool {
         ctx: &ToolContext,
     ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
         std::future::ready(
-            validate_free_form_command(ctx, &args.host, &args.command).map(|()| None),
+            validate_free_form_command(ctx, FleetDiffTool::NAME, &args.host, &args.command)
+                .map(|()| None),
         )
     }
 

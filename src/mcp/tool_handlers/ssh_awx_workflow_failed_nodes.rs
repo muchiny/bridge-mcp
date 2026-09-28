@@ -144,7 +144,7 @@ impl ToolHandler for SshAwxWorkflowFailedNodesHandler {
 
         let raw = ctx
             .execute_use_case
-            .process_success(host, &cmd, &output.into())
+            .process_success(self.name(), host, &cmd, &output.into(), &[])
             .stdout;
         let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction_recorded(
