@@ -37,15 +37,34 @@ reading it. Every item below was reproduced before the fix and measured after.
   on a live host: 44 of the 45 `readOnlyHint` tools that were probed behaved
   this way.
 
-  **The scope is the shared pipeline, not every tool.** 52 handlers implement
-  `ToolHandler` directly, run their remote command outside that pipeline, and
-  **still exit 0 when it fails**: `ssh_exec`, `ssh_exec_multi`,
-  `ssh_session_exec`, `ssh_find`, `ssh_tail`, `ssh_metrics`,
-  `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, and the 43
-  `ssh_awx_*` tools. So `bridge-mcp tool ssh_exec host=x command=false` exits 0
-  while the same failure through a `StandardTool` tool exits 6. Two of them
-  (`ssh_tail`, `ssh_metrics`) carry `readOnlyHint`, so part of the measured
-  population above is **not** covered by this change.
+  **The measured defect is closed; the defect class is not.** Every tool the
+  campaign could probe is a `StandardTool`-pipeline tool, so all 44 are fixed.
+  The chain, so you can check it rather than take it: the sweep skipped 14 tools
+  because their schema advertises no `sudo_user` property, and `sudo_user` is
+  injected by `PrivilegeArgs::extract`, which has exactly **one** production call
+  site — `src/mcp/standard_tool.rs:339`. A probed tool therefore went through the
+  pipeline by construction.
+
+  **What is not closed:** 52 handlers implement `ToolHandler` directly, run their
+  remote command outside that pipeline, and **still exit 0 when it fails** —
+  `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
+  `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, plus
+  the `ssh_awx_*` family as qualified below. So
+  `bridge-mcp tool ssh_exec host=x command=false` exits 0 while the same failure
+  through a `StandardTool` tool exits 6. **None of these 52 was ever in the
+  measured set** (`ssh_tail`, `ssh_metrics` and `ssh_find` declare no
+  `sudo_user` at all, so they were never probed) — they are the *unmeasured*
+  remainder of the same defect class, not a gap in the fix.
+
+  **The AWX family is narrower than the raw count suggests.** 42 of the 43 route
+  their response through `AwxCommandBuilder::parse_checked_response`
+  (`src/domain/use_cases/awx.rs:226-244`), which already raises
+  `BridgeError::AwxApi` for any HTTP status >= 400. Only a **transport-level
+  curl failure that writes no status marker** — connection refused, timeout —
+  falls through to `Ok(raw)` and exits 0. The exception is
+  `ssh_awx_job_follow`, which builds its requests with the unchecked
+  `build_api_call`, never parses a status, and returns `text(stdout)` regardless
+  — so it swallows HTTP errors too, not only transport failures.
 
   Two further boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when
   a `bridge-mcp daemon` serves the call the CLI reads the result back off the
@@ -55,9 +74,10 @@ reading it. Every item below was reproduced before the fix and measured after.
 
 - **An MCP tool result now carries `isError: true` when its remote command
   failed** — again, for `StandardTool`-pipeline tools only; the 52 handlers
-  listed above are unchanged. A client that treated every `tools/call` answer
-  as a success, and read the outcome out of the text, will start seeing errors
-  it did not see before, for calls that were already failing.
+  listed above are unchanged, with the AWX qualification stated there. A client
+  that treated every `tools/call` answer as a success, and read the outcome out
+  of the text, will start seeing errors it did not see before, for calls that
+  were already failing.
 
   **Four tools report a normal answer as an error because of this**, and it is
   the intended trade-off rather than an oversight: `ssh_service_status` and
@@ -266,26 +286,53 @@ reading it. Every item below was reproduced before the fix and measured after.
   one process each.
 - **52 handlers still exit 0 when their remote command fails**, because they run
   it outside the `StandardTool` pipeline that the exit-code fix above lives in.
-  They implement `ToolHandler` directly, and each one still does `warn!(…)` on a
+  They implement `ToolHandler` directly, and each still does `warn!(…)` on a
   non-zero exit and then returns `ToolCallResult::text(…)`, whose `is_error` is
-  `None`. The list: `ssh_exec` (`src/mcp/tool_handlers/ssh_exec.rs:246-279`),
-  `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`, `ssh_metrics`,
-  `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, and the 43
-  `ssh_awx_*` tools. Two of them (`ssh_tail`, `ssh_metrics`) carry
-  `readOnlyHint`, so part of the campaign's measured population is still
-  affected.
+  `None`. **None of them was in the campaign's measured population** — the
+  measured 44 are all pipeline tools (see the BREAKING entry for the chain) —
+  so this is the unmeasured remainder of the same defect class.
 
-  **Shape of the fix:** a mechanical sweep, one edit per handler — after the
-  result is built, `if response.exit_code != 0 { result = result
-  .with_remote_exit_code(i32::try_from(response.exit_code).unwrap_or(1)); }`,
+  **Nine confirmed, with the exit code plainly dropped:** `ssh_exec`
+  (`src/mcp/tool_handlers/ssh_exec.rs:246-279` — warns, then `:279` returns
+  `text(...)`), `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
+  `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`.
+
+  **The 43 `ssh_awx_*`, but narrower than the count suggests:** 42 route their
+  response through `AwxCommandBuilder::parse_checked_response`
+  (`src/domain/use_cases/awx.rs:226-244`), which already raises
+  `BridgeError::AwxApi` on HTTP >= 400, so only a **transport-level curl failure
+  that writes no status marker** (connection refused, timeout) reaches
+  `Ok(raw)` and exits 0. `ssh_awx_job_follow` is the exception: it uses the
+  unchecked `build_api_call`, parses no status, and returns `text(stdout)`
+  regardless, so it swallows HTTP errors too.
+
+  **Shape of the fix — and it does not fit AWX.** For the nine confirmed
+  handlers it is a mechanical sweep, one edit each: after the result is built,
+  `if response.exit_code != 0 { result = result
+  .with_remote_exit_code(i32::try_from(response.exit_code).unwrap_or(1)); }` —
   the same line the pipeline's step 19 runs, placed last so a post-processing
-  hook cannot mask it. The builder already exists and is public. Watch for the
-  handlers where a non-zero exit is the *answer* rather than a failure — the same
-  judgment the `NONZERO_EXIT_IS_ERROR` note above describes, which for a direct
-  handler has to be made per call site since there is no trait const to set.
-  `ssh_exec` is the one to think hardest about: it runs whatever the caller
-  asked for, so its exit code is the caller's to interpret — but exiting 0 on a
-  failed `command=false` is what the fix above exists to stop.
+  hook cannot mask it. The builder already exists and is public.
+  **The AWX handlers need a different fix:** they never read `exit_code` at all,
+  so there is nothing for that line to test. Their failure mode is a curl
+  transport error with no status marker, which means the work there is to make
+  `parse_checked_response` (or its callers) distinguish "no marker because curl
+  never reached the server" from "no marker because this was an unchecked call",
+  plus moving `ssh_awx_job_follow` onto `build_api_call_checked`. Do not start
+  from the one-line shape there.
+
+  Watch, in either group, for handlers where a non-zero exit is the *answer*
+  rather than a failure — the same judgment the `NONZERO_EXIT_IS_ERROR` note
+  above describes, which for a direct handler has to be made per call site since
+  there is no trait const to set. `ssh_exec` is the one to think hardest about:
+  it runs whatever the caller asked for, so its exit code is arguably the
+  caller's to interpret — but exiting 0 on a failed `command=false` is what the
+  fix above exists to stop.
+
+  **Three further candidates, UNVERIFIED** — flagged by a reviewer's heuristic,
+  not confirmed by anyone, and listed so they are not lost rather than as
+  findings: `ssh_runbook_execute` (many exec call sites, no `process_success`),
+  `ssh_health` and `ssh_history` (both read `exit_code`). Check them before
+  counting them.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 

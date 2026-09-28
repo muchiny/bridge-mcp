@@ -787,11 +787,11 @@ shared `StandardTool` pipeline, which is most of the catalogue but not all of
 it. **52 handlers run their remote command outside that pipeline and still exit
 0 when it fails**, including the ones you are most likely to script:
 
-| Still exits 0 on a remote failure | Count |
-|---|---|
-| `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec` — the free-form escape hatches | 3 |
-| `ssh_find`, `ssh_tail`, `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write` | 6 |
-| the `ssh_awx_*` family | 43 |
+| Still exits 0 on a remote failure | Count | When |
+|---|---|---|
+| `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec` — the free-form escape hatches | 3 | any non-zero exit |
+| `ssh_find`, `ssh_tail`, `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write` | 6 | any non-zero exit |
+| the `ssh_awx_*` family | 43 | **only** a curl transport failure (connection refused, timeout). An HTTP status >= 400 already surfaces as a bridge error. Except `ssh_awx_job_follow`, which does not check the status and so swallows HTTP errors too. |
 
 So `bridge-mcp tool ssh_exec host=x command=false` exits 0, while the same
 failure through a `StandardTool` tool exits 6. Bringing those 52 into line is
