@@ -27,7 +27,7 @@ does H06b. Needles: "Session not found" (H02b), "blacklist" (H02c), "timeout"
 kind therefore FAIL where all three used to pass. H02c additionally RAISES when
 the H04/H05 session is missing instead of falling back to an unknown session id:
 with a fallback it would degrade into a second H02b, never reach the blacklist,
-and - before the kind assertion - still print PASS.
+and — before the kind assertion — still print PASS.
 
 Read-only on the host: nothing is written, no file and no process survives.
 `sleep 8` against `timeout_seconds=2` overruns by 6 s, inside the 10 s

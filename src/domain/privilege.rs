@@ -445,8 +445,10 @@ mod tests {
     #[ignore = "elevate_with_password's Step-3 implementation (per the plan) puts the \
                 password on the command line via `printf '%s\\n' <pw> | sudo -S …`: on \
                 every caller that sends that string as an SSH exec request it is readable \
-                in `ps` on the remote host for the duration of the call, and the session \
-                caller escapes it only by accident (see this function's own doc). \
+                in `ps` on the remote host for the duration of the call. The session caller \
+                avoids that only because of HOW it delivers the string — on an open shell's \
+                stdin, where nothing lands in an argv — and not because of anything this \
+                function does; see its own doc. \
                 Removing that leak means passing the password over the SSH channel instead \
                 of the command line, which is a change to `ports/` and is outside this \
                 task's scope (privilege elevation wrapping only). Tracked, not silently \
