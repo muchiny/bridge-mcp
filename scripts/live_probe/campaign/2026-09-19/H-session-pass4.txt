@@ -20,8 +20,12 @@ apart.
   built      CARGO_BUILD_JOBS=2 cargo build --features full,winrm,psrp --bin bridge-mcp
   version    bridge-mcp 3.0.0 (rev 741dcff18173-dirty)
              "dirty" is H-fixes.json, this file and report-pass4-B.json — none
-             of the three is compiled into the binary; `git diff 741dcff -- src/
-             Cargo.toml Cargo.lock` was empty at build time.
+             of the three is compiled into the binary, and no tracked source
+             file, Cargo.toml or Cargo.lock differed from 741dcff when it was
+             built. (Do not re-run that diff today and expect nothing: a later
+             commit on this branch, fc1984f, edits doc comments in
+             src/domain/privilege.rs, which this binary predates. Doc comments
+             only — no behaviour this transcript measured is affected.)
   config     ~/.config/mcp-ssh-bridge/config.yaml (legacy path, the one actually
              loaded on this machine) — 7 hosts, 353 tools, security Permissive
   host       raspberry = 192.168.1.51, Raspberry Pi 5
