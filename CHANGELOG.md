@@ -408,22 +408,27 @@ reading it. Every item below was reproduced before the fix and measured after.
   `ssh_recording_list`, `ssh_recording_replay`, `ssh_recording_verify`.
 
   **Nothing central covers them.** Neither the MCP dispatcher nor the CLI's
-  tool path writes an audit event per tool call: the only `AuditEvent`s built
-  outside a handler are the four entry points in
-  `src/domain/use_cases/execute_command.rs`, the `bridge-mcp exec` subcommand's
-  own `ssh_exec` path, and the SFTP transfers of `bridge-mcp upload` /
-  `download`. So `ssh_session_create host=pi` opens an SSH session to a host and
-  leaves no line behind saying it did.
+  tool path writes an audit event per tool call. Outside the handlers themselves,
+  the only code that constructs an `AuditEvent` is
+  `src/domain/use_cases/execute_command.rs` — the four entry points, which a
+  caller has to invoke by name, as the `bridge-mcp exec` subcommand does — and
+  the four SFTP sites of `bridge-mcp upload` / `download` in `src/cli/runner.rs`
+  (`grep -rn 'AuditEvent::new\|AuditEvent::denied' src/`). So
+  `ssh_session_create host=pi` opens an SSH session to a host and leaves no line
+  behind saying it did.
 
 - **The `NONZERO_EXIT_IS_ERROR` opt-out has four users out of 399, and 355 of
   the 399 have never been measured.** The exit-code change flips the behaviour
-  of every `StandardTool` tool at once — 399 of them (`grep -c 'impl
-  StandardTool for'` over `src/mcp/tool_handlers/`; 399 plus the 77 direct
-  handlers is the whole 476-tool baseline). The judgment behind flipping them
-  all rests on the 44 the live campaign could probe. Of the four opt-outs above,
-  exactly one was measured on hardware — `ssh_service_status`, case `H07` — and
-  the other three were read off their command (`systemctl status`,
-  `kubectl diff`, `helm diff --detailed-exitcode`), not run. Nothing here says
+  of every `StandardTool` tool at once — 399 of them
+  (`grep -rho 'impl StandardTool for' src/mcp/tool_handlers/ | wc -l`; 399 plus
+  the 77 direct handlers is the whole 476-tool baseline). The judgment behind
+  flipping them all rests on the 44 the live campaign could probe. Of the four
+  opt-outs above, `ssh_service_status` is the one measured live on this branch
+  (case `H07`, `report-pass4-B.json`). Whether the other three were among that
+  44 is not recorded in any artefact in this tree — the sweep's own reports are
+  gitignored and exist only in the main checkout — so treat their non-zero
+  semantics as read off their command (`systemctl status`, `kubectl diff`,
+  `helm diff --detailed-exitcode`) rather than as measured. Nothing here says
   the 355 unprobed tools have no normal non-zero answer of their own; it says
   only that nobody has looked. When one turns up, the fix is one const on that
   tool, and these four are the worked examples.
@@ -433,9 +438,12 @@ reading it. Every item below was reproduced before the fix and measured after.
   `sudo -n` only) is what the `StandardTool` pipeline calls, so it governs 399
   tools; `elevate_with_password` is reached only by `ssh_exec`,
   `ssh_exec_multi` and `ssh_session_exec`, the three handlers that build their
-  own `PrivilegeArgs`. On a host whose config carries a `sudo_password`, `sudo:
-  true` therefore works on those 3 and fails immediately on the other 399,
-  which need `NOPASSWD` on the remote host. **This predates the branch** — the
+  own `PrivilegeArgs`. On a host that carries a `sudo_password` *and* genuinely
+  demands one, `sudo: true` therefore works on those 3 and fails immediately on
+  the other 399, which need `NOPASSWD` on the remote host — and where
+  `NOPASSWD` is granted the configured password was never needed in the first
+  place, which is why the split has gone unnoticed. **This predates the
+  branch** — the
   pipeline called the password-less `elevate` before it too — and it is left
   alone deliberately: the remedy is one line (pass the host's `sudo_password`
   to `elevate_with_password` at `src/mcp/standard_tool.rs`, step 5b), but it

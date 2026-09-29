@@ -5,11 +5,16 @@ campaign to a commit or to a feature set. run.py:208 writes only
 {binary, host, baseline, results}, and `binary` is the bare string
 "./target/debug/bridge-mcp" — no revision, no --features, no timestamp. That
 path is not a stable identity either: `make ci` builds the bin target with
-DEFAULT features and rewrites it, which happened once mid-campaign and left
-5 of 7 hosts unloadable. run.py is not this wave's to modify, so the provenance
-is recorded here instead, and in the `about` block of H-fixes.json. It covers
-both pass-4 artefacts — this transcript and report-pass4-B.json — which the
-same binary produced minutes apart.
+DEFAULT features and rewrites it. That happened once mid-campaign, and what
+followed is worth stating precisely because it is the opposite of silent — the
+default-features binary could not parse this machine's config at all
+("unknown variant winrm") and refused to start, which is the only reason the
+swap did not produce measurements from a build nobody chose. A campaign must
+rebuild after every `make ci` and re-check `validate` before measuring.
+run.py is not this wave's to modify, so the provenance is recorded here instead,
+and in the `about` block of H-fixes.json. It covers both pass-4 artefacts —
+this transcript and report-pass4-B.json — which the same binary produced minutes
+apart.
 
   commit     741dcff18173b731fdae6533768449c8e27c019c  (fix/defauts-campagne-racines)
   built      CARGO_BUILD_JOBS=2 cargo build --features full,winrm,psrp --bin bridge-mcp
@@ -23,6 +28,14 @@ same binary produced minutes apart.
   command    python3 scripts/live_probe/campaign/2026-09-19/H-session.py \
                  ./target/debug/bridge-mcp
   exit code  0 — the script's exit code IS its FAIL count
+
+Passes 1-3 and the four earlier H-session runs were measured on
+`bridge-mcp 3.0.0 (rev ced947b58070)`, same `--features full,winrm,psrp`. That
+revision is written down only in the task-5 report, which is gitignored, so this
+is the first committed statement of it. It does not weaken those verdicts:
+`git diff ced947b c4c9f07 -- src/ Cargo.toml Cargo.lock` is empty, so the binary
+they ran is source-identical to the branch tip they were filed against — the
+three commits in between touched probe files only.
 
 WHAT THIS PASS ADDS over the four runs quoted in the task report. It is the
 first run in which H06b, H02b and H02c assert the error KIND instead of
