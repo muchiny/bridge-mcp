@@ -37,14 +37,18 @@ extend-ignore-identifiers-re = [
 nore = "nore"
 # French words used in documentation
 projet = "projet"
-# `domain::privilege::elevate{,_with_password}` doc comments and their handler
-# call-site comments (src/domain/privilege.rs, src/mcp/tool_handlers/ssh_exec*.rs):
-# "enveloppe" (wraps) reads as "envelope", "raison" (reason) as "reason", "sur"
-# (on/about) as "sure", "reste" (remains) as "reset"/"rest"/"rests".
+# `domain::privilege::elevate` handler call-site comments and one test message
+# (src/domain/privilege.rs, src/mcp/tool_handlers/ssh_exec*.rs,
+# ssh_session_exec.rs): "enveloppe" (wraps) reads as "envelope".
+#
+# The `raison`, `sur` and `reste` entries that used to stand here existed only
+# for the French doc comment on `elevate_with_password`, which is now in
+# English. No file `typos` reads uses them any more. `.specify/memory/
+# constitution.md` is full of them and is tracked, but it lives under a dot
+# directory, which `typos` skips unless it is run with `--hidden` — so putting
+# the three bare words back is not the answer if that day comes; an
+# `extend-exclude` for that one file is.
 enveloppe = "enveloppe"
-raison = "raison"
-sur = "sur"
-reste = "reste"
 # Legitimate code patterns
 secur = "secur"
 routeros = "routeros"

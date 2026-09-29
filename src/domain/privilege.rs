@@ -162,6 +162,23 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// command: for an ordinary name escaping is a no-op wrap (`root` becomes
 /// `'root'`, which `sudo -u` reads identically), and for anything else it
 /// keeps the payload a single, inert argument instead of a shell metacharacter.
+///
+/// # This function has no password path, and it is the one 399 tools use
+///
+/// The `StandardTool` pipeline elevates here (`src/mcp/standard_tool.rs`, step
+/// 5b), so all 399 pipeline tools get `sudo -n` and nothing else. On a host
+/// whose config carries a `sudo_password`, that password is never offered to
+/// them: `sudo -n` fails at once with "a password is required", and `sudo:
+/// true` therefore only works on such a host for the three handlers that build
+/// their own `PrivilegeArgs` and call [`elevate_with_password`] — `ssh_exec`,
+/// `ssh_exec_multi` and `ssh_session_exec`. Every other elevated tool needs
+/// `NOPASSWD` on the remote host.
+///
+/// That split is deliberate for now, not an oversight: the one-line remedy is
+/// to pass the host's `sudo_password` to [`elevate_with_password`] here too,
+/// but it would change the behaviour of 399 tools on every password host at
+/// once, and only the three above have ever been exercised on one. It is a
+/// named known issue in `CHANGELOG.md` waiting for its own measurement.
 #[must_use]
 pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     if !args.sudo {
@@ -178,15 +195,33 @@ pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     )
 }
 
-/// Comme [`elevate`], mais pour un hôte dont la configuration porte un mot de
-/// passe `sudo`.
+/// Like [`elevate`], but for a host whose configuration carries a `sudo`
+/// password.
 ///
-/// Le mot de passe est passé sur **stdin** de `sudo -S`, jamais dans la ligne de
-/// commande : `echo <mot de passe> | sudo …` le rend lisible par tout `ps` sur
-/// l'hôte distant, y compris par les comptes non privilégiés.
+/// **The password is in the string this function returns**, so it is only as
+/// private as what the caller does with that string. `sudo -S` does read it
+/// from stdin, but that stdin is a pipe written *inside the command text*, not
+/// a channel of its own — so "on stdin" is not the same as "off the command
+/// line":
 ///
-/// La commande reste enveloppée dans un `bash -c` pour la même raison que
-/// [`elevate`] : sans cela seul le premier processus de la ligne est élevé.
+/// - Sent as an SSH exec request (`ssh_exec`, `ssh_exec_multi`), the whole
+///   `printf '%s\n' '<password>' | sudo -S …` string becomes the argument of
+///   `$SHELL -c` on the remote host. **Any account there reads the password
+///   with `ps -ef` for as long as the call lasts.**
+/// - Written to an already-open session shell's stdin (`ssh_session_exec`), it
+///   is not in anyone's argv: `printf` is a builtin and the `sudo` process it
+///   pipes into carries no password of its own. That is a property of that one
+///   caller, not a guarantee made here.
+///
+/// `printf` in place of `echo` buys nothing either way: both are builtins, and
+/// what leaks on the first path is the outer command line, not the pipe.
+/// Removing the leak means handing the password to the SSH channel instead of
+/// the command line, which is a change to `ports/`. The `#[ignore]`d
+/// `elevate_with_password_never_puts_the_password_in_the_command_line` test in
+/// this file holds the assertion that does not pass today; do not weaken it.
+///
+/// The command is wrapped in a `bash -c` for the same reason as [`elevate`]:
+/// without it only the first process of the line is elevated.
 #[must_use]
 pub fn elevate_with_password(
     command: &str,
@@ -408,8 +443,10 @@ mod tests {
     /// ships.
     #[test]
     #[ignore = "elevate_with_password's Step-3 implementation (per the plan) puts the \
-                password on the command line via `printf '%s\\n' <pw> | sudo -S …`: it is \
-                still visible in `ps` on the remote host for the duration of the call. \
+                password on the command line via `printf '%s\\n' <pw> | sudo -S …`: on \
+                every caller that sends that string as an SSH exec request it is readable \
+                in `ps` on the remote host for the duration of the call, and the session \
+                caller escapes it only by accident (see this function's own doc). \
                 Removing that leak means passing the password over the SSH channel instead \
                 of the command line, which is a change to `ports/` and is outside this \
                 task's scope (privilege elevation wrapping only). Tracked, not silently \
