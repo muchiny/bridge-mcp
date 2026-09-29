@@ -59,4 +59,12 @@ extend-exclude = [
     "PLAN.md",
     # Internal French research/planning artifact — prose, not shipped docs
     "docs/feature-research-2026-06.md",
+    # Captured live-probe output, not prose: `run.py --report` stores each case's
+    # stdout/stderr truncated at `out[:400]`, which cuts words mid-token
+    # (`(code=exited, statu` -> `statu` -> `status`). These files are evidence of
+    # what a tool actually printed on a real host; correcting a word inside one
+    # would falsify the record. Scoped to the `report-*.json` artefacts only —
+    # the hand-written case files beside them (H-fixes.json and every other
+    # campaign lane file) stay spell-checked.
+    "scripts/live_probe/campaign/*/report-*.json",
 ]

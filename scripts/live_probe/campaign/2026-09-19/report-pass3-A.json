@@ -1,0 +1,15 @@
+{
+  "binary": "./target/debug/bridge-mcp",
+  "host": "raspberry",
+  "baseline": true,
+  "results": {
+    "H00": {
+      "cli": {
+        "ok": true,
+        "out": "made\n",
+        "err": "",
+        "rc": 0
+      }
+    }
+  }
+}

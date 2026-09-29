@@ -15,6 +15,13 @@ Cases:
   H05  a `cd` still persists between two calls         `cd /tmp` then `pwd`
   H06  a timeout no longer kills the session           `sleep 8` @ timeout 2, then `echo vivant`
   H02b generates the audit FAILURE trail               exec on an unknown session_id
+  H02c generates the audit DENIED trail                a blacklisted command
+
+H02b and H02c are TRAIL GENERATORS, not assertions. Their `check` passes on any
+error at all, which is deliberate: the property under test is that the resulting
+line in the bridge host's audit log carries `tool_name`, and that log is not
+reachable from here. The proof is the audit line, asserted by the caller; a PASS
+printed below means only that the trail was produced.
 
 Read-only on the host: nothing is written, no file and no process survives.
 `sleep 8` against `timeout_seconds=2` overruns by 6 s, inside the 10 s
@@ -171,13 +178,17 @@ def main():
         check("H02b", "error" in m or m.get("result", {}).get("isError"),
               f"unknown session_id -> {json.dumps(m)[:200]}")
 
-        # Denied by the local validator BEFORE any SSH traffic: `cat\\s+/etc/
-        # shadow` is a blacklist pattern, and ssh_session_exec is not annotated
-        # destructive, so no confirmation gate stands in front of the denial.
-        # Nothing runs on the host.
+        # Denied by the local validator BEFORE any SSH traffic: `>\\s*/dev/(sd|
+        # mmcblk|nvme)` is a blacklist pattern, and ssh_session_exec is not
+        # annotated destructive, so no confirmation gate stands in front of the
+        # denial. Chosen to be harmless even if the pattern were missing from a
+        # config: /dev/sdzz-bridge-probe is not a device node, and an
+        # unprivileged user cannot create one under /dev, so the unguarded form
+        # fails with EACCES instead of writing to a disk. A case must be safe on
+        # its own terms — see the `about` block of H-fixes.json.
         m = s.tool("ssh_session_exec",
                    {"session_id": sid or "H-session-unknown-id",
-                    "command": "cat /etc/shadow"})
+                    "command": "echo probe > /dev/sdzz-bridge-probe"})
         check("H02c", "error" in m or m.get("result", {}).get("isError"),
               f"blacklisted command -> {json.dumps(m)[:200]}")
     finally:

@@ -1,0 +1,55 @@
+{
+  "binary": "./target/debug/bridge-mcp",
+  "host": "raspberry",
+  "baseline": false,
+  "results": {
+    "H01": {
+      "cli": {
+        "ok": true,
+        "out": "ok\n",
+        "err": "",
+        "rc": 0
+      }
+    },
+    "H01b": {
+      "cli": {
+        "ok": true,
+        "out": "0\n0\n",
+        "err": "",
+        "rc": 0
+      }
+    },
+    "H03": {
+      "cli": {
+        "ok": true,
+        "out": "[exit:1]\nid: 'nexistepas': no such user\ngroups: 'nexistepas': no such user\n",
+        "err": "",
+        "rc": 6
+      }
+    },
+    "H03b": {
+      "mcp": {
+        "ok": true,
+        "out": "[exit:1]\nid: 'nexistepas': no such user\ngroups: 'nexistepas': no such user\n",
+        "err": "Error: [exit:1]\nid: 'nexistepas': no such user\ngroups: 'nexistepas': no such user\n",
+        "rc": 1
+      }
+    },
+    "H07": {
+      "cli": {
+        "ok": false,
+        "out": "[exit:3]\n* apt-daily.service - Daily apt download activities\n     Loaded: loaded (/usr/lib/systemd/system/apt-daily.service; static)\n     Active: inactive (dead) since Mon 2026-09-28 20:36:15 CEST; 4h 42min ago\n Invocation: c479e41b028c40bbadb364c7613971fc\nTriggeredBy: * apt-daily.timer\n       Docs: man:apt(8)\n    Process: 588212 ExecStartPre=/usr/lib/apt/apt-helper wait-online (code=exited, statu",
+        "err": "",
+        "rc": 6
+      }
+    },
+    "H07b": {
+      "mcp": {
+        "ok": false,
+        "out": "[exit:3]\n* apt-daily.service - Daily apt download activities\n     Loaded: loaded (/usr/lib/systemd/system/apt-daily.service; static)\n     Active: inactive (dead) since Mon 2026-09-28 20:36:15 CEST; 4h 42min ago\n Invocation: c479e41b028c40bbadb364c7613971fc\nTriggeredBy: * apt-daily.timer\n       Docs: man:apt(8)\n    Process: 588212 ExecStartPre=/usr/lib/apt/apt-helper wait-online (code=exited, statu",
+        "err": "Error: [exit:3]\n* apt-daily.service - Daily apt download activities\n     Loaded: loaded (/usr/lib/systemd/system/apt-daily.service; static)\n     Active: inactive (dead) since Mon 2026-09-28 20:36:15 CEST; 4h 42min ago\n Invocation: c479e41b028c40bbadb364c7613971fc\nTriggeredBy: * apt-daily.timer\n       Docs: man:apt(8)\n    Process: 588212 ExecStartPre=/usr/lib/apt/apt-helper wait-online (code=exited",
+        "rc": 1
+      }
+    }
+  }
+}
