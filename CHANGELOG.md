@@ -375,11 +375,73 @@ reading it. Every item below was reproduced before the fix and measured after.
   caller's to interpret — but exiting 0 on a failed `command=false` is what the
   fix above exists to stop.
 
-  **Three further candidates, UNVERIFIED** — flagged by a reviewer's heuristic,
-  not confirmed by anyone, and listed so they are not lost rather than as
-  findings: `ssh_runbook_execute` (many exec call sites, no `process_success`),
-  `ssh_health` and `ssh_history` (both read `exit_code`). Check them before
-  counting them.
+  **The three candidates that stood here as UNVERIFIED are not candidates at
+  all** — checked, rather than passed on: none of the three runs a remote
+  command, so none of them can exit 0 when one fails. `ssh_runbook_execute`
+  resolves a runbook into a plan and returns the text of it
+  (`format_execution_plan`); the steps are meant to be run *afterwards* through
+  `ssh_exec`, which is where the "many exec call sites" impression came from.
+  `ssh_health` and `ssh_history` read `ctx.history`, `ctx.session_manager` and
+  `ctx.connection_pool` — local state — and the `entry.exit_code` they touch is
+  a tally over already-recorded history, not a code they receive from a host.
+  Decisive check: `grep -nE 'execute_use_case|execute_command|\.exec\('` over
+  the three files matches nothing. So the remainder is the 52 above, and that
+  list is now closed rather than open-ended.
+
+- **20 of the 77 handlers that implement `ToolHandler` directly write no audit
+  event at all.** This is the complement of the question asked about the audit
+  on this branch: that one inventoried which *events* carry no `tool_name`, and
+  nobody asked which *operations* produce no event to name. Making the name
+  mandatory on the four entry points cannot reach these, by construction — they
+  call none of them.
+
+  Counted, not estimated: of the 77 files under `src/mcp/tool_handlers/` with an
+  `impl ToolHandler for`, 20 mention none of `log_success`, `log_failure`,
+  `log_denied`, `process_success`, `AuditEvent` or `audit_logger` outside their
+  `#[cfg(test)]` module. **Seven of the 20 open a connection or change server
+  state, and those are the ones that matter:** `ssh_session_create`,
+  `ssh_session_close`, `ssh_tunnel_create`, `ssh_tunnel_close`,
+  `ssh_config_set`, `ssh_recording_start`, `ssh_recording_stop`. The other 13
+  are local reads: `ssh_status`, `ssh_health`, `ssh_history`, `ssh_config_get`,
+  `ssh_output_fetch`, `ssh_session_list`, `ssh_tunnel_list`,
+  `ssh_runbook_execute`, `ssh_runbook_list`, `ssh_runbook_validate`,
+  `ssh_recording_list`, `ssh_recording_replay`, `ssh_recording_verify`.
+
+  **Nothing central covers them.** Neither the MCP dispatcher nor the CLI's
+  tool path writes an audit event per tool call: the only `AuditEvent`s built
+  outside a handler are the four entry points in
+  `src/domain/use_cases/execute_command.rs`, the `bridge-mcp exec` subcommand's
+  own `ssh_exec` path, and the SFTP transfers of `bridge-mcp upload` /
+  `download`. So `ssh_session_create host=pi` opens an SSH session to a host and
+  leaves no line behind saying it did.
+
+- **The `NONZERO_EXIT_IS_ERROR` opt-out has four users out of 399, and 355 of
+  the 399 have never been measured.** The exit-code change flips the behaviour
+  of every `StandardTool` tool at once — 399 of them (`grep -c 'impl
+  StandardTool for'` over `src/mcp/tool_handlers/`; 399 plus the 77 direct
+  handlers is the whole 476-tool baseline). The judgment behind flipping them
+  all rests on the 44 the live campaign could probe. Of the four opt-outs above,
+  exactly one was measured on hardware — `ssh_service_status`, case `H07` — and
+  the other three were read off their command (`systemctl status`,
+  `kubectl diff`, `helm diff --detailed-exitcode`), not run. Nothing here says
+  the 355 unprobed tools have no normal non-zero answer of their own; it says
+  only that nobody has looked. When one turns up, the fix is one const on that
+  tool, and these four are the worked examples.
+
+- **`sudo: true` reaches two different functions, and only one of them can use
+  a configured `sudo_password`.** `domain::privilege::elevate` (no password,
+  `sudo -n` only) is what the `StandardTool` pipeline calls, so it governs 399
+  tools; `elevate_with_password` is reached only by `ssh_exec`,
+  `ssh_exec_multi` and `ssh_session_exec`, the three handlers that build their
+  own `PrivilegeArgs`. On a host whose config carries a `sudo_password`, `sudo:
+  true` therefore works on those 3 and fails immediately on the other 399,
+  which need `NOPASSWD` on the remote host. **This predates the branch** — the
+  pipeline called the password-less `elevate` before it too — and it is left
+  alone deliberately: the remedy is one line (pass the host's `sudo_password`
+  to `elevate_with_password` at `src/mcp/standard_tool.rs`, step 5b), but it
+  changes the behaviour of 399 tools on every password host at once and only
+  the three have ever been exercised on one. It wants its own measurement, and
+  both functions' rustdoc now says so.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 
