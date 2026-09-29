@@ -226,6 +226,23 @@ impl ToolHandler for SshDiskUsageHandler {
         // qui sort 1 dans un sous-répertoire illisible tout en ayant produit un
         // total, et dont le `&&` supprime la moitié `df` : la réponse est
         // partielle, et la déclarer en échec serait un nouveau mensonge.
+        //
+        // HYPOTHÈSE, écrite parce qu'elle n'est pas démontrée pour tous les
+        // cas : sans `path`, TOUT code non nul est traité comme l'échec de la
+        // réponse, jamais comme une réponse partielle. Si `df -h` sortait non
+        // nul APRÈS avoir listé les autres systèmes de fichiers, cette garde
+        // fabriquerait un échec — l'erreur exactement inverse de ce que ce
+        // plan corrige.
+        //
+        // Mesuré (GNU coreutils 9.7, WSL2) : le cas redouté ne se produit pas.
+        // Pour `df` SANS opérande, un point de montage listé dont `stat`
+        // échoue avec EACCES (droits) ou ENOENT (le chemin ne se résout plus)
+        // est omis en silence, stderr demeure vide et le code vaut 0 — c'est
+        // le cas courant d'un utilisateur non root d'un hôte containerd/K3s.
+        // NON MESURÉ : la version de coreutils de l'hôte de référence
+        // (Raspberry Pi K3s), et un échec de `stat` portant un autre errno
+        // (NFS mort, FUSE cassé), qui lui n'est pas omis. Une seule commande
+        // trancherait, lancée depuis cet hôte : `df -h >/dev/null 2>&1; echo $?`.
         if args.path.is_none() && response.exit_code != 0 {
             let code = i32::try_from(response.exit_code).unwrap_or(1);
             result = result.with_remote_exit_code(code);
