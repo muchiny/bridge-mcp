@@ -406,6 +406,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_successful_write_claims_no_exit_code() {
+        // Épingle la MOITIÉ NULLE de `(response.exit_code != 0).then(...)` :
+        // remplacée par un `Some(...)` inconditionnel, une écriture réussie
+        // porterait `Some(0)`, que rien dans l'arbre n'émet.
+        let config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        let result = SshFileWriteHandler
+            .execute(
+                Some(json!({"host": "server1", "path": "/etc/x", "content": "hi"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "une écriture réussie ne pose aucun code : {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_missing_arguments() {
         let handler = SshFileWriteHandler;
         let ctx = create_test_context();
@@ -671,9 +699,15 @@ mod tests {
                 &ctx,
             )
             .await;
-        // Either succeeds via the shell pipeline or surfaces a structured
-        // error; both branches exercise the previously-uncovered code.
-        assert!(result.is_ok() || result.is_err());
+        // Ces deux appels atteignent bien `Ok` (vérifié) : le `assert!(is_ok()
+        // || is_err())` qui tenait cette ligne était une tautologie. La sortie
+        // simulée vaut 0, donc aucun code ne doit être posé — ce qui épingle
+        // ici aussi la moitié nulle de la garde, tout au long du chemin shell.
+        let result = result.expect("le chemin shell doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "sortie simulée 0 : aucun code posé : {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -730,8 +764,14 @@ mod tests {
                 &ctx,
             )
             .await;
-        // Exercises the append branch; final outcome depends on the mock
-        // connection, so both Ok and Err are acceptable here.
-        assert!(result.is_ok() || result.is_err());
+        // Ces deux appels atteignent bien `Ok` (vérifié) : le `assert!(is_ok()
+        // || is_err())` qui tenait cette ligne était une tautologie. La sortie
+        // simulée vaut 0, donc aucun code ne doit être posé — ce qui épingle
+        // ici aussi la moitié nulle de la garde, tout au long du chemin shell.
+        let result = result.expect("le chemin shell doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "sortie simulée 0 : aucun code posé : {result:?}"
+        );
     }
 }

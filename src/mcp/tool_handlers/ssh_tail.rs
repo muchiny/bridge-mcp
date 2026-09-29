@@ -320,6 +320,19 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_exit_claims_nothing_even_without_grep() {
+        // Épingle la MOITIÉ NULLE de la garde. Sans `|| exit_code == 0`, un
+        // `tail` réussi porterait `Some(0)` — une affirmation que rien dans
+        // l'arbre n'émet. La décision est isolée hors du handler : ce cas
+        // n'a besoin d'aucun exécuteur.
+        let result = with_exit_code_when_meaningful(ToolCallResult::text("ligne"), false, 0);
+        assert_eq!(
+            result.remote_exit_code, None,
+            "un tail qui réussit ne pose aucun code : {result:?}"
+        );
+    }
+
+    #[test]
     fn test_schema() {
         let handler = SshTailHandler;
         assert_eq!(handler.name(), "ssh_tail");

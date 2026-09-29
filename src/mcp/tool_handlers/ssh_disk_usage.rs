@@ -523,6 +523,14 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+        // Épingle la MOITIÉ NULLE de la garde : sans `&& response.exit_code
+        // != 0`, ce `df` réussi porterait `Some(0)` — une affirmation que rien
+        // dans l'arbre n'émet. C'est ce que `standard_tool.rs` épingle déjà
+        // pour les 399 outils du pipeline.
+        assert_eq!(
+            result.remote_exit_code, None,
+            "un df qui réussit ne pose aucun code : {result:?}"
+        );
     }
 
     #[test]
