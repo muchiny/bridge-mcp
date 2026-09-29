@@ -82,23 +82,35 @@ reading it. Every item below was reproduced before the fix and measured after.
   of the text, will start seeing errors it did not see before, for calls that
   were already failing.
 
-  **Four tools report a normal answer as an error because of this**, and it is
-  the intended trade-off rather than an oversight: `ssh_service_status` and
-  `ssh_timer_info` (`systemctl status` exits **3** for a unit that exists and
-  is stopped), `ssh_k8s_diff` (`kubectl diff` exits **1** when there *are*
-  differences) and `ssh_helm_diff` with `detailed_exitcode=true` (exits **2**
-  when there are changes). An MCP client asking `ssh_service_status` about a
-  stopped unit now gets an error result where it previously got a success, and
-  the CLI exits 6. Each of those commands uses non-zero for both "here is your
-  answer" and "I failed" — `systemctl` also exits 4 for "no such unit",
-  `kubectl diff` >1 for a real failure, and `ssh_helm_diff`'s own guard exits 4
-  when the plugin is missing — so the fail-closed reading was chosen: a
-  spurious non-zero is visible, a spurious zero is the defect being removed.
-  The new `StandardTool::NONZERO_EXIT_IS_ERROR = false` is the opt-out for a
-  tool whose non-zero exit is *always* a normal answer; no tool sets it, because
-  a per-tool boolean cannot separate those two meanings, and where the codebase
-  does want a non-zero exit ignored it already says so in the command
-  (`diff -u … || true`).
+  **Four tools are exempt, because their command answers *by* its exit code.**
+  They set the new `StandardTool::NONZERO_EXIT_IS_ERROR = false`:
+  `ssh_service_status` and `ssh_timer_info` (`systemctl status` exits **3** for
+  a unit that exists and is stopped), `ssh_k8s_diff` (`kubectl diff` exits **1**
+  when there *are* differences) and `ssh_helm_diff` (`--detailed-exitcode`
+  exits **2** when there are changes). For those four a non-zero exit stays what
+  it was before this chain: an ordinary success whose code is visible in the
+  text as `[exit:N]` and in the audit event, and the CLI exits 0.
+
+  An earlier draft of this entry defended the opposite choice as "the intended
+  trade-off". The live campaign then measured it: `ssh_service_status` on a
+  loaded-but-stopped unit — the commonest status query there is — returned
+  `isError` and exit 6 while the audit line for the same call recorded
+  `Success{exit_code:3}`, so the product contradicted itself (defect D1, cases
+  `H07`/`H07b`). Ruling **R32** settled it on that evidence: opting these four
+  out restores exactly their pre-plan behaviour, so it is a regression for
+  nobody, and it removes a daily false failure.
+
+  **What opting out costs, stated rather than hidden:** a per-tool boolean
+  cannot separate "here is your answer" from "I failed", and each of these four
+  commands uses non-zero for both — `systemctl` also exits 4 for "no such
+  unit", `kubectl diff` >1 for a real failure, `ssh_helm_diff`'s own guard exits
+  4 when the helm-diff plugin is missing. Those cases exit 0 again. That is the
+  narrower loss: it is the behaviour every one of these tools had before the
+  chain, whereas the false failure was new. `ssh_helm_diff` is the least clean
+  of the four, and its own doc comment says so: `detailed_exitcode` defaults to
+  false, so most calls of it have no normal non-zero answer at all, but a trait
+  const cannot depend on an argument and leaving it `true` would make the
+  documented flag report every diff it finds as a failed call.
 
 - **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
   struct-literal construction outside this crate must add it;

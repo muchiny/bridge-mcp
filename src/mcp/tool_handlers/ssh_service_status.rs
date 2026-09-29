@@ -68,6 +68,18 @@ impl StandardTool for ServiceStatusTool {
         }
     }"#;
 
+    /// `systemctl status` answers **by** its exit code: 0 active, 3 loaded
+    /// but inactive, 4 no such unit. A stopped unit is the commonest answer
+    /// this tool gives, and treating it as a failed call made
+    /// `bridge-mcp tool ssh_service_status … && next` stop on a correct,
+    /// read-only answer (live campaign defect D1, ruling R32). The cost of
+    /// opting out is stated rather than hidden: a per-tool boolean cannot
+    /// separate 3 from 4, so an absent unit exits 0 again — exactly what it
+    /// did before the exit-code chain, and the narrower of the two losses.
+    /// The code stays in the text (`[exit:N]`) and in the audit event either
+    /// way.
+    const NONZERO_EXIT_IS_ERROR: bool = false;
+
     const OS_GUARD: Option<OsType> = Some(OsType::Linux);
 
     fn build_command(args: &SshServiceStatusArgs, _host_config: &HostConfig) -> Result<String> {

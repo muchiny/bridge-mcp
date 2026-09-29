@@ -49,6 +49,18 @@ impl StandardTool for HelmDiffTool {
 
     const NAME: &'static str = "ssh_helm_diff";
 
+    /// `helm diff --detailed-exitcode` exits **2 when there are changes**,
+    /// which is what the caller asked for. Unlike the three other opt-outs on
+    /// this branch that mode is not the default here (`detailed_exitcode`
+    /// defaults to false), so most calls of this tool have no normal non-zero
+    /// answer at all — but a trait const cannot depend on an argument, and
+    /// leaving it `true` would make the documented flag report every diff it
+    /// finds as a failed call. What that costs: the builder's own
+    /// `exit 4` for a missing helm-diff plugin, and a real `helm` error, are
+    /// reported as successes again — unchanged from before the exit-code
+    /// chain, and visible in the text as `[exit:N]` (ruling R32).
+    const NONZERO_EXIT_IS_ERROR: bool = false;
+
     const DESCRIPTION: &'static str = "Show diff of Helm changes using the helm-diff plugin on a remote host. \
         Requires the helm-diff plugin to be installed (helm plugin install https://github.com/databus23/helm-diff). \
         subcommand: upgrade | rollback | release | revision. \

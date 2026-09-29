@@ -36,6 +36,12 @@ pub struct K8sDiffTool;
 impl StandardTool for K8sDiffTool {
     type Args = SshK8sDiffArgs;
     const NAME: &'static str = "ssh_k8s_diff";
+    /// `kubectl diff` exits **1 when there are differences** — which is the
+    /// answer this read-only tool is asked for — and >1 on a real failure.
+    /// A per-tool boolean cannot tell those apart, so the answer wins and a
+    /// genuine kubectl error exits 0 again, as it did before the exit-code
+    /// chain (ruling R32).
+    const NONZERO_EXIT_IS_ERROR: bool = false;
     const DESCRIPTION: &'static str = "Preview the changes a manifest would make against the live cluster (kubectl diff -f). \
         manifest is a remote file path (starts with /, ./, ~) or inline YAML. \
         Read-only — use before ssh_k8s_apply.";
