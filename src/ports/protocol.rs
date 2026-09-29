@@ -478,6 +478,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn a_remote_exit_code_too_large_for_i32_becomes_one() {
+        // `ExecuteCommandResponse::exit_code` est un u32 et le champ un i32.
+        // La forme de référence fait `try_from(...).unwrap_or(1)` : un code
+        // qu'aucun processus réel ne peut produire doit rester non nul et
+        // légitime, pas devenir négatif ni paniquer.
+        let code = i32::try_from(u32::MAX).unwrap_or(1);
+        assert_eq!(code, 1);
+        let r = ToolCallResult::text("x".to_string()).with_remote_exit_code(code);
+        assert_eq!(r.remote_exit_code, Some(1));
+        assert_eq!(r.is_error, Some(true));
+    }
+
     // ========================================================================
     // ToolAnnotations tests
     // ========================================================================

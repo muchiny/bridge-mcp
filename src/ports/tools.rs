@@ -1056,7 +1056,10 @@ mod tests {
                 duration_ms: 1,
             },
         );
-        // Les deux moitiés doivent survivre : la config passée ET la sortie simulée.
+        // Ce test ne prouve que la construction : la config passée survit. Il
+        // ne prouve PAS que la sortie simulée est câblée ; c'est le test
+        // `a_failing_df_reaches_the_caller_as_data` (ssh_disk_usage) qui le
+        // prouve, en faisant traverser `exit_code: 1` à un vrai handler.
         assert!(ctx.config.hosts.contains_key("server1"));
     }
 }

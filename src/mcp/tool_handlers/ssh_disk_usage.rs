@@ -215,7 +215,22 @@ impl ToolHandler for SshDiskUsageHandler {
         }
 
         let result = ToolCallResult::text(output_text);
-        Ok(post_process_disk_usage(result, &args, &response.stdout))
+        // Le post-traitement reconstruit un ToolCallResult depuis
+        // `parse_columnar_output`, donc il EFFACERAIT un champ posé avant lui —
+        // c'est exactement ce que `standard_tool.rs` appelle « un hook de
+        // présentation ne doit pas pouvoir parler par-dessus ». Le champ se pose
+        // donc APRÈS.
+        let mut result = post_process_disk_usage(result, &args, &response.stdout);
+        // Seule la forme `df -h` (sans `path`) permet de dire qu'un code non nul
+        // est un échec. Avec `path`, la commande est `du -sh <p> && df -h <p>`,
+        // qui sort 1 dans un sous-répertoire illisible tout en ayant produit un
+        // total, et dont le `&&` supprime la moitié `df` : la réponse est
+        // partielle, et la déclarer en échec serait un nouveau mensonge.
+        if args.path.is_none() && response.exit_code != 0 {
+            let code = i32::try_from(response.exit_code).unwrap_or(1);
+            result = result.with_remote_exit_code(code);
+        }
+        Ok(result)
     }
 }
 
@@ -260,6 +275,54 @@ mod tests {
     use super::*;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    /// Contexte avec l'hôte "server1" et une sortie distante simulée.
+    fn ctx_with_output(exit_code: u32, stdout: &str, stderr: &str) -> crate::ports::ToolContext {
+        let config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code,
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+                duration_ms: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_failing_df_reaches_the_caller_as_data() {
+        let ctx = ctx_with_output(1, "", "df: /nope: No such file or directory");
+        let result = SshDiskUsageHandler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat, pas une erreur");
+        assert_eq!(
+            result.remote_exit_code,
+            Some(1),
+            "un df en échec doit remonter comme donnée : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_du_answer_is_not_announced_as_a_failure() {
+        // `du -sh <p> && df -h <p>` sort 1 dans un sous-répertoire illisible
+        // TOUT EN ayant imprimé un total, et le `&&` supprime la moitié `df`.
+        // La réponse est partielle, pas fausse : ne pas la déclarer en échec.
+        let ctx = ctx_with_output(
+            1,
+            "4.0K\t/tmp/p\n",
+            "du: cannot read directory '/tmp/p/x': Permission denied",
+        );
+        let result = SshDiskUsageHandler
+            .execute(Some(json!({"host": "server1", "path": "/tmp/p"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "la forme `path=` ne peut pas distinguer le cas incomplet de l'échec : {result:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {

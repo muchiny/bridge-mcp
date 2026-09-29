@@ -115,6 +115,7 @@ impl ToolHandler for SshTailHandler {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn execute(&self, args: Option<Value>, ctx: &ToolContext) -> Result<ToolCallResult> {
         let Some(v) = args else {
             return Err(BridgeError::McpMissingParam {
@@ -239,8 +240,30 @@ impl ToolHandler for SshTailHandler {
             }
         }
 
-        Ok(ToolCallResult::text(output_text))
+        Ok(with_exit_code_when_meaningful(
+            ToolCallResult::text(output_text),
+            args.grep.is_some(),
+            response.exit_code,
+        ))
     }
+}
+
+/// Pose le code de sortie distant, sauf quand il ne veut rien dire.
+///
+/// Sans `grep`, la commande est `tail -n N <fichier>` et un code non nul
+/// signifie que le fichier n'a pas pu être lu. Avec `grep`, le statut du
+/// pipeline est celui de `grep -E`, qui sort 1 pour « aucun match »
+/// — la réponse ordinaire — et un `tail` en échec sort 1 lui aussi, donc le
+/// code ne les distingue pas.
+fn with_exit_code_when_meaningful(
+    result: ToolCallResult,
+    has_grep: bool,
+    exit_code: u32,
+) -> ToolCallResult {
+    if has_grep || exit_code == 0 {
+        return result;
+    }
+    result.with_remote_exit_code(i32::try_from(exit_code).unwrap_or(1))
 }
 
 #[cfg(test)]
@@ -248,6 +271,53 @@ mod tests {
     use super::*;
     use crate::ports::mock::{create_test_context, create_test_context_with_host};
     use serde_json::json;
+
+    /// Contexte avec l'hôte "server1" et une sortie distante simulée.
+    fn ctx_with_output(exit_code: u32, stdout: &str, stderr: &str) -> crate::ports::ToolContext {
+        let config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code,
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+                duration_ms: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_failing_tail_reaches_the_caller_as_data() {
+        let ctx = ctx_with_output(
+            1,
+            "",
+            "tail: cannot open '/var/log/nope' for reading: No such file or directory",
+        );
+        let result = SshTailHandler
+            .execute(
+                Some(json!({"host": "server1", "file": "/var/log/nope"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.remote_exit_code, Some(1), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_grep_with_no_match_is_not_a_failure() {
+        // `grep -E` sort 1 pour « aucun match », qui est la réponse
+        // ordinaire, et il masque en plus un échec de `tail`, qui sort 1 aussi
+        // — le code ne peut pas les distinguer.
+        let ctx = ctx_with_output(1, "", "");
+        let result = SshTailHandler
+            .execute(
+                Some(json!({"host": "server1", "file": "/var/log/x", "grep": "NOPE"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.remote_exit_code, None, "{result:?}");
+    }
 
     #[test]
     fn test_schema() {
