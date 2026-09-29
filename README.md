@@ -786,14 +786,15 @@ which report the code without the verdict. See the next section.
 **Which tools emit 6 — read this before relying on it.** Code 6 comes from the
 shared `StandardTool` pipeline, which is most of the catalogue but not all of
 it. 52 handlers run their remote command outside that pipeline; five of them
-now report a code of their own, and the rest **still exit 0 when the remote
-command fails**:
+now report a code of their own, 42 of the `ssh_awx_*` family raise a **bridge
+error** instead (see below the tables), and the remaining five **still exit 0
+when the remote command fails**:
 
 | Emits 6 outside the pipeline | When |
 |---|---|
 | `ssh_exec` | any non-zero exit |
 | `ssh_exec_multi` | **single host only** — see below |
-| `ssh_file_write` | any non-zero exit |
+| `ssh_file_write` | any non-zero exit **on the shell path** — content whose length reaches `sftp_write_threshold_bytes` (64 KiB by default; `0` means every write) goes over SFTP, which runs no remote process and so has no code to report |
 | `ssh_disk_usage` | only without `path` (with one, the command is `du … && df …`, which exits 1 from an unreadable subdirectory while still answering) |
 | `ssh_tail` | only without `grep` (with one, exit 1 means "no match", which is not a failure) |
 
@@ -802,7 +803,19 @@ command fails**:
 | `ssh_session_exec` | 1 | any non-zero exit. Deliberately excluded: its output parser *fabricates* exit code 1 for a missing or unparsable marker, so propagating it would announce a failure of your command where the truth is a bridge-side parse failure. |
 | `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` | 3 | any non-zero exit |
 | `ssh_exec_multi` across 2+ hosts | — | see below |
-| the `ssh_awx_*` family | 43 | **only** a curl transport failure (connection refused, timeout). An HTTP status >= 400 already surfaces as a bridge error. Except `ssh_awx_job_follow`, which does not check the status and so swallows HTTP errors too. |
+| `ssh_awx_job_follow` | 1 | either an HTTP status >= 400 or a curl transport failure. It builds its requests with the unchecked `build_api_call`, parses no status at all, and returns the raw stdout whatever happened. |
+
+**The other 42 `ssh_awx_*` tools are not in that table, and never emit 6
+either.** They route their response through
+`AwxCommandBuilder::parse_checked_response` and propagate its error with `?`. An
+HTTP status >= 400 has always raised `BridgeError::AwxApi`; since the fix in this
+cycle a **curl transport failure** (connection refused, timeout, DNS — curl
+writes `%{http_code}` = `000`) raises it too, as `AwxApi { status: 0 }`, where
+`status` is not an HTTP status but the mark of "curl obtained none". That is a
+bridge error, so it **exits 1**, not 6. The call is arguable — curl did run on
+the target host and exit non-zero — but the curl command is the bridge's own, not
+one you wrote, so failing to reach the AWX API is counted as the bridge failing
+to run your request rather than as your request failing. Non-zero either way.
 
 The live-host sweep that found this measured 44 affected tools, and all 44 are
 pipeline tools, so the measured defect is closed — but the defect *class* is
