@@ -1,0 +1,50 @@
+H-session.py — live transcript, pass 4 (2026-09-29)
+
+WHY THIS FILE EXISTS. No committed artefact tied the live evidence of this
+campaign to a commit or to a feature set. run.py:208 writes only
+{binary, host, baseline, results}, and `binary` is the bare string
+"./target/debug/bridge-mcp" — no revision, no --features, no timestamp. That
+path is not a stable identity either: `make ci` builds the bin target with
+DEFAULT features and rewrites it, which happened once mid-campaign and left
+5 of 7 hosts unloadable. run.py is not this wave's to modify, so the provenance
+is recorded here instead, and in the `about` block of H-fixes.json. It covers
+both pass-4 artefacts — this transcript and report-pass4-B.json — which the
+same binary produced minutes apart.
+
+  commit     741dcff18173b731fdae6533768449c8e27c019c  (fix/defauts-campagne-racines)
+  built      CARGO_BUILD_JOBS=2 cargo build --features full,winrm,psrp --bin bridge-mcp
+  version    bridge-mcp 3.0.0 (rev 741dcff18173-dirty)
+             "dirty" is H-fixes.json, this file and report-pass4-B.json — none
+             of the three is compiled into the binary; `git diff 741dcff -- src/
+             Cargo.toml Cargo.lock` was empty at build time.
+  config     ~/.config/mcp-ssh-bridge/config.yaml (legacy path, the one actually
+             loaded on this machine) — 7 hosts, 353 tools, security Permissive
+  host       raspberry = 192.168.1.51, Raspberry Pi 5
+  command    python3 scripts/live_probe/campaign/2026-09-19/H-session.py \
+                 ./target/debug/bridge-mcp
+  exit code  0 — the script's exit code IS its FAIL count
+
+WHAT THIS PASS ADDS over the four runs quoted in the task report. It is the
+first run in which H06b, H02b and H02c assert the error KIND instead of
+accepting any failure at all. So the three detail lines below are not decoration:
+they are the capture those needles were proven against — "timeout",
+"Session not found", "blacklist" — and none of them matches what a lost reply,
+a server that never started, or a remote EACCES would have produced.
+
+Read-only on the host: two sessions created and closed, `printf`, `cd`, `pwd`,
+`sleep 8`, `echo`, one refusal that never left this machine. Nothing written,
+no process left behind.
+
+--- output ---
+
+H04a PASS — 'session_create -> {"id":"098e4281-d06a-4792-bdef-bd2200991ff7","host":"raspberry","cwd":"/home/muchini","created_at_secs_ago":0,"last_used_secs_ago":0}'
+H04b PASS — "printf sans-nl -> {'cwd': '/home/muchini', 'exit_code': 0, 'output': 'sans-nl', 'session_id': '098e4281-d06a-4792-bdef-bd2200991ff7'}"
+H05 PASS — "cd /tmp then pwd -> {'cwd': '/tmp', 'exit_code': 0, 'output': '/tmp', 'session_id': '098e4281-d06a-4792-bdef-bd2200991ff7'}"
+H06a PASS — 'session_create -> {"id":"5237eac8-8a31-4541-a024-0e03da876452","host":"raspberry","cwd":"/home/muchini","created_at_secs_ago":0,"last_used_secs_ago":0}'
+H06b PASS — 'sleep 8 @ timeout 2 -> SSH command timeout after 2s'
+H06c PASS — "echo vivant in the SAME session -> {'cwd': '/home/muchini', 'exit_code': 0, 'output': 'vivant', 'session_id': '5237eac8-8a31-4541-a024-0e03da876452'}"
+H06d PASS — 'session still listed -> [{"id":"098e4281-d06a-4792-bdef-bd2200991ff7","host":"raspberry","cwd":"/tmp","created_at_secs_ago":8,"last_used_secs_ago":8},{"id":"5237eac8-8a31-4541-a024-0e03da876452","host":"raspberry","cwd":"/ho'
+H02b PASS — 'unknown session_id -> Session not found: H-session-unknown-id'
+H02c PASS — 'blacklisted command -> Command denied: Command matches blacklist pattern: >\\s*/dev/(sd|mmcblk|nvme)'
+
+0 FAIL(s)
