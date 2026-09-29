@@ -198,7 +198,8 @@ nothing in the text below would otherwise tell you which is which.
   PowerShell sessions too, where `exit` ends the shell the same way.
 
 - **`ssh_file_write`, `ssh_disk_usage` and `ssh_tail` now exit 6 when the
-  remote command fails, and mark the result `isError`.** All three used to exit
+  remote command fails, and mark the result `isError` — two of them under a
+  condition stated below.** All three used to exit
   **0** with the failure visible only in the result text, so
   `bridge-mcp tool ssh_file_write … && next` ran `next` after a refused write.
   They now use `ToolCallResult::with_remote_exit_code`, the same constructor the
@@ -210,8 +211,8 @@ nothing in the text below would otherwise tell you which is which.
   `ssh_disk_usage` reports a code only when called **without** `path`: with one,
   the command is `du -sh <p> && df -h <p>`, which exits 1 from an unreadable
   subdirectory *while having printed a total*, and the `&&` has already
-  suppressed the `df` half — a partial answer, which calling a failure would be a
-  new false claim in the opposite direction. `ssh_tail` reports a code only
+  suppressed the `df` half. That is a partial answer, and calling it a failure
+  would be a new false claim in the opposite direction. `ssh_tail` reports a code only
   **without** `grep`: with one, the pipeline's status is `grep -E`'s, and exit 1
   there means "no match", the ordinary answer. `ssh_file_write` is
   unconditional on its shell path; its SFTP path (content reaching
