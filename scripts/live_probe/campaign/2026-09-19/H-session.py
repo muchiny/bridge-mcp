@@ -17,14 +17,17 @@ Cases:
   H02b generates the audit FAILURE trail               exec on an unknown session_id
   H02c generates the audit DENIED trail                a blacklisted command
 
-H02b and H02c are TRAIL GENERATORS, not assertions. Their `check` passes on any
-error at all, which is deliberate: the property under test is that the resulting
-line in the bridge host's audit log carries `tool_name`, and that log is not
-reachable from here. The proof is the audit line, asserted by the caller; a PASS
-printed below means only that the trail was produced. Because that check is so
-weak, H02c RAISES when the H04/H05 session is missing instead of falling back to
-an unknown session id: with a fallback it would degrade into a second H02b, never
-reach the blacklist, and still print PASS.
+H02b and H02c are TRAIL GENERATORS first: the property under test is that the
+resulting line in the bridge host's audit log carries `tool_name`, and that log
+is not reachable from here, so the proof is the audit line and the caller asserts
+it. But a generator that prints PASS on any error at all cannot even show the
+trail it produced is the right one, so both now assert the error KIND, and so
+does H06b. Needles: "Session not found" (H02b), "blacklist" (H02c), "timeout"
+(H06b). A lost reply, a server that never started, and a refusal of the wrong
+kind therefore FAIL where all three used to pass. H02c additionally RAISES when
+the H04/H05 session is missing instead of falling back to an unknown session id:
+with a fallback it would degrade into a second H02b, never reach the blacklist,
+and - before the kind assertion - still print PASS.
 
 Read-only on the host: nothing is written, no file and no process survives.
 `sleep 8` against `timeout_seconds=2` overruns by 6 s, inside the 10 s
@@ -112,6 +115,32 @@ def envelope(msg):
         return None
 
 
+def error_text(msg):
+    """Everything the server said about a call that did not succeed.
+
+    A refusal reaches us in one of two shapes and the case should not have to
+    know which: `handle_tools_call` turns a handler's `Err` into a *successful*
+    result carrying `isError: true` with the message in its text content
+    (src/mcp/server.rs), while a malformed or unroutable request comes back as a
+    JSON-RPC `error`. Both are concatenated here.
+
+    This is also why a lost reply is fatal rather than a pass: `Server.call`
+    answers a dead or silent server with its own "server closed stdout" / "no
+    answer", which contains none of the kind needles below, so the case FAILS.
+    `envelope(m) is None` — what H06b used to assert — could not tell those
+    apart, and a missing reply passed as "timed out as designed".
+    """
+    parts = []
+    err = msg.get("error")
+    if isinstance(err, dict):
+        parts.append(str(err.get("message", err)))
+    elif err is not None:
+        parts.append(str(err))
+    if msg.get("result", {}).get("isError"):
+        parts.append(text_of(msg))
+    return "\n".join(parts)
+
+
 def check(cid, cond, detail):
     global FAILS
     print(f"{cid} {'PASS' if cond else 'FAIL'} — {str(detail)[:300]!r}")
@@ -157,9 +186,14 @@ def main():
         if sid2:
             m = s.tool("ssh_session_exec",
                        {"session_id": sid2, "command": "sleep 8", "timeout_seconds": 2})
-            timed_out = envelope(m) is None
-            check("H06b", timed_out,
-                  f"sleep 8 @ timeout 2 -> {json.dumps(m)[:300]}")
+            # The KIND, not merely "no envelope": `BridgeError::SshTimeout`
+            # displays as "SSH command timeout after 2s" (src/error.rs:52). The
+            # old assertion was `envelope(m) is None`, which a lost reply, a
+            # dead server and any other failure satisfy just as well — it read
+            # every one of them as "timed out as designed".
+            err = error_text(m)
+            check("H06b", "timeout" in err.lower(),
+                  f"sleep 8 @ timeout 2 -> {err or json.dumps(m)[:300]}")
 
             m = s.tool("ssh_session_exec", {"session_id": sid2, "command": "echo vivant"})
             env = envelope(m)
@@ -178,8 +212,13 @@ def main():
         # covered by every ssh_exec / ssh_user_info line H-fixes.json leaves.
         m = s.tool("ssh_session_exec",
                    {"session_id": "H-session-unknown-id", "command": "echo x"})
-        check("H02b", "error" in m or m.get("result", {}).get("isError"),
-              f"unknown session_id -> {json.dumps(m)[:200]}")
+        # `BridgeError::SessionNotFound` displays as "Session not found: <id>"
+        # (src/error.rs:79). Asserting the kind is what makes this a case: the
+        # old form passed on ANY error, so a server that could not start, a
+        # blacklist refusal or a lost reply all produced the same PASS.
+        err = error_text(m)
+        check("H02b", "Session not found" in err,
+              f"unknown session_id -> {err or json.dumps(m)[:200]}")
 
         # Denied by the local validator BEFORE any SSH traffic: `>\\s*/dev/(sd|
         # mmcblk|nvme)` is a blacklist pattern, and ssh_session_exec is not
@@ -204,8 +243,15 @@ def main():
         m = s.tool("ssh_session_exec",
                    {"session_id": sid,
                     "command": "echo probe > /dev/sdzz-bridge-probe"})
-        check("H02c", "error" in m or m.get("result", {}).get("isError"),
-              f"blacklisted command -> {json.dumps(m)[:200]}")
+        # The kind again: `BridgeError::CommandDenied` displays as "Command
+        # denied: Command matches blacklist pattern: <pattern>"
+        # (src/error.rs:59, src/security/validator.rs:167). An EACCES from the
+        # host would also be an error, and would mean the pattern was missing
+        # from the config and the command actually travelled — which is exactly
+        # the outcome this case must not report as a pass.
+        err = error_text(m)
+        check("H02c", "blacklist" in err,
+              f"blacklisted command -> {err or json.dumps(m)[:200]}")
     finally:
         for leftover in (sid, sid2):
             if leftover:
