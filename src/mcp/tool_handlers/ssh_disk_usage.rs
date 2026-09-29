@@ -305,6 +305,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_exit_code_survives_the_table_rebuild() {
+        // Avec un stdout vide, `post_process_disk_usage` rend le résultat tel
+        // quel : le champ survivrait quel que soit l'ordre. Ici stdout a un
+        // en-tête et une ligne, donc `parse_columnar_output` rend `Some` et le
+        // résultat est réellement reconstruit — un champ posé AVANT serait
+        // effacé.
+        let ctx = ctx_with_output(
+            1,
+            "Filesystem Size Used Avail Use% Mounted\n/dev/sda1 10G 5G 5G 50% /\n",
+            "df: /proc/x: Permission denied",
+        );
+        let result = SshDiskUsageHandler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|c| matches!(c, crate::ports::ToolContent::App { .. })),
+            "le test doit traverser la reconstruction du tableau : {result:?}"
+        );
+        assert_eq!(result.remote_exit_code, Some(1), "{result:?}");
+    }
+
+    #[tokio::test]
     async fn a_partial_du_answer_is_not_announced_as_a_failure() {
         // `du -sh <p> && df -h <p>` sort 1 dans un sous-répertoire illisible
         // TOUT EN ayant imprimé un total, et le `&&` supprime la moitié `df`.
