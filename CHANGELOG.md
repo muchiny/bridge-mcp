@@ -463,6 +463,20 @@ nothing in the text below would otherwise tell you which is which.
   CLI; the docs previously implied otherwise.
 - `limits.max_concurrent_commands` does not apply to CLI invocations, which are
   one process each.
+- **Nothing tests the exit-6 seam end to end.** No test at any level runs a
+  `bridge-mcp` process and observes its exit code, so the headline claim — that
+  a failed remote command now makes the CLI exit 6 — is assembled from two
+  separately-tested halves that nothing exercises together: `--lib` unit tests
+  on the `ToolCallResult` a handler returns, and unit tests on `tool_exit_code`
+  (`src/cli/runner.rs:64`) in isolation. **`make e2e-docker` does not close
+  this**, contrary to what an earlier note claimed:
+  `test_docker_ssh_exec_nonzero_exit` (`tests/e2e_docker.rs:277-294`,
+  `#[ignore]`, and therefore skipped by `make ci`) asserts on the struct the
+  handler returned and never spawns a process or reads a process exit status.
+  Closing it needs a test that actually runs the binary — spawn
+  `env!("CARGO_BIN_EXE_bridge-mcp")` with `tool …` against a reachable host and
+  assert on `status.code()`.
+
 - **52 handlers still exit 0 when their remote command fails**, because they run
   it outside the `StandardTool` pipeline that the exit-code fix above lives in.
   They implement `ToolHandler` directly, and each still does `warn!(…)` on a

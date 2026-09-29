@@ -819,9 +819,12 @@ to run your request rather than as your request failing. Non-zero either way.
 
 The live-host sweep that found this measured 44 affected tools, and all 44 are
 pipeline tools, so the measured defect is closed — but the defect *class* is
-not, and the handlers above are its unmeasured remainder (CHANGELOG has the
-chain). Until it is closed, treat exit 6 as "this tool told me the remote
-command failed", never exit 0 as "the remote command succeeded".
+not, and the handlers still listed above as exiting 0 are its unmeasured
+remainder (CHANGELOG has the chain). The five that now emit 6 were brought into
+line later in the same cycle, by unit test and mutation rather than on a host —
+so they have left the remainder without ever having been measured on one. Until
+it is closed, treat exit 6 as "this tool told me the remote command failed",
+never exit 0 as "the remote command succeeded".
 
 **`ssh_exec` and `ssh_exec_multi` emit 6 without marking the call an error.**
 You wrote their command, and plenty of ordinary commands exit non-zero *as

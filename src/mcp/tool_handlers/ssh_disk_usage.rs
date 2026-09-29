@@ -234,15 +234,22 @@ impl ToolHandler for SshDiskUsageHandler {
         // fabriquerait un échec — l'erreur exactement inverse de ce que ce
         // plan corrige.
         //
-        // Mesuré (GNU coreutils 9.7, WSL2) : le cas redouté ne se produit pas.
+        // Mesuré (GNU coreutils 9.7, WSL2) : le cas redouté ne se produit pas
+        // POUR EACCES NI POUR ENOENT — et il se produit pour les autres errno.
         // Pour `df` SANS opérande, un point de montage listé dont `stat`
         // échoue avec EACCES (droits) ou ENOENT (le chemin ne se résout plus)
-        // est omis en silence, stderr demeure vide et le code vaut 0 — c'est
-        // le cas courant d'un utilisateur non root d'un hôte containerd/K3s.
-        // NON MESURÉ : la version de coreutils de l'hôte de référence
-        // (Raspberry Pi K3s), et un échec de `stat` portant un autre errno
-        // (NFS mort, FUSE cassé), qui lui n'est pas omis. Une seule commande
-        // trancherait, lancée depuis cet hôte : `df -h >/dev/null 2>&1; echo $?`.
+        // est omis en silence, stderr demeure vide et le code vaut 0 : c'est
+        // le cas courant d'un utilisateur non root d'un hôte containerd/K3s,
+        // et c'est le seul cas ainsi vérifié.
+        // Un `stat` qui échoue avec un AUTRE errno — ESTALE d'un montage NFS
+        // périmé, EIO — suit l'autre chemin de coreutils : message vers
+        // stderr, code non nul, et les autres systèmes de fichiers listés
+        // quand même. C'est exactement le scénario redouté, intact, et cette
+        // garde déclarerait cette réponse-là en échec. NON MESURÉ ici,
+        // contrairement aux deux précédents.
+        // NON MESURÉ aussi : la version de coreutils de l'hôte de référence
+        // (Raspberry Pi K3s). Une seule commande trancherait, lancée depuis
+        // cet hôte : `df -h >/dev/null 2>&1; echo $?`.
         if args.path.is_none() && response.exit_code != 0 {
             let code = i32::try_from(response.exit_code).unwrap_or(1);
             result = result.with_remote_exit_code(code);
