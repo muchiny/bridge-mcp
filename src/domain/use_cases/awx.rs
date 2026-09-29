@@ -348,9 +348,23 @@ mod tests {
         let err = AwxCommandBuilder::parse_checked_response(&raw)
             .expect_err("un échec de transport ne doit pas être un succès");
         let msg = err.to_string();
+        assert!(msg.contains("000"), "l'erreur doit citer le 000 : {msg}");
         assert!(
-            msg.contains("000") || msg.to_lowercase().contains("transport"),
+            msg.to_lowercase().contains("transport"),
             "l'erreur doit nommer l'échec de transport : {msg}"
+        );
+    }
+
+    #[test]
+    fn text_without_a_marker_is_returned_unchanged() {
+        // Cas documenté : sans marqueur, le texte ne vient pas de
+        // `build_api_call_checked` (ou curl est mort avant son write-out,
+        // tué par le délai SSH) et passe tel quel, en succès. Ce test
+        // fait de cette phrase un garde : la changer doit être délibéré.
+        let raw = "{\"count\":1}";
+        assert_eq!(
+            AwxCommandBuilder::parse_checked_response(raw).expect("sans marqueur : Ok"),
+            raw
         );
     }
 

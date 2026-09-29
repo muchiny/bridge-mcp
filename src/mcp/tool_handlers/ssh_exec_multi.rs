@@ -73,6 +73,18 @@ struct HostResult {
     duration_ms: Option<u64>,
 }
 
+/// Le code de sortie à remonter, ou `None` quand il n'a pas de référent unique.
+///
+/// Le garde compte les hôtes *demandés*, pas seulement les résultats : une
+/// tâche qui panique fait perdre un `HostResult`, et deux hôtes dont un
+/// panique donnent un seul résultat, qui n'est pas un appel mono-hôte.
+fn single_host_exit(results: &[HostResult], requested_hosts: usize) -> Option<u32> {
+    match results {
+        [only] if requested_hosts == 1 => only.exit_code,
+        _ => None,
+    }
+}
+
 /// Aggregated results for all hosts
 #[derive(Debug, Serialize)]
 struct MultiExecResult {
@@ -318,14 +330,7 @@ impl ToolHandler for SshExecMultiHandler {
         // `exit_code` vaut `None` quand l'hôte n'a rien exécuté (annulation,
         // quota de débit, échec de connexion) : ce cas ne prétend alors rien
         // non plus.
-        // Le garde compte le nombre d'hôtes demandés, pas seulement de résultats :
-        // une tâche qui panique fait perdre un `HostResult`, et deux hôtes
-        // dont un panique donnent un seul résultat, qui n'est pas un appel
-        // mono-hôte.
-        let single_host_exit = match results.as_slice() {
-            [only] if args.hosts.len() == 1 => only.exit_code,
-            _ => None,
-        };
+        let single_host_exit = single_host_exit(&results, args.hosts.len());
 
         // Optional: compute a multi-host diff (Sprint 3 Phase B.7).
         // Runs against whatever succeeded — failed hosts still appear
@@ -578,6 +583,35 @@ mod tests {
     use crate::ports::mock::create_test_context;
     use serde_json::json;
     use std::collections::HashMap;
+
+    fn host_result(exit_code: Option<u32>) -> HostResult {
+        HostResult {
+            host: "h".to_string(),
+            success: exit_code == Some(0),
+            exit_code,
+            output: None,
+            error: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn single_host_exit_reports_the_code_for_one_requested_host() {
+        assert_eq!(single_host_exit(&[host_result(Some(1))], 1), Some(1));
+    }
+
+    #[test]
+    fn single_host_exit_is_none_when_a_task_was_lost() {
+        // Deux hôtes demandés, un seul résultat (JoinError) : pas mono-hôte.
+        assert_eq!(single_host_exit(&[host_result(Some(1))], 2), None);
+    }
+
+    #[test]
+    fn single_host_exit_is_none_for_several_results_or_no_code() {
+        let two = [host_result(Some(1)), host_result(Some(2))];
+        assert_eq!(single_host_exit(&two, 2), None);
+        assert_eq!(single_host_exit(&[host_result(None)], 1), None);
+    }
 
     fn create_test_context_with_hosts() -> ToolContext {
         let mut hosts = HashMap::new();

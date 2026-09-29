@@ -160,6 +160,9 @@ pub enum BridgeError {
     /// AWX (expired token → 401, RBAC → 403, bad id → 404, validation → 400) is
     /// reported as an error instead of being handed to the model as an opaque
     /// success. `detail` carries the AWX `detail`/`__all__` message when present.
+    ///
+    /// `status: 0` is not an HTTP status: it means curl obtained none (transport
+    /// failure: connection refused, timeout, DNS; curl's `%{http_code}` was `000`).
     #[error("AWX API error: HTTP {status} - {detail}")]
     AwxApi { status: u16, detail: String },
 
