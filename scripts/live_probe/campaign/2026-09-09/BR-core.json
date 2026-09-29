@@ -1,0 +1,1054 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": "",
+    "SBX": "/tmp/bridge-test-0909/lane-b",
+    "SMALL": "/tmp/bridge-test-0909/lane-b/small.txt",
+    "MID": "/tmp/bridge-test-0909/lane-b/mid.txt",
+    "BIG": "/tmp/bridge-test-0909/lane-b/big.txt",
+    "ARC": "/tmp/bridge-test-0909/lane-b/arc.tar",
+    "OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "CHART_MULTI": "/home/muchini/media-stack-k8s/charts/plex",
+    "CHART_SINGLE": "/home/muchini/media-stack-k8s/charts/backup"
+  },
+  "cases": [
+    {
+      "id": "BR01",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {},
+      "expect": "ok"
+    },
+    {
+      "id": "BR02",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "limit": 3
+      },
+      "expect": "error=is not supported by `ssh_k3s_status`"
+    },
+    {
+      "id": "BR03",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "columns": [
+          "A"
+        ]
+      },
+      "expect": "error=it returns RawText output"
+    },
+    {
+      "id": "BR04",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "jq_filter": "."
+      },
+      "expect": "error=it returns RawText output"
+    },
+    {
+      "id": "BR05",
+      "owner": "campaign",
+      "tool": "ssh_k3s_status",
+      "args": {
+        "output_format": "tsv"
+      },
+      "expect": "error=it returns RawText output"
+    },
+    {
+      "id": "BR06",
+      "owner": "campaign",
+      "tool": "ssh_firewall_status",
+      "args": {
+        "limit": 3
+      },
+      "expect": "error=`limit` is not supported"
+    },
+    {
+      "id": "BR07",
+      "owner": "campaign",
+      "tool": "ssh_firewall_status",
+      "args": {},
+      "expect": "ok"
+    },
+    {
+      "id": "BR08",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${SMALL}"
+      },
+      "expect": [
+        "lines=100",
+        "first=1"
+      ]
+    },
+    {
+      "id": "BR09",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${SMALL}",
+        "limit": 10
+      },
+      "expect": "error=is not supported by `ssh_file_read`"
+    },
+    {
+      "id": "BR10",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${SMALL}",
+        "offset": 95
+      },
+      "expect": "lines<=6"
+    },
+    {
+      "id": "BR11",
+      "owner": "campaign",
+      "tool": "ssh_history",
+      "args": {
+        "limit": 3
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BR13",
+      "owner": "campaign",
+      "tool": "ssh_find",
+      "args": {
+        "path": "${SBX}",
+        "type": "f"
+      },
+      "expect": "lines=4"
+    },
+    {
+      "id": "BR14",
+      "owner": "campaign",
+      "tool": "ssh_find",
+      "args": {
+        "path": "${SBX}",
+        "limit": 2
+      },
+      "expect": "error=Unknown argument `limit`",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BR15",
+      "owner": "campaign",
+      "tool": "ssh_disk_usage",
+      "args": {
+        "path": "${SBX}"
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BR16",
+      "owner": "campaign",
+      "tool": "ssh_disk_usage",
+      "args": {
+        "limit": 2
+      },
+      "expect": "error=it returns RawText output"
+    },
+    {
+      "id": "BR17",
+      "owner": "campaign",
+      "tool": "ssh_tail",
+      "args": {
+        "file": "${MID}",
+        "lines": 5
+      },
+      "expect": "lines=5"
+    },
+    {
+      "id": "BR18",
+      "owner": "campaign",
+      "tool": "ssh_tail",
+      "args": {
+        "file": "${MID}",
+        "lines": 5,
+        "columns": [
+          "A"
+        ]
+      },
+      "expect": "error=is not supported"
+    },
+    {
+      "id": "BR19",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {},
+      "expect": "lines=7"
+    },
+    {
+      "id": "BR20",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {
+        "limit": 2
+      },
+      "expect": "lines=3"
+    },
+    {
+      "id": "BR21",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {
+        "limit": 1
+      },
+      "expect": "lines=2"
+    },
+    {
+      "id": "BR22",
+      "owner": "campaign",
+      "tool": "ssh_alert_list",
+      "args": {},
+      "expect": "lines=10"
+    },
+    {
+      "id": "BR23",
+      "owner": "campaign",
+      "tool": "ssh_alert_list",
+      "args": {
+        "limit": 2
+      },
+      "expect": "lines=3"
+    },
+    {
+      "id": "BR24",
+      "owner": "discover",
+      "tool": "ssh_alert_list",
+      "args": {
+        "columns": [
+          "CPU"
+        ]
+      },
+      "expect": "lines=10"
+    },
+    {
+      "id": "BR25",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {},
+      "expect": "re=/dev/"
+    },
+    {
+      "id": "BR26",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "columns": [
+          "FILESYSTEM",
+          "USE%"
+        ]
+      },
+      "expect": "first=FILESYSTEM\tUSE%"
+    },
+    {
+      "id": "BR27",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "columns": [
+          "USE%",
+          "FILESYSTEM"
+        ]
+      },
+      "expect": "first=FILESYSTEM\tUSE%"
+    },
+    {
+      "id": "BR28",
+      "owner": "discover",
+      "tool": "ssh_storage_df",
+      "args": {
+        "columns": [
+          "NOPE"
+        ]
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BR29",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "limit": 1
+      },
+      "expect": "lines=2"
+    },
+    {
+      "id": "BR30",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "columns": [
+          "FILESYSTEM"
+        ],
+        "limit": 2
+      },
+      "expect": [
+        "lines=3",
+        "nore=\t"
+      ]
+    },
+    {
+      "id": "BR31",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "limit": 0
+      },
+      "expect": "error=limit must be at least 1"
+    },
+    {
+      "id": "BR32",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {},
+      "expect": "first=USER\tUID\tGID\tHOME\tSHELL"
+    },
+    {
+      "id": "BR33",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {
+        "columns": [
+          "user",
+          "shell"
+        ]
+      },
+      "expect": "first=USER\tSHELL"
+    },
+    {
+      "id": "BR34",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {
+        "system": true,
+        "limit": 5
+      },
+      "expect": "lines=6"
+    },
+    {
+      "id": "BR35",
+      "owner": "campaign",
+      "tool": "ssh_group_list",
+      "args": {
+        "limit": 3
+      },
+      "expect": "lines=4"
+    },
+    {
+      "id": "BR36",
+      "owner": "campaign",
+      "tool": "ssh_service_list",
+      "args": {
+        "state": "running",
+        "columns": [
+          "UNIT",
+          "ACTIVE"
+        ],
+        "limit": 3
+      },
+      "expect": "lines=4"
+    },
+    {
+      "id": "BR37",
+      "owner": "campaign",
+      "tool": "ssh_service_list",
+      "args": {
+        "state": "running",
+        "jq_filter": "."
+      },
+      "expect": "error=it returns Tabular output"
+    },
+    {
+      "id": "BR38",
+      "owner": "campaign",
+      "tool": "ssh_journal_boots",
+      "args": {},
+      "expect": "ok"
+    },
+    {
+      "id": "BR39",
+      "owner": "campaign",
+      "tool": "ssh_journal_boots",
+      "args": {
+        "limit": 1
+      },
+      "expect": "lines<=2"
+    },
+    {
+      "id": "BR40",
+      "owner": "campaign",
+      "tool": "ssh_process_list",
+      "args": {
+        "filter": "k3s",
+        "limit": 2,
+        "columns": [
+          "USER",
+          "%CPU"
+        ]
+      },
+      "expect": "lines=3"
+    },
+    {
+      "id": "BR41",
+      "owner": "campaign",
+      "tool": "ssh_net_connections",
+      "args": {
+        "listening": true,
+        "limit": 3
+      },
+      "expect": "lines=4"
+    },
+    {
+      "id": "BR42",
+      "owner": "campaign",
+      "tool": "ssh_cron_history",
+      "args": {
+        "lines": 50,
+        "limit": 3
+      },
+      "expect": "lines<=4"
+    },
+    {
+      "id": "BR43",
+      "owner": "campaign",
+      "tool": "ssh_log_aggregate",
+      "args": {
+        "log_files": "/var/log/syslog",
+        "limit": 2
+      },
+      "expect": "lines<=3"
+    },
+    {
+      "id": "BR44",
+      "owner": "campaign",
+      "tool": "ssh_backup_list",
+      "args": {
+        "archive_file": "${ARC}"
+      },
+      "expect": [
+        "re=SMALL\\.TXT",
+        "nore=(?m)^small\\.txt"
+      ]
+    },
+    {
+      "id": "BR45",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ]
+      },
+      "expect": "json"
+    },
+    {
+      "id": "BR46",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load"
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BR47",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "memory"
+        ],
+        "jq_filter": ".memory.total_bytes"
+      },
+      "expect": "re=^[0-9]+$"
+    },
+    {
+      "id": "BR48",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": "[.load.load_1min,.load.load_5min]",
+        "output_format": "tsv"
+      },
+      "expect": "re=^\\S+\\t\\S+$"
+    },
+    {
+      "id": "BR49",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "cpu"
+        ],
+        "columns": [
+          "cpu"
+        ]
+      },
+      "expect": "error=it returns Json output"
+    },
+    {
+      "id": "BR50",
+      "owner": "discover",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "limit": 1
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BR51",
+      "owner": "campaign",
+      "tool": "ssh_ls",
+      "args": {
+        "path": "${SBX}"
+      },
+      "expect": "json"
+    },
+    {
+      "id": "BR52",
+      "owner": "campaign",
+      "tool": "ssh_ls",
+      "args": {
+        "path": "${SBX}",
+        "limit": 2
+      },
+      "expect": "count=\"name\":2"
+    },
+    {
+      "id": "BR53",
+      "owner": "campaign",
+      "tool": "ssh_ls",
+      "args": {
+        "path": "${SBX}",
+        "jq_filter": ".[].name"
+      },
+      "expect": "lines=4"
+    },
+    {
+      "id": "BR54",
+      "owner": "campaign",
+      "tool": "ssh_ls",
+      "args": {
+        "path": "${SBX}",
+        "jq_filter": ".[] | [.name, .size]",
+        "output_format": "tsv"
+      },
+      "expect": [
+        "lines=4",
+        "re=\\t"
+      ]
+    },
+    {
+      "id": "BR55",
+      "owner": "campaign",
+      "tool": "ssh_ls",
+      "args": {
+        "path": "${SBX}",
+        "jq_filter": ".[].name",
+        "limit": 2
+      },
+      "expect": "lines=2"
+    },
+    {
+      "id": "BR56",
+      "owner": "campaign",
+      "tool": "ssh_ls",
+      "args": {
+        "path": "${SBX}",
+        "yq_filter": "."
+      },
+      "expect": "error=it returns Json output"
+    },
+    {
+      "id": "BR57",
+      "owner": "campaign",
+      "tool": "ssh_k8s_version",
+      "args": {},
+      "expect": "json"
+    },
+    {
+      "id": "BR58",
+      "owner": "campaign",
+      "tool": "ssh_k8s_version",
+      "args": {
+        "jq_filter": ".clientVersion.gitVersion"
+      },
+      "expect": "re=^\"v1\\."
+    },
+    {
+      "id": "BR59",
+      "owner": "campaign",
+      "tool": "ssh_k8s_version",
+      "args": {
+        "jq_filter": "[.clientVersion.gitVersion]",
+        "output_format": "tsv"
+      },
+      "expect": "re=^v1\\."
+    },
+    {
+      "id": "BR60",
+      "owner": "campaign",
+      "tool": "ssh_k8s_version",
+      "args": {
+        "client_only": true,
+        "jq_filter": ".serverVersion"
+      },
+      "expect": "eq=null"
+    },
+    {
+      "id": "BR61",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b"
+      },
+      "expect": "re=kind:"
+    },
+    {
+      "id": "BR62",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "yq_filter": ".kind"
+      },
+      "expect": "re=Deployment"
+    },
+    {
+      "id": "BR63",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "yq_filter": "[.kind,.metadata.name]",
+        "output_format": "tsv"
+      },
+      "expect": "re=\\t"
+    },
+    {
+      "id": "BR64",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "yq_filter": ".kind",
+        "limit": 1
+      },
+      "expect": "lines=1"
+    },
+    {
+      "id": "BR65",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "limit": 1
+      },
+      "expect": "count=---:1"
+    },
+    {
+      "id": "BR66",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "jq_filter": "."
+      },
+      "expect": "error=it returns Yaml output"
+    },
+    {
+      "id": "BR67",
+      "owner": "campaign",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_MULTI}",
+        "release": "probe-b",
+        "columns": [
+          "kind"
+        ]
+      },
+      "expect": "error=it returns Yaml output"
+    },
+    {
+      "id": "BR68",
+      "owner": "discover",
+      "tool": "ssh_helm_template",
+      "args": {
+        "chart": "${CHART_SINGLE}",
+        "release": "probe-b",
+        "limit": 1
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BR69",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system"
+      },
+      "expect": "re=Running"
+    },
+    {
+      "id": "BR70",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "limit": 3
+      },
+      "expect": "lines=4"
+    },
+    {
+      "id": "BR71",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "columns": [
+          "NAME",
+          "STATUS"
+        ],
+        "limit": 3
+      },
+      "expect": [
+        "lines=4",
+        "first=NAME\tSTATUS"
+      ]
+    },
+    {
+      "id": "BR72",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "json",
+        "jq_filter": ".items[].metadata.name"
+      },
+      "expect": "lines>=3"
+    },
+    {
+      "id": "BR73",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "json",
+        "jq_filter": ".items[] | [.metadata.name,.status.phase]",
+        "output_format": "tsv"
+      },
+      "expect": "re=\\tRunning"
+    },
+    {
+      "id": "BR74",
+      "owner": "discover",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "json",
+        "limit": 2
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BR75",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "yaml",
+        "yq_filter": ".kind"
+      },
+      "expect": "re=Pod|List"
+    },
+    {
+      "id": "BR76",
+      "owner": "discover",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "yaml",
+        "limit": 1
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BR77",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "name",
+        "limit": 3
+      },
+      "expect": [
+        "lines=3",
+        "nore=^POD"
+      ]
+    },
+    {
+      "id": "BR78",
+      "owner": "campaign",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "name"
+      },
+      "expect": [
+        "lines>=3",
+        "re=^pod/"
+      ]
+    },
+    {
+      "id": "BR79",
+      "owner": "discover",
+      "tool": "ssh_k8s_get",
+      "args": {
+        "resource": "pods",
+        "namespace": "kube-system",
+        "output": "json",
+        "columns": [
+          "NAME"
+        ]
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BR80",
+      "owner": "campaign",
+      "tool": "ssh_k8s_api_resources",
+      "args": {
+        "limit": 5
+      },
+      "expect": "lines=6"
+    },
+    {
+      "id": "BR81",
+      "owner": "campaign",
+      "tool": "ssh_k8s_api_resources",
+      "args": {
+        "columns": [
+          "NAME",
+          "KIND"
+        ],
+        "limit": 5
+      },
+      "expect": [
+        "lines=6",
+        "first=NAME\tKIND"
+      ]
+    },
+    {
+      "id": "BR82",
+      "owner": "campaign",
+      "tool": "ssh_k8s_top",
+      "args": {
+        "resource_type": "nodes"
+      },
+      "expect": "re=server"
+    },
+    {
+      "id": "BR83",
+      "owner": "campaign",
+      "tool": "ssh_k8s_top",
+      "args": {
+        "resource_type": "pods",
+        "all_namespaces": true,
+        "limit": 3
+      },
+      "expect": "lines=4"
+    },
+    {
+      "id": "BR84",
+      "owner": "discover",
+      "tool": "ssh_k8s_describe",
+      "args": {
+        "resource": "deployment",
+        "name": "coredns",
+        "namespace": "kube-system",
+        "limit": 5
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BR85",
+      "owner": "campaign",
+      "tool": "ssh_k8s_describe",
+      "args": {
+        "resource": "deployment",
+        "name": "coredns",
+        "namespace": "kube-system",
+        "jq_filter": "."
+      },
+      "expect": "error=jq_filter requires JSON output, but command returned plain text"
+    },
+    {
+      "id": "BR86",
+      "owner": "campaign",
+      "tool": "ssh_storage_lsblk",
+      "args": {},
+      "expect": "re=(mmcblk|nvme|sd)"
+    },
+    {
+      "id": "BR87",
+      "owner": "campaign",
+      "tool": "ssh_storage_lsblk",
+      "args": {
+        "columns": [
+          "NAME",
+          "SIZE"
+        ],
+        "limit": 3
+      },
+      "expect": [
+        "lines=4",
+        "first=NAME\tSIZE"
+      ]
+    },
+    {
+      "id": "BR88",
+      "owner": "campaign",
+      "tool": "ssh_storage_lsblk",
+      "args": {
+        "json": true,
+        "jq_filter": ".blockdevices[].name"
+      },
+      "expect": "lines>=1"
+    },
+    {
+      "id": "BR89",
+      "owner": "discover",
+      "tool": "ssh_storage_lsblk",
+      "args": {
+        "json": true,
+        "columns": [
+          "NAME"
+        ]
+      },
+      "expect": "exit=0"
+    },
+    {
+      "id": "BR90",
+      "owner": "campaign",
+      "tool": "ssh_service_logs",
+      "args": {
+        "service": "k3s",
+        "lines": 5,
+        "output": "json",
+        "jq_filter": ".MESSAGE"
+      },
+      "expect": "error=jq_filter requires JSON output"
+    },
+    {
+      "id": "BR91",
+      "owner": "discover",
+      "tool": "ssh_service_logs",
+      "args": {
+        "service": "k3s",
+        "lines": 5,
+        "limit": 2
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "BR92",
+      "owner": "campaign",
+      "tool": "ssh_crictl_pods",
+      "args": {
+        "sudo": true,
+        "limit": 2
+      },
+      "expect": [
+        "json",
+        "count=\"id\":2"
+      ]
+    },
+    {
+      "id": "BR93",
+      "owner": "discover",
+      "tool": "ssh_crictl_images",
+      "args": {
+        "sudo": true,
+        "columns": [
+          "IMAGE",
+          "TAG"
+        ],
+        "limit": 3
+      },
+      "expect": [
+        "json"
+      ]
+    },
+    {
+      "id": "BR94",
+      "owner": "campaign",
+      "tool": "ssh_crictl_ps",
+      "args": {
+        "sudo": true,
+        "limit": 2
+      },
+      "expect": [
+        "json",
+        "count=\"id\":2"
+      ]
+    },
+    {
+      "id": "BR95",
+      "owner": "env",
+      "tool": "ssh_k8s_who_can",
+      "args": {
+        "verb": "get",
+        "resource": "pods"
+      },
+      "expect": "ok"
+    }
+  ]
+}

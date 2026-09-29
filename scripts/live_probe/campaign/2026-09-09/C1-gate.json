@@ -1,0 +1,816 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": "",
+    "SBX": "/tmp/bridge-test-0909/lane-c"
+  },
+  "cases": [
+    {
+      "id": "C101",
+      "tool": "ssh_backup_restore",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "archive_file": "${SBX}/nonexistent.tar"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C101b",
+      "tool": "ssh_backup_restore",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "archive_file": "${SBX}/nonexistent.tar"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C102",
+      "tool": "ssh_exec",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "command": "true"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C102b",
+      "tool": "ssh_exec",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "command": "true"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C103",
+      "tool": "ssh_crictl_rmi",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "image": "localhost/bmcp-nonexistent-0909:0"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C103b",
+      "tool": "ssh_crictl_rmi",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "image": "localhost/bmcp-nonexistent-0909:0"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C104",
+      "tool": "ssh_cron_remove",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pattern": "${CRON_MARK}"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C104b",
+      "tool": "ssh_cron_remove",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pattern": "${CRON_MARK}"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C105",
+      "tool": "ssh_docker_compose",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "action": "ps",
+        "project_dir": "/tmp/bridge-test-0909/nonexistent"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C105b",
+      "tool": "ssh_docker_compose",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "action": "ps",
+        "project_dir": "/tmp/bridge-test-0909/nonexistent"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C106",
+      "tool": "ssh_file_patch",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "target_file": "${SBX}/c131.txt",
+        "patch_content": "--- c131.txt\n+++ c131.txt\n@@ -1 +1 @@\n-x\n+y\n",
+        "dry_run": true
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C106b",
+      "tool": "ssh_file_patch",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "target_file": "${SBX}/c131.txt",
+        "patch_content": "--- c131.txt\n+++ c131.txt\n@@ -1 +1 @@\n-x\n+y\n",
+        "dry_run": true
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C107",
+      "tool": "ssh_file_write",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "path": "${SBX}/c131.txt",
+        "content": "probe\n"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C107b",
+      "tool": "ssh_file_write",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "path": "${SBX}/c131.txt",
+        "content": "probe\n"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C108",
+      "tool": "ssh_files_write",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "files": [
+          {
+            "remote_path": "/tmp/bridge-test-0909/lane-c/c132a.txt",
+            "content": "a\n"
+          }
+        ]
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C108b",
+      "tool": "ssh_files_write",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "files": [
+          {
+            "remote_path": "/tmp/bridge-test-0909/lane-c/c132a.txt",
+            "content": "a\n"
+          }
+        ]
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C115",
+      "tool": "ssh_helm_repo_remove",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "names": [
+          "bridge-test-nonexistent-repo"
+        ]
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C115b",
+      "tool": "ssh_helm_repo_remove",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "names": [
+          "bridge-test-nonexistent-repo"
+        ]
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C116",
+      "tool": "ssh_helm_rollback",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "release": "bridge-test-nonexistent",
+        "namespace": "${NS}"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C116b",
+      "tool": "ssh_helm_rollback",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "release": "bridge-test-nonexistent",
+        "namespace": "${NS}"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C117",
+      "tool": "ssh_helm_uninstall",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "release": "bridge-test-nonexistent",
+        "namespace": "${NS}"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C117b",
+      "tool": "ssh_helm_uninstall",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "release": "bridge-test-nonexistent",
+        "namespace": "${NS}"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C118",
+      "tool": "ssh_k8s_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource": "configmap",
+        "name": "bmcp-nonexistent-0909",
+        "namespace": "${NS}"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C118b",
+      "tool": "ssh_k8s_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "resource": "configmap",
+        "name": "bmcp-nonexistent-0909",
+        "namespace": "${NS}"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C123",
+      "tool": "ssh_process_kill",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pid": 2147483647
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C123b",
+      "tool": "ssh_process_kill",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "pid": 2147483647
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C124",
+      "tool": "ssh_runbook_execute",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "runbook_name": "bmcp-nonexistent-0909"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C124b",
+      "tool": "ssh_runbook_execute",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "runbook_name": "bmcp-nonexistent-0909"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C125",
+      "tool": "ssh_service_stop",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "service": "bridge-test-0909-nonexistent.service"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C125b",
+      "tool": "ssh_service_stop",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "service": "bridge-test-0909-nonexistent.service"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C126",
+      "tool": "ssh_template_apply",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "content": "campaign-c\n",
+        "dest": "${SBX}/c147.conf"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C126b",
+      "tool": "ssh_template_apply",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "content": "campaign-c\n",
+        "dest": "${SBX}/c147.conf"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C127",
+      "tool": "ssh_group_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "name": "${SBXGROUP}"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C127b",
+      "tool": "ssh_group_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "name": "${SBXGROUP}"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C128",
+      "tool": "ssh_user_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "username": "${SBXUSER}"
+      },
+      "expect": "exit=4"
+    },
+    {
+      "id": "C128b",
+      "tool": "ssh_user_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "args": {
+        "username": "${SBXUSER}"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C130",
+      "tool": "ssh_exec",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "command": "echo campaign-c-ok"
+      },
+      "expect": "eq=campaign-c-ok"
+    },
+    {
+      "id": "C131",
+      "tool": "ssh_file_write",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "path": "${SBX}/c131.txt",
+        "content": "campaign-c\n"
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "C132",
+      "tool": "ssh_files_write",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "files": [
+          {
+            "remote_path": "/tmp/bridge-test-0909/lane-c/c132a.txt",
+            "content": "a\n"
+          },
+          {
+            "remote_path": "/tmp/bridge-test-0909/lane-c/c132b.txt",
+            "content": "b\n"
+          }
+        ]
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "C133",
+      "tool": "ssh_file_patch",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "target_file": "${SBX}/c131.txt",
+        "patch_content": "--- c131.txt\n+++ c131.txt\n@@ -1 +1 @@\n-campaign-c\n+campaign-c-patched\n",
+        "dry_run": true
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "C134",
+      "tool": "ssh_backup_restore",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "archive_file": "${SBX}/nonexistent.tar",
+        "destination": "${SBX}/restore"
+      },
+      "expect": "re=Cannot open: No such file or directory"
+    },
+    {
+      "id": "C135",
+      "tool": "ssh_cron_remove",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "pattern": "${CRON_MARK}"
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "C136",
+      "tool": "ssh_group_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "name": "${SBXGROUP}",
+        "sudo": true
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "C137",
+      "tool": "ssh_user_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "username": "${SBXUSER}",
+        "sudo": true,
+        "remove_home": true
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "C139",
+      "tool": "ssh_service_stop",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "service": "bridge-test-0909-nonexistent.service",
+        "sudo": true
+      },
+      "expect": "re=not loaded"
+    },
+    {
+      "id": "C140",
+      "tool": "ssh_k8s_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "resource": "configmap",
+        "name": "bmcp-nonexistent-0909",
+        "namespace": "${NS}"
+      },
+      "expect": "re=configmaps \"bmcp-nonexistent-0909\" not found"
+    },
+    {
+      "id": "C141",
+      "tool": "ssh_helm_uninstall",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "release": "bridge-test-nonexistent",
+        "namespace": "${NS}"
+      },
+      "expect": "re=Kubernetes cluster unreachable"
+    },
+    {
+      "id": "C142",
+      "tool": "ssh_helm_rollback",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "release": "bridge-test-nonexistent",
+        "namespace": "${NS}"
+      },
+      "expect": "re=Kubernetes cluster unreachable"
+    },
+    {
+      "id": "C143",
+      "tool": "ssh_helm_repo_remove",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "names": [
+          "bridge-test-nonexistent-repo"
+        ]
+      },
+      "expect": "re=no repo named \"bridge-test-nonexistent-repo\" found"
+    },
+    {
+      "id": "C144",
+      "tool": "ssh_crictl_rmi",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "image": "localhost/bmcp-nonexistent-0909:0",
+        "sudo": true
+      },
+      "expect": "re=no such image localhost/bmcp-nonexistent-0909:0"
+    },
+    {
+      "id": "C145",
+      "tool": "ssh_docker_compose",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "action": "ps",
+        "project_dir": "/tmp/bridge-test-0909/nonexistent"
+      },
+      "expect": "re=No such file or directory"
+    },
+    {
+      "id": "C146",
+      "tool": "ssh_runbook_execute",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "runbook_name": "bmcp-nonexistent-0909"
+      },
+      "expect": "error="
+    },
+    {
+      "id": "C147",
+      "tool": "ssh_template_apply",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "content": "campaign-c\n",
+        "dest": "${SBX}/c147.conf"
+      },
+      "expect": "ok"
+    },
+    {
+      "id": "C160",
+      "tool": "ssh_exec",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "guard_probe": true,
+      "args": {
+        "command": "echo shutdown"
+      },
+      "expect": "error=is annotated destructive and stdin is not a terminal"
+    },
+    {
+      "id": "C161b",
+      "tool": "ssh_k8s_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "resource": "namespace",
+        "name": "kube-system",
+        "dry_run": "client"
+      },
+      "expect": "error=is blocked"
+    },
+    {
+      "id": "C161",
+      "tool": "ssh_exec",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "guard_probe": true,
+      "args": {
+        "command": "echo shutdown"
+      },
+      "expect": "error=Command matches blacklist pattern"
+    },
+    {
+      "id": "C162",
+      "tool": "ssh_k8s_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "resource": "namespace",
+        "name": "kube-system"
+      },
+      "expect": "error=Deletion of namespace 'kube-system' is blocked"
+    },
+    {
+      "id": "C163",
+      "tool": "ssh_k8s_delete",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "resource": "ns",
+        "name": "KUBE-SYSTEM"
+      },
+      "expect": "error=is blocked"
+    },
+    {
+      "id": "C164",
+      "tool": "ssh_process_kill",
+      "owner": "campaign",
+      "paths": [
+        "cli"
+      ],
+      "yes": true,
+      "args": {
+        "pid": 2147483647
+      },
+      "expect": "re=No such process"
+    }
+  ]
+}

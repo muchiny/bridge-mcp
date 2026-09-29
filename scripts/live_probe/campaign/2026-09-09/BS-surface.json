@@ -1,0 +1,421 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": "",
+    "SBX": "/tmp/bridge-test-0909/lane-b",
+    "SMALL": "/tmp/bridge-test-0909/lane-b/small.txt",
+    "MID": "/tmp/bridge-test-0909/lane-b/mid.txt",
+    "BIG": "/tmp/bridge-test-0909/lane-b/big.txt",
+    "ARC": "/tmp/bridge-test-0909/lane-b/arc.tar",
+    "OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "CHART_MULTI": "/home/muchini/media-stack-k8s/charts/plex",
+    "CHART_SINGLE": "/home/muchini/media-stack-k8s/charts/backup"
+  },
+  "cases": [
+    {
+      "id": "BS01",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {},
+      "expect": "first=USER\tSHELL",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--columns",
+        "user,shell"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BS02",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {},
+      "expect": "lines=3",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--limit",
+        "2"
+      ]
+    },
+    {
+      "id": "BS03",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ]
+      },
+      "expect": "ok",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--jq",
+        ".load"
+      ]
+    },
+    {
+      "id": "BS04",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ]
+      },
+      "expect": "nore=^\\[",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--jq",
+        "[.load.load1]",
+        "--output-format",
+        "tsv"
+      ]
+    },
+    {
+      "id": "BS05",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {
+        "limit": 2
+      },
+      "expect": "lines=3",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--limit",
+        "5"
+      ]
+    },
+    {
+      "id": "BS06",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {
+        "columns": [
+          "user"
+        ]
+      },
+      "expect": "first=USER",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--columns",
+        "home"
+      ]
+    },
+    {
+      "id": "BS07",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load"
+      },
+      "expect": [
+        "ok",
+        "nore=cpu"
+      ],
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--jq",
+        ".cpu"
+      ]
+    },
+    {
+      "id": "BS08",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "jq_filter": ".load",
+        "output_format": "json"
+      },
+      "expect": [
+        "json"
+      ],
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--output-format",
+        "tsv"
+      ]
+    },
+    {
+      "id": "BS09",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {},
+      "expect": "lines=3",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--limit",
+        "2"
+      ],
+      "argstyle": "json-args"
+    },
+    {
+      "id": "BS10",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {
+        "limit": 2
+      },
+      "expect": "lines=3",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--limit",
+        "5"
+      ],
+      "argstyle": "json-args"
+    },
+    {
+      "id": "BS13",
+      "owner": "discover",
+      "tool": "ssh_user_list",
+      "args": {
+        "columns": "USER,SHELL"
+      },
+      "expect": "exit=0",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BS14",
+      "owner": "discover",
+      "tool": "ssh_template_list",
+      "args": {
+        "limit": "abc"
+      },
+      "expect": "exit=0",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BS15",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "columns": [
+          "a"
+        ]
+      },
+      "expect": "error=Unknown argument `columns`",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BS16",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "metrics": [
+          "load"
+        ],
+        "colunms": [
+          "a"
+        ]
+      },
+      "expect": [
+        "exit=1",
+        "error=unknown field"
+      ],
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "json-args"
+    },
+    {
+      "id": "BS17",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "jq_fitler": ".load"
+      },
+      "expect": "error=Did you mean `jq_filter`?",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BS18",
+      "owner": "campaign",
+      "tool": "ssh_metrics",
+      "args": {
+        "jq_fitler": ".load"
+      },
+      "expect": [
+        "exit=1",
+        "stderr=unknown field"
+      ],
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "json-args"
+    },
+    {
+      "id": "BS20",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {
+        "system": true,
+        "limit": 5
+      },
+      "expect": "lines=6",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BS21",
+      "owner": "campaign",
+      "tool": "ssh_user_list",
+      "args": {
+        "columns": [
+          "USER",
+          "SHELL"
+        ]
+      },
+      "expect": "first=USER\tSHELL",
+      "paths": [
+        "cli"
+      ],
+      "argstyle": "kv"
+    },
+    {
+      "id": "BS22",
+      "owner": "discover",
+      "tool": "ssh_user_list",
+      "args": {
+        "columns": "USER,SHELL"
+      },
+      "expect": "exit=0",
+      "paths": [
+        "mcp"
+      ]
+    },
+    {
+      "id": "BS23",
+      "owner": "discover",
+      "tool": "ssh_user_list",
+      "args": {
+        "colunms": [
+          "USER"
+        ]
+      },
+      "expect": "exit=0",
+      "paths": [
+        "mcp"
+      ]
+    },
+    {
+      "id": "BS24",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "limit": 1
+      },
+      "expect": "json",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--json"
+      ]
+    },
+    {
+      "id": "BS25",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {
+        "save_output": "${OUT}/df.json.txt"
+      },
+      "expect": "re=Full output saved to",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--json"
+      ]
+    },
+    {
+      "id": "BS26",
+      "owner": "campaign",
+      "tool": "ssh_template_list",
+      "args": {},
+      "expect": "exit=0",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BS27",
+      "owner": "campaign",
+      "tool": "ssh_file_read",
+      "args": {
+        "path": "${SBX}/absent.txt"
+      },
+      "expect": "exit=1",
+      "paths": [
+        "cli"
+      ]
+    },
+    {
+      "id": "BS28",
+      "owner": "campaign",
+      "tool": "ssh_storage_df",
+      "args": {},
+      "expect": "ok",
+      "paths": [
+        "cli"
+      ],
+      "flags": [
+        "--yes"
+      ]
+    }
+  ]
+}

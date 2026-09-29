@@ -1,0 +1,223 @@
+{
+ "vars": {
+  "SANDBOX": "/tmp/bridge-test-0909",
+  "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+  "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+  "NS": "bridge-test",
+  "SBXUSER": "btest0909",
+  "SBXGROUP": "btestgrp0909",
+  "CRON_MARK": "BRIDGE_TEST_0909",
+  "UNIT": "bridge-test-0909",
+  "SLEEPPID": "3357939",
+  "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+  "PAUSE_IMAGE": "docker.io/library/busybox:1.38",
+  "BUSYBOX_OK": "no",
+  "UFW_ABSENT": "yes",
+  "HAD_CRONTAB": "yes",
+  "BT_CID": "41a92f6fa84adf61cc67066b425a25c438fad7f7d0ec570a194dfc52af1ad5d0"
+ },
+ "cases": [
+  {
+   "id": "E501",
+   "owner": "campaign",
+   "tool": "ssh_storage_mount",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "device": "tmpfs",
+    "fs_type": "tmpfs",
+    "mount_point": "/tmp/bridge-test-0909/mnt",
+    "options": "size=1M,mode=0700",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E502",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "findmnt -n -o FSTYPE /tmp/bridge-test-0909/mnt"
+   },
+   "expect": "eq=tmpfs"
+  },
+  {
+   "id": "E503",
+   "owner": "campaign",
+   "tool": "ssh_storage_df",
+   "paths": [
+    "cli"
+   ],
+   "args": {},
+   "expect": "re=bridge-test-0909/mnt"
+  },
+  {
+   "id": "E504",
+   "owner": "campaign",
+   "tool": "ssh_storage_umount",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "/tmp/bridge-test-0909/mnt",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E505",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "findmnt -n /tmp/bridge-test-0909/mnt || echo unmounted"
+   },
+   "expect": "eq=unmounted"
+  },
+  {
+   "id": "E505a",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "setsid nohup sleep 86400 >/dev/null 2>&1 & echo $! > /tmp/bridge-test-0909/sleep.pid; cat /tmp/bridge-test-0909/sleep.pid"
+   },
+   "expect": "re=^[0-9]+$"
+  },
+  {
+   "id": "E505b",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "ps -p ${SLEEPPID} -o args= | grep -c \"^sleep 86400$\""
+   },
+   "expect": "eq=1"
+  },
+  {
+   "id": "E506",
+   "owner": "campaign",
+   "tool": "ssh_process_kill",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pid": 0,
+    "signal": "TERM"
+   },
+   "pid_identity": "E505a crée le sleep et enregistre son PID ; E505b re-confirme, dans ce même sous-lot, que le PID est vivant et que son argv est exactement `sleep 86400` ; E-patch-pid.sh revérifie liveness et identité contre l'hôte avant de réécrire ce champ",
+   "expect": "ok"
+  },
+  {
+   "id": "E507",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "test -e /proc/${SLEEPPID} && echo alive || echo gone"
+   },
+   "expect": "eq=gone"
+  },
+  {
+   "id": "E508",
+   "owner": "campaign",
+   "tool": "ssh_docker_exec",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "container": "bt",
+    "command": "id"
+   },
+   "expect": "re=Docker/Podman not installed"
+  },
+  {
+   "id": "E509",
+   "owner": "campaign",
+   "tool": "ssh_docker_compose",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "ps",
+    "project_dir": "/tmp/bridge-test-0909/nonexistent"
+   },
+   "expect": "re=No such file or directory"
+  },
+  {
+   "id": "E509b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_scale",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}",
+    "replicas": 1
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E509c",
+   "owner": "campaign",
+   "tool": "ssh_crictl_ps",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "sudo": true
+   },
+   "expect": "re=bt-pause"
+  },
+  {
+   "id": "E510",
+   "owner": "campaign",
+   "tool": "ssh_crictl_exec",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "container_id": "${BT_CID}",
+    "command": "id",
+    "sudo": true
+   },
+   "sudo_reason": "la configuration crictl du Pi n'est lisible que par root (fait hôte du Step 1)",
+   "expect": "re=uid="
+  },
+  {
+   "id": "E512",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "nft list ruleset 2>/dev/null | grep -c 59999 || true",
+    "sudo": true
+   },
+   "sudo_reason": "nft list ruleset exige root ; preuve d'absence permanente qu'aucune règle de pare-feu n'a jamais été posée par la campagne",
+   "expect": "eq=0"
+  }
+ ]
+}

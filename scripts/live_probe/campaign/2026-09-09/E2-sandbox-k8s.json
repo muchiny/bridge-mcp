@@ -1,0 +1,987 @@
+{
+ "vars": {
+  "SANDBOX": "/tmp/bridge-test-0909",
+  "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+  "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+  "NS": "bridge-test",
+  "SBXUSER": "btest0909",
+  "SBXGROUP": "btestgrp0909",
+  "CRON_MARK": "BRIDGE_TEST_0909",
+  "UNIT": "bridge-test-0909",
+  "SLEEPPID": "",
+  "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+  "PAUSE_IMAGE": "docker.io/library/busybox:1.38",
+  "BUSYBOX_OK": "no",
+  "UFW_ABSENT": "yes",
+  "HAD_CRONTAB": "yes",
+  "BT_CID": ""
+ },
+ "cases": [
+  {
+   "id": "E201",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "namespace",
+    "name": "${NS}"
+   },
+   "expect": "re=NotFound"
+  },
+  {
+   "id": "E202",
+   "owner": "campaign",
+   "tool": "ssh_k8s_apply",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "dry_run": "client",
+    "manifest": "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: bridge-test\n  labels:\n    bridge-mcp-campaign: \"2026-09-09\"\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E203",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "namespace",
+    "name": "${NS}"
+   },
+   "expect": "re=NotFound"
+  },
+  {
+   "id": "E204",
+   "owner": "campaign",
+   "tool": "ssh_k8s_apply",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "manifest": "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: bridge-test\n  labels:\n    bridge-mcp-campaign: \"2026-09-09\"\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E205",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "namespace",
+    "name": "${NS}"
+   },
+   "expect": "re=bridge-test"
+  },
+  {
+   "id": "E206",
+   "owner": "campaign",
+   "tool": "ssh_k8s_create_configmap",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "bt-cm",
+    "namespace": "${NS}",
+    "dry_run": "client",
+    "from_literal": {
+     "probe": "bridge-test-0909"
+    }
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E207",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "configmap",
+    "name": "bt-cm",
+    "namespace": "${NS}"
+   },
+   "expect": "re=NotFound"
+  },
+  {
+   "id": "E208",
+   "owner": "campaign",
+   "tool": "ssh_k8s_create_configmap",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "bt-cm",
+    "namespace": "${NS}",
+    "from_literal": {
+     "probe": "bridge-test-0909"
+    }
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E209",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "configmap",
+    "name": "bt-cm",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-cm"
+  },
+  {
+   "id": "E210",
+   "owner": "campaign",
+   "tool": "ssh_k8s_create_secret",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "bt-secret",
+    "namespace": "${NS}",
+    "from_literal": [
+     {
+      "key": "fake",
+      "value": "s3cr3t-fake-not-a-real-credential"
+     }
+    ]
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E211",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "secret",
+    "name": "bt-secret",
+    "namespace": "${NS}"
+   },
+   "expect": "nore=s3cr3t-fake"
+  },
+  {
+   "id": "E212",
+   "owner": "campaign",
+   "tool": "ssh_k8s_describe",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "secret",
+    "name": "bt-secret",
+    "namespace": "${NS}"
+   },
+   "expect": "nore=s3cr3t-fake"
+  },
+  {
+   "id": "E213",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rbac_create",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "kind": "serviceaccount",
+    "name": "bt-sa",
+    "namespace": "${NS}",
+    "dry_run": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E214",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rbac_create",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "kind": "serviceaccount",
+    "name": "bt-sa",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E215",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "serviceaccount",
+    "name": "bt-sa",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-sa"
+  },
+  {
+   "id": "E216",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rbac_create",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "kind": "role",
+    "name": "bt-role",
+    "namespace": "${NS}",
+    "resources": [
+     "configmaps"
+    ],
+    "verbs": [
+     "get"
+    ]
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E217",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rbac_create",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "kind": "rolebinding",
+    "name": "bt-rb",
+    "namespace": "${NS}",
+    "role": "bt-role",
+    "serviceaccount": "bridge-test:bt-sa"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E218",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "rolebinding",
+    "name": "bt-rb",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-rb"
+  },
+  {
+   "id": "E219",
+   "owner": "campaign",
+   "tool": "ssh_k8s_auth_reconcile",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "dry_run": true,
+    "manifest": "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: bt-role2\n  namespace: bridge-test\nrules:\n- apiGroups: [\"\"]\n  resources: [\"configmaps\"]\n  verbs: [\"get\"]\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E220",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "role",
+    "name": "bt-role2",
+    "namespace": "${NS}"
+   },
+   "expect": "re=NotFound"
+  },
+  {
+   "id": "E221",
+   "owner": "campaign",
+   "tool": "ssh_k8s_auth_reconcile",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "manifest": "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: bt-role2\n  namespace: bridge-test\nrules:\n- apiGroups: [\"\"]\n  resources: [\"configmaps\"]\n  verbs: [\"get\"]\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E222",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "role",
+    "name": "bt-role2",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-role2"
+  },
+  {
+   "id": "E223",
+   "owner": "campaign",
+   "tool": "ssh_k8s_create_token",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "service_account": "bt-sa",
+    "namespace": "${NS}",
+    "duration": "600s"
+   },
+   "expect": "re=JWT_TOKEN_REDACTED"
+  },
+  {
+   "id": "E224",
+   "owner": "campaign",
+   "tool": "ssh_k8s_kubeconfig_generate",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "service_account": "bt-sa",
+    "namespace": "${NS}"
+   },
+   "expect": "re=apiVersion: v1"
+  },
+  {
+   "id": "E225",
+   "owner": "campaign",
+   "tool": "ssh_k8s_apply",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "manifest": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: bt-pause\n  namespace: bridge-test\nspec:\n  replicas: 0\n  selector:\n    matchLabels:\n      app: bt-pause\n  template:\n    metadata:\n      labels:\n        app: bt-pause\n    spec:\n      terminationGracePeriodSeconds: 1\n      containers:\n      - name: bt-pause\n        image: ${PAUSE_IMAGE}\n        imagePullPolicy: IfNotPresent\n        command: [\"sleep\", \"3600\"]\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E226",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment",
+    "name": "bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-pause"
+  },
+  {
+   "id": "E227",
+   "owner": "campaign",
+   "tool": "ssh_k8s_scale",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}",
+    "replicas": 1
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E230",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rollout",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "history",
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E231",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rollout",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "pause",
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E232",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rollout",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "resume",
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E233",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rollout",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "restart",
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E234",
+   "owner": "campaign",
+   "tool": "ssh_k8s_rollout",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "status",
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E228",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "pods",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-pause"
+  },
+  {
+   "id": "E245b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "pods",
+    "namespace": "${NS}",
+    "output": "name"
+   },
+   "expect": "re=bt-pause"
+  },
+  {
+   "id": "E246",
+   "owner": "campaign",
+   "tool": "ssh_k8s_exec",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pod": "bt-pause-5bbb947c8c-ptfpl",
+    "command": "id",
+    "namespace": "${NS}"
+   },
+   "expect": "re=uid="
+  },
+  {
+   "id": "E229",
+   "owner": "campaign",
+   "tool": "ssh_k8s_scale",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment/bt-pause",
+    "namespace": "${NS}",
+    "replicas": 0
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E235",
+   "owner": "campaign",
+   "tool": "ssh_k8s_patch",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "target": "deployment/bt-pause",
+    "namespace": "${NS}",
+    "patch_type": "merge",
+    "patch": "{\"metadata\":{\"labels\":{\"bt\":\"patched\"}}}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E236",
+   "owner": "campaign",
+   "tool": "ssh_k8s_describe",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment",
+    "name": "bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt=patched"
+  },
+  {
+   "id": "E237",
+   "owner": "campaign",
+   "tool": "ssh_k8s_set",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "subcommand": "env",
+    "target": "deployment/bt-pause",
+    "namespace": "${NS}",
+    "assignments": [
+     "BT=1"
+    ]
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E238",
+   "owner": "campaign",
+   "tool": "ssh_k8s_set",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "subcommand": "env",
+    "target": "deployment/bt-pause",
+    "namespace": "${NS}",
+    "list": true
+   },
+   "expect": "re=BT=1"
+  },
+  {
+   "id": "E239",
+   "owner": "campaign",
+   "tool": "ssh_k8s_set",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "subcommand": "image",
+    "target": "deployment/bt-pause",
+    "namespace": "${NS}",
+    "assignments": [
+     "bt-pause=docker.io/library/busybox:1.38"
+    ]
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E240",
+   "owner": "campaign",
+   "tool": "ssh_k8s_apply",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "manifest": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: bt-netpol\n  namespace: bridge-test\nspec:\n  podSelector:\n    matchLabels:\n      app: bt-pause\n  policyTypes:\n  - Ingress\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E241",
+   "owner": "campaign",
+   "tool": "ssh_k8s_apply",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "manifest": "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: bt-ing\n  namespace: bridge-test\nspec:\n  ingressClassName: bt-nonexistent-class\n  rules:\n  - host: bt.invalid\n    http:\n      paths:\n      - path: /\n        pathType: Prefix\n        backend:\n          service:\n            name: bt-svc\n            port:\n              number: 80\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E242",
+   "owner": "campaign",
+   "tool": "ssh_k8s_apply",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "manifest": "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: bt-pvc\n  namespace: bridge-test\nspec:\n  accessModes:\n  - ReadWriteOnce\n  storageClassName: local-path\n  resources:\n    requests:\n      storage: 1Mi\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E243",
+   "owner": "campaign",
+   "tool": "ssh_k8s_apply",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "manifest": "apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: bt-pv\nspec:\n  capacity:\n    storage: 1Mi\n  accessModes:\n  - ReadWriteOnce\n  persistentVolumeReclaimPolicy: Delete\n  storageClassName: bt-none\n  hostPath:\n    path: /tmp/bridge-test-0909/pv\n"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E244",
+   "owner": "campaign",
+   "tool": "ssh_k8s_volume_expand",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "pvc": "bt-pvc",
+    "namespace": "${NS}",
+    "size": "2Gi"
+   },
+   "expect": "re=does not allow volume expansion"
+  },
+  {
+   "id": "E247",
+   "owner": "campaign",
+   "tool": "ssh_k8s_connectivity_test",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "namespace": "${NS}",
+    "target_host": "10.43.0.1",
+    "target_port": 443,
+    "image": "docker.io/library/busybox:1.38",
+    "kubectl_bin": "kubectl"
+   },
+   "expect": "re=REACHABLE"
+  },
+  {
+   "id": "E248",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "pods",
+    "namespace": "${NS}"
+   },
+   "expect": "nore=conn-probe"
+  },
+  {
+   "id": "E248a",
+   "owner": "campaign",
+   "tool": "ssh_k8s_cordon",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "node": "server"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E248b",
+   "owner": "campaign",
+   "tool": "ssh_k8s_uncordon",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "node": "server"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E249",
+   "owner": "campaign",
+   "tool": "ssh_k3s_ctr_images",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "ls",
+    "sudo": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E250",
+   "owner": "campaign",
+   "tool": "ssh_k3s_etcd_snapshot_save",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "sudo": true
+   },
+   "expect": "re=etcd datastore disabled"
+  },
+  {
+   "id": "E250b",
+   "owner": "campaign",
+   "tool": "ssh_k3s_etcd_snapshot_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "sudo": true
+   },
+   "expect": "nore=bridge-test"
+  },
+  {
+   "id": "E251",
+   "owner": "campaign",
+   "tool": "ssh_helm_repo_add",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "name": "${NS}",
+    "url": "https://kubernetes-sigs.github.io/metrics-server/"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E252",
+   "owner": "campaign",
+   "tool": "ssh_helm_repo_update",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "repos": [
+     "bridge-test"
+    ]
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E253",
+   "owner": "campaign",
+   "tool": "ssh_helm_pull",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "chart": "bridge-test/metrics-server",
+    "destination": "/tmp/bridge-test-0909/chart"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E254",
+   "owner": "campaign",
+   "tool": "ssh_helm_dependency",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "subcommand": "list",
+    "chart_path": "/tmp/bridge-test-0909/chart/backup"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E255",
+   "owner": "campaign",
+   "tool": "ssh_helm_repo_remove",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "names": [
+     "bridge-test-nonexistent-repo"
+    ]
+   },
+   "expect": "re=bridge-test-nonexistent-repo"
+  },
+  {
+   "id": "E256",
+   "owner": "campaign",
+   "tool": "ssh_helm_install",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "release": "bt-rel",
+    "chart": "/tmp/bridge-test-0909/chart/backup",
+    "namespace": "${NS}",
+    "dry_run": "client"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E257",
+   "owner": "campaign",
+   "tool": "ssh_helm_install",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "release": "bt-rel",
+    "chart": "/tmp/bridge-test-0909/chart/backup",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E258",
+   "owner": "campaign",
+   "tool": "ssh_helm_upgrade",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "release": "bt-rel",
+    "chart": "/tmp/bridge-test-0909/chart/backup",
+    "namespace": "${NS}",
+    "dry_run": "client"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E259",
+   "owner": "campaign",
+   "tool": "ssh_helm_rollback",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "release": "bridge-test-nonexistent",
+    "namespace": "${NS}",
+    "dry_run": "client"
+   },
+   "expect": "re=bridge-test-nonexistent"
+  },
+  {
+   "id": "E260",
+   "owner": "campaign",
+   "tool": "ssh_helm_uninstall",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "release": "bridge-test-nonexistent",
+    "namespace": "${NS}",
+    "dry_run": true
+   },
+   "expect": "re=bridge-test-nonexistent"
+  },
+  {
+   "id": "E261",
+   "owner": "campaign",
+   "tool": "ssh_helm_test",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "release": "bt-rel",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-rel"
+  },
+  {
+   "id": "E261b",
+   "owner": "campaign",
+   "tool": "ssh_helm_list",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "namespace": "${NS}"
+   },
+   "expect": "nore=bt-rel"
+  },
+  {
+   "id": "E262",
+   "owner": "campaign",
+   "tool": "ssh_k8s_delete",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment",
+    "name": "bt-pause",
+    "namespace": "${NS}",
+    "dry_run": "client"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E263",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment",
+    "name": "bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "re=bt-pause"
+  },
+  {
+   "id": "E264",
+   "owner": "campaign",
+   "tool": "ssh_k8s_delete",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment",
+    "name": "bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E265",
+   "owner": "campaign",
+   "tool": "ssh_k8s_get",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "resource": "deployment",
+    "name": "bt-pause",
+    "namespace": "${NS}"
+   },
+   "expect": "re=NotFound"
+  }
+ ]
+}

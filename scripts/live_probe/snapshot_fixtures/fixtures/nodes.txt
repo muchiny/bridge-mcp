@@ -1,0 +1,2 @@
+NAME	STATUS	ROLES	AGE	VERSION
+server	NotReady	control-plane,master	264d	v1.36.4+k3s1

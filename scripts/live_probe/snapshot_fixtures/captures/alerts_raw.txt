@@ -1,0 +1,10 @@
+=== CPU ===
+cpu_usage=14.2%
+=== Memory ===
+memory_usage=25.2%
+=== Swap ===
+swap_usage=8.5%
+=== Disk ===
+disk_usage=87%
+=== Load ===
+load_1m=0.42 load_5m=0.35 load_15m=0.25

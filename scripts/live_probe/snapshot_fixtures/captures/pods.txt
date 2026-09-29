@@ -1,0 +1,15 @@
+pod/argocd-application-controller-0
+pod/argocd-image-updater-controller-74f96b4dd-2tvmw
+pod/argocd-redis-86846d5986-7zbjj
+pod/argocd-repo-server-7d44c57bc8-hcm78
+pod/argocd-server-8567f6cc96-8bm2p
+pod/coredns-74b7b4f7f8-vqnrf
+pod/local-path-provisioner-77b9867795-s4jf6
+pod/metrics-server-6dc596dfb8-4n2g9
+pod/traefik-6df4bb9f4f-8bt6x
+pod/media-backup-29816700-7ks9n
+pod/media-backup-29818140-kmwmb
+pod/media-backup-29819580-2slct
+pod/media-plex-7bdf878667-4whzg
+pod/media-qbittorrent-6675d8d8d6-nthkk
+

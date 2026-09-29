@@ -1,0 +1,194 @@
+{
+ "vars": {
+  "SANDBOX": "/tmp/bridge-test-0909",
+  "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+  "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+  "NS": "bridge-test",
+  "SBXUSER": "btest0909",
+  "SBXGROUP": "btestgrp0909",
+  "CRON_MARK": "BRIDGE_TEST_0909",
+  "UNIT": "bridge-test-0909",
+  "SLEEPPID": "",
+  "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+  "PAUSE_IMAGE": "docker.io/library/busybox:1.38",
+  "BUSYBOX_OK": "no",
+  "UFW_ABSENT": "yes",
+  "HAD_CRONTAB": "yes",
+  "BT_CID": ""
+ },
+ "cases": [
+  {
+   "id": "E401",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "rm -r -- /tmp/bridge-test-0909/repo /tmp/bridge-test-0909/clone 2>/dev/null; git -C /tmp/bridge-test-0909 init repo -q && cd /tmp/bridge-test-0909/repo && git config user.email bt@example.invalid && git config user.name bt && echo x > f.txt && git add -A && git commit -qm init && echo repo-ready"
+   },
+   "expect": "eq=repo-ready"
+  },
+  {
+   "id": "E402",
+   "owner": "campaign",
+   "tool": "ssh_git_status",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/repo",
+    "short": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E403",
+   "owner": "campaign",
+   "tool": "ssh_git_branch",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "list",
+    "path": "${SANDBOX}/repo"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E404",
+   "owner": "campaign",
+   "tool": "ssh_git_branch",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "create",
+    "name": "bt-branch",
+    "path": "${SANDBOX}/repo"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E404b",
+   "owner": "campaign",
+   "tool": "ssh_git_branch",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "list",
+    "path": "${SANDBOX}/repo"
+   },
+   "expect": "re=bt-branch"
+  },
+  {
+   "id": "E405",
+   "owner": "campaign",
+   "tool": "ssh_git_checkout",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/repo",
+    "target": "bt-branch"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E406",
+   "owner": "campaign",
+   "tool": "ssh_exec",
+   "yes": true,
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "command": "git -C /tmp/bridge-test-0909/repo rev-parse --abbrev-ref HEAD"
+   },
+   "expect": "eq=bt-branch"
+  },
+  {
+   "id": "E407",
+   "owner": "campaign",
+   "tool": "ssh_git_checkout",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/repo",
+    "target": "bt-new",
+    "create": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E408",
+   "owner": "campaign",
+   "tool": "ssh_git_log",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/repo",
+    "max_count": 1,
+    "oneline": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E409",
+   "owner": "campaign",
+   "tool": "ssh_git_clone",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "url": "/tmp/bridge-test-0909/repo",
+    "destination": "/tmp/bridge-test-0909/clone"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E410",
+   "owner": "campaign",
+   "tool": "ssh_git_pull",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "path": "${SANDBOX}/clone",
+    "ff_only": true
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E411",
+   "owner": "campaign",
+   "tool": "ssh_git_branch",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "delete",
+    "name": "bt-branch",
+    "path": "${SANDBOX}/repo"
+   },
+   "expect": "ok"
+  },
+  {
+   "id": "E412",
+   "owner": "campaign",
+   "tool": "ssh_git_branch",
+   "paths": [
+    "cli"
+   ],
+   "args": {
+    "action": "list",
+    "path": "${SANDBOX}/repo"
+   },
+   "expect": "nore=bt-branch"
+  }
+ ]
+}

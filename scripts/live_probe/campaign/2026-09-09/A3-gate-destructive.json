@@ -1,0 +1,24 @@
+{
+  "vars": {
+    "SANDBOX": "/tmp/bridge-test-0909",
+    "SANDBOX_LOCAL": "/tmp/bridge-test-0909-local",
+    "LOCAL_OUT": "/home/muchini/bmcp-test-0909/.superpowers/campaign/2026-09-09/out",
+    "NS": "bridge-test",
+    "SBXUSER": "btest0909",
+    "SBXGROUP": "btestgrp0909",
+    "CRON_MARK": "BRIDGE_TEST_0909",
+    "UNIT": "bridge-test-0909",
+    "SLEEPPID": "",
+    "NS_MANIFEST": "/tmp/bridge-test-0909/ns.yaml",
+    "PAUSE_IMAGE": "",
+    "BUSYBOX_OK": "",
+    "UFW_ABSENT": "true",
+    "HAD_CRONTAB": "true",
+    "BT_CID": ""
+  },
+  "cases": [
+    {"id": "A509", "owner": "campaign", "tool": "ssh_template_apply", "args": {"dest": "/tmp/bridge-test-0909/bmcp-nope-template", "content": "# bmcp probe\n"}, "expect": "exit=4", "paths": ["cli"]},
+    {"id": "A510", "owner": "campaign", "tool": "ssh_service_stop", "args": {"service": "bridge-test-0909-nonexistent.service"}, "expect": "exit=4", "paths": ["cli"]},
+    {"id": "A511", "owner": "campaign", "tool": "ssh_user_delete", "args": {"username": "btest0909"}, "expect": "exit=4", "paths": ["cli"]}
+  ]
+}

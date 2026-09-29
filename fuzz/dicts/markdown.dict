@@ -11,6 +11,17 @@
 # bytes. It managed it via comparison feedback, but slowly and only because
 # the code compares against those literals; a dictionary does not depend on
 # that accident.
+#
+# ESCAPES: libFuzzer's dictionary parser understands \\, \" and \xNN, and
+# NOTHING else. `\n` is not an escape to it, it is a parse error, and one
+# parse error kills the whole file:
+#
+#   ParseDictionaryFile: error in line 28
+#   Error: Fuzz target exited with exit status: 1
+#
+# The nightly job reads any non-zero exit as a crash, so from 2026-09-02 to
+# 2026-09-09 this target filed a "crash" issue every night while never once
+# executing. Line endings go in as \x0a and \x0d.
 
 fence3="```"
 fence4="````"
@@ -25,19 +36,19 @@ info_json="```json"
 heading_command="**Command:**"
 heading_arguments="**Arguments:**"
 bold="**"
-heading_prefix="\n**"
+heading_prefix="\x0a**"
 
-lf="\n"
-cr="\r"
-crlf="\r\n"
-fence_after_lf="\n```"
-fence_after_crlf="\r\n```"
-lone_cr_fence="\r```\r"
+lf="\x0a"
+cr="\x0d"
+crlf="\x0d\x0a"
+fence_after_lf="\x0a```"
+fence_after_crlf="\x0d\x0a```"
+lone_cr_fence="\x0d```\x0d"
 
 proceed="Proceed?"
 confirm_line="Confirm destructive operation:"
 
 # The two shapes that were actually exploitable before the fix: close the
 # block and continue in prose, and forge a second Command section.
-escape_to_prose="\n```\nNothing will be executed"
-forged_section="\n```\n\n**Command:**\n```sh\n"
+escape_to_prose="\x0a```\x0aNothing will be executed"
+forged_section="\x0a```\x0a\x0a**Command:**\x0a```sh\x0a"
