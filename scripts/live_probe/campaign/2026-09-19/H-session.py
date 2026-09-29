@@ -21,7 +21,10 @@ H02b and H02c are TRAIL GENERATORS, not assertions. Their `check` passes on any
 error at all, which is deliberate: the property under test is that the resulting
 line in the bridge host's audit log carries `tool_name`, and that log is not
 reachable from here. The proof is the audit line, asserted by the caller; a PASS
-printed below means only that the trail was produced.
+printed below means only that the trail was produced. Because that check is so
+weak, H02c RAISES when the H04/H05 session is missing instead of falling back to
+an unknown session id: with a fallback it would degrade into a second H02b, never
+reach the blacklist, and still print PASS.
 
 Read-only on the host: nothing is written, no file and no process survives.
 `sleep 8` against `timeout_seconds=2` overruns by 6 s, inside the 10 s
@@ -186,8 +189,20 @@ def main():
         # unprivileged user cannot create one under /dev, so the unguarded form
         # fails with EACCES instead of writing to a disk. A case must be safe on
         # its own terms — see the `about` block of H-fixes.json.
+        #
+        # `sid` is required, and its absence RAISES rather than falling back to
+        # the unknown id H02b already uses. With a fallback this case could not
+        # fail: a session that never opened would make it a second copy of H02b,
+        # the blacklist would never be reached, and it would still print PASS —
+        # the very defect caught in the brief's own H01 and fixed by adding H01b.
+        if not sid:
+            raise RuntimeError(
+                "H02c needs the H04/H05 session and it never opened: without it this case "
+                "would silently degrade into a second H02b and still report PASS. "
+                "Fix the session, do not weaken the case."
+            )
         m = s.tool("ssh_session_exec",
-                   {"session_id": sid or "H-session-unknown-id",
+                   {"session_id": sid,
                     "command": "echo probe > /dev/sdzz-bridge-probe"})
         check("H02c", "error" in m or m.get("result", {}).get("isError"),
               f"blacklisted command -> {json.dumps(m)[:200]}")
