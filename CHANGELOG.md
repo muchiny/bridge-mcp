@@ -82,35 +82,52 @@ reading it. Every item below was reproduced before the fix and measured after.
   of the text, will start seeing errors it did not see before, for calls that
   were already failing.
 
-  **Four tools are exempt, because their command answers *by* its exit code.**
-  They set the new `StandardTool::NONZERO_EXIT_IS_ERROR = false`:
-  `ssh_service_status` and `ssh_timer_info` (`systemctl status` exits **3** for
-  a unit that exists and is stopped), `ssh_k8s_diff` (`kubectl diff` exits **1**
-  when there *are* differences) and `ssh_helm_diff` (`--detailed-exitcode`
-  exits **2** when there are changes). For those four a non-zero exit stays what
-  it was before this chain: an ordinary success whose code is visible in the
-  text as `[exit:N]` and in the audit event, and the CLI exits 0.
+  **Three tools are exempt, because their command answers *by* its exit code
+  under default arguments.** They set the new
+  `StandardTool::NONZERO_EXIT_IS_ERROR = false`: `ssh_service_status` and
+  `ssh_timer_info` (`systemctl status` exits **3** for a unit that exists and is
+  stopped) and `ssh_k8s_diff` (`kubectl diff` exits **1** when there *are*
+  differences). For those three a non-zero exit stays what it was before this
+  chain: an ordinary success whose code is visible in the text as `[exit:N]` and
+  in the audit event, and the CLI exits 0.
 
   An earlier draft of this entry defended the opposite choice as "the intended
   trade-off". The live campaign then measured it: `ssh_service_status` on a
   loaded-but-stopped unit — the commonest status query there is — returned
   `isError` and exit 6 while the audit line for the same call recorded
   `Success{exit_code:3}`, so the product contradicted itself (defect D1, cases
-  `H07`/`H07b`). Ruling **R32** settled it on that evidence: opting these four
+  `H07`/`H07b`). Ruling **R32** settled it on that evidence: opting these three
   out restores exactly their pre-plan behaviour, so it is a regression for
   nobody, and it removes a daily false failure.
 
   **What opting out costs, stated rather than hidden:** a per-tool boolean
-  cannot separate "here is your answer" from "I failed", and each of these four
-  commands uses non-zero for both — `systemctl` also exits 4 for "no such
-  unit", `kubectl diff` >1 for a real failure, `ssh_helm_diff`'s own guard exits
-  4 when the helm-diff plugin is missing. Those cases exit 0 again. That is the
-  narrower loss: it is the behaviour every one of these tools had before the
-  chain, whereas the false failure was new. `ssh_helm_diff` is the least clean
-  of the four, and its own doc comment says so: `detailed_exitcode` defaults to
-  false, so most calls of it have no normal non-zero answer at all, but a trait
-  const cannot depend on an argument and leaving it `true` would make the
-  documented flag report every diff it finds as a failed call.
+  cannot separate "here is your answer" from "I failed", and each of these three
+  commands uses non-zero for both — `systemctl` also exits 4 for "no such unit",
+  `kubectl diff` >1 for a real kubectl failure. Those cases exit 0 again. That
+  is the narrower loss: it is the behaviour every one of these tools had before
+  the chain, whereas the false failure was new.
+
+  **`ssh_helm_diff` is deliberately NOT in the set, and that is a decision, not
+  an omission.** It was, in a first cut of this wave; the ruling that removed it
+  is the one worth recording. Its non-zero-is-the-answer mode is
+  `--detailed-exitcode` (exit **2** on changes), and `detailed_exitcode`
+  **defaults to false** — without it `helm diff` exits 0 whether or not there
+  are differences. So under default arguments a non-zero exit from that tool is
+  a *real* failure (the builder's own `exit 4` for a missing helm-diff plugin,
+  an unknown release, a broken `helm`), and opting out would hide precisely what
+  this chain exists to surface while removing no false positive, because there
+  is none by default. R32's justification — "returns the tool to exactly its
+  pre-plan behaviour, so it is a regression for nobody, and it removes a new
+  daily false failure" — holds for the three above and inverts for this one.
+
+  The limitation that leaves is named in the tool's own description rather than
+  papered over: a caller who *does* pass `detailed_exitcode=true` gets `isError`
+  / CLI exit 6 when a difference is found, and must read 6 as "changes found"
+  itself, because a trait const cannot condition on an argument. Corroboration
+  that this is the right way round: the committed live case `B93`
+  (`scripts/live_probe/campaign/B-k8s.json`) calls `ssh_helm_diff` and expects
+  `error=`, i.e. a non-zero rc — an expectation written against the const being
+  `true`, which the opt-out would have inverted.
 
 - **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
   struct-literal construction outside this crate must add it;
@@ -417,21 +434,23 @@ reading it. Every item below was reproduced before the fix and measured after.
   `ssh_session_create host=pi` opens an SSH session to a host and leaves no line
   behind saying it did.
 
-- **The `NONZERO_EXIT_IS_ERROR` opt-out has four users out of 399, and 355 of
+- **The `NONZERO_EXIT_IS_ERROR` opt-out has three users out of 399, and 355 of
   the 399 have never been measured.** The exit-code change flips the behaviour
   of every `StandardTool` tool at once — 399 of them
   (`grep -rho 'impl StandardTool for' src/mcp/tool_handlers/ | wc -l`; 399 plus
   the 77 direct handlers is the whole 476-tool baseline). The judgment behind
-  flipping them all rests on the 44 the live campaign could probe. Of the four
+  flipping them all rests on the 44 the live campaign could probe. Of the three
   opt-outs above, `ssh_service_status` is the one measured live on this branch
-  (case `H07`, `report-pass4-B.json`). Whether the other three were among that
-  44 is not recorded in any artefact in this tree — the sweep's own reports are
-  gitignored and exist only in the main checkout — so treat their non-zero
-  semantics as read off their command (`systemctl status`, `kubectl diff`,
-  `helm diff --detailed-exitcode`) rather than as measured. Nothing here says
+  (case `H07`, `report-pass4-B.json`). Whether `ssh_timer_info` or
+  `ssh_k8s_diff` were among that 44 is not recorded in any artefact in this tree
+  — the sweep's own reports are gitignored and exist only in the main checkout —
+  so treat their non-zero semantics as read off their command
+  (`systemctl status`, `kubectl diff`) rather than as measured. Nothing here says
   the 355 unprobed tools have no normal non-zero answer of their own; it says
   only that nobody has looked. When one turns up, the fix is one const on that
-  tool, and these four are the worked examples.
+  tool — and `ssh_helm_diff` above is the worked example of a candidate that
+  looks like one and is not, because its non-zero answer depends on an argument
+  the const cannot see.
 
 - **`sudo: true` reaches two different functions, and only one of them can use
   a configured `sudo_password`.** `domain::privilege::elevate` (no password,
