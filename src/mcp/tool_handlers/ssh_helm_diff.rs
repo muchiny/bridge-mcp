@@ -49,11 +49,36 @@ impl StandardTool for HelmDiffTool {
 
     const NAME: &'static str = "ssh_helm_diff";
 
+    // WHY THIS TOOL DOES **NOT** SET `NONZERO_EXIT_IS_ERROR = false`, unlike
+    // `ssh_service_status`, `ssh_timer_info` and `ssh_k8s_diff`.
+    //
+    // Those three answer by their exit code under DEFAULT arguments, so for
+    // them a non-zero exit really is a normal answer and the opt-out returns
+    // them to their pre-plan behaviour (ruling R32). This tool does not:
+    // `detailed_exitcode` defaults to false (`build_command`, below:
+    // `args.detailed_exitcode.unwrap_or(false)`), and without it `helm diff`
+    // exits 0 whether or not there are differences. So by default a non-zero
+    // exit from here is a REAL failure — the builder's own `exit 4` for a
+    // missing helm-diff plugin, an unknown release, a broken `helm` — and
+    // opting out would hide exactly what the exit-code chain exists to
+    // surface, while buying nothing in the common case.
+    //
+    // **The limitation that leaves, named rather than papered over:** a caller
+    // who passes `detailed_exitcode=true` asks for 2-means-changes, and this
+    // tool will report that difference as a failed call — `isError` on the MCP
+    // path, exit 6 from the CLI. A trait const cannot condition on an
+    // argument, so such a caller has to read 6 as "changes found" itself. The
+    // tool description says so, and `bridge-mcp tool ssh_helm_diff … && next`
+    // will not run `next` after a diff that found something.
+
     const DESCRIPTION: &'static str = "Show diff of Helm changes using the helm-diff plugin on a remote host. \
         Requires the helm-diff plugin to be installed (helm plugin install https://github.com/databus23/helm-diff). \
         subcommand: upgrade | rollback | release | revision. \
         Use upgrade to preview changes before helm upgrade. Use rollback to see what a rollback would do. \
-        Auto-detects helm binary. Exits with code 4 if helm-diff plugin is not installed.";
+        Auto-detects helm binary. Exits with code 4 if helm-diff plugin is not installed. \
+        With detailed_exitcode=true a found difference is reported as a FAILED call \
+        (CLI exit 6, isError over MCP), because a non-zero exit from this tool is \
+        otherwise a real failure: read 6 as 'changes found' yourself in that mode.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",

@@ -667,9 +667,9 @@ async fn test_sanitizer_redacts_passwords() {
         exit_code: 0,
         duration_ms: 50,
     };
-    let response = ctx
-        .execute_use_case
-        .process_success("linux-server", "env", &output);
+    let response =
+        ctx.execute_use_case
+            .process_success("test_tool", "linux-server", "env", &output, &[]);
     assert!(
         !response.output.contains("supersecret123"),
         "Password should be redacted: {}",
@@ -687,9 +687,9 @@ async fn test_sanitizer_redacts_aws_keys() {
         exit_code: 0,
         duration_ms: 50,
     };
-    let response = ctx
-        .execute_use_case
-        .process_success("linux-server", "env", &output);
+    let response =
+        ctx.execute_use_case
+            .process_success("test_tool", "linux-server", "env", &output, &[]);
     assert!(
         !response.output.contains("wJalrXUtnFEMI"),
         "AWS key should be redacted: {}",
@@ -706,9 +706,9 @@ async fn test_sanitizer_preserves_normal_output() {
         exit_code: 0,
         duration_ms: 50,
     };
-    let response = ctx
-        .execute_use_case
-        .process_success("linux-server", "ls -la", &output);
+    let response =
+        ctx.execute_use_case
+            .process_success("test_tool", "linux-server", "ls -la", &output, &[]);
     assert!(
         response.output.contains("drwxr-xr-x"),
         "Normal output should be preserved: {}",
@@ -725,9 +725,9 @@ async fn test_process_success_nonzero_exit() {
         exit_code: 127,
         duration_ms: 10,
     };
-    let response = ctx
-        .execute_use_case
-        .process_success("linux-server", "foobar", &output);
+    let response =
+        ctx.execute_use_case
+            .process_success("test_tool", "linux-server", "foobar", &output, &[]);
     assert_eq!(response.exit_code, 127);
     assert!(response.output.contains("command not found"));
 }
@@ -807,9 +807,13 @@ async fn test_history_records_success() {
         exit_code: 0,
         duration_ms: 50,
     };
-    let _ = ctx
-        .execute_use_case
-        .process_success("linux-server", "echo hello", &output);
+    let _ = ctx.execute_use_case.process_success(
+        "test_tool",
+        "linux-server",
+        "echo hello",
+        &output,
+        &[],
+    );
 
     // Verify history recorded the command
     let entries = ctx.history.for_host("linux-server", 10);

@@ -186,7 +186,7 @@ fn test_use_case_process_success_sanitization() {
         duration_ms: 100,
     };
 
-    let response = use_case.process_success("test-server", "cat config", &output);
+    let response = use_case.process_success("test_tool", "test-server", "cat config", &output, &[]);
 
     // Password should be sanitized
     assert!(!response.output.contains("secret123"));
@@ -208,7 +208,7 @@ fn test_use_case_process_success_with_stderr() {
         duration_ms: 50,
     };
 
-    let response = use_case.process_success("test-server", "ls", &output);
+    let response = use_case.process_success("test_tool", "test-server", "ls", &output, &[]);
 
     assert!(response.output.contains("output line 1"));
     assert!(response.output.contains("STDERR"));
@@ -227,7 +227,7 @@ fn test_use_case_process_success_nonzero_exit() {
         duration_ms: 10,
     };
 
-    let response = use_case.process_success("test-server", "bad-cmd", &output);
+    let response = use_case.process_success("test_tool", "test-server", "bad-cmd", &output, &[]);
 
     assert_eq!(response.exit_code, 127);
     assert!(response.output.contains("127"));

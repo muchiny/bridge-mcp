@@ -413,6 +413,8 @@ fn success_json(value: Value) -> ToolCallResult {
         content: vec![ToolContent::Text { text }],
         is_error: Some(false),
         structured_content: Some(value),
+        // Meta-tools answer from the registry; no remote command runs.
+        remote_exit_code: None,
     }
 }
 

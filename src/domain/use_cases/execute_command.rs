@@ -166,28 +166,29 @@ impl ExecuteCommandUseCase {
         self.validator.validate_builtin(command)
     }
 
-    /// Log a denied command
-    pub fn log_denied(&self, host: &str, command: &str, reason: &str) {
-        self.audit_logger
-            .log(AuditEvent::denied(host, command, reason));
-    }
-
     /// Log a denied command, recording which tool asked for it.
     ///
-    /// `AuditEvent::event_type` is the literal `"ssh_exec"` for every event, so
-    /// an audit line could not say whether a denial came from `ssh_exec` itself
-    /// or from `ssh_file_write`. `tool_name` has existed on the event since it
-    /// was added but nothing in production ever set it.
-    pub fn log_denied_for_tool(&self, tool: &str, host: &str, command: &str, reason: &str) {
+    /// `tool` is mandatory: `AuditEvent::event_type` is the literal
+    /// `"ssh_exec"` for every event, so an audit line could not otherwise
+    /// say whether a denial came from `ssh_exec` itself or from
+    /// `ssh_file_write`. `tool_name` has existed on the event since it was
+    /// added, but as long as carrying it was optional nothing in
+    /// production ever set it: a 2026-09 measurement found 25% of 3,686
+    /// audit lines with no `tool_name`, and `ssh_exec` — the escape hatch
+    /// every free-form write goes through — never appeared as a tool name
+    /// at all. An absent name proved nothing; it only meant a caller had
+    /// not bothered.
+    pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
         self.audit_logger
             .log(AuditEvent::denied(host, command, reason).with_tool_name(tool));
     }
 
     /// Process a successful execution, recording which tool ran it.
     ///
-    /// See [`Self::log_denied_for_tool`] for why the name is worth carrying.
+    /// See [`Self::log_denied`] for why `tool` is mandatory rather than an
+    /// `Option`.
     #[must_use]
-    pub fn process_success_for_tool(
+    pub fn process_success(
         &self,
         tool: &str,
         host: &str,
@@ -195,33 +196,19 @@ impl ExecuteCommandUseCase {
         output: &CommandOutput,
         reduction: &[&'static str],
     ) -> ExecuteCommandResponse {
+        // Redact secrets (e.g. an AWX bearer token typed on the command line)
+        // from the command itself before it ever reaches audit or history —
+        // both re-export `command` verbatim, and only the *output* used to be
+        // sanitized (audit 2026-08-13, B5/B6).
         let redacted = self.sanitizer.sanitize(command);
-        self.record_success_redacted_for_tool(
-            Some(tool),
+        self.record_success_redacted(
+            tool,
             host,
             &redacted,
             output.exit_code,
             output.duration_ms,
             reduction,
         );
-        self.finish_success(host, &redacted, output)
-    }
-
-    /// Process the output from a successful command execution
-    #[must_use]
-    pub fn process_success(
-        &self,
-        host: &str,
-        command: &str,
-        output: &CommandOutput,
-    ) -> ExecuteCommandResponse {
-        // Redact secrets (e.g. an AWX bearer token typed on the command line)
-        // from the command itself before it ever reaches audit or history —
-        // both re-export `command` verbatim, and only the *output* used to be
-        // sanitized (audit 2026-08-13, B5/B6).
-        let redacted = self.sanitizer.sanitize(command);
-
-        self.record_success_redacted(host, &redacted, output.exit_code, output.duration_ms);
         self.finish_success(host, &redacted, output)
     }
 
@@ -263,9 +250,22 @@ impl ExecuteCommandUseCase {
     /// persistent session already does all three, so it needs only the
     /// audit-and-history half — without it a session command that succeeds
     /// leaves no trace anywhere, while the same command denied does.
-    pub fn log_success(&self, host: &str, command: &str, exit_code: u32, duration_ms: u64) {
+    ///
+    /// `tool` is mandatory — see [`Self::log_denied`]. This is the entry
+    /// point the persistent-session path uses, and it was the one bare call
+    /// with no tool-named twin at all: `ssh_session_exec` never once
+    /// appeared as a tool name in the audit log this task was written to
+    /// fix.
+    pub fn log_success(
+        &self,
+        tool: &str,
+        host: &str,
+        command: &str,
+        exit_code: u32,
+        duration_ms: u64,
+    ) {
         let redacted = self.sanitizer.sanitize(command);
-        self.record_success_redacted(host, &redacted, exit_code, duration_ms);
+        self.record_success_redacted(tool, host, &redacted, exit_code, duration_ms, &[]);
     }
 
     /// Audit + history for a command whose text is ALREADY redacted.
@@ -276,19 +276,7 @@ impl ExecuteCommandUseCase {
     /// "no raw command past this point" invariant on one line each.
     fn record_success_redacted(
         &self,
-        host: &str,
-        redacted: &str,
-        exit_code: u32,
-        duration_ms: u64,
-    ) {
-        self.record_success_redacted_for_tool(None, host, redacted, exit_code, duration_ms, &[]);
-    }
-
-    /// As [`Self::record_success_redacted`], carrying the tool name into the
-    /// audit event when the caller knows it.
-    fn record_success_redacted_for_tool(
-        &self,
-        tool: Option<&str>,
+        tool: &str,
         host: &str,
         redacted: &str,
         exit_code: u32,
@@ -302,10 +290,8 @@ impl ExecuteCommandUseCase {
                 exit_code,
                 duration_ms,
             },
-        );
-        if let Some(name) = tool {
-            event = event.with_tool_name(name);
-        }
+        )
+        .with_tool_name(tool);
         event.reduction = reduction.to_vec();
         self.audit_logger.log(event);
         self.history
@@ -314,9 +300,11 @@ impl ExecuteCommandUseCase {
 
     /// Log a failed command execution, recording which tool ran it.
     ///
-    /// See [`Self::log_denied_for_tool`] for why the name is worth carrying.
-    pub fn log_failure_for_tool(&self, tool: &str, host: &str, command: &str, error: &str) {
+    /// `tool` is mandatory — see [`Self::log_denied`].
+    pub fn log_failure(&self, tool: &str, host: &str, command: &str, error: &str) {
+        // Same redaction as `process_success` — see its comment.
         let redacted = self.sanitizer.sanitize(command);
+
         self.audit_logger.log(
             AuditEvent::new(
                 host,
@@ -327,21 +315,6 @@ impl ExecuteCommandUseCase {
             )
             .with_tool_name(tool),
         );
-        self.history.record_failure(host, &redacted);
-    }
-
-    /// Log a failed command execution
-    pub fn log_failure(&self, host: &str, command: &str, error: &str) {
-        // Same redaction as `process_success` — see its comment.
-        let redacted = self.sanitizer.sanitize(command);
-
-        self.audit_logger.log(AuditEvent::new(
-            host,
-            &redacted,
-            CommandResult::Error {
-                message: error.to_string(),
-            },
-        ));
 
         self.history.record_failure(host, &redacted);
     }
@@ -398,6 +371,73 @@ mod tests {
             Arc::new(AuditLogger::disabled()),
             Arc::new(CommandHistory::new(&HistoryConfig::default())),
         )
+    }
+
+    /// Like `create_test_use_case`, but wired to an `AuditLogger::for_test`
+    /// instead of `AuditLogger::disabled` so a test can drain and assert on
+    /// the exact `AuditEvent`s a call produced (`tool_name` included).
+    fn test_use_case() -> ExecuteCommandUseCase {
+        let security_config = crate::config::SecurityConfig::default();
+
+        ExecuteCommandUseCase::new(
+            Arc::new(CommandValidator::new(&security_config)),
+            Arc::new(Sanitizer::with_defaults()),
+            Arc::new(AuditLogger::for_test()),
+            Arc::new(CommandHistory::new(&HistoryConfig::default())),
+        )
+    }
+
+    /// A remote failure must be readable as **data** — `exit_code` on the
+    /// response — not only as the `[exit:N]` prefix `format_for_llm` writes
+    /// into the text a human reads.
+    ///
+    /// The field already exists and `finish_success` already fills it, so
+    /// this test is a **lock, not a driver**: it pins the data path so a
+    /// later change cannot quietly turn the remote exit code back into
+    /// presentation only. The genuine red for this task is one layer up, in
+    /// `cli::runner`, where the code was being dropped on the floor.
+    #[test]
+    fn a_remote_failure_is_visible_as_data_not_only_as_text() {
+        let uc = test_use_case();
+        let out = CommandOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "no such user".into(),
+            duration_ms: 1,
+        };
+        let resp = uc.process_success("ssh_user_info", "raspberry", "id btest", &out, &[]);
+        assert_eq!(
+            resp.exit_code, 1,
+            "the remote exit code must be data, not only a text prefix"
+        );
+        // The text is unchanged: `format_for_llm` still leads with the
+        // `[exit:N]` marker. Note it is `format_for_llm` that carries that
+        // prefix, not `resp.output` — the latter is `format_output`'s
+        // verbose `Host:/Command:/Exit code:` block.
+        let text = resp.format_for_llm(&resp.stdout);
+        assert!(
+            text.starts_with("[exit:1]"),
+            "the [exit:N] text stays for the reader, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn every_audit_event_carries_the_tool_that_produced_it() {
+        let uc = test_use_case();
+        let out = CommandOutput {
+            exit_code: 0,
+            stdout: "x".into(),
+            stderr: String::new(),
+            duration_ms: 1,
+        };
+        let _ = uc.process_success("ssh_exec", "raspberry", "id", &out, &[]);
+        let events = uc.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].tool_name.as_deref(),
+            Some("ssh_exec"),
+            "un événement d'audit sans nom d'outil n'est rattachable à rien"
+        );
     }
 
     #[test]
@@ -674,7 +714,7 @@ mod tests {
             duration_ms: 50,
         };
 
-        let response = use_case.process_success("host", "echo test", &output);
+        let response = use_case.process_success("test_tool", "host", "echo test", &output, &[]);
 
         // Password should be sanitized
         assert!(!response.output.contains("secret123"));
@@ -697,7 +737,7 @@ mod tests {
             Arc::clone(&history),
         );
 
-        use_case.log_success("raspberry", "uptime", 0, 12);
+        use_case.log_success("test_tool", "raspberry", "uptime", 0, 12);
 
         let entries = history.recent(10);
         assert_eq!(
@@ -723,7 +763,7 @@ mod tests {
             duration_ms: 10,
         };
 
-        let response = use_case.process_success("host", "env", &output);
+        let response = use_case.process_success("test_tool", "host", "env", &output, &[]);
 
         // GitHub token should be sanitized
         assert!(!response.output.contains(token));
@@ -740,7 +780,7 @@ mod tests {
             duration_ms: 100,
         };
 
-        let response = use_case.process_success("host", "failing_cmd", &output);
+        let response = use_case.process_success("test_tool", "host", "failing_cmd", &output, &[]);
 
         assert_eq!(response.exit_code, 1);
         assert!(response.output.contains("Error occurred"));
@@ -751,8 +791,13 @@ mod tests {
         let use_case = create_test_use_case();
 
         // Should not panic even with disabled logger
-        use_case.log_denied("host1", "rm -rf /", "blacklisted");
-        use_case.log_denied("host2", "dangerous_command", "not in whitelist");
+        use_case.log_denied("test_tool", "host1", "rm -rf /", "blacklisted");
+        use_case.log_denied(
+            "test_tool",
+            "host2",
+            "dangerous_command",
+            "not in whitelist",
+        );
     }
 
     #[test]
@@ -760,8 +805,8 @@ mod tests {
         let use_case = create_test_use_case();
 
         // Should not panic even with disabled logger
-        use_case.log_failure("host1", "ls", "connection timeout");
-        use_case.log_failure("host2", "pwd", "network error");
+        use_case.log_failure("test_tool", "host1", "ls", "connection timeout");
+        use_case.log_failure("test_tool", "host2", "pwd", "network error");
     }
 
     #[test]

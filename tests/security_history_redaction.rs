@@ -37,7 +37,7 @@ fn history_redacts_awx_bearer_token_on_success() {
         duration_ms: 5,
     };
 
-    let response = use_case.process_success("awx", &command, &output);
+    let response = use_case.process_success("test_tool", "awx", &command, &output, &[]);
 
     // The response's own `command` field must not leak the token either.
     assert!(
@@ -70,7 +70,7 @@ fn history_redacts_awx_bearer_token_on_failure() {
     let token = "abc123def456ghi789jkl012mno345";
     let command = format!("curl -H 'Authorization: Bearer {token}' https://awx/api");
 
-    use_case.log_failure("awx", &command, "connection timeout");
+    use_case.log_failure("test_tool", "awx", &command, "connection timeout");
 
     let recent = history.recent(1);
     assert_eq!(recent.len(), 1);
@@ -94,7 +94,7 @@ fn history_benign_command_round_trips_byte_identical() {
         duration_ms: 12,
     };
 
-    let response = use_case.process_success("host1", "ls -la", &output);
+    let response = use_case.process_success("test_tool", "host1", "ls -la", &output, &[]);
     assert_eq!(response.command, "ls -la");
 
     let recent = history.recent(1);
@@ -128,7 +128,7 @@ fn history_entropy_detection_redacts_opaque_high_entropy_argument() {
         duration_ms: 8,
     };
 
-    let response = use_case.process_success("host1", &command, &output);
+    let response = use_case.process_success("test_tool", "host1", &command, &output, &[]);
 
     assert!(
         !response.command.contains(opaque_arg),

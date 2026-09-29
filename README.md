@@ -770,6 +770,49 @@ bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 | 3 | SSH connection error |
 | 4 | Security denial |
 | 5 | Configuration error |
+| 6 | The remote command itself failed (non-zero exit on the target host) |
+
+Codes 1-5 are the bridge's *own* failures: it could not run your command.
+Code 6 means the opposite — the command ran on the target host and exited
+non-zero. The distinction matters because before this release `bridge-mcp tool`
+exited **0** in that case, so `bridge-mcp tool … && next` ran `next` after a
+failure.
+
+The remote command's own exit code is not returned as a separate field; it
+appears in the result text as the `[exit:N]` prefix, and `--json` marks the
+call `"isError": true`.
+
+**Which tools emit 6 — read this before relying on it.** Code 6 comes from the
+shared `StandardTool` pipeline, which is most of the catalogue but not all of
+it. **52 handlers run their remote command outside that pipeline and still exit
+0 when it fails**, including the ones you are most likely to script:
+
+| Still exits 0 on a remote failure | Count | When |
+|---|---|---|
+| `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec` — the free-form escape hatches | 3 | any non-zero exit |
+| `ssh_find`, `ssh_tail`, `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write` | 6 | any non-zero exit |
+| the `ssh_awx_*` family | 43 | **only** a curl transport failure (connection refused, timeout). An HTTP status >= 400 already surfaces as a bridge error. Except `ssh_awx_job_follow`, which does not check the status and so swallows HTTP errors too. |
+
+So `bridge-mcp tool ssh_exec host=x command=false` exits 0, while the same
+failure through a `StandardTool` tool exits 6. Bringing those 52 into line is
+tracked as follow-up work; until then, treat exit 6 as "this tool told me the
+remote command failed", never exit 0 as "the remote command succeeded".
+
+The live-host sweep that found this measured 44 affected tools, and all 44 are
+pipeline tools, so the measured defect is closed — but the defect *class* is
+not, and the 52 above are its unmeasured remainder (CHANGELOG has the chain).
+
+Two further limits:
+
+- **Only the `tool` subcommand distinguishes 6.** `bridge-mcp exec` exits 1 on
+  a failed remote command, as it always has.
+- **Not when a daemon serves the call.** With `bridge-mcp daemon` running, the
+  CLI forwards the call and reads the MCP result back off the wire, where the
+  remote/bridge distinction is not carried — a remote failure then exits 1, not
+  6. Still non-zero, so `&&` behaves the same either way; only the
+  discrimination is lost. A caller branching on `$? -eq 6` is therefore
+  environment-dependent; branch on `$? -ne 0` unless you control whether a
+  daemon is running.
 
 ### Shell completions
 

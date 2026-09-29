@@ -421,17 +421,21 @@ async fn execute_on_host(
     };
 
     // Wrap command with sudo if requested
+    //
+    // L'élévation est une décision du domaine : `privilege::elevate*`
+    // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
+    // ici n'élèverait que le premier processus — voir la documentation de
+    // `domain::privilege::elevate`.
     let wrapped_command = if use_sudo {
-        if let Some(ref password) = host_config.sudo_password {
-            format!(
-                "echo {} | sudo -S -u {} {}",
-                shell_escape(password),
-                shell_escape(&sudo_user),
-                command
-            )
-        } else {
-            format!("sudo -n -u {} {}", shell_escape(&sudo_user), command)
-        }
+        let privilege = crate::domain::privilege::PrivilegeArgs {
+            sudo: use_sudo,
+            sudo_user: Some(sudo_user.to_string()),
+        };
+        crate::domain::privilege::elevate_with_password(
+            &command,
+            &privilege,
+            host_config.sudo_password.as_deref(),
+        )
     } else {
         command.clone()
     };
@@ -482,7 +486,13 @@ async fn execute_on_host(
 
     match output {
         Ok(output) => {
-            let response = execute_use_case.process_success(&host_name, &command, &output.into());
+            let response = execute_use_case.process_success(
+                "ssh_exec_multi",
+                &host_name,
+                &command,
+                &output.into(),
+                &[],
+            );
             let truncated = truncate_output_with_cache(
                 &response.output,
                 max_chars,
@@ -505,7 +515,7 @@ async fn execute_on_host(
             }
         }
         Err(e) => {
-            execute_use_case.log_failure(&host_name, &command, &e.to_string());
+            execute_use_case.log_failure("ssh_exec_multi", &host_name, &command, &e.to_string());
 
             if fail_fast {
                 cancel_token.cancel();

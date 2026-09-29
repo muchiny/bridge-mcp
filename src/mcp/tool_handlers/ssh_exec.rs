@@ -17,8 +17,6 @@ use crate::ssh::{is_retryable_error_for, with_retry_if};
 use crate::config::ShellType;
 use crate::domain::use_cases::shell;
 
-use super::utils::shell_escape;
-
 /// Arguments for `ssh_exec` tool
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,7 +133,7 @@ impl ToolHandler for SshExecHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(&args.host, &args.command, &reason);
+                .log_denied(self.name(), &args.host, &args.command, &reason);
             return Err(e);
         }
 
@@ -162,19 +160,20 @@ impl ToolHandler for SshExecHandler {
         // Derive effective shell for this host
         let effective_shell = host_config.effective_shell();
 
-        // Wrap command with sudo if requested (POSIX only; no-op on Windows)
-        let command = if args.sudo.unwrap_or(false) && effective_shell == ShellType::Posix {
-            let sudo_user = args.sudo_user.as_deref().unwrap_or("root");
-            if let Some(ref password) = host_config.sudo_password {
-                format!(
-                    "echo {} | sudo -S -u {} {}",
-                    shell_escape(password),
-                    shell_escape(sudo_user),
-                    args.command
-                )
-            } else {
-                format!("sudo -n -u {} {}", shell_escape(sudo_user), args.command)
-            }
+        // L'élévation est une décision du domaine : `privilege::elevate*`
+        // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
+        // ici n'élèverait que le premier processus — voir la documentation de
+        // `domain::privilege::elevate`.
+        let command = if effective_shell == ShellType::Posix {
+            let privilege = crate::domain::privilege::PrivilegeArgs {
+                sudo: args.sudo.unwrap_or(false),
+                sudo_user: args.sudo_user.clone(),
+            };
+            crate::domain::privilege::elevate_with_password(
+                &args.command,
+                &privilege,
+                host_config.sudo_password.as_deref(),
+            )
         } else {
             args.command.clone()
         };
@@ -227,14 +226,22 @@ impl ToolHandler for SshExecHandler {
         .await;
 
         let output = output.inspect_err(|e| {
-            ctx.execute_use_case
-                .log_failure(&args.host, &args.command, &e.to_string());
+            ctx.execute_use_case.log_failure(
+                self.name(),
+                &args.host,
+                &args.command,
+                &e.to_string(),
+            );
         })?;
 
         // Process success using the use case (handles audit, history, formatting, sanitization)
-        let response =
-            ctx.execute_use_case
-                .process_success(&args.host, &args.command, &output.into());
+        let response = ctx.execute_use_case.process_success(
+            self.name(),
+            &args.host,
+            &args.command,
+            &output.into(),
+            &[],
+        );
 
         if response.exit_code != 0 {
             warn!(

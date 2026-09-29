@@ -125,6 +125,42 @@ pub struct ToolCallResult {
     /// Must conform to the tool's `outputSchema` if defined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
+    /// The **remote** command's own exit code, when this result failed
+    /// *because the remote command failed*.
+    ///
+    /// This is the discriminator `is_error` alone cannot provide.
+    /// [`Self::error`] sets `is_error` for bridge-side refusals too — a rate
+    /// limit, a denied command, a declined confirmation — so "`is_error` is
+    /// true" cannot tell "the bridge refused" from "the target host said no".
+    /// The CLI needs that distinction to report a distinct process exit code
+    /// (see `EXIT_REMOTE_FAILURE` in `crate::cli::runner`), and announcing a
+    /// remote failure on a signal that cannot establish one would be the very
+    /// fault this field exists to remove.
+    ///
+    /// The three states, in full:
+    /// * `None` — no claim about a remote exit code. Either nothing ran
+    ///   remotely, or the tool counts a non-zero exit as a normal answer
+    ///   (`StandardTool::NONZERO_EXIT_IS_ERROR = false`), or the handler
+    ///   simply does not report one. **This is what a successful call carries**,
+    ///   and it is what every handler outside the `StandardTool` pipeline
+    ///   carries today — see the note on that pipeline's step 19.
+    /// * `Some(0)` — a command ran on the target host and succeeded. A
+    ///   coherent statement, and the CLI reads it as success, but nothing in
+    ///   the tree emits it: the pipeline only records a code when it is
+    ///   non-zero, so `Some(0)` exists as a total contract rather than as a
+    ///   reachable state.
+    /// * `Some(n)`, `n != 0` — a command ran on the target host, exited `n`,
+    ///   and the tool treats that as a failure. `is_error` is `Some(true)`
+    ///   alongside it.
+    ///
+    /// **Not part of the MCP wire format.** `#[serde(skip)]` keeps it out of
+    /// every serialized result and out of every `outputSchema`: it is an
+    /// in-process channel from the handler to the CLI, not a protocol
+    /// extension. One consequence, deliberate and documented: the
+    /// daemon-forwarding CLI path reads the response back off the wire and so
+    /// cannot see this field — it falls back to exit 1.
+    #[serde(skip)]
+    pub remote_exit_code: Option<i32>,
 }
 
 /// Content block within a tool result.
@@ -216,6 +252,7 @@ impl ToolCallResult {
             content: vec![ToolContent::Text { text: text.into() }],
             is_error: None,
             structured_content: None,
+            remote_exit_code: None,
         }
     }
 
@@ -225,6 +262,10 @@ impl ToolCallResult {
             content: vec![ToolContent::Text { text: text.into() }],
             is_error: Some(true),
             structured_content: None,
+            // Deliberately `None`: `error` is the bridge's own refusal
+            // channel. Claiming a remote exit code here is what would
+            // conflate "the bridge said no" with "the host said no".
+            remote_exit_code: None,
         }
     }
 
@@ -254,6 +295,27 @@ impl ToolCallResult {
     #[must_use]
     pub fn with_structured(mut self, data: serde_json::Value) -> Self {
         self.structured_content = Some(data);
+        self
+    }
+
+    /// Record that a command ran on the target host and exited `code`.
+    ///
+    /// For `code != 0` this also sets `is_error`: a remote command that failed
+    /// is a failed tool call, which is what an MCP client tests. See
+    /// [`Self::remote_exit_code`] for why the two signals are not
+    /// interchangeable.
+    ///
+    /// `code == 0` records the code and leaves `is_error` alone, because a
+    /// command that succeeded is not an error. That is deliberate rather than
+    /// a half-state — [`Self::remote_exit_code`] documents all three states —
+    /// but no caller passes 0 today, since the pipeline records a code only
+    /// when it is non-zero.
+    #[must_use]
+    pub const fn with_remote_exit_code(mut self, code: i32) -> Self {
+        self.remote_exit_code = Some(code);
+        if code != 0 {
+            self.is_error = Some(true);
+        }
         self
     }
 }

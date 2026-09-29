@@ -216,6 +216,12 @@ impl SealedResult {
     }
 
     fn into_result(self) -> ToolCallResult {
+        // NOTE: this rebuilds the result from the three fields a sealed result
+        // carries, so `remote_exit_code` does not survive the round-trip — it
+        // is not an invariant of `ToolCallResult`. Harmless today: the field is
+        // `#[serde(skip)]` and read only by the direct CLI path, which never
+        // seals anything. Anything that starts reading it on the MCP side must
+        // carry it through here (and through `SealedResult`) first.
         let mut result = ToolCallResult::text(self.text);
         result.structured_content = self.structured;
         result.is_error = Some(self.is_error);
@@ -723,6 +729,10 @@ impl McpServer {
         text.push_str("\n=== LLM SUMMARY ===\n");
         text.push_str(summary);
 
+        // NOTE: same as `SealedResult::into_result` — rebuilding the result
+        // drops `remote_exit_code`. Latent only (this is the MCP summary path,
+        // and the field is read by the direct CLI path), but do not assume the
+        // field survives an enrichment hook.
         let mut enriched = ToolCallResult::text(text);
         enriched.structured_content = result.structured_content;
         enriched.is_error = result.is_error;

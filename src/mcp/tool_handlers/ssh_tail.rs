@@ -143,7 +143,7 @@ impl ToolHandler for SshTailHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(&args.host, &command, &reason);
+                .log_denied(self.name(), &args.host, &command, &reason);
             return Err(e);
         }
 
@@ -203,13 +203,17 @@ impl ToolHandler for SshTailHandler {
 
         let output = output.inspect_err(|e| {
             ctx.execute_use_case
-                .log_failure(&args.host, &command, &e.to_string());
+                .log_failure(self.name(), &args.host, &command, &e.to_string());
         })?;
 
         // Process success (audit, history, formatting, sanitization)
-        let response = ctx
-            .execute_use_case
-            .process_success(&args.host, &command, &output.into());
+        let response = ctx.execute_use_case.process_success(
+            self.name(),
+            &args.host,
+            &command,
+            &output.into(),
+            &[],
+        );
 
         // Apply smart truncation with optional caching
         #[allow(clippy::cast_possible_truncation)]

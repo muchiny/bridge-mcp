@@ -1,0 +1,15 @@
+{
+  "binary": "./target/debug/bridge-mcp",
+  "host": "raspberry",
+  "baseline": true,
+  "results": {
+    "H91": {
+      "cli": {
+        "ok": true,
+        "out": "",
+        "err": "Error: SFTP error: SFTP error: No such file: No such file",
+        "rc": 1
+      }
+    }
+  }
+}

@@ -174,8 +174,13 @@ async fn main() -> Result<()> {
             )
             .await
             .map_err(map_exit_code)?;
+            // Propagate the code `run_tool` computed rather than flattening
+            // everything to 1: it distinguishes a remote command that failed
+            // (`bridge_mcp::cli::EXIT_REMOTE_FAILURE`) from the
+            // bridge's own failure to run it. Flattening here would have
+            // thrown that distinction away right after it was established.
             if exit_code != 0 {
-                std::process::exit(1);
+                std::process::exit(exit_code);
             }
         }
         Some(Commands::DescribeTool { tool_name }) => {

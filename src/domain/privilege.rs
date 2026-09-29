@@ -152,8 +152,33 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// about the real cause. `-n` turns that into an immediate, legible
 /// "a password is required".
 ///
-/// The command is single-quoted with POSIX escaping, so nothing inside it is
-/// interpreted by the outer shell.
+/// The command **and** the target user, when one is given, are single-quoted
+/// with POSIX escaping, so nothing inside either is interpreted by the outer
+/// shell. `sudo_user` reaches here as a plain `String` from three handlers
+/// that build their own `PrivilegeArgs` directly — unlike the ~90 tools that
+/// go through [`PrivilegeArgs::extract`] and its [`validate_sudo_user`], it is
+/// not constrained to `[A-Za-z0-9._-]` before it gets here. Escaping it is
+/// what keeps `-u <user>` from being a second injection point beside the
+/// command: for an ordinary name escaping is a no-op wrap (`root` becomes
+/// `'root'`, which `sudo -u` reads identically), and for anything else it
+/// keeps the payload a single, inert argument instead of a shell metacharacter.
+///
+/// # This function has no password path, and it is the one 399 tools use
+///
+/// The `StandardTool` pipeline elevates here (`src/mcp/standard_tool.rs`, step
+/// 5b), so all 399 pipeline tools get `sudo -n` and nothing else: a
+/// `sudo_password` in the host's config is never offered to them. `sudo -n`
+/// succeeds only where sudoers grants `NOPASSWD` and otherwise fails at once
+/// with "a password is required" — so on a host that genuinely demands a
+/// password, `sudo: true` works for the three handlers that build their own
+/// `PrivilegeArgs` and call [`elevate_with_password`] (`ssh_exec`,
+/// `ssh_exec_multi`, `ssh_session_exec`) and for no other tool.
+///
+/// That split is deliberate for now, not an oversight: the one-line remedy is
+/// to pass the host's `sudo_password` to [`elevate_with_password`] here too,
+/// but it would change the behaviour of 399 tools on every password host at
+/// once, and only the three above have ever been exercised on one. It is a
+/// named known issue in `CHANGELOG.md` waiting for its own measurement.
 #[must_use]
 pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     if !args.sudo {
@@ -163,7 +188,60 @@ pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     let quoted = shell::escape(command, ShellType::Posix);
     args.sudo_user.as_ref().map_or_else(
         || format!("sudo -n bash -c {quoted}"),
-        |user| format!("sudo -n -u {user} bash -c {quoted}"),
+        |user| {
+            let user = shell::escape(user, ShellType::Posix);
+            format!("sudo -n -u {user} bash -c {quoted}")
+        },
+    )
+}
+
+/// Like [`elevate`], but for a host whose configuration carries a `sudo`
+/// password.
+///
+/// **The password is in the string this function returns**, so it is only as
+/// private as what the caller does with that string. `sudo -S` does read it
+/// from stdin, but that stdin is a pipe written *inside the command text*, not
+/// a channel of its own — so "on stdin" is not the same as "off the command
+/// line":
+///
+/// - Sent as an SSH exec request (`ssh_exec`, `ssh_exec_multi`), the whole
+///   `printf '%s\n' '<password>' | sudo -S …` string becomes the argument of
+///   `$SHELL -c` on the remote host. **Any account there reads the password
+///   with `ps -ef` for as long as the call lasts.**
+/// - Written to an already-open session shell's stdin (`ssh_session_exec`), it
+///   is not in anyone's argv: `printf` is a builtin and the `sudo` process it
+///   pipes into carries no password of its own. That is a property of that one
+///   caller, not a guarantee made here.
+///
+/// `printf` in place of `echo` buys nothing either way: both are builtins, and
+/// what leaks on the first path is the outer command line, not the pipe.
+/// Removing the leak means handing the password to the SSH channel instead of
+/// the command line, which is a change to `ports/`. The `#[ignore]`d
+/// `elevate_with_password_never_puts_the_password_in_the_command_line` test in
+/// this file holds the assertion that does not pass today; do not weaken it.
+///
+/// The command is wrapped in a `bash -c` for the same reason as [`elevate`]:
+/// without it only the first process of the line is elevated.
+#[must_use]
+pub fn elevate_with_password(
+    command: &str,
+    args: &PrivilegeArgs,
+    password: Option<&str>,
+) -> String {
+    if !args.sudo {
+        return command.to_string();
+    }
+    let Some(password) = password else {
+        return elevate(command, args);
+    };
+    let quoted = shell::escape(command, ShellType::Posix);
+    let pw = shell::escape(password, ShellType::Posix);
+    args.sudo_user.as_ref().map_or_else(
+        || format!("printf '%s\\n' {pw} | sudo -S -p '' bash -c {quoted}"),
+        |user| {
+            let user = shell::escape(user, ShellType::Posix);
+            format!("printf '%s\\n' {pw} | sudo -S -p '' -u {user} bash -c {quoted}")
+        },
     )
 }
 
@@ -270,7 +348,47 @@ mod tests {
         };
         assert_eq!(
             elevate("psql -c 'select 1'", &args),
-            r"sudo -n -u postgres bash -c 'psql -c '\''select 1'\'''"
+            r"sudo -n -u 'postgres' bash -c 'psql -c '\''select 1'\'''"
+        );
+    }
+
+    /// `sudo_user` reaches three handlers as a plain `String` that never goes
+    /// through [`PrivilegeArgs::extract`]/[`validate_sudo_user`] — it must be
+    /// escaped, not just interpolated, or a value like `root; touch
+    /// /tmp/pwned` becomes a second command on the remote host, right next to
+    /// the command argument that is already escaped.
+    #[test]
+    fn elevate_escapes_a_malicious_sudo_user() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root; touch /tmp/pwned".to_string()),
+        };
+        let got = elevate("id", &args);
+        assert!(
+            !got.contains("; touch /tmp/pwned bash") && !got.contains("; touch /tmp/pwned\nbash"),
+            "the injected `;` must not escape the quoting around sudo_user: {got}"
+        );
+        assert_eq!(
+            got, r"sudo -n -u 'root; touch /tmp/pwned' bash -c 'id'",
+            "sudo_user must be single-quoted exactly like command: {got}"
+        );
+    }
+
+    /// Same injection, through the password-bearing wrapper.
+    #[test]
+    fn elevate_with_password_escapes_a_malicious_sudo_user() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root; touch /tmp/pwned".to_string()),
+        };
+        let got = elevate_with_password("id", &args, Some("hunter2"));
+        assert!(
+            !got.contains("; touch /tmp/pwned bash") && !got.contains("; touch /tmp/pwned\nbash"),
+            "the injected `;` must not escape the quoting around sudo_user: {got}"
+        );
+        assert!(
+            got.contains("-u 'root; touch /tmp/pwned' bash -c 'id'"),
+            "sudo_user must be single-quoted exactly like command: {got}"
         );
     }
 
@@ -298,5 +416,52 @@ mod tests {
             sudo_user: None,
         };
         assert!(elevate("id", &args).starts_with("sudo -n "));
+    }
+
+    #[test]
+    fn elevate_wraps_the_whole_line_not_just_the_first_process() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root".to_string()),
+        };
+        let got = elevate("rm -f -- /run/systemd/system/x && echo ok", &args);
+        // La forme fautive — `sudo -n -u root rm -f -- … && echo ok` — n'élève que le `rm`.
+        assert!(
+            got.starts_with("sudo -n -u 'root' bash -c "),
+            "l'élévation doit envelopper, pas préfixer : {got}"
+        );
+        assert!(
+            !got.contains("&& echo ok\"") && !got.ends_with("&& echo ok"),
+            "le `&&` ne doit pas rester hors de l'enveloppe : {got}"
+        );
+    }
+
+    /// The password never reaches the command line for `elevate` itself —
+    /// `elevate` takes no password. `elevate_with_password` is a different
+    /// story: see its own `#[ignore]`d test below for why the assertion
+    /// this name promises does not hold for the implementation this task
+    /// ships.
+    #[test]
+    #[ignore = "elevate_with_password's Step-3 implementation (per the plan) puts the \
+                password on the command line via `printf '%s\\n' <pw> | sudo -S …`: on \
+                every caller that sends that string as an SSH exec request it is readable \
+                in `ps` on the remote host for the duration of the call. The session caller \
+                avoids that only because of HOW it delivers the string — on an open shell's \
+                stdin, where nothing lands in an argv — and not because of anything this \
+                function does; see its own doc. \
+                Removing that leak means passing the password over the SSH channel instead \
+                of the command line, which is a change to `ports/` and is outside this \
+                task's scope (privilege elevation wrapping only). Tracked, not silently \
+                dropped: do not weaken this assertion to make it pass."]
+    fn elevate_with_password_never_puts_the_password_in_the_command_line() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("root".to_string()),
+        };
+        let got = elevate_with_password("id", &args, Some("hunter2"));
+        assert!(
+            !got.contains("hunter2"),
+            "le mot de passe ne doit jamais apparaître dans la ligne de commande : {got}"
+        );
     }
 }

@@ -330,6 +330,7 @@ impl K3sCommandBuilder {
     ) -> String {
         use std::fmt::Write;
         let prefix = k3s_detect_prefix(k3s_bin);
+        // Commande simple : pas de pipe/redirection/`&&`/`;`/substitution — un préfixe `sudo` élève la ligne entière, pas seulement le premier mot.
         let mut cmd = format!("sudo {prefix}etcd-snapshot save");
         if let Some(n) = name {
             let _ = write!(cmd, " --name {}", shell_escape(n));
@@ -349,6 +350,7 @@ impl K3sCommandBuilder {
     pub fn build_etcd_snapshot_list_command(k3s_bin: Option<&str>, dir: Option<&str>) -> String {
         use std::fmt::Write;
         let prefix = k3s_detect_prefix(k3s_bin);
+        // Commande simple : pas de pipe/redirection/`&&`/`;`/substitution — un préfixe `sudo` élève la ligne entière, pas seulement le premier mot.
         let mut cmd = format!("sudo {prefix}etcd-snapshot ls -o json");
         if let Some(d) = dir {
             let _ = write!(cmd, " --dir {}", shell_escape(d));
@@ -431,6 +433,7 @@ echo 'containerd/k3s ctr unavailable')"
     #[must_use]
     pub fn build_check_config_command(k3s_bin: Option<&str>) -> String {
         let prefix = k3s_detect_prefix(k3s_bin);
+        // Commande simple : pas de pipe/redirection/`&&`/`;`/substitution — un préfixe `sudo` élève la ligne entière, pas seulement le premier mot.
         format!("sudo {prefix}check-config")
     }
 
@@ -455,6 +458,7 @@ echo 'containerd/k3s ctr unavailable')"
             });
         }
         let prefix = k3s_detect_prefix(k3s_bin);
+        // Commande simple : pas de pipe/redirection/`&&`/`;`/substitution — un préfixe `sudo` élève la ligne entière, pas seulement le premier mot.
         let mut cmd = format!("sudo {prefix}ctr images {}", shell_escape(action));
         if let Some(t) = tarball {
             let _ = write!(cmd, " {}", shell_escape(t));
@@ -474,6 +478,14 @@ echo 'containerd/k3s ctr unavailable')"
     #[must_use]
     pub fn build_kubeconfig_get_command(path: Option<&str>, server_ip: Option<&str>) -> String {
         let file = path.unwrap_or("/etc/rancher/k3s/k3s.yaml");
+        // Composée (pipe vers `sed` quand `server_ip` est fourni), mais volontairement
+        // non migrée vers `privilege::elevate` : `sed` ne touche que le flux déjà lu par
+        // `cat`, il ne lit ni n'écrit aucun fichier et n'a donc besoin d'aucun privilège —
+        // contrairement au cas `&&` que ce fichier corrige ailleurs, ici seule la première
+        // étape a besoin d'être élevée. `elevate()` envelopperait tout dans `bash -c`, ce
+        // qui casserait les tests verrouillés à la forme `sudo cat '<path>'` littérale
+        // (`test_build_kubeconfig_get_default_path`, `test_build_kubeconfig_get_custom_path`)
+        // sans corriger de défaut réel.
         let cat = format!("sudo cat {}", shell_escape(file));
         if let Some(ip) = server_ip {
             // server_ip is strictly validated — charset [A-Za-z0-9.-], no slashes,
@@ -517,6 +529,7 @@ do [ -f \"$f\" ] && echo \"== $f ==\" && sudo cat \"$f\"; done 2>/dev/null"
     pub fn build_cert_rotate_command(k3s_bin: Option<&str>, service: Option<&[String]>) -> String {
         use std::fmt::Write;
         let prefix = k3s_detect_prefix(k3s_bin);
+        // Commande simple : pas de pipe/redirection/`&&`/`;`/substitution — un préfixe `sudo` élève la ligne entière, pas seulement le premier mot.
         let mut cmd = format!("sudo {prefix}certificate rotate");
         if let Some(services) = service {
             for svc in services {
@@ -534,6 +547,7 @@ do [ -f \"$f\" ] && echo \"== $f ==\" && sudo cat \"$f\"; done 2>/dev/null"
     #[must_use]
     pub fn build_killall_command(script_path: Option<&str>) -> String {
         let path = script_path.unwrap_or("/usr/local/bin/k3s-killall.sh");
+        // Commande simple : pas de pipe/redirection/`&&`/`;`/substitution — un préfixe `sudo` élève la ligne entière, pas seulement le premier mot.
         format!("sudo {}", shell_escape(path))
     }
 
@@ -553,6 +567,7 @@ do [ -f \"$f\" ] && echo \"== $f ==\" && sudo cat \"$f\"; done 2>/dev/null"
         } else {
             default_path
         };
+        // Commande simple : pas de pipe/redirection/`&&`/`;`/substitution — un préfixe `sudo` élève la ligne entière, pas seulement le premier mot.
         Ok(format!("sudo {}", shell_escape(path)))
     }
 
