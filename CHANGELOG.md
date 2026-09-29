@@ -59,6 +59,16 @@ reading it. Every item below was reproduced before the fix and measured after.
   `sudo_user` at all, so they were never probed) — they are the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
+  **Five of those 52 have since been brought into line**, in this same
+  unreleased cycle: `ssh_file_write`, `ssh_disk_usage` (without `path`),
+  `ssh_tail` (without `grep`), `ssh_exec`, and `ssh_exec_multi` against a
+  single host. The two entries below state what each now does; the paragraph
+  above is kept as written because it is the finding as it was measured, and
+  the list it gives is the one the follow-up work is tracked against. What is
+  still open, therefore: `ssh_session_exec`, `ssh_find`, `ssh_metrics`,
+  `ssh_metrics_multi`, `ssh_exec_multi` across 2+ hosts, `ssh_disk_usage` with
+  a `path`, `ssh_tail` with a `grep`, and the AWX family.
+
   **The AWX family is narrower than the raw count suggests.** 42 of the 43 route
   their response through `AwxCommandBuilder::parse_checked_response`
   (`src/domain/use_cases/awx.rs:226-244`), which already raises
@@ -154,6 +164,53 @@ reading it. Every item below was reproduced before the fix and measured after.
   `( exit 7 )` still run — and every gap known to it is listed and pinned by a
   test on `command_runs_exit_in_session_shell`. It applies to `cmd.exe` and
   PowerShell sessions too, where `exit` ends the shell the same way.
+
+- **`ssh_exec` and `ssh_exec_multi` now exit 6 when the remote command exits
+  non-zero — but they do not call it an error.** `bridge-mcp tool ssh_exec
+  host=x command=false` exited **0**; it now exits **6**, so a script doing
+  `bridge-mcp tool ssh_exec … && next` stops where it used to continue. That is
+  the breaking half, and it is the point: the failure used to live only in the
+  result text as `[exit:N]`, where no caller could test it.
+
+  **The MCP surface is deliberately unchanged.** These two run a command *you*
+  wrote, and plenty of ordinary commands exit non-zero as their answer — `grep`
+  matching nothing exits 1, `diff` finding a difference exits 1, `test` exits 1
+  for false, `systemctl is-active` exits 3 for a stopped unit. The pipeline
+  solved its version of this with a per-tool `NONZERO_EXIT_IS_ERROR`, which
+  cannot work here: the tool is `ssh_exec` and the command is an *argument*. So
+  the result reports the fact (`remote_exit_code`) and declines the verdict
+  (`is_error` stays absent), via a second constructor,
+  `ToolCallResult::with_remote_exit_code_only`. An MCP client is not told that
+  its own `grep` failed; a shell caller still gets a non-zero `$?`. Every other
+  handler keeps welding the two, and `with_remote_exit_code` is untouched.
+
+  **`ssh_exec_multi` reports a code only for a single host.** Across two or
+  more it reports nothing. The per-host `failed` counter does not distinguish
+  "the command exited non-zero" from "the host was unreachable" — `success` is
+  false for both — so mapping it onto exit 6 would make 6 mean "the bridge
+  could not reach a host", re-conflating precisely what 6 was created to
+  separate. The fan-out case is left open rather than answered wrongly; the
+  per-host `exit_code` values are in the JSON result.
+
+  **`ssh_session_exec` is excluded and stays at exit 0.** Its output parser
+  *fabricates* exit code 1 for a missing marker and for an unparsable one
+  (`src/ssh/session.rs`, `parse_exec_output`), so propagating that code would
+  announce a failure of your command where the truth is a bridge-side parse
+  failure — the exact conflation this whole chain exists to remove.
+
+  **Known asymmetry, not closed.** When a `bridge-mcp daemon` serves the call,
+  the CLI reads the result back off the MCP wire, and `remote_exit_code` is
+  `#[serde(skip)]` — it is an in-process channel, not a protocol extension. The
+  daemon path can only read `isError`, which these two deliberately do not set,
+  so **it exits 0** where the direct path exits 6. This is not a regression:
+  that path already exited 0 for these tools, since they set no `isError`
+  before either. What is new is that the two paths now disagree. For every
+  other tool the daemon path exits 1, so the usual advice — branch on
+  `$? -ne 0`, not `$? -eq 6` — holds there but **not** for these two. Closing
+  it means putting the remote code on the MCP wire, which is a response-format
+  change and was not taken here. Both halves are pinned by tests in
+  `src/cli/runner.rs`, and `ports::protocol::tests::the_fact_never_crosses_the_mcp_wire`
+  fails if the `skip` is ever lifted without revisiting this.
 
 ### Fixed
 

@@ -276,7 +276,26 @@ impl ToolHandler for SshExecHandler {
             }
         }
 
-        Ok(ToolCallResult::text(output_text))
+        let result = ToolCallResult::text(output_text);
+
+        // Le fait, pas le verdict. `ssh_exec` exécute la ligne que l'appelant
+        // a écrite, et bien des lignes ordinaires sortent non nul *comme
+        // réponse* : `grep` qui ne trouve rien, `diff` qui voit une
+        // différence, `test` pour faux. Le code doit donc atteindre `$?` — un
+        // script en `&& suite` doit s'arrêter — sans que `is_error` aille dire
+        // à un client MCP que son propre `grep` a échoué. D'où
+        // `with_remote_exit_code_only` et non `with_remote_exit_code`, qui
+        // poserait le verdict par ricochet.
+        //
+        // Posé en dernier, dans le résultat final : `output_text` a déjà
+        // absorbé la troncature et le `save_output`, et aucun de ces deux
+        // chemins ne reconstruit le résultat.
+        if response.exit_code != 0 {
+            let code = i32::try_from(response.exit_code).unwrap_or(1);
+            return Ok(result.with_remote_exit_code_only(code));
+        }
+
+        Ok(result)
     }
 }
 
@@ -285,6 +304,74 @@ mod tests {
     use super::*;
     use crate::ports::mock::{create_test_context, create_test_context_with_host};
     use serde_json::json;
+
+    /// Contexte qui autorise n'importe quelle commande, avec une sortie
+    /// distante simulée.
+    ///
+    /// Le mode par défaut est `Standard` avec une liste blanche vide, où
+    /// `validator.rs` refuse **toute** commande : `ssh_exec` ferait demi-tour
+    /// avant d'atteindre son propre code. La forme de config vient de
+    /// `ssh_find.rs`, qui résout déjà le même problème.
+    fn ctx_permissive_with_exit(exit_code: u32) -> crate::ports::ToolContext {
+        use crate::config::{SecurityConfig, SecurityMode};
+
+        // `HostConfig` n'implémente pas `Default` : on emprunte l'hôte
+        // "server1" que le mock partagé fournit déjà.
+        let mut config = (*create_test_context_with_host().config).clone();
+        config.security = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            blacklist: vec![],
+            ..SecurityConfig::default()
+        };
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code,
+                duration_ms: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_nonzero_exit_is_reported_as_a_fact_without_a_verdict() {
+        // `false` rend 1. Le code doit atteindre l'appelant — mais `is_error`
+        // doit rester absent : l'appelant a choisi cette commande, et un
+        // `grep` qui ne trouve rien rend 1 sans avoir échoué.
+        let ctx = ctx_permissive_with_exit(1);
+        let result = SshExecHandler
+            .execute(Some(json!({"host": "server1", "command": "false"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code,
+            Some(1),
+            "le fait remonte : {result:?}"
+        );
+        assert_eq!(
+            result.is_error, None,
+            "le verdict n'est pas posé : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_exit_claims_nothing_at_all() {
+        // Épingle le fait que la pose est CONDITIONNELLE. Sans la garde
+        // `!= 0`, ce test verrait `Some(0)` : inoffensif pour `$?`, mais une
+        // affirmation que rien dans l'arbre n'émet (voir la documentation des
+        // trois états de `remote_exit_code`).
+        let ctx = ctx_permissive_with_exit(0);
+        let result = SshExecHandler
+            .execute(Some(json!({"host": "server1", "command": "true"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "une commande qui réussit ne pose aucun code : {result:?}"
+        );
+        assert_eq!(result.is_error, None, "ni aucun verdict : {result:?}");
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {

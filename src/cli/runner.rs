@@ -46,7 +46,7 @@ pub const EXIT_REMOTE_FAILURE: i32 = 6;
 ///
 /// Three outcomes, and the order matters:
 /// * `remote_exit_code: Some(n)`, `n != 0` — a command ran on the target host
-///   and failed. [`EXIT_REMOTE_FAILURE`].
+///   and exited non-zero. [`EXIT_REMOTE_FAILURE`].
 /// * otherwise `is_error` — the *bridge* refused or failed (rate limit, denied
 ///   command, declined confirmation). 1, matching `map_exit_code`.
 /// * otherwise success. 0.
@@ -54,6 +54,13 @@ pub const EXIT_REMOTE_FAILURE: i32 = 6;
 /// `is_error` alone cannot separate the first two cases, which is why the
 /// remote code travels beside it (see
 /// [`crate::ports::protocol::ToolCallResult::remote_exit_code`]).
+///
+/// The first arm says "exited non-zero", not "failed", and the difference is
+/// load-bearing. For a tool whose command the caller wrote — `ssh_exec`,
+/// `ssh_exec_multi` — the handler reports the code WITHOUT setting
+/// `is_error`, because `grep` matching nothing exits 1 without having failed.
+/// Reading this field first is what lets the process still stop on `&&` while
+/// the MCP result stays free of a verdict nobody can justify.
 fn tool_exit_code(result: &crate::mcp::protocol::ToolCallResult) -> i32 {
     match result.remote_exit_code {
         Some(code) if code != 0 => EXIT_REMOTE_FAILURE,
@@ -4481,6 +4488,45 @@ mod tests {
         assert_ne!(
             code, EXIT_REMOTE_FAILURE,
             "and it must not borrow the remote-failure code on a signal that does not prove one"
+        );
+    }
+
+    /// The same gap, one notch wider, for the free-form tools — pinned
+    /// because it is the one thing that did NOT get fixed alongside them.
+    ///
+    /// `ssh_exec` and `ssh_exec_multi` report a non-zero remote exit as a fact
+    /// (`remote_exit_code`) and deliberately do NOT set `isError`: the caller
+    /// wrote the command, and a `grep` that matches nothing exits 1 without
+    /// having failed. The direct CLI path reads the fact and exits 6. The
+    /// daemon path can read neither — the fact is `#[serde(skip)]`, and there
+    /// is no verdict to read instead — so it exits 0.
+    ///
+    /// That is NOT a regression: before the fact was reported at all, these
+    /// tools set no `isError` either, so this path already exited 0. What
+    /// changed is that the direct path no longer agrees with it. Closing the
+    /// gap means putting the code on the wire, which is a protocol change.
+    /// Until then `$? -eq 6` is environment-dependent and `$? -ne 0` is not a
+    /// safe substitute on this path either, which is why it is pinned rather
+    /// than left to be rediscovered.
+    #[test]
+    fn the_daemon_path_reports_nothing_at_all_for_a_free_form_tool() {
+        let resp = serde_json::json!({
+            "result": {"content": [{"type": "text", "text": "[exit:1]\n"}]}
+        });
+        let code = print_daemon_response(&resp, false).unwrap();
+        assert_eq!(
+            code, 0,
+            "no isError and no readable remote code leaves the daemon path with nothing to report"
+        );
+
+        // And the direct path, on the very same outcome, says 6. The two
+        // numbers on one line are the asymmetry itself.
+        let direct =
+            crate::mcp::protocol::ToolCallResult::text("[exit:1]\n").with_remote_exit_code_only(1);
+        assert_eq!(
+            tool_exit_code(&direct),
+            EXIT_REMOTE_FAILURE,
+            "the direct path reads the fact the wire dropped"
         );
     }
 

@@ -125,8 +125,13 @@ pub struct ToolCallResult {
     /// Must conform to the tool's `outputSchema` if defined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
-    /// The **remote** command's own exit code, when this result failed
-    /// *because the remote command failed*.
+    /// The **remote** command's own exit code, when a command ran on the
+    /// target host and exited non-zero.
+    ///
+    /// Whether that *is a failure* is a separate question, and a separate
+    /// field. See [`Self::with_remote_exit_code`], which answers yes and sets
+    /// `is_error` too, and [`Self::with_remote_exit_code_only`], which
+    /// declines to answer because the caller chose the command.
     ///
     /// This is the discriminator `is_error` alone cannot provide.
     /// [`Self::error`] sets `is_error` for bridge-side refusals too — a rate
@@ -142,23 +147,33 @@ pub struct ToolCallResult {
     ///   remotely, or the tool counts a non-zero exit as a normal answer
     ///   (`StandardTool::NONZERO_EXIT_IS_ERROR = false`), or the handler
     ///   simply does not report one. **This is what a successful call carries**,
-    ///   and it is what every handler outside the `StandardTool` pipeline
-    ///   carries today — see the note on that pipeline's step 19.
+    ///   and what most handlers outside the `StandardTool` pipeline still
+    ///   carry — see the note on that pipeline's step 19. The exceptions are
+    ///   the handlers that now report a code of their own: `ssh_file_write`,
+    ///   `ssh_disk_usage` and `ssh_tail` under their documented conditions,
+    ///   and `ssh_exec` / single-host `ssh_exec_multi`.
     /// * `Some(0)` — a command ran on the target host and succeeded. A
     ///   coherent statement, and the CLI reads it as success, but nothing in
     ///   the tree emits it: the pipeline only records a code when it is
     ///   non-zero, so `Some(0)` exists as a total contract rather than as a
     ///   reachable state.
-    /// * `Some(n)`, `n != 0` — a command ran on the target host, exited `n`,
-    ///   and the tool treats that as a failure. `is_error` is `Some(true)`
-    ///   alongside it.
+    /// * `Some(n)`, `n != 0` — a command ran on the target host and exited
+    ///   `n`. `is_error` is `Some(true)` alongside it **only when the tool
+    ///   also calls that a failure**. A tool whose command the caller wrote —
+    ///   `ssh_exec`, `ssh_exec_multi` — reports the code with `is_error`
+    ///   absent, because `grep` matching nothing exits 1 without having
+    ///   failed. The CLI still exits `EXIT_REMOTE_FAILURE` (6) either way,
+    ///   since it reads this field before `is_error`.
     ///
     /// **Not part of the MCP wire format.** `#[serde(skip)]` keeps it out of
     /// every serialized result and out of every `outputSchema`: it is an
     /// in-process channel from the handler to the CLI, not a protocol
     /// extension. One consequence, deliberate and documented: the
     /// daemon-forwarding CLI path reads the response back off the wire and so
-    /// cannot see this field — it falls back to exit 1.
+    /// cannot see this field. It falls back to `is_error`, which means exit 1
+    /// when the tool set a verdict — and exit **0** when it did not, which is
+    /// the case for every free-form tool above. Both cases are pinned in
+    /// `crate::cli::runner`'s tests.
     #[serde(skip)]
     pub remote_exit_code: Option<i32>,
 }
@@ -316,6 +331,22 @@ impl ToolCallResult {
         if code != 0 {
             self.is_error = Some(true);
         }
+        self
+    }
+
+    /// Comme [`Self::with_remote_exit_code`], mais **sans** poser `is_error`.
+    ///
+    /// Pour les outils dont l'appelant choisit la commande — `ssh_exec`,
+    /// `ssh_exec_multi`. Un code non nul y décrit un *fait* de la commande, pas
+    /// un *verdict* de l'appel : `grep` qui ne trouve rien sort 1, `diff` qui
+    /// voit une différence sort 1, `test` sort 1 pour faux. Poser `is_error`
+    /// dirait à un client MCP que son propre `grep` a échoué, sans recours.
+    ///
+    /// Le code atteint quand même le processus, parce que `tool_exit_code`
+    /// (dans `crate::cli::runner`) lit `remote_exit_code` avant `is_error`.
+    #[must_use]
+    pub const fn with_remote_exit_code_only(mut self, code: i32) -> Self {
+        self.remote_exit_code = Some(code);
         self
     }
 }
@@ -934,5 +965,47 @@ mod tests {
         };
         let json_str = serde_json::to_string(&info).unwrap();
         assert!(!json_str.contains("statusMessage"));
+    }
+
+    #[test]
+    fn the_fact_and_the_verdict_can_be_set_separately() {
+        // Soudés : ce que le pipeline veut, et ce que la Task 2 veut.
+        let welded = ToolCallResult::text("x".to_string()).with_remote_exit_code(1);
+        assert_eq!(welded.remote_exit_code, Some(1));
+        assert_eq!(welded.is_error, Some(true), "le pipeline veut le verdict");
+
+        // Séparés : ce que les outils à commande libre veulent. Un `grep` qui
+        // ne trouve rien sort 1 et n'est pas un échec de l'appel.
+        let fact_only = ToolCallResult::text("x".to_string()).with_remote_exit_code_only(1);
+        assert_eq!(fact_only.remote_exit_code, Some(1), "le fait remonte");
+        assert_eq!(
+            fact_only.is_error, None,
+            "le verdict n'est PAS posé : un grep qui ne trouve rien n'est pas un échec"
+        );
+    }
+
+    /// Le fait ne traverse PAS le fil MCP, et c'est ce qui bloque le chemin
+    /// daemon du CLI.
+    ///
+    /// Le `#[serde(skip)]` porté par `remote_exit_code` est délibéré — voir
+    /// la documentation du champ. Conséquence mesurée ici plutôt que supposée :
+    /// un `bridge-mcp daemon` qui sert l'appel ne peut relire que `isError`,
+    /// donc pour les outils à commande libre, qui ne le posent pas, il rend 0.
+    /// Le test existe pour que lever le `skip` — un changement de format de
+    /// réponse — ne puisse pas se faire sans le voir.
+    #[test]
+    fn the_fact_never_crosses_the_mcp_wire() {
+        let json = serde_json::to_value(
+            ToolCallResult::text("x".to_string()).with_remote_exit_code_only(7),
+        )
+        .expect("un ToolCallResult doit être sérialisable");
+        assert!(
+            json.get("remoteExitCode").is_none() && json.get("remote_exit_code").is_none(),
+            "le code distant ne doit pas apparaître dans la réponse MCP : {json}"
+        );
+        assert!(
+            json.get("isError").is_none(),
+            "ni le verdict, que ce constructeur ne pose pas : {json}"
+        );
     }
 }

@@ -770,7 +770,7 @@ bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 | 3 | SSH connection error |
 | 4 | Security denial |
 | 5 | Configuration error |
-| 6 | The remote command itself failed (non-zero exit on the target host) |
+| 6 | The remote command exited non-zero on the target host |
 
 Codes 1-5 are the bridge's *own* failures: it could not run your command.
 Code 6 means the opposite — the command ran on the target host and exited
@@ -779,40 +779,69 @@ exited **0** in that case, so `bridge-mcp tool … && next` ran `next` after a
 failure.
 
 The remote command's own exit code is not returned as a separate field; it
-appears in the result text as the `[exit:N]` prefix, and `--json` marks the
-call `"isError": true`.
+appears in the result text as the `[exit:N]` prefix. `--json` marks the call
+`"isError": true` — **except for the tools whose command you wrote yourself**,
+which report the code without the verdict. See the next section.
 
 **Which tools emit 6 — read this before relying on it.** Code 6 comes from the
 shared `StandardTool` pipeline, which is most of the catalogue but not all of
-it. **52 handlers run their remote command outside that pipeline and still exit
-0 when it fails**, including the ones you are most likely to script:
+it. 52 handlers run their remote command outside that pipeline; five of them
+now report a code of their own, and the rest **still exit 0 when the remote
+command fails**:
+
+| Emits 6 outside the pipeline | When |
+|---|---|
+| `ssh_exec` | any non-zero exit |
+| `ssh_exec_multi` | **single host only** — see below |
+| `ssh_file_write` | any non-zero exit |
+| `ssh_disk_usage` | only without `path` (with one, the command is `du … && df …`, which exits 1 from an unreadable subdirectory while still answering) |
+| `ssh_tail` | only without `grep` (with one, exit 1 means "no match", which is not a failure) |
 
 | Still exits 0 on a remote failure | Count | When |
 |---|---|---|
-| `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec` — the free-form escape hatches | 3 | any non-zero exit |
-| `ssh_find`, `ssh_tail`, `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write` | 6 | any non-zero exit |
+| `ssh_session_exec` | 1 | any non-zero exit. Deliberately excluded: its output parser *fabricates* exit code 1 for a missing or unparsable marker, so propagating it would announce a failure of your command where the truth is a bridge-side parse failure. |
+| `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` | 3 | any non-zero exit |
+| `ssh_exec_multi` across 2+ hosts | — | see below |
 | the `ssh_awx_*` family | 43 | **only** a curl transport failure (connection refused, timeout). An HTTP status >= 400 already surfaces as a bridge error. Except `ssh_awx_job_follow`, which does not check the status and so swallows HTTP errors too. |
-
-So `bridge-mcp tool ssh_exec host=x command=false` exits 0, while the same
-failure through a `StandardTool` tool exits 6. Bringing those 52 into line is
-tracked as follow-up work; until then, treat exit 6 as "this tool told me the
-remote command failed", never exit 0 as "the remote command succeeded".
 
 The live-host sweep that found this measured 44 affected tools, and all 44 are
 pipeline tools, so the measured defect is closed — but the defect *class* is
-not, and the 52 above are its unmeasured remainder (CHANGELOG has the chain).
+not, and the handlers above are its unmeasured remainder (CHANGELOG has the
+chain). Until it is closed, treat exit 6 as "this tool told me the remote
+command failed", never exit 0 as "the remote command succeeded".
+
+**`ssh_exec` and `ssh_exec_multi` emit 6 without marking the call an error.**
+You wrote their command, and plenty of ordinary commands exit non-zero *as
+their answer*: `grep` matching nothing exits 1, `diff` finding a difference
+exits 1, `test` exits 1 for false, `systemctl is-active` exits 3 for a stopped
+unit. So the code reaches `$?` — your `&&` stops, which is what a shell caller
+expects — but the MCP result does **not** carry `"isError": true`, because
+nothing here can establish that your command failed. Every other tool in the
+first table sets both, since its command is one the bridge built and a non-zero
+exit really is a failure.
+
+**`ssh_exec_multi` reports a code only for a single host.** Across two or more
+it reports nothing, deliberately: the per-host `failed` counter cannot tell
+"the command exited non-zero" from "the host was unreachable", and mapping it
+onto exit 6 would make 6 mean "the bridge could not reach a host" — the exact
+conflation 6 was created to remove. Read the per-host `exit_code` values in the
+JSON result instead.
 
 Two further limits:
 
 - **Only the `tool` subcommand distinguishes 6.** `bridge-mcp exec` exits 1 on
   a failed remote command, as it always has.
 - **Not when a daemon serves the call.** With `bridge-mcp daemon` running, the
-  CLI forwards the call and reads the MCP result back off the wire, where the
-  remote/bridge distinction is not carried — a remote failure then exits 1, not
-  6. Still non-zero, so `&&` behaves the same either way; only the
-  discrimination is lost. A caller branching on `$? -eq 6` is therefore
-  environment-dependent; branch on `$? -ne 0` unless you control whether a
-  daemon is running.
+  CLI forwards the call and reads the MCP result back off the wire, which does
+  not carry the remote exit code at all. All it can read is `"isError"`, so:
+  a tool that sets the verdict exits **1** instead of 6 — still non-zero, only
+  the discrimination is lost — while `ssh_exec` and `ssh_exec_multi`, which
+  deliberately do not set it, exit **0**. On that path `$? -ne 0` is *not* a
+  safe substitute for those two; it is the one place where the exit code still
+  cannot tell you their remote command failed. Closing it means putting the
+  code on the MCP wire, which is a protocol change and is not done. Until then,
+  if you script `ssh_exec` against `$?`, make sure no daemon is serving your
+  calls, or read the `[exit:N]` prefix out of the output.
 
 ### Shell completions
 
