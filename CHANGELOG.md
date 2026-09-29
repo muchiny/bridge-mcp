@@ -71,10 +71,16 @@ reading it. Every item below was reproduced before the fix and measured after.
 
   **The AWX family is narrower than the raw count suggests.** 42 of the 43 route
   their response through `AwxCommandBuilder::parse_checked_response`
-  (`src/domain/use_cases/awx.rs:226-244`), which already raises
-  `BridgeError::AwxApi` for any HTTP status >= 400. Only a **transport-level
-  curl failure that writes no status marker** — connection refused, timeout —
-  falls through to `Ok(raw)` and exits 0. The exception is
+  (`AwxCommandBuilder::parse_checked_response`), which already raises
+  `BridgeError::AwxApi` for any HTTP status >= 400. A **transport-level curl
+  failure** — connection refused, timeout — does NOT lack a marker: curl writes
+  its `-w` output even when it fails, with `%{http_code}` = `000`, so the marker
+  is present and `"000".parse().unwrap_or(0)` gave 0, which `>= 400` let through
+  as `Ok("")`. **`parse_checked_response` is fixed** (`000` or any unreadable
+  status now returns `AwxApi { status: 0 }`); **the sweep of the 42 call sites
+  stays open, deliberately**: the AWX group has no section in the local config
+  and no test has ever run an AWX `execute()` body past the config guard, so it
+  does not earn its diff. Do not start from the marker-absent branch. The exception is
   `ssh_awx_job_follow`, which builds its requests with the unchecked
   `build_api_call`, never parses a status, and returns `text(stdout)` regardless
   — so it swallows HTTP errors too, not only transport failures.
@@ -420,10 +426,13 @@ reading it. Every item below was reproduced before the fix and measured after.
 
   **The 43 `ssh_awx_*`, but narrower than the count suggests:** 42 route their
   response through `AwxCommandBuilder::parse_checked_response`
-  (`src/domain/use_cases/awx.rs:226-244`), which already raises
-  `BridgeError::AwxApi` on HTTP >= 400, so only a **transport-level curl failure
-  that writes no status marker** (connection refused, timeout) reaches
-  `Ok(raw)` and exits 0. `ssh_awx_job_follow` is the exception: it uses the
+  (`AwxCommandBuilder::parse_checked_response`), which already raises
+  `BridgeError::AwxApi` on HTTP >= 400. A transport-level curl failure (connection
+  refused, timeout) used to reach `Ok("")` and exit 0 — not through a missing
+  marker (curl writes `-w` even on failure, with `%{http_code}` = `000`) but
+  because `000` parsed as 0 and `0 >= 400` is false; fixed in the function, the
+  42-site sweep left open (AWX unconfigured locally, no test passes the config
+  guard). `ssh_awx_job_follow` is the exception: it uses the
   unchecked `build_api_call`, parses no status, and returns `text(stdout)`
   regardless, so it swallows HTTP errors too.
 
@@ -434,11 +443,10 @@ reading it. Every item below was reproduced before the fix and measured after.
   the same line the pipeline's step 19 runs, placed last so a post-processing
   hook cannot mask it. The builder already exists and is public.
   **The AWX handlers need a different fix:** they never read `exit_code` at all,
-  so there is nothing for that line to test. Their failure mode is a curl
-  transport error with no status marker, which means the work there is to make
-  `parse_checked_response` (or its callers) distinguish "no marker because curl
-  never reached the server" from "no marker because this was an unchecked call",
-  plus moving `ssh_awx_job_follow` onto `build_api_call_checked`. Do not start
+  so there is nothing for that line to test. Their failure mode was a curl
+  transport error whose marker reads `000` (not an absent marker);
+  `parse_checked_response` now rejects it. What remains is the call-site sweep
+  and moving `ssh_awx_job_follow` onto `build_api_call_checked`. Do not start
   from the one-line shape there.
 
   Watch, in either group, for handlers where a non-zero exit is the *answer*

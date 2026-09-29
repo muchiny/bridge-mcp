@@ -342,8 +342,10 @@ impl ToolCallResult {
     /// voit une différence sort 1, `test` sort 1 pour faux. Poser `is_error`
     /// dirait à un client MCP que son propre `grep` a échoué, sans recours.
     ///
-    /// Le code atteint quand même le processus, parce que `tool_exit_code`
-    /// (dans `crate::cli::runner`) lit `remote_exit_code` avant `is_error`.
+    /// Le code atteint quand même le processus quand l'appel est servi en
+    /// direct, parce que `tool_exit_code` (dans `crate::cli::runner`) lit
+    /// `remote_exit_code` avant `is_error`. Servi par un daemon, le champ ne
+    /// traverse pas le wire et le code vaut 0 (voir la doc du champ).
     #[must_use]
     pub const fn with_remote_exit_code_only(mut self, code: i32) -> Self {
         self.remote_exit_code = Some(code);

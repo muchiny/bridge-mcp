@@ -318,8 +318,12 @@ impl ToolHandler for SshExecMultiHandler {
         // `exit_code` vaut `None` quand l'hôte n'a rien exécuté (annulation,
         // quota de débit, échec de connexion) : ce cas ne prétend alors rien
         // non plus.
+        // Le garde compte le nombre d'hôtes demandés, pas seulement de résultats :
+        // une tâche qui panique fait perdre un `HostResult`, et deux hôtes
+        // dont un panique donnent un seul résultat, qui n'est pas un appel
+        // mono-hôte.
         let single_host_exit = match results.as_slice() {
-            [only] => only.exit_code,
+            [only] if args.hosts.len() == 1 => only.exit_code,
             _ => None,
         };
 
