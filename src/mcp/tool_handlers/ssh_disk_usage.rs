@@ -370,7 +370,7 @@ mod tests {
             .expect("le handler doit rendre un résultat");
         assert_eq!(
             result.remote_exit_code, None,
-            "la forme `path=` ne peut pas distinguer le cas incomplet de l'échec : {result:?}"
+            "la forme `path=` ne peut pas distinguer une réponse partielle d’un échec : {result:?}"
         );
     }
 
