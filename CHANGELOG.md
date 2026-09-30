@@ -304,6 +304,21 @@ nothing in the text below would otherwise tell you which is which.
   advertising the param, which on the CLI is what makes `sudo=true` fail at
   parse time (exit 5) rather than mid-pipeline.
 
+  **Both refusals are audited, and so is every other `validate` rejection.**
+  Step 4 of the `StandardTool` pipeline now writes a `command_denied` event
+  when `T::validate` refuses — for all 476 tools, not only this one. That hook
+  is what stands in for the whitelist on the specialised tools, since
+  `validate_builtin` at step 6 skips the whitelist precisely on the assumption
+  that they check their own inputs; every validator reachable from it returns
+  `CommandDenied`. Until now the 90 handlers that implement it refused
+  injection attempts — `validate_service_name("x; rm -rf /")` among them — and
+  left no trace, while the functionally identical blacklist denial in the same
+  pipeline was recorded. **This adds no audit volume to normal operation**: the
+  event fires only on a call that was refused. The event's `command` is empty
+  at step 4, where no command has been built yet and a synthetic one would be
+  a fabrication; the offending input is in `reason`, which every validator
+  already names it in.
+
   The reserved tag is a `const NETWORK_EQUIPMENT_TAG` in
   `src/domain/use_cases/network_equipment.rs`, on the existing `HostConfig.tags`
   rather than a new `HostConfig` field: `tags` is already `#[serde(default)]`
