@@ -315,15 +315,15 @@ nothing in the text below would otherwise tell you which is which.
   recorded. **This adds no audit volume to normal operation**: the event fires
   only on a call that was refused. The event's `command` is empty at step 4,
   where no command has been built yet and a synthetic one would be a
-  fabrication; the offending input is in `reason`, which most of these
-  validators interpolate it into.
+  fabrication; most of these validators interpolate the offending input into
+  `reason` instead.
 
   **What a `command_denied` event from step 4 does and does not tell you.** It
   means the tool refused the input, not that an attack was refused, so read
   `reason` before alerting on it. Among the validators reachable from those 90
-  `validate` bodies, some are genuine injection guards (`validate_service_name`,
-  `validate_identifier`) and others are typo-class checks the repo happens to
-  spell `CommandDenied` — `validate_port` ("Invalid port number: '99999'"),
+  `validate` bodies, some are genuine injection guards (`validate_service_name`)
+  and others are typo-class checks the repo happens to spell `CommandDenied` —
+  `validate_port` ("Invalid port number: '99999'"),
   `validate_duration`, `validate_dimensions`, `validate_count`,
   `validate_bench_type`, `validate_provider`, `validate_tag_action`. Two do not
   return `CommandDenied` at all: `validate_vm_name` and `validate_snapshot_name`
@@ -331,6 +331,17 @@ nothing in the text below would otherwise tell you which is which.
   return `McpInvalidRequest`, whose message is carried through verbatim. **If
   you alert on `command_denied`, this widens what reaches that alert**; filter
   on `tool_name` and `reason`, not on the event type alone.
+
+  **And it does not cover the guards that live in the builders.** A specialised
+  tool can also refuse inside `T::build_command` at step 5 — `validate_identifier`
+  (`domain::use_cases::network_equipment`), which rejects a shell metacharacter
+  in an interface or config-section name, is reached from
+  `build_show_run_command` and `build_show_interfaces_command` and from no
+  handler's `validate`. Step 5 propagates that error with `?` and no
+  `log_denied`, so such a refusal writes **no** audit event, before this change
+  or after it. Widening step 5 the way step 4 was widened is not part of this
+  release; it is recorded so nobody reads `command_denied` coverage as
+  "every input a tool refused".
 
   The reserved tag is a `const NETWORK_EQUIPMENT_TAG` in
   `src/domain/use_cases/network_equipment.rs`, on the existing `HostConfig.tags`
