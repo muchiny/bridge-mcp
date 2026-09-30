@@ -11,10 +11,11 @@ Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
 reading it. Every item below was reproduced before the fix and measured after.
 
 **That provenance is the campaign's, and it stops there.** The exit-code
-follow-ups added later in this same unreleased cycle — the five `ToolHandler`
+follow-ups added later in this same unreleased cycle — the six `ToolHandler`
 handlers brought into line (`ssh_file_write`, `ssh_disk_usage`, `ssh_tail`,
-`ssh_exec`, `ssh_exec_multi`) and the AWX curl-transport fix — were established
-by unit test and mutation testing. **None of them was ever run against a host.**
+`ssh_exec`, `ssh_exec_multi`, `ssh_awx_job_follow`) and the AWX curl-transport
+fix — were established by unit test and mutation testing. **None of them was
+ever run against a host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 
@@ -67,17 +68,18 @@ nothing in the text below would otherwise tell you which is which.
   `sudo_user` at all, so they were never probed) — they are the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
-  **Five of those 52 have since been brought into line**, in this same
+  **Six of those 52 have since been brought into line**, in this same
   unreleased cycle: `ssh_file_write`, `ssh_disk_usage` (without `path`),
-  `ssh_tail` (without `grep`), `ssh_exec`, and `ssh_exec_multi` against a
-  single host. The two entries below state what each now does; the paragraph
-  above is kept as written because it is the finding as it was measured, and
-  the list it gives is the one the follow-up work is tracked against. What is
+  `ssh_tail` (without `grep`), `ssh_exec`, `ssh_exec_multi` against a
+  single host, and `ssh_awx_job_follow`. The three entries below state what
+  each now does; the paragraph above is kept as written because it is the
+  finding as it was measured, and the list it gives is the one the follow-up
+  work is tracked against. What is
   still open, therefore: `ssh_session_exec`, `ssh_find`, `ssh_metrics`,
   `ssh_metrics_multi`, `ssh_exec_multi` across 2+ hosts, `ssh_disk_usage` with
-  a `path`, `ssh_tail` with a `grep`, and — of the AWX family — `ssh_awx_job_follow`
-  alone; the other 42 are closed by the fix to `parse_checked_response`, as the
-  next paragraph now states.
+  a `path`, and `ssh_tail` with a `grep`. **The AWX family is now closed
+  entirely**: the 42 by the fix to `parse_checked_response`, as the next
+  paragraph states, and `ssh_awx_job_follow` by its own entry below.
 
   **The AWX family is narrower than the raw count suggests.** 42 of the 43 route
   their response through `AwxCommandBuilder::parse_checked_response`
@@ -95,11 +97,13 @@ nothing in the text below would otherwise tell you which is which.
   An earlier draft of this entry deferred a "42-call-site sweep" on the grounds
   that AWX is unconfigured locally; the deferral was wrong about what the sites
   contain and is **withdrawn**, so do not go looking for that sweep. Do not start
-  from the marker-absent branch either. **The one handler that does still need
-  work is `ssh_awx_job_follow`**, which builds its requests with the unchecked
-  `build_api_call`, never parses a status, and returns `text(stdout)` regardless
-  — so it swallows HTTP errors too, not only transport failures. Its fix is to
-  move onto `build_api_call_checked`.
+  from the marker-absent branch either. **The one handler that still needed
+  work was `ssh_awx_job_follow`**, which built its requests with the unchecked
+  `build_api_call`, never parsed a status, and returned `text(stdout)` regardless
+  — so it swallowed HTTP errors too, not only transport failures. **It is fixed;
+  see its own entry below.** The fix prescribed here — "move onto
+  `build_api_call_checked`" — was not sufficient and, applied alone, would have
+  broken the tool: that entry says why.
 
   Two further boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when
   a `bridge-mcp daemon` serves the call the CLI reads the result back off the
@@ -110,16 +114,16 @@ nothing in the text below would otherwise tell you which is which.
 - **An MCP tool result now carries `isError: true` when its remote command
   failed** — again, for `StandardTool`-pipeline tools only. The 52 handlers
   listed above are **not** all unchanged, though, once the follow-ups later in
-  this same unreleased cycle are counted: **three** now set `isError` themselves
+  this same unreleased cycle are counted: **four** now set `isError` themselves
   (`ssh_file_write`, `ssh_disk_usage` without a `path`, `ssh_tail` without a
-  `grep` — see the entry below, they use the same `with_remote_exit_code`
-  constructor the pipeline does); **two** report the exit code and deliberately
-  decline the verdict (`ssh_exec`, `ssh_exec_multi` against a single host);
+  `grep`, and `ssh_awx_job_follow` — see the entries below, they use the same
+  `with_remote_exit_code` constructor the pipeline does); **two** report the
+  exit code and deliberately decline the verdict (`ssh_exec`, `ssh_exec_multi`
+  against a single host);
   **42** — the AWX handlers on `parse_checked_response` — now return `Err` for a
   curl transport failure, which the server wraps as a result with `isError: true`
-  where it used to be an empty success. Only **five** are genuinely unchanged:
-  `ssh_session_exec`, `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` and
-  `ssh_awx_job_follow`. A client
+  where it used to be an empty success. Only **four** are genuinely unchanged:
+  `ssh_session_exec`, `ssh_find`, `ssh_metrics` and `ssh_metrics_multi`. A client
   that treated every `tools/call` answer as a success, and read the outcome out
   of the text, will start seeing errors it did not see before, for calls that
   were already failing.
@@ -269,6 +273,68 @@ nothing in the text below would otherwise tell you which is which.
   change and was not taken here. Both halves are pinned by tests in
   `src/cli/runner.rs`, and `ports::protocol::tests::the_fact_never_crosses_the_mcp_wire`
   fails if the `skip` is ever lifted without revisiting this.
+
+- **`ssh_awx_job_follow` now exits 6 when the job it followed did not succeed,
+  and marks the result `isError`.** It exited **0** for every outcome. The
+  script's four terminal statuses shared one arm ending in `exit 0`, so a job
+  AWX finished in `failed`, `error` or `canceled` returned success; and the
+  timeout fall-through was the script's last command, whose `echo` returned 0,
+  so a job still running when `max_wait` ran out returned success too. Both
+  reproduced before the fix against a stubbed `curl`: exit 0 on all five
+  outcomes. `bridge-mcp tool ssh_awx_job_follow template_id=7 && next`
+  therefore ran `next` after a failed playbook, and after a playbook that was
+  still running. Now only `successful` exits 0; the other four exit **6**.
+
+  **No per-status code**, deliberately: the CLI flattens any remote failure to
+  one code and `remote_exit_code` is `#[serde(skip)]` on the MCP side, so a
+  distinct code per status would be observable nowhere. The exact status stays
+  where it always was, in the JSON result, and every arm still emits its full
+  document — including the summary on a failed job. The handler uses
+  `ToolCallResult::with_remote_exit_code`, which sets `isError` too, on the same
+  reading as `ssh_file_write` above: this tool wrote the script, the caller did
+  not, so a job that failed is a failure of what the tool was asked to do rather
+  than a fact for the caller to interpret.
+
+  **All three of its AWX requests are verified now; not one of them was.** They
+  went out through the unchecked `AwxCommandBuilder::build_api_call`, so
+  `curl -s` exited 0 on any HTTP response and nothing looked at the status.
+  Reproduced against a stubbed curl before the fix: a 403 on the status poll
+  made the tool poll until `max_wait` and exit 0 with `"status":"timeout"`; a
+  non-2xx on the host-summaries call put AWX's error body into the `summary`
+  field of an otherwise successful-looking document and exited 0; and a
+  transport failure on the poll killed the script under `set -e`, returning an
+  empty stdout with no diagnostic at all. Each of the three now emits a JSON
+  error naming **which** call failed, with its HTTP status, and exits non-zero —
+  `000` included, because the capture tolerates curl's own non-zero exit so the
+  check can run rather than `set -e` aborting first.
+
+  **The checks live in the shell, not in `parse_checked_response`, and that
+  divergence from the other 42 is deliberate.** This handler's curl bodies are
+  consumed *inside* the script it builds — they feed the job-id extraction, the
+  status extraction, and the document it emits — and the handler only ever sees
+  the script's final stdout. `parse_checked_response` classifies the **last**
+  marker in whatever it is given, so applied there it would classify whatever
+  leaked rather than an HTTP response. The script splits each `HTTP_STATUS:`
+  line with POSIX parameter expansion and checks the code per call;
+  `build_follow_script` in the handler carries the argument in full. The
+  paragraph above prescribed "move onto `build_api_call_checked`" as the whole
+  fix — that alone would have **broken** the tool, because the appended
+  write-out line makes the status body's `json.load` fail, the
+  `|| echo "unknown"` fallback fire on every poll, and the tool time out on
+  every single call.
+
+  **Also in the same pass:** the handler passed the literal string
+  `"ssh_awx_job_follow"` as the `command` argument of `process_success`, so its
+  audit event and history entry recorded the tool name where every other
+  handler records what ran. It now records the script — not the
+  `bash -c '<script>'` wrapper, because that form escapes every `'` as `'\''`,
+  which defeats the sanitizer's opaque-bearer pattern (it allows one optional
+  quote after `Bearer` and stops at the backslash) and would have written the
+  AWX token to `audit.log` and the history in clear. A test pins the redaction.
+
+  Established by unit test, running the generated script under `bash` against
+  stub `curl` and `sleep` binaries — not on a host; AWX is configured on no
+  machine this was written on. See the note under `[Unreleased]`.
 
 - **`ssh_net_equip_config` now refuses any host whose `tags` do not contain
   `network-equipment`, and refuses `sudo` outright.** **An existing config that
