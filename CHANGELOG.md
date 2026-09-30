@@ -11,11 +11,14 @@ Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
 reading it. Every item below was reproduced before the fix and measured after.
 
 **That provenance is the campaign's, and it stops there.** The exit-code
-follow-ups added later in this same unreleased cycle — the six `ToolHandler`
+follow-ups added later in this same unreleased cycle — five `ToolHandler`
 handlers brought into line (`ssh_file_write`, `ssh_disk_usage`, `ssh_tail`,
-`ssh_exec`, `ssh_exec_multi`, `ssh_awx_job_follow`) and the AWX curl-transport
-fix — were established by unit test and mutation testing. **None of them was
-ever run against a host.**
+`ssh_exec`, `ssh_exec_multi`) and the AWX curl-transport fix — were established
+by unit test and mutation testing. The sixth, `ssh_awx_job_follow`, was
+established by unit test **only**: no `cargo mutants` run covers it, and the
+basis for it is the generated script executed under `bash` against stub `curl`
+and `sleep` binaries, plus `make ci`. **None of them was ever run against a
+host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 

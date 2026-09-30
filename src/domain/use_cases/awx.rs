@@ -185,8 +185,9 @@ impl AwxCommandBuilder {
     /// listing is not an empty listing — so this is the form **every** AWX
     /// handler uses, the read-only ones included and not just the mutating
     /// five (launch, relaunch, cancel, approvals, project sync) this paragraph
-    /// used to name. Inside this crate `build_api_call` has no caller left
-    /// beyond this function and one test assertion.
+    /// used to name. `build_api_call` has no caller left in production code —
+    /// only this function, plus the test modules of `awx.rs` itself and of
+    /// `ssh_awx_workflow_approvals.rs`.
     ///
     /// Most handlers then hand the raw stdout to
     /// [`Self::parse_checked_response`], which splits the status off and
