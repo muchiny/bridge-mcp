@@ -1,8 +1,14 @@
 //! Standard Tool Handler
 //!
 //! Generic handler that implements the common 16-step execution pipeline
-//! shared by ~170 of the 337 tool handlers. Each standard tool only needs
-//! to define its args struct, schema, and `build_command` function.
+//! shared by most tool handlers; the rest are direct [`ToolHandler`] impls
+//! that run no part of this pipeline. Each standard tool only needs to define
+//! its args struct, schema, and `build_command` function.
+//!
+//! No count is written here on purpose — two stale ones lived on this line.
+//! The live split is the `shape` field (`standard` / `direct`) of
+//! `scripts/tool_metadata.json`, which `scripts/validate_baseline.py`
+//! regenerates from `registry.rs` on every run.
 
 use std::marker::PhantomData;
 

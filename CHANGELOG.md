@@ -326,6 +326,18 @@ nothing in the text below would otherwise tell you which is which.
   `|| echo "unknown"` fallback fire on every poll, and the tool time out on
   every single call.
 
+  **This tool needs `python3` on the AWX SSH host**, which nothing said before
+  and which the exit-code change above makes newly visible. The script parses
+  the launch and poll bodies with `python3 -c 'import sys,json; …'`; the job-id
+  extraction has a `grep`/`cut` fallback, but the *status* extraction does not
+  — its `|| echo "unknown"` arm sends every poll round the loop, so on a host
+  without `python3` every job runs to `max_wait` and reports
+  `"status":"timeout"`. That is not new. What is new is that the timeout path
+  now exits **6** instead of **0**, so a python3-less host turns a silent
+  wrong answer into a loud one on every call. If this tool starts returning
+  nothing but timeouts after the upgrade, check for `python3` on the host
+  before suspecting AWX.
+
   **Also in the same pass:** the handler passed the literal string
   `"ssh_awx_job_follow"` as the `command` argument of `process_success`, so its
   audit event and history entry recorded the tool name where every other
@@ -391,16 +403,23 @@ nothing in the text below would otherwise tell you which is which.
   blacklist, wrapping the built command in `sudo -n bash -c '…'` — so
   `sudo: true` ran that verbatim `commands` text as root. The mechanism is a new
   additive `StandardTool::ALLOWS_ELEVATION` const, `true` by default so the
-  other 475 tools are unchanged; the one tool that sets it `false` also stops
-  advertising the param, which on the CLI is what makes `sudo=true` fail at
-  parse time (exit 5) rather than mid-pipeline.
+  other 398 tools on that pipeline are unchanged — the 77 direct handlers do
+  not implement the trait and never took `sudo` through this path at all; the
+  one tool that sets it `false` also stops advertising the param, which on the
+  CLI is what makes `sudo=true` fail at parse time (exit 5) rather than
+  mid-pipeline.
 
   **Both refusals are audited, and so is every other `validate` rejection.**
   Step 4 of the `StandardTool` pipeline now writes a `command_denied` event
-  when `T::validate` refuses — for all 476 tools, not only this one. That hook
-  is what stands in for the whitelist on the specialised tools, since
-  `validate_builtin` at step 6 skips the whitelist precisely on the assumption
-  that they check their own inputs. Until now the 90 handlers that implement it
+  when `T::validate` refuses — for all 399 tools on that pipeline, not only
+  this one. **The 77 direct handlers have no step 4 and are unaffected**, and
+  that gap is not academic: only 7 of the 77 call `log_denied` anywhere, and
+  none of the 43 `ssh_awx_*` handlers do, so an `AwxCommandBuilder::validate_id`
+  refusal still propagates with `?` and writes nothing. If you are sizing
+  alert-tuning work, size it on 399. That hook is what stands in for the
+  whitelist on the specialised tools, since `validate_builtin` at step 6 skips
+  the whitelist precisely on the assumption that they check their own inputs.
+  Until now the 90 handlers that implement it
   refused injection attempts — `validate_service_name("x; rm -rf /")` among
   them — and left no trace, while the blacklist denial in the same pipeline was
   recorded. **This adds no audit volume to normal operation**: the event fires
@@ -419,7 +438,11 @@ nothing in the text below would otherwise tell you which is which.
   `validate_bench_type`, `validate_provider`, `validate_tag_action`. Two do not
   return `CommandDenied` at all: `validate_vm_name` and `validate_snapshot_name`
   (`domain::use_cases::hyperv`, reached from the five `ssh_hyperv_*` handlers)
-  return `McpInvalidRequest`, whose message is carried through verbatim. **If
+  return `McpInvalidRequest`. Its message is carried *inside* `reason` rather
+  than being it: the fallback arm stringifies the variant, and that variant's
+  `Display` is `"MCP invalid request: {0}"`, so `reason` reads
+  `"MCP invalid request: <message>"`. Nothing is dropped, but a matcher
+  anchored at the start of `reason` will not see the validator's own text. **If
   you alert on `command_denied`, this widens what reaches that alert**; filter
   on `tool_name` and `reason`, not on the event type alone.
 
