@@ -165,6 +165,16 @@ const JOB_ID_EXPANSION: &str = "'\"$JOB_ID\"'";
 /// substitution, see `JOB_ID_EXPANSION` — but it is a correctness guard on
 /// the output, and it is free. An empty id, the only case the `[ -z ]` test
 /// it replaces could catch, matches the same pattern.
+///
+/// `${SUMMARY_BODY:-null}` supplies the one default the success document
+/// needs. The summary body is the only value interpolated into that document
+/// that is a raw HTTP body rather than something this script derived and
+/// checked: `$JOB_ID` is digits by the guard above, `$STATUS` is one of the
+/// four matched literals, `$ELAPSED` is arithmetic. A 2xx with an empty body
+/// — or a 3xx, since `[23][0-9][0-9]` accepts a redirect and a proxy can
+/// answer 301 with nothing a client would keep — would otherwise emit
+/// `"summary":}`, an unparsable document, on the one path that exits **0**.
+/// `null` is the honest value there: the call succeeded and said nothing.
 fn build_follow_script(
     awx: &crate::config::AwxConfig,
     template_id: u64,
@@ -247,7 +257,7 @@ while [ $ELAPSED -lt {max_wait} ]; do
     [23][0-9][0-9]) ;;
     *) echo '{{"error":"AWX job host summaries request failed","request":"GET /api/v2/jobs/'$JOB_ID'/job_host_summaries/","job_id":'$JOB_ID',"status":"'$STATUS'","http_status":"'"$SUMMARY_CODE"'"}}'; exit 1 ;;
   esac
-  echo '{{"job_id":'$JOB_ID',"status":"'$STATUS'","elapsed":'$ELAPSED',"summary":'$SUMMARY_BODY'}}'
+  echo '{{"job_id":'$JOB_ID',"status":"'$STATUS'","elapsed":'$ELAPSED',"summary":'${{SUMMARY_BODY:-null}}'}}'
   exit $JOB_EXIT
 done
 echo '{{"job_id":'$JOB_ID',"status":"timeout","elapsed":'$ELAPSED',"message":"Job still running after {max_wait}s. Use ssh_awx_job_status to check."}}'
@@ -463,6 +473,10 @@ mod tests {
     ///
     /// `000` also exits non-zero, because that is what curl does on a
     /// transport failure while still writing its `-w` line.
+    ///
+    /// `$STUB_SUMMARY_BODY` overrides the host-summaries body when it is
+    /// *set* — including when set to the empty string, which is the whole
+    /// point of the unset-only `${VAR-default}` form here.
     /// Every URL it is handed is appended to `$STUB_URL_LOG`, so a test can
     /// assert on the request the script really made and not only on the text
     /// it built.
@@ -481,7 +495,7 @@ case "$url" in
     code=$STUB_LAUNCH_CODE
     ;;
   */job_host_summaries/)
-    body='{"results":[{"host_name":"h1","ok":2,"failures":0}]}'
+    body=${STUB_SUMMARY_BODY-'{"results":[{"host_name":"h1","ok":2,"failures":0}]}'}
     code=$STUB_SUMMARY_CODE
     ;;
   *)
@@ -534,7 +548,51 @@ esac
         summary_code: &str,
         job_status: &str,
     ) -> ScriptRun {
+        run_follow_script_full(
+            launch_id,
+            launch_code,
+            poll_code,
+            summary_code,
+            job_status,
+            None,
+        )
+    }
+
+    /// As [`run_follow_script_with_launch_id`], but `summary_body` overrides
+    /// the body the stub returns for the host-summaries call. `Some("")` is
+    /// how a test reaches the empty-2xx-body case; `None` leaves the stub's
+    /// own default in place.
+    #[cfg(unix)]
+    fn run_follow_script_full(
+        launch_id: &str,
+        launch_code: &str,
+        poll_code: &str,
+        summary_code: &str,
+        job_status: &str,
+        summary_body: Option<&str>,
+    ) -> ScriptRun {
         use std::os::unix::fs::PermissionsExt;
+
+        // `python3` is a dependency of the code under test, not of the test:
+        // the generated script parses AWX's JSON with it. Without it every
+        // `json.load` falls through to its `|| echo "unknown"` arm and every
+        // job looks like a timeout — so most of the tests below fail with
+        // messages that point nowhere near the cause (a `successful` job
+        // reported as `"status":"timeout"`), and
+        // `a_job_still_running_at_max_wait_exits_one` *passes*, for entirely
+        // the wrong reason: a python3-less box makes every job a timeout.
+        // Both were measured on a PATH with python3 removed. Fail once, here,
+        // naming what is missing, rather than once per confused assertion.
+        assert!(
+            std::process::Command::new("python3")
+                .arg("-c")
+                .arg("pass")
+                .output()
+                .is_ok_and(|o| o.status.success()),
+            "python3 must be on PATH: the ssh_awx_job_follow script parses \
+             AWX's JSON responses with it, so without python3 every job in \
+             these tests degrades to \"status\":\"timeout\"",
+        );
 
         let dir = tempfile::tempdir().expect("tempdir for the curl/sleep stubs");
         for (name, body) in [("curl", CURL_STUB), ("sleep", SLEEP_STUB)] {
@@ -546,7 +604,14 @@ esac
         let url_log = dir.path().join("urls");
 
         let script = build_follow_script(&test_awx_config(), 7, "{}", 2, 10);
-        let output = std::process::Command::new("bash")
+        let mut command = std::process::Command::new("bash");
+        // Only set when a test asks for it: the stub defaults with
+        // `${STUB_SUMMARY_BODY-…}`, which is unset-only, so exporting it
+        // unconditionally would make `Some("")` indistinguishable from `None`.
+        if let Some(body) = summary_body {
+            command.env("STUB_SUMMARY_BODY", body);
+        }
+        let output = command
             .arg("-c")
             .arg(&script)
             .env(
@@ -603,6 +668,26 @@ esac
         // The summary is the *split* body: had the marker line survived the
         // split, this document would not have parsed at all.
         assert_eq!(doc["summary"]["results"][0]["host_name"], "h1");
+    }
+
+    /// A 2xx with an empty body is the case `${SUMMARY_BODY:-null}` exists
+    /// for. Without the default the success arm emits `"summary":}` and exits
+    /// **0**, so the caller gets an unparsable document on the one path that
+    /// claims everything worked. A 3xx reaches the same arm — `[23][0-9][0-9]`
+    /// accepts redirects — which is why an empty body is not a hypothetical.
+    #[cfg(unix)]
+    #[test]
+    fn a_successful_job_with_an_empty_summary_body_still_emits_parsable_json() {
+        let run = run_follow_script_full("4242", "201", "200", "200", "successful", Some(""));
+        assert_eq!(run.code, 0, "stdout: {:?}", run.stdout);
+        let doc = emitted_json(&run);
+        assert_eq!(doc["status"], "successful");
+        assert_eq!(doc["job_id"], 4242);
+        assert_eq!(
+            doc["summary"],
+            Value::Null,
+            "an empty 2xx summary body must render as JSON null, not as a hole"
+        );
     }
 
     #[cfg(unix)]
@@ -804,8 +889,9 @@ esac
             "the job status must be parsed from the split body: {script}"
         );
         assert!(
-            script.contains("\"summary\":'$SUMMARY_BODY'"),
-            "the emitted document must carry the split body: {script}"
+            script.contains("\"summary\":'${SUMMARY_BODY:-null}'"),
+            "the emitted document must carry the split body, defaulted so an \
+             empty 2xx body cannot produce `\"summary\":}}`: {script}"
         );
 
         // The job-id sentinel is a build-time device; none of it may survive
