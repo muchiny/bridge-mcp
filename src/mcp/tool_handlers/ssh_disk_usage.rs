@@ -215,7 +215,46 @@ impl ToolHandler for SshDiskUsageHandler {
         }
 
         let result = ToolCallResult::text(output_text);
-        Ok(post_process_disk_usage(result, &args, &response.stdout))
+        // Le post-traitement reconstruit un ToolCallResult depuis
+        // `parse_columnar_output`, donc il EFFACERAIT un champ posé avant lui —
+        // c'est exactement ce que `standard_tool.rs` appelle « un hook de
+        // présentation ne doit pas pouvoir parler par-dessus ». Le champ se pose
+        // donc APRÈS.
+        let mut result = post_process_disk_usage(result, &args, &response.stdout);
+        // Seule la forme `df -h` (sans `path`) permet de dire qu'un code non nul
+        // est un échec. Avec `path`, la commande est `du -sh <p> && df -h <p>`,
+        // qui sort 1 dans un sous-répertoire illisible tout en ayant produit un
+        // total, et dont le `&&` supprime la moitié `df` : la réponse est
+        // partielle, et la déclarer en échec serait un nouveau mensonge.
+        //
+        // HYPOTHÈSE, écrite parce qu'elle n'est pas démontrée pour tous les
+        // cas : sans `path`, TOUT code non nul est traité comme l'échec de la
+        // réponse, jamais comme une réponse partielle. Si `df -h` sortait non
+        // nul APRÈS avoir listé les autres systèmes de fichiers, cette garde
+        // fabriquerait un échec — l'erreur exactement inverse de ce que ce
+        // plan corrige.
+        //
+        // Mesuré (GNU coreutils 9.7, WSL2) : le cas redouté ne se produit pas
+        // POUR EACCES NI POUR ENOENT — et il se produit pour les autres errno.
+        // Pour `df` SANS opérande, un point de montage listé dont `stat`
+        // échoue avec EACCES (droits) ou ENOENT (le chemin ne se résout plus)
+        // est omis en silence, stderr demeure vide et le code vaut 0 : c'est
+        // le cas courant d'un utilisateur non root d'un hôte containerd/K3s,
+        // et c'est le seul cas ainsi vérifié.
+        // Un `stat` qui échoue avec un AUTRE errno — ESTALE d'un montage NFS
+        // périmé, EIO — suit l'autre chemin de coreutils : message vers
+        // stderr, code non nul, et les autres systèmes de fichiers listés
+        // quand même. C'est exactement le scénario redouté, intact, et cette
+        // garde déclarerait cette réponse-là en échec. NON MESURÉ ici,
+        // contrairement aux deux précédents.
+        // NON MESURÉ aussi : la version de coreutils de l'hôte de référence
+        // (Raspberry Pi K3s). Une seule commande trancherait, lancée depuis
+        // cet hôte : `df -h >/dev/null 2>&1; echo $?`.
+        if args.path.is_none() && response.exit_code != 0 {
+            let code = i32::try_from(response.exit_code).unwrap_or(1);
+            result = result.with_remote_exit_code(code);
+        }
+        Ok(result)
     }
 }
 
@@ -260,6 +299,80 @@ mod tests {
     use super::*;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    /// Contexte avec l'hôte "server1" et une sortie distante simulée.
+    fn ctx_with_output(exit_code: u32, stdout: &str, stderr: &str) -> crate::ports::ToolContext {
+        let config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code,
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+                duration_ms: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_failing_df_reaches_the_caller_as_data() {
+        let ctx = ctx_with_output(1, "", "df: /nope: No such file or directory");
+        let result = SshDiskUsageHandler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat, pas une erreur");
+        assert_eq!(
+            result.remote_exit_code,
+            Some(1),
+            "un df en échec doit remonter comme donnée : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_exit_code_survives_the_table_rebuild() {
+        // Avec un stdout vide, `post_process_disk_usage` rend le résultat tel
+        // quel : le champ survivrait quel que soit l'ordre. Ici stdout a un
+        // en-tête et une ligne, donc `parse_columnar_output` rend `Some` et le
+        // résultat est réellement reconstruit — un champ posé AVANT serait
+        // effacé.
+        let ctx = ctx_with_output(
+            1,
+            "Filesystem Size Used Avail Use% Mounted\n/dev/sda1 10G 5G 5G 50% /\n",
+            "df: /proc/x: Permission denied",
+        );
+        let result = SshDiskUsageHandler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|c| matches!(c, crate::ports::ToolContent::App { .. })),
+            "le test doit traverser la reconstruction du tableau : {result:?}"
+        );
+        assert_eq!(result.remote_exit_code, Some(1), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_partial_du_answer_is_not_announced_as_a_failure() {
+        // `du -sh <p> && df -h <p>` sort 1 dans un sous-répertoire illisible
+        // TOUT EN ayant imprimé un total, et le `&&` supprime la moitié `df`.
+        // La réponse est partielle, pas fausse : ne pas la déclarer en échec.
+        let ctx = ctx_with_output(
+            1,
+            "4.0K\t/tmp/p\n",
+            "du: cannot read directory '/tmp/p/x': Permission denied",
+        );
+        let result = SshDiskUsageHandler
+            .execute(Some(json!({"host": "server1", "path": "/tmp/p"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "la forme `path=` ne peut pas distinguer une réponse partielle d’un échec : {result:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {
@@ -417,6 +530,14 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+        // Épingle la MOITIÉ NULLE de la garde : sans `&& response.exit_code
+        // != 0`, ce `df` réussi porterait `Some(0)` — une affirmation que rien
+        // dans l'arbre n'émet. C'est ce que `standard_tool.rs` épingle déjà
+        // pour les 399 outils du pipeline.
+        assert_eq!(
+            result.remote_exit_code, None,
+            "un df qui réussit ne pose aucun code : {result:?}"
+        );
     }
 
     #[test]

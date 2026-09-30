@@ -73,6 +73,18 @@ struct HostResult {
     duration_ms: Option<u64>,
 }
 
+/// Le code de sortie à remonter, ou `None` quand il n'a pas de référent unique.
+///
+/// Le garde compte les hôtes *demandés*, pas seulement les résultats : une
+/// tâche qui panique fait perdre un `HostResult`, et deux hôtes dont un
+/// panique donnent un seul résultat, qui n'est pas un appel mono-hôte.
+fn single_host_exit(results: &[HostResult], requested_hosts: usize) -> Option<u32> {
+    match results {
+        [only] if requested_hosts == 1 => only.exit_code,
+        _ => None,
+    }
+}
+
 /// Aggregated results for all hosts
 #[derive(Debug, Serialize)]
 struct MultiExecResult {
@@ -301,6 +313,25 @@ impl ToolHandler for SshExecMultiHandler {
         let succeeded = results.iter().filter(|r| r.success).count();
         let failed = results.len() - succeeded;
 
+        // Le fait, pas le verdict — et seulement quand il a un référent unique.
+        //
+        // Un seul hôte : le code de sortie distant est celui-là, et il remonte
+        // comme pour `ssh_exec`, et pour le même motif on ne pose PAS
+        // `is_error` (l'appelant a choisi la ligne ; `grep` qui ne trouve rien
+        // sort 1 sans avoir échoué).
+        //
+        // Plusieurs hôtes : rien n'est posé, délibérément. Le compteur `failed`
+        // ci-dessus confond « la ligne a rendu non nul » et « l'hôte est
+        // injoignable » — `HostResult::success` est faux dans les deux cas —
+        // donc le mapper ferait dire au code 6 « le bridge n'a pas joint un
+        // hôte », en re-confondant précisément ce que 6 existe pour séparer.
+        // Le cas fan-out demeure donc ouvert plutôt que mal répondu.
+        //
+        // `exit_code` vaut `None` quand l'hôte n'a rien exécuté (annulation,
+        // quota de débit, échec de connexion) : ce cas ne prétend alors rien
+        // non plus.
+        let single_host_exit = single_host_exit(&results, args.hosts.len());
+
         // Optional: compute a multi-host diff (Sprint 3 Phase B.7).
         // Runs against whatever succeeded — failed hosts still appear
         // in the diff with their error output, which is usually what
@@ -358,7 +389,13 @@ impl ToolHandler for SshExecMultiHandler {
             }
         }
 
-        Ok(ToolCallResult::text(json_output))
+        let result = ToolCallResult::text(json_output);
+        if let Some(code) = single_host_exit.filter(|c| *c != 0) {
+            let code = i32::try_from(code).unwrap_or(1);
+            return Ok(result.with_remote_exit_code_only(code));
+        }
+
+        Ok(result)
     }
 }
 
@@ -547,6 +584,35 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
+    fn host_result(exit_code: Option<u32>) -> HostResult {
+        HostResult {
+            host: "h".to_string(),
+            success: exit_code == Some(0),
+            exit_code,
+            output: None,
+            error: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn single_host_exit_reports_the_code_for_one_requested_host() {
+        assert_eq!(single_host_exit(&[host_result(Some(1))], 1), Some(1));
+    }
+
+    #[test]
+    fn single_host_exit_is_none_when_a_task_was_lost() {
+        // Deux hôtes demandés, un seul résultat (JoinError) : pas mono-hôte.
+        assert_eq!(single_host_exit(&[host_result(Some(1))], 2), None);
+    }
+
+    #[test]
+    fn single_host_exit_is_none_for_several_results_or_no_code() {
+        let two = [host_result(Some(1)), host_result(Some(2))];
+        assert_eq!(single_host_exit(&two, 2), None);
+        assert_eq!(single_host_exit(&[host_result(None)], 1), None);
+    }
+
     fn create_test_context_with_hosts() -> ToolContext {
         let mut hosts = HashMap::new();
         hosts.insert(
@@ -640,6 +706,94 @@ mod tests {
             },
         );
         crate::ports::mock::create_test_context_with_hosts(hosts)
+    }
+
+    /// Les mêmes trois hôtes, mais avec une sortie distante simulée et une
+    /// config qui autorise la commande — en mode `Standard` par défaut la
+    /// liste blanche est vide et `validator.rs` refuse tout, bien avant que le
+    /// handler atteigne son propre code.
+    fn ctx_permissive_with_exit(exit_code: u32) -> ToolContext {
+        use crate::config::{SecurityConfig, SecurityMode};
+
+        let mut config = (*create_test_context_with_hosts().config).clone();
+        config.security = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            blacklist: vec![],
+            ..SecurityConfig::default()
+        };
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code,
+                duration_ms: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_single_host_nonzero_exit_is_a_fact_without_a_verdict() {
+        let ctx = ctx_permissive_with_exit(1);
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({"hosts": ["server1"], "command": "false"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code,
+            Some(1),
+            "le fait remonte : {result:?}"
+        );
+        assert_eq!(
+            result.is_error, None,
+            "le verdict n'est pas posé : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_host_zero_exit_claims_nothing() {
+        let ctx = ctx_permissive_with_exit(0);
+        let result = SshExecMultiHandler
+            .execute(Some(json!({"hosts": ["server1"], "command": "true"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "une commande qui réussit ne pose aucun code : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_claims_nothing_even_when_every_host_failed() {
+        // Épingle l'abstention décrite au-dessus de `single_host_exit` : avec
+        // plusieurs hôtes, `failed` vaut 2 et pourtant rien n'est posé, parce
+        // que ce compteur ne distingue pas « la ligne a rendu non nul » de
+        // « l'hôte est injoignable ». Mapper `failed > 0` ferait dire au code
+        // 6 quelque chose qu'il a été créé pour ne PAS dire.
+        let ctx = ctx_permissive_with_exit(1);
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({"hosts": ["server1", "server2"], "command": "false"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ToolContent::Text { text } => text.clone(),
+            other => panic!("contenu texte attendu, obtenu {other:?}"),
+        };
+        assert!(
+            text.contains("\"failed\":2"),
+            "les deux hôtes doivent avoir rendu non nul, sinon ce test \
+             n'atteint pas le cas fan-out : {text}"
+        );
+        assert_eq!(
+            result.remote_exit_code, None,
+            "le fan-out s'abstient : {result:?}"
+        );
     }
 
     #[test]

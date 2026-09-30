@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
 reading it. Every item below was reproduced before the fix and measured after.
 
+**That provenance is the campaign's, and it stops there.** The exit-code
+follow-ups added later in this same unreleased cycle — the five `ToolHandler`
+handlers brought into line (`ssh_file_write`, `ssh_disk_usage`, `ssh_tail`,
+`ssh_exec`, `ssh_exec_multi`) and the AWX curl-transport fix — were established
+by unit test and mutation testing. **None of them was ever run against a host.**
+That is a sound basis, but it is not the basis the sentence above describes, and
+nothing in the text below would otherwise tell you which is which.
+
 ### BREAKING
 
 - **`bridge-mcp tool <name>` rejects arguments the tool does not declare**,
@@ -59,15 +67,39 @@ reading it. Every item below was reproduced before the fix and measured after.
   `sudo_user` at all, so they were never probed) — they are the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
+  **Five of those 52 have since been brought into line**, in this same
+  unreleased cycle: `ssh_file_write`, `ssh_disk_usage` (without `path`),
+  `ssh_tail` (without `grep`), `ssh_exec`, and `ssh_exec_multi` against a
+  single host. The two entries below state what each now does; the paragraph
+  above is kept as written because it is the finding as it was measured, and
+  the list it gives is the one the follow-up work is tracked against. What is
+  still open, therefore: `ssh_session_exec`, `ssh_find`, `ssh_metrics`,
+  `ssh_metrics_multi`, `ssh_exec_multi` across 2+ hosts, `ssh_disk_usage` with
+  a `path`, `ssh_tail` with a `grep`, and — of the AWX family — `ssh_awx_job_follow`
+  alone; the other 42 are closed by the fix to `parse_checked_response`, as the
+  next paragraph now states.
+
   **The AWX family is narrower than the raw count suggests.** 42 of the 43 route
   their response through `AwxCommandBuilder::parse_checked_response`
-  (`src/domain/use_cases/awx.rs:226-244`), which already raises
-  `BridgeError::AwxApi` for any HTTP status >= 400. Only a **transport-level
-  curl failure that writes no status marker** — connection refused, timeout —
-  falls through to `Ok(raw)` and exits 0. The exception is
-  `ssh_awx_job_follow`, which builds its requests with the unchecked
+  (`AwxCommandBuilder::parse_checked_response`), which already raises
+  `BridgeError::AwxApi` for any HTTP status >= 400. A **transport-level curl
+  failure** — connection refused, timeout — does NOT lack a marker: curl writes
+  its `-w` output even when it fails, with `%{http_code}` = `000`, so the marker
+  is present and `"000".parse().unwrap_or(0)` gave 0, which `>= 400` let through
+  as `Ok("")`. **`parse_checked_response` is fixed** (`000` or any unreadable
+  status now returns `AwxApi { status: 0 }`), **and for 42 of the 43 that is the
+  whole fix.** Each of those 42 holds exactly one call site —
+  `AwxCommandBuilder::parse_checked_response(&raw)?`, one of two byte-identical
+  lines — and the `?` already propagates the new error, which reaches the CLI as
+  exit **1**, a bridge error, not 6. There is nothing at those sites to change.
+  An earlier draft of this entry deferred a "42-call-site sweep" on the grounds
+  that AWX is unconfigured locally; the deferral was wrong about what the sites
+  contain and is **withdrawn**, so do not go looking for that sweep. Do not start
+  from the marker-absent branch either. **The one handler that does still need
+  work is `ssh_awx_job_follow`**, which builds its requests with the unchecked
   `build_api_call`, never parses a status, and returns `text(stdout)` regardless
-  — so it swallows HTTP errors too, not only transport failures.
+  — so it swallows HTTP errors too, not only transport failures. Its fix is to
+  move onto `build_api_call_checked`.
 
   Two further boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when
   a `bridge-mcp daemon` serves the call the CLI reads the result back off the
@@ -76,8 +108,18 @@ reading it. Every item below was reproduced before the fix and measured after.
   same; a caller branching on `$? -eq 6` specifically is environment-dependent.
 
 - **An MCP tool result now carries `isError: true` when its remote command
-  failed** — again, for `StandardTool`-pipeline tools only; the 52 handlers
-  listed above are unchanged, with the AWX qualification stated there. A client
+  failed** — again, for `StandardTool`-pipeline tools only. The 52 handlers
+  listed above are **not** all unchanged, though, once the follow-ups later in
+  this same unreleased cycle are counted: **three** now set `isError` themselves
+  (`ssh_file_write`, `ssh_disk_usage` without a `path`, `ssh_tail` without a
+  `grep` — see the entry below, they use the same `with_remote_exit_code`
+  constructor the pipeline does); **two** report the exit code and deliberately
+  decline the verdict (`ssh_exec`, `ssh_exec_multi` against a single host);
+  **42** — the AWX handlers on `parse_checked_response` — now return `Err` for a
+  curl transport failure, which the server wraps as a result with `isError: true`
+  where it used to be an empty success. Only **five** are genuinely unchanged:
+  `ssh_session_exec`, `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` and
+  `ssh_awx_job_follow`. A client
   that treated every `tools/call` answer as a success, and read the outcome out
   of the text, will start seeing errors it did not see before, for calls that
   were already failing.
@@ -154,6 +196,79 @@ reading it. Every item below was reproduced before the fix and measured after.
   `( exit 7 )` still run — and every gap known to it is listed and pinned by a
   test on `command_runs_exit_in_session_shell`. It applies to `cmd.exe` and
   PowerShell sessions too, where `exit` ends the shell the same way.
+
+- **`ssh_file_write`, `ssh_disk_usage` and `ssh_tail` now exit 6 when the
+  remote command fails, and mark the result `isError` — two of them under a
+  condition stated below.** All three used to exit
+  **0** with the failure visible only in the result text, so
+  `bridge-mcp tool ssh_file_write … && next` ran `next` after a refused write.
+  They now use `ToolCallResult::with_remote_exit_code`, the same constructor the
+  pipeline uses, which sets `isError: true` as well — so an MCP client that read
+  every `tools/call` answer as a success will start seeing errors on calls that
+  were already failing.
+
+  **Two of the three are conditional, and the condition is the substance.**
+  `ssh_disk_usage` reports a code only when called **without** `path`: with one,
+  the command is `du -sh <p> && df -h <p>`, which exits 1 from an unreadable
+  subdirectory *while having printed a total*, and the `&&` has already
+  suppressed the `df` half. That is a partial answer, and calling it a failure
+  would be a new false claim in the opposite direction. `ssh_tail` reports a code only
+  **without** `grep`: with one, the pipeline's status is `grep -E`'s, and exit 1
+  there means "no match", the ordinary answer. `ssh_file_write` is
+  unconditional on its shell path; its SFTP path (content reaching
+  `sftp_write_threshold_bytes`, 64 KiB by default) runs no remote process and
+  reports no code, so the same call can report 6 or nothing depending on that
+  config value. Known restriction, not a defect of this change.
+
+  Established by unit test and mutation testing, not on a host — see the note
+  under `[Unreleased]`.
+
+- **`ssh_exec` and `ssh_exec_multi` now exit 6 when the remote command exits
+  non-zero — but they do not call it an error.** `bridge-mcp tool ssh_exec
+  host=x command=false` exited **0**; it now exits **6**, so a script doing
+  `bridge-mcp tool ssh_exec … && next` stops where it used to continue. That is
+  the breaking half, and it is the point: the failure used to live only in the
+  result text as `[exit:N]`, where no caller could test it.
+
+  **The MCP surface is deliberately unchanged.** These two run a command *you*
+  wrote, and plenty of ordinary commands exit non-zero as their answer — `grep`
+  matching nothing exits 1, `diff` finding a difference exits 1, `test` exits 1
+  for false, `systemctl is-active` exits 3 for a stopped unit. The pipeline
+  solved its version of this with a per-tool `NONZERO_EXIT_IS_ERROR`, which
+  cannot work here: the tool is `ssh_exec` and the command is an *argument*. So
+  the result reports the fact (`remote_exit_code`) and declines the verdict
+  (`is_error` stays absent), via a second constructor,
+  `ToolCallResult::with_remote_exit_code_only`. An MCP client is not told that
+  its own `grep` failed; a shell caller still gets a non-zero `$?`. Every other
+  handler keeps welding the two, and `with_remote_exit_code` is untouched.
+
+  **`ssh_exec_multi` reports a code only for a single host.** Across two or
+  more it reports nothing. The per-host `failed` counter does not distinguish
+  "the command exited non-zero" from "the host was unreachable" — `success` is
+  false for both — so mapping it onto exit 6 would make 6 mean "the bridge
+  could not reach a host", re-conflating precisely what 6 was created to
+  separate. The fan-out case is left open rather than answered wrongly; the
+  per-host `exit_code` values are in the JSON result.
+
+  **`ssh_session_exec` is excluded and stays at exit 0.** Its output parser
+  *fabricates* exit code 1 for a missing marker and for an unparsable one
+  (`src/ssh/session.rs`, `parse_exec_output`), so propagating that code would
+  announce a failure of your command where the truth is a bridge-side parse
+  failure — the exact conflation this whole chain exists to remove.
+
+  **Known asymmetry, not closed.** When a `bridge-mcp daemon` serves the call,
+  the CLI reads the result back off the MCP wire, and `remote_exit_code` is
+  `#[serde(skip)]` — it is an in-process channel, not a protocol extension. The
+  daemon path can only read `isError`, which these two deliberately do not set,
+  so **it exits 0** where the direct path exits 6. This is not a regression:
+  that path already exited 0 for these tools, since they set no `isError`
+  before either. What is new is that the two paths now disagree. For every
+  other tool the daemon path exits 1, so the usual advice — branch on
+  `$? -ne 0`, not `$? -eq 6` — holds there but **not** for these two. Closing
+  it means putting the remote code on the MCP wire, which is a response-format
+  change and was not taken here. Both halves are pinned by tests in
+  `src/cli/runner.rs`, and `ports::protocol::tests::the_fact_never_crosses_the_mcp_wire`
+  fails if the `skip` is ever lifted without revisiting this.
 
 ### Fixed
 
@@ -348,6 +463,20 @@ reading it. Every item below was reproduced before the fix and measured after.
   CLI; the docs previously implied otherwise.
 - `limits.max_concurrent_commands` does not apply to CLI invocations, which are
   one process each.
+- **Nothing tests the exit-6 seam end to end.** No test at any level runs a
+  `bridge-mcp` process and observes its exit code, so the headline claim — that
+  a failed remote command now makes the CLI exit 6 — is assembled from two
+  separately-tested halves that nothing exercises together: `--lib` unit tests
+  on the `ToolCallResult` a handler returns, and unit tests on `tool_exit_code`
+  (`src/cli/runner.rs:64`) in isolation. **`make e2e-docker` does not close
+  this**, contrary to what an earlier note claimed:
+  `test_docker_ssh_exec_nonzero_exit` (`tests/e2e_docker.rs:277-294`,
+  `#[ignore]`, and therefore skipped by `make ci`) asserts on the struct the
+  handler returned and never spawns a process or reads a process exit status.
+  Closing it needs a test that actually runs the binary — spawn
+  `env!("CARGO_BIN_EXE_bridge-mcp")` with `tool …` against a reachable host and
+  assert on `status.code()`.
+
 - **52 handlers still exit 0 when their remote command fails**, because they run
   it outside the `StandardTool` pipeline that the exit-code fix above lives in.
   They implement `ToolHandler` directly, and each still does `warn!(…)` on a
@@ -363,10 +492,14 @@ reading it. Every item below was reproduced before the fix and measured after.
 
   **The 43 `ssh_awx_*`, but narrower than the count suggests:** 42 route their
   response through `AwxCommandBuilder::parse_checked_response`
-  (`src/domain/use_cases/awx.rs:226-244`), which already raises
-  `BridgeError::AwxApi` on HTTP >= 400, so only a **transport-level curl failure
-  that writes no status marker** (connection refused, timeout) reaches
-  `Ok(raw)` and exits 0. `ssh_awx_job_follow` is the exception: it uses the
+  (`AwxCommandBuilder::parse_checked_response`), which already raises
+  `BridgeError::AwxApi` on HTTP >= 400. A transport-level curl failure (connection
+  refused, timeout) used to reach `Ok("")` and exit 0 — not through a missing
+  marker (curl writes `-w` even on failure, with `%{http_code}` = `000`) but
+  because `000` parsed as 0 and `0 >= 400` is false; fixed in the function,
+  which is the whole fix for those 42 — each holds one
+  `parse_checked_response(&raw)?` call site and the `?` already propagates.
+  `ssh_awx_job_follow` is the exception: it uses the
   unchecked `build_api_call`, parses no status, and returns `text(stdout)`
   regardless, so it swallows HTTP errors too.
 
@@ -377,12 +510,12 @@ reading it. Every item below was reproduced before the fix and measured after.
   the same line the pipeline's step 19 runs, placed last so a post-processing
   hook cannot mask it. The builder already exists and is public.
   **The AWX handlers need a different fix:** they never read `exit_code` at all,
-  so there is nothing for that line to test. Their failure mode is a curl
-  transport error with no status marker, which means the work there is to make
-  `parse_checked_response` (or its callers) distinguish "no marker because curl
-  never reached the server" from "no marker because this was an unchecked call",
-  plus moving `ssh_awx_job_follow` onto `build_api_call_checked`. Do not start
-  from the one-line shape there.
+  so there is nothing for that line to test. Their failure mode was a curl
+  transport error whose marker reads `000` (not an absent marker);
+  `parse_checked_response` now rejects it, and the 42 call sites need nothing:
+  each is a single `parse_checked_response(&raw)?` that already propagates. What
+  remains is moving `ssh_awx_job_follow` onto `build_api_call_checked`. Do not
+  start from the one-line shape there.
 
   Watch, in either group, for handlers where a non-zero exit is the *answer*
   rather than a failure — the same judgment the `NONZERO_EXIT_IS_ERROR` note

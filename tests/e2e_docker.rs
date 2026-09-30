@@ -282,10 +282,15 @@ async fn test_docker_ssh_exec_nonzero_exit() {
         .execute(Some(json!({"host": "docker", "command": "false"})), &ctx)
         .await
         .unwrap();
-    // "false" returns exit code 1 — should be reflected in structured content
-    if let Some(structured) = &result.structured_content {
-        assert_ne!(structured["exit_code"], 0);
-    }
+    // `false` rend 1. Avant ce plan, `ssh_exec` n'exposait ce 1 que dans le
+    // texte, préfixé `[exit:1]` : ni `remote_exit_code`, ni `structured_content`.
+    // L'assertion précédente vivait sous un `if let Some(structured)` que ce
+    // handler ne remplit jamais, donc elle n'a jamais été exécutée.
+    assert_eq!(
+        result.remote_exit_code,
+        Some(1),
+        "le code de sortie distant doit être une donnée, pas seulement un préfixe de texte : {result:?}"
+    );
 }
 
 #[tokio::test]

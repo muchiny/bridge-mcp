@@ -162,7 +162,7 @@ impl ToolHandler for SshFileWriteHandler {
             "Writing file"
         );
 
-        let output_text = if use_sftp {
+        let (output_text, exit_code) = if use_sftp {
             self.execute_sftp(&args, host_config, ctx, append).await?
         } else {
             self.execute_shell(&args, ctx, append).await?
@@ -194,7 +194,13 @@ impl ToolHandler for SshFileWriteHandler {
             }
         }
 
-        Ok(ToolCallResult::text(final_output))
+        let mut result = ToolCallResult::text(final_output);
+        // `printf <contenu> > <chemin>` : un code non nul est toujours un échec
+        // d'écriture. Posé en dernier, après la troncature et `save_output`.
+        if let Some(code) = exit_code {
+            result = result.with_remote_exit_code(code);
+        }
+        Ok(result)
     }
 }
 
@@ -205,7 +211,7 @@ impl SshFileWriteHandler {
         args: &SshFileWriteArgs,
         ctx: &ToolContext,
         append: bool,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<i32>)> {
         let command = FileOpsCommandBuilder::build_write_command(&args.path, &args.content, append);
 
         // Security validation
@@ -286,7 +292,9 @@ impl SshFileWriteHandler {
             );
         }
 
-        Ok(response.format_for_llm(&response.stdout))
+        let exit_code =
+            (response.exit_code != 0).then(|| i32::try_from(response.exit_code).unwrap_or(1));
+        Ok((response.format_for_llm(&response.stdout), exit_code))
     }
 
     /// SFTP-based write for large content (streaming, no shell limits).
@@ -296,7 +304,7 @@ impl SshFileWriteHandler {
         host_config: &crate::config::HostConfig,
         ctx: &ToolContext,
         append: bool,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<i32>)> {
         let client =
             connect_with_jump(&args.host, host_config, &ctx.config.limits, &ctx.config).await?;
 
@@ -357,7 +365,13 @@ impl SshFileWriteHandler {
             transfer_result.bytes_per_second / 1_000_000.0
         );
 
-        Ok(output)
+        // Le chemin SFTP n'exécute aucun processus distant : elle n'a pas de
+        // code de sortie et doit rester à None. Ne pas en fabriquer un. Noter
+        // que le choix du chemin dépend de `sftp_write_threshold_bytes`
+        // (`:157`), qu'un 0 force à SFTP pour CHAQUE appel — le même appel
+        // rapporterait donc 6 ou rien selon une valeur de config. C'est une
+        // restriction connue, pas un défaut de cette tâche.
+        Ok((output, None))
     }
 }
 
@@ -368,6 +382,56 @@ mod tests {
     use crate::ports::ToolHandler;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn a_refused_write_reaches_the_caller_as_data() {
+        let config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "printf: write error: Permission denied".to_string(),
+                duration_ms: 1,
+            },
+        );
+        let result = SshFileWriteHandler
+            .execute(
+                Some(json!({"host": "server1", "path": "/etc/x", "content": "hi"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.remote_exit_code, Some(1), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_successful_write_claims_no_exit_code() {
+        // Épingle la MOITIÉ NULLE de `(response.exit_code != 0).then(...)` :
+        // remplacée par un `Some(...)` inconditionnel, une écriture réussie
+        // porterait `Some(0)`, que rien dans l'arbre n'émet.
+        let config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        let result = SshFileWriteHandler
+            .execute(
+                Some(json!({"host": "server1", "path": "/etc/x", "content": "hi"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "une écriture réussie ne pose aucun code : {result:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {
@@ -635,9 +699,15 @@ mod tests {
                 &ctx,
             )
             .await;
-        // Either succeeds via the shell pipeline or surfaces a structured
-        // error; both branches exercise the previously-uncovered code.
-        assert!(result.is_ok() || result.is_err());
+        // Ces deux appels atteignent bien `Ok` (vérifié) : le `assert!(is_ok()
+        // || is_err())` qui tenait cette ligne était une tautologie. La sortie
+        // simulée vaut 0, donc aucun code ne doit être posé — ce qui épingle
+        // ici aussi la moitié nulle de la garde, tout au long du chemin shell.
+        let result = result.expect("le chemin shell doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "sortie simulée 0 : aucun code posé : {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -694,8 +764,14 @@ mod tests {
                 &ctx,
             )
             .await;
-        // Exercises the append branch; final outcome depends on the mock
-        // connection, so both Ok and Err are acceptable here.
-        assert!(result.is_ok() || result.is_err());
+        // Ces deux appels atteignent bien `Ok` (vérifié) : le `assert!(is_ok()
+        // || is_err())` qui tenait cette ligne était une tautologie. La sortie
+        // simulée vaut 0, donc aucun code ne doit être posé — ce qui épingle
+        // ici aussi la moitié nulle de la garde, tout au long du chemin shell.
+        let result = result.expect("le chemin shell doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "sortie simulée 0 : aucun code posé : {result:?}"
+        );
     }
 }
