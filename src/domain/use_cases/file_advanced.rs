@@ -37,12 +37,20 @@ impl FileAdvancedCommandBuilder {
     }
 
     /// Build a patch apply command (with dry-run support).
+    ///
+    /// The patch is passed as `printf`'s ARGUMENT, never as its format string.
+    /// It used to be the format (`printf '<patch>'`), which is correctly quoted
+    /// and so not an injection, but is still wrong: `printf` interprets its
+    /// format, so a `%s` in a hunk was consumed and dropped, a `%d` printed
+    /// `0`, and a two-character `\t` or `\n` in a patched line became a real tab
+    /// or newline. Each of those silently applies a patch that is not the one
+    /// the caller sent. `printf '%s'` makes the patch data.
     #[must_use]
     pub fn build_patch_command(target_file: &str, patch_content: &str, dry_run: bool) -> String {
         let escaped_target = shell_escape(target_file);
         let escaped_patch = shell_escape(patch_content);
         let dry_flag = if dry_run { " --dry-run" } else { "" };
-        format!("printf {escaped_patch} | patch{dry_flag} -p0 {escaped_target}")
+        format!("printf '%s' {escaped_patch} | patch{dry_flag} -p0 {escaped_target}")
     }
 
     /// Build a template rendering command using envsubst.
@@ -108,6 +116,32 @@ mod tests {
     fn test_patch_command_apply() {
         let cmd = FileAdvancedCommandBuilder::build_patch_command("/etc/config", "diff", false);
         assert!(!cmd.contains("--dry-run"));
+    }
+
+    /// The patch must be `printf`'s argument, never its format. As the format —
+    /// `printf '<patch>'` — the two-character `%s` in the hunk below is a
+    /// conversion `printf` consumes with no argument to fill it, so the line
+    /// reached `patch` with the `%s` gone. `%d` would have become `0`, and a
+    /// two-character `\t` a real tab. All three apply a patch that is not the
+    /// one the caller sent, so the assertion is on the shape of the command:
+    /// the format is a literal `'%s'` owned by this builder, and the patch
+    /// follows it as data.
+    #[test]
+    fn patch_content_is_printf_data_not_its_format() {
+        let patch = "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+printf \"%s\\n\" \"$v\"\n";
+        let cmd = FileAdvancedCommandBuilder::build_patch_command("/etc/config", patch, false);
+
+        assert!(
+            cmd.starts_with("printf '%s' '--- a\n"),
+            "the format must be a literal '%s' the builder owns, with the patch \
+             as the next argument: {cmd}"
+        );
+        // The shape the fix removes: the patch's own first bytes acting as the
+        // format string.
+        assert!(
+            !cmd.starts_with("printf '--- a"),
+            "the patch must not be the format string: {cmd}"
+        );
     }
 
     #[test]

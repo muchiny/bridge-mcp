@@ -468,6 +468,20 @@ nothing in the text below would otherwise tell you which is which.
   the custom handlers are a follow-up. `bridge-mcp status` reports
   `"written_by": "mcp-server-and-cli"`.
 
+- **A patch is no longer reinterpreted by `printf`.**
+  `FileAdvancedCommandBuilder::build_patch_command` passed the patch as
+  `printf`'s **format** (`printf '<patch>'`). Correctly quoted, so never an
+  injection, but `printf` interprets its format: a `%s` in a hunk was consumed
+  and dropped, a `%d` printed `0`, a two-character `\t` became a real tab. Each
+  silently applied a patch that was not the one sent. It is now
+  `printf '%s' '<patch>'`, with the patch as data.
+
+- **`tool_handlers::utils::shell_escape` delegates to
+  `domain::use_cases::shell::escape`** instead of carrying its own copy of the
+  same quoting. Two implementations of a security primitive that agreed and that
+  nothing kept in agreement; behaviour is unchanged, the byte-for-byte identical
+  body is gone.
+
 ### Changed
 
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
