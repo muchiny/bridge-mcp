@@ -100,6 +100,29 @@ pub trait StandardTool: Send + Sync + 'static {
     /// the text (`format_for_llm`'s `[exit:N]`) and in the audit event.
     const NONZERO_EXIT_IS_ERROR: bool = true;
 
+    /// Whether this tool accepts the pipeline's `sudo` / `sudo_user` params.
+    ///
+    /// `true` (the default) is right for every tool whose command is a POSIX
+    /// one: elevation is what makes the specialised tools usable at all on a
+    /// host where the interesting state is root-owned, which is why
+    /// `PrivilegeArgs` was lifted into this pipeline in the first place (see
+    /// [`crate::domain::privilege`]).
+    ///
+    /// Set it to `false` for a tool whose far end is not a POSIX shell, so
+    /// there is no `sudo` there to run. That is not merely a no-op: elevation
+    /// happens at step 5b, BEFORE the blacklist at step 6, and it wraps the
+    /// built command in `sudo -n bash -c '…'` — so on a tool that splices
+    /// caller text into its command, `sudo: true` turns that text into a root
+    /// shell. Refusing the param is what keeps the elevation path from being
+    /// an escalation path for such a tool.
+    ///
+    /// Opting out does both halves: the param is not advertised
+    /// ([`ToolHandler::supports_elevation`]), and a request that sends it
+    /// anyway is refused rather than silently stripped — a caller who asked
+    /// for root and got an unelevated run would read the result as the
+    /// elevated one.
+    const ALLOWS_ELEVATION: bool = true;
+
     /// Optional JSON Schema (2020-12) string describing this tool's
     /// `structuredContent` return value. `None` (default) = no contract.
     ///
@@ -299,8 +322,15 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 
     /// Every standard tool bar the Windows-only ones: elevation is applied by
     /// the shared pipeline, so it works without the handler knowing about it.
+    ///
+    /// [`StandardTool::ALLOWS_ELEVATION`] is the other way out, for a tool
+    /// whose far end is not a POSIX shell at all. Advertising the param and
+    /// then refusing it at step 5b would make the schema lie, and on the CLI
+    /// that lie is load-bearing: `bridge-mcp tool` rejects any key the
+    /// enriched schema does not declare, so leaving it out is what makes
+    /// `sudo=true` fail at parse time there instead of mid-pipeline.
     fn supports_elevation(&self) -> bool {
-        !matches!(T::OS_GUARD, Some(OsType::Windows))
+        T::ALLOWS_ELEVATION && !matches!(T::OS_GUARD, Some(OsType::Windows))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -397,6 +427,26 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // must see the command that will actually run, not the unelevated one
         // it was built from. Windows has no `sudo`, and the OS guard above has
         // already established which kind of host this is.
+        //
+        // A tool that opted out of elevation entirely is refused first, and
+        // with an `Err` rather than the `ToolCallResult::error` the Windows arm
+        // below returns: the Windows arm states a capability of the host ("this
+        // OS has no sudo"), whereas this one is a policy denial of the same
+        // class as the blacklist at step 6 — the tool forbids the param because
+        // honouring it would elevate caller-supplied text — and that class
+        // travels as `CommandDenied` everywhere else in this pipeline.
+        if !T::ALLOWS_ELEVATION && privilege.is_elevated() {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "Tool '{}' does not accept 'sudo' or 'sudo_user'. Elevation wraps the \
+                     whole built command in a root shell and is applied before the \
+                     command blacklist, and this tool's command is not one that may be \
+                     run that way. Drop the parameter; there is no host on which it \
+                     works for this tool.",
+                    T::NAME
+                ),
+            });
+        }
         let command = if host_config.os_type == OsType::Windows {
             if privilege.is_elevated() {
                 return Ok(ToolCallResult::error(format!(

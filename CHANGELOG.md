@@ -270,6 +270,48 @@ nothing in the text below would otherwise tell you which is which.
   `src/cli/runner.rs`, and `ports::protocol::tests::the_fact_never_crosses_the_mcp_wire`
   fails if the `skip` is ever lifted without revisiting this.
 
+- **`ssh_net_equip_config` now refuses any host whose `tags` do not contain
+  `network-equipment`, and refuses `sudo` outright.** **An existing config that
+  uses this tool stops working until the operator adds that tag** to the host in
+  `config.yaml` — exact spelling, case-sensitive, not the case-insensitive
+  matching `HostConfig::has_tag` does elsewhere, so a grant is the literal
+  string that grants it. The refusal is a `CommandDenied` naming the host and
+  the tag to add.
+
+  Why the tool needed a host marker at all: it is the only one in the group that
+  sends caller-supplied COMMAND text. `NetworkEquipmentCommandBuilder::build_config_command`
+  interpolates `commands` verbatim, and for `EquipmentType::Generic` — the
+  default — the vendor wrapper is empty, so the text *is* the command. On the
+  `StandardTool` pipeline that text is seen only by `validate_builtin`, which
+  skips the whitelist by design for specialised tools. On a POSIX host the tool
+  was therefore `ssh_exec` with the whitelist removed, executing what `ssh_exec`
+  itself would have refused under the same config. It was the last of the six
+  command-injection sites found on 2026-07-25 still open.
+
+  `commands` stays unescaped and unwhitelisted, which is deliberate: a Cisco or
+  Juniper CLI needs multi-line input, `|` and `!`, and quoting the text would
+  break every legitimate call. What is constrained is the *host* — the operator
+  states that the far end speaks a device CLI and not a shell, and only then
+  does the tool run. A host nobody marked is refused, which is the pre-tag
+  default for every host in every existing config.
+
+  **`sudo` / `sudo_user` are refused on this tool**, not ignored. `PrivilegeArgs::extract`
+  runs for every pipeline tool, and elevation is applied at step 5b *before* the
+  blacklist, wrapping the built command in `sudo -n bash -c '…'` — so
+  `sudo: true` ran that verbatim `commands` text as root. The mechanism is a new
+  additive `StandardTool::ALLOWS_ELEVATION` const, `true` by default so the
+  other 475 tools are unchanged; the one tool that sets it `false` also stops
+  advertising the param, which on the CLI is what makes `sudo=true` fail at
+  parse time (exit 5) rather than mid-pipeline.
+
+  The reserved tag is a `const NETWORK_EQUIPMENT_TAG` in
+  `src/domain/use_cases/network_equipment.rs`, on the existing `HostConfig.tags`
+  rather than a new `HostConfig` field: `tags` is already `#[serde(default)]`
+  and a new field would have meant editing 987 struct literals across 415
+  files, since only one of them uses `..Default::default()` and `HostConfig`
+  derives no `Default`. `build_config_command` and `EquipmentType` are
+  unchanged.
+
 ### Fixed
 
 - **A slow command no longer destroys its session.** Every `Err` from reading a

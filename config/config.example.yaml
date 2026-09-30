@@ -82,6 +82,25 @@ hosts:
   #     type: key
   #     path: ~/.ssh/id_ed25519
 
+  # Example: Network equipment (switch, router, firewall)
+  # The `network-equipment` tag is REQUIRED for ssh_net_equip_config, and only
+  # for that tool — the read-only ssh_net_equip_show_* tools work without it.
+  # It is a declaration, not a label: ssh_net_equip_config sends its `commands`
+  # text to the host unescaped and with the command whitelist skipped, which is
+  # what a Cisco or Juniper CLI needs (multi-line input, `|`, `!`) and what
+  # would be arbitrary shell execution on a POSIX host. The tag is where you
+  # state that the far end is a device CLI and not a shell. Spelled exactly,
+  # case-sensitively. `sudo` is refused on that tool regardless.
+  # core-switch:
+  #   hostname: 192.168.1.2
+  #   port: 22
+  #   user: netadmin
+  #   description: "Core switch (Cisco IOS)"
+  #   tags: [network-equipment]
+  #   auth:
+  #     type: key
+  #     path: ~/.ssh/id_ed25519
+
   # Example: Using password authentication (not recommended)
   # legacy-server:
   #   hostname: 192.168.1.50

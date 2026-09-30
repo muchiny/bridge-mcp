@@ -13,6 +13,33 @@
 
 use crate::error::{BridgeError, Result};
 
+/// The `HostConfig::tags` value an operator must set for a host to accept
+/// `ssh_net_equip_config`.
+///
+/// `ssh_net_equip_config` is the one tool here that sends caller-supplied
+/// COMMAND text — [`NetworkEquipmentCommandBuilder::build_config_command`]
+/// interpolates `commands` verbatim, and for `EquipmentType::Generic`, the
+/// default, the wrapper is empty so the text *is* the command. On the
+/// `StandardTool` pipeline that text is only ever seen by `validate_builtin`,
+/// which skips the whitelist by design for specialised tools. On a POSIX host
+/// that makes the tool `ssh_exec` with the whitelist removed — the last of the
+/// six 2026-07-25 injection sites.
+///
+/// Escaping the text is not an option: a Cisco or Juniper CLI genuinely needs
+/// multi-line input, `|` and `!`, and single-quoting it would break every
+/// legitimate call. So `commands` stays free and the *host* is constrained
+/// instead: the tool runs only where the operator has written this tag in
+/// `config.yaml`, declaring that the far end is a device CLI and not a shell.
+/// A host nobody marked is refused, which is the pre-tag default.
+///
+/// Matched **exactly, case-sensitively**, NOT through
+/// [`HostConfig::has_tag`](crate::config::HostConfig::has_tag), whose
+/// `eq_ignore_ascii_case` is right for grouping hosts and wrong for an
+/// authorisation marker: a grant should be visible in the config as the literal
+/// string that grants it, so a `Network-Equipment` typo reads as the non-match
+/// it is instead of quietly opening the path.
+pub const NETWORK_EQUIPMENT_TAG: &str = "network-equipment";
+
 /// Reject an identifier that could break out of the command it is placed in.
 ///
 /// Measured before this existed: `build_show_interfaces_command(Juniper,
