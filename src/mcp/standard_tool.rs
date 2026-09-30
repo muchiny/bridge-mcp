@@ -417,31 +417,49 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 
         // Step 4: Domain validation (optional), and its denial is audited.
         //
-        // A `T::validate` rejection IS a policy denial, of the same class as
-        // the blacklist at step 6, and it is audited for the same reason. That
-        // is not an interpretation: `validate_builtin` at step 6 deliberately
-        // skips the whitelist for specialised tools *on the assumption that
-        // they validate their own inputs*, so this hook is what stands in for
-        // the whitelist on every tool that runs this pipeline — see
-        // `validate_identifier` in `domain::use_cases::network_equipment`,
-        // which says so in as many words. Every validator reachable from here
-        // returns `BridgeError::CommandDenied`, the variant whose whole meaning
-        // is "policy refused this". Until this call was wrapped, the 90
-        // handlers that implement `validate` refused injection attempts —
-        // `validate_service_name("x; rm -rf /")` among them — and left no
-        // trace, while the functionally identical blacklist denial at step 6
-        // was recorded.
+        // This hook is where the specialised tools enforce what the whitelist
+        // would otherwise enforce for them: `validate_builtin` at step 6
+        // deliberately skips the whitelist *on the assumption that they
+        // validate their own inputs* — see `validate_identifier` in
+        // `domain::use_cases::network_equipment`, which says so in as many
+        // words. Until this call was wrapped, a rejection here left no trace,
+        // while the blacklist denial at step 6 was recorded. So refusals like
+        // `validate_service_name("x; rm -rf /")` were invisible, and that is
+        // what this closes.
         //
-        // This only ever fires on a REFUSED call, so it adds no audit volume
-        // to normal operation; a refused call is what an audit log is for.
+        // Two things this event does NOT mean, both measured rather than
+        // assumed, because an earlier version of this comment asserted the
+        // opposite and was wrong:
+        //
+        // - **Not every rejection here is `CommandDenied`.** The overwhelming
+        //   majority of the validators reachable from the 90 `validate` bodies
+        //   return it, but `validate_vm_name` and `validate_snapshot_name` in
+        //   `domain::use_cases::hyperv` return `McpInvalidRequest`, and they
+        //   are reached from the five `ssh_hyperv_*` handlers. That is what
+        //   the fallback arm below exists for — it stringifies any other
+        //   variant rather than dropping the reason.
+        // - **Not every rejection here is an attack.** The variant does not
+        //   settle the semantics: `validate_port`, `validate_duration`,
+        //   `validate_dimensions`, `validate_count`, `validate_bench_type`,
+        //   `validate_provider` and `validate_tag_action` all spell a
+        //   typo-class rejection `CommandDenied` ("Invalid port number: '99999'"),
+        //   and hyperv's shape checks (`is_empty`, `len() > 200`) are not
+        //   injection attempts either. A `command_denied` event from THIS site
+        //   therefore means "the tool refused this input", not "an attack was
+        //   refused" — read `reason` before alerting on it.
+        //
+        // Auditing it anyway is the right trade: the alternative is that the
+        // injection refusals in the same set stay invisible. It only ever
+        // fires on a REFUSED call, so it adds no audit volume to normal
+        // operation; a refused call is what an audit log is for.
         //
         // The command position is empty on purpose. No command has been built
         // yet — step 5 is below — and a synthetic one would be a fabrication
         // that a reader or a log parser could mistake for something that was
-        // going to run. The offending input is not lost: every validator names
-        // it in its `reason` ("Invalid service name 'x; rm -rf /'"), which is
-        // where the forensics belong when the denial is about an argument
-        // rather than about a command.
+        // going to run. The offending input is not lost where it matters: most
+        // of these validators interpolate it into their `reason` ("Invalid
+        // service name 'x; rm -rf /'"), which is where the forensics belong
+        // when the denial is about an argument rather than about a command.
         if let Err(e) = T::validate(&args, host_config) {
             let reason = match &e {
                 BridgeError::CommandDenied { reason } => reason.clone(),

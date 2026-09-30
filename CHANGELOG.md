@@ -309,15 +309,28 @@ nothing in the text below would otherwise tell you which is which.
   when `T::validate` refuses — for all 476 tools, not only this one. That hook
   is what stands in for the whitelist on the specialised tools, since
   `validate_builtin` at step 6 skips the whitelist precisely on the assumption
-  that they check their own inputs; every validator reachable from it returns
-  `CommandDenied`. Until now the 90 handlers that implement it refused
-  injection attempts — `validate_service_name("x; rm -rf /")` among them — and
-  left no trace, while the functionally identical blacklist denial in the same
-  pipeline was recorded. **This adds no audit volume to normal operation**: the
-  event fires only on a call that was refused. The event's `command` is empty
-  at step 4, where no command has been built yet and a synthetic one would be
-  a fabrication; the offending input is in `reason`, which every validator
-  already names it in.
+  that they check their own inputs. Until now the 90 handlers that implement it
+  refused injection attempts — `validate_service_name("x; rm -rf /")` among
+  them — and left no trace, while the blacklist denial in the same pipeline was
+  recorded. **This adds no audit volume to normal operation**: the event fires
+  only on a call that was refused. The event's `command` is empty at step 4,
+  where no command has been built yet and a synthetic one would be a
+  fabrication; the offending input is in `reason`, which most of these
+  validators interpolate it into.
+
+  **What a `command_denied` event from step 4 does and does not tell you.** It
+  means the tool refused the input, not that an attack was refused, so read
+  `reason` before alerting on it. Among the validators reachable from those 90
+  `validate` bodies, some are genuine injection guards (`validate_service_name`,
+  `validate_identifier`) and others are typo-class checks the repo happens to
+  spell `CommandDenied` — `validate_port` ("Invalid port number: '99999'"),
+  `validate_duration`, `validate_dimensions`, `validate_count`,
+  `validate_bench_type`, `validate_provider`, `validate_tag_action`. Two do not
+  return `CommandDenied` at all: `validate_vm_name` and `validate_snapshot_name`
+  (`domain::use_cases::hyperv`, reached from the five `ssh_hyperv_*` handlers)
+  return `McpInvalidRequest`, whose message is carried through verbatim. **If
+  you alert on `command_denied`, this widens what reaches that alert**; filter
+  on `tool_name` and `reason`, not on the event type alone.
 
   The reserved tag is a `const NETWORK_EQUIPMENT_TAG` in
   `src/domain/use_cases/network_equipment.rs`, on the existing `HostConfig.tags`
