@@ -82,6 +82,32 @@ const SCHEMA: &str = r#"{
 /// refusal (an unsplit body never matches `[23][0-9][0-9]`).
 const STATUS_MARKER: &str = "HTTP_STATUS:";
 
+/// Sentinel standing in for the job id in the two endpoints that need it,
+/// swapped for a shell expansion after `build_api_call_checked` has escaped
+/// the URL.
+///
+/// It exists because the obvious spelling does not work. The endpoint used to
+/// read `/api/v2/jobs/'$JOB_ID'/`, written that way to close and reopen the
+/// single quotes the builder wraps the URL in — but the builder escapes the
+/// URL it is given, turning each `'` into `'\''`, so the shell saw a literal
+/// quote and a literal `$JOB_ID` and curl requested
+/// `/api/v2/jobs/'$JOB_ID'/`. Substituting after the escaping is what lets the
+/// variable survive. `the_poll_and_summary_urls_carry_the_real_job_id` runs
+/// the script and reads back the URLs curl was actually handed.
+const JOB_ID_PLACEHOLDER: &str = "__BRIDGE_JOB_ID__";
+
+/// The shell text the placeholder becomes: the variable in a double-quoted
+/// span, spliced between the single-quoted halves of the escaped URL.
+///
+/// Double quotes rather than a bare `$JOB_ID` so a value carrying whitespace
+/// or a `*` cannot split the argument or be matched against the working
+/// directory. They are not what stops a `$(...)` in an AWX response from
+/// running — nothing has to: the shell does not re-scan the result of a
+/// parameter expansion for command substitution, so such a value would reach
+/// curl as literal text. Measured, not assumed:
+/// `V='$(touch x)'; URL="$V"` creates no file.
+const JOB_ID_EXPANSION: &str = "'\"$JOB_ID\"'";
+
 /// Build the launch → poll → summarise script this tool relays over SSH.
 ///
 /// Split out of `execute` because the interesting part of this tool is shell,
@@ -127,6 +153,18 @@ const STATUS_MARKER: &str = "HTTP_STATUS:";
 /// `AwxCommandBuilder::parse_checked_response` documents. Under `set -e` the
 /// assignment alone would abort the script there, before the check could name
 /// which of the three calls died, and with nothing at all on stdout.
+///
+/// `case "$JOB_ID" in ''|*[!0-9]*)` rejects anything but a run of digits.
+/// `$JOB_ID` comes from AWX's own launch response, via
+/// `print(json.load(...)['id'])`, which prints whatever type AWX sent, and it
+/// is then interpolated **unquoted** into the `"job_id":` field of every
+/// document this script emits. A non-numeric id would make each of those
+/// documents invalid JSON, which the handler hands on as the tool's result;
+/// it would also travel into the poll and summary URLs. It is not a shell
+/// injection — the shell does not re-scan an expansion for command
+/// substitution, see `JOB_ID_EXPANSION` — but it is a correctness guard on
+/// the output, and it is free. An empty id, the only case the `[ -z ]` test
+/// it replaces could catch, matches the same pattern.
 fn build_follow_script(
     awx: &crate::config::AwxConfig,
     template_id: u64,
@@ -144,26 +182,31 @@ fn build_follow_script(
         &[],
         awx.api_timeout,
     );
+    // The substitution happens AFTER the builder has escaped the URL — see
+    // `JOB_ID_PLACEHOLDER` for why writing the expansion into the endpoint
+    // cannot work.
     let status_cmd = AwxCommandBuilder::build_api_call_checked(
         &awx.url,
         &awx.token,
-        "/api/v2/jobs/'$JOB_ID'/",
+        &format!("/api/v2/jobs/{JOB_ID_PLACEHOLDER}/"),
         HttpMethod::Get,
         None,
         awx.verify_ssl,
         &[],
         awx.api_timeout,
-    );
+    )
+    .replace(JOB_ID_PLACEHOLDER, JOB_ID_EXPANSION);
     let summary_cmd = AwxCommandBuilder::build_api_call_checked(
         &awx.url,
         &awx.token,
-        "/api/v2/jobs/'$JOB_ID'/job_host_summaries/",
+        &format!("/api/v2/jobs/{JOB_ID_PLACEHOLDER}/job_host_summaries/"),
         HttpMethod::Get,
         None,
         awx.verify_ssl,
         &[],
         awx.api_timeout,
-    );
+    )
+    .replace(JOB_ID_PLACEHOLDER, JOB_ID_EXPANSION);
 
     format!(
         r#"set -e
@@ -176,7 +219,7 @@ case "$LAUNCH_CODE" in
   *) echo '{{"error":"AWX job launch request failed","request":"POST /api/v2/job_templates/{template_id}/launch/","http_status":"'"$LAUNCH_CODE"'"}}'; exit 1 ;;
 esac
 JOB_ID=$(echo "$LAUNCH_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "$LAUNCH_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
-if [ -z "$JOB_ID" ]; then echo '{{"error":"Failed to launch job","response":'"$LAUNCH_BODY"'}}'; exit 1; fi
+case "$JOB_ID" in ''|*[!0-9]*) echo '{{"error":"Failed to launch job","response":'"$LAUNCH_BODY"'}}'; exit 1 ;; esac
 echo '{{"launched":true,"job_id":'$JOB_ID'}}' >&2
 ELAPSED=0
 while [ $ELAPSED -lt {max_wait} ]; do
@@ -420,6 +463,9 @@ mod tests {
     ///
     /// `000` also exits non-zero, because that is what curl does on a
     /// transport failure while still writing its `-w` line.
+    /// Every URL it is handed is appended to `$STUB_URL_LOG`, so a test can
+    /// assert on the request the script really made and not only on the text
+    /// it built.
     #[cfg(unix)]
     const CURL_STUB: &str = r#"#!/bin/sh
 url=
@@ -428,9 +474,10 @@ for a in "$@"; do
     http://*|https://*) url=$a ;;
   esac
 done
+printf '%s\n' "$url" >> "$STUB_URL_LOG"
 case "$url" in
   */launch/)
-    body='{"id":4242}'
+    body="{\"id\":$STUB_LAUNCH_ID}"
     code=$STUB_LAUNCH_CODE
     ;;
   */job_host_summaries/)
@@ -458,6 +505,8 @@ esac
     struct ScriptRun {
         code: i32,
         stdout: String,
+        /// The URLs the stub curl was handed, in order.
+        urls: Vec<String>,
     }
 
     /// Run the generated script under `bash` with the stubs on `PATH`.
@@ -466,6 +515,20 @@ esac
     /// through the environment, so one harness drives every arm.
     #[cfg(unix)]
     fn run_follow_script(
+        launch_code: &str,
+        poll_code: &str,
+        summary_code: &str,
+        job_status: &str,
+    ) -> ScriptRun {
+        run_follow_script_with_launch_id("4242", launch_code, poll_code, summary_code, job_status)
+    }
+
+    /// As [`run_follow_script`], but the stub's launch response carries
+    /// `launch_id` verbatim as the value of `"id"` — so a test can hand the
+    /// script something that is not a number.
+    #[cfg(unix)]
+    fn run_follow_script_with_launch_id(
+        launch_id: &str,
         launch_code: &str,
         poll_code: &str,
         summary_code: &str,
@@ -480,6 +543,7 @@ esac
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                 .expect("make the stub executable");
         }
+        let url_log = dir.path().join("urls");
 
         let script = build_follow_script(&test_awx_config(), 7, "{}", 2, 10);
         let output = std::process::Command::new("bash")
@@ -493,6 +557,8 @@ esac
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env("STUB_URL_LOG", &url_log)
+            .env("STUB_LAUNCH_ID", launch_id)
             .env("STUB_LAUNCH_CODE", launch_code)
             .env("STUB_POLL_CODE", poll_code)
             .env("STUB_SUMMARY_CODE", summary_code)
@@ -506,6 +572,11 @@ esac
                 .code()
                 .expect("the script must exit, not die on a signal"),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            urls: std::fs::read_to_string(&url_log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect(),
         }
     }
 
@@ -632,6 +703,48 @@ esac
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_poll_and_summary_urls_carry_the_real_job_id() {
+        // The endpoint used to be written `/api/v2/jobs/'$JOB_ID'/`, relying on
+        // the quotes closing and reopening the builder's own. They do not: the
+        // builder escapes the URL it is handed, so `'` became `'\''` and curl
+        // was asked for a path with a literal `'$JOB_ID'` in it. Every poll
+        // 404ed, the status read `unknown`, and the tool ran to `max_wait` on
+        // every call.
+        let run = run_follow_script("201", "200", "200", "successful");
+        assert_eq!(run.code, 0, "stdout: {:?}", run.stdout);
+        assert_eq!(
+            run.urls,
+            vec![
+                "https://awx.test/api/v2/job_templates/7/launch/".to_string(),
+                "https://awx.test/api/v2/jobs/4242/".to_string(),
+                "https://awx.test/api/v2/jobs/4242/job_host_summaries/".to_string(),
+            ],
+            "the job id must reach the URL curl is handed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_response_whose_id_is_not_a_number_is_refused() {
+        // `$JOB_ID` is interpolated unquoted into the `"job_id":` field of
+        // every document this script emits, so a non-numeric id makes the
+        // tool's own result invalid JSON — and travels into the two URLs. The
+        // `[ -z "$JOB_ID" ]` test this replaced let anything non-empty
+        // through: with it, the run below reaches the poll and returns 0.
+        let run =
+            run_follow_script_with_launch_id("\"not-a-number\"", "201", "200", "200", "successful");
+        assert_eq!(run.code, 1, "stdout: {:?}", run.stdout);
+        assert_eq!(emitted_json(&run)["error"], "Failed to launch job");
+        assert_eq!(
+            run.urls.len(),
+            1,
+            "the run must stop at the launch call: {:?}",
+            run.urls
+        );
+    }
+
     #[test]
     fn the_script_splits_the_marker_the_builder_actually_writes() {
         let script = build_follow_script(&test_awx_config(), 7, "{}", 5, 600);
@@ -693,6 +806,18 @@ esac
         assert!(
             script.contains("\"summary\":'$SUMMARY_BODY'"),
             "the emitted document must carry the split body: {script}"
+        );
+
+        // The job-id sentinel is a build-time device; none of it may survive
+        // into the text sent to the host.
+        assert!(
+            !script.contains(JOB_ID_PLACEHOLDER),
+            "the job-id sentinel leaked into the script: {script}"
+        );
+        assert_eq!(
+            script.matches(JOB_ID_EXPANSION).count(),
+            2,
+            "the poll and summary URLs must both expand the job id: {script}"
         );
     }
 

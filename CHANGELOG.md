@@ -332,6 +332,28 @@ nothing in the text below would otherwise tell you which is which.
   quote after `Bearer` and stops at the backslash) and would have written the
   AWX token to `audit.log` and the history in clear. A test pins the redaction.
 
+  **And the two URLs it polled were never the right URLs.** The status and
+  host-summaries endpoints were written `/api/v2/jobs/'$JOB_ID'/`, the quotes
+  meant to close and reopen the single-quoted span the builder wraps a URL in.
+  They do not: `build_api_call_checked` escapes the URL it is handed, so each
+  `'` became `'\''` and curl was asked for a path holding a literal
+  `'$JOB_ID'`. Measured by logging what a stub curl received:
+  `https://awx.test/api/v2/jobs/'$JOB_ID'/`. Every poll therefore 404ed, the
+  status read back as `unknown`, and the tool ran to `max_wait` and reported a
+  timeout on **every** call — so none of the terminal-status paths above was
+  reachable in production before this, and the launched job ran on
+  unobserved. The id is now substituted *after* the escaping, and it is
+  refused unless it is a run of digits. That second check is a correctness
+  guard, not a security one: the id comes from AWX's own response through
+  `print(json.load(...)['id'])`, which prints whatever type AWX sent, and it
+  is interpolated unquoted into the `"job_id":` field of every document the
+  tool returns — a non-numeric id makes that document invalid JSON. It is
+  **not** a shell injection, and an earlier draft of this paragraph said it
+  was: the shell does not re-scan the result of a parameter expansion for
+  command substitution, so a `$(...)` in an AWX response reaches curl as
+  literal text. The check also replaces the `[ -z "$JOB_ID" ]` test, which let
+  anything non-empty through.
+
   Established by unit test, running the generated script under `bash` against
   stub `curl` and `sleep` binaries — not on a host; AWX is configured on no
   machine this was written on. See the note under `[Unreleased]`.
