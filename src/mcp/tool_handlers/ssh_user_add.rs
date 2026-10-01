@@ -212,7 +212,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "username": "newuser"})).unwrap();
         let host = test_host_config();
         let cmd = UserAddTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("newuser"));
     }
 

@@ -350,7 +350,7 @@ mod tests {
         let result = parse_azure_response(&body, 50);
         // Falls back to body.to_string()
         assert_eq!(result.exit_code, 0);
-        assert!(!result.stdout.is_empty());
+        assert_ne!(result.stdout, "");
     }
 
     #[test]
@@ -364,8 +364,8 @@ mod tests {
     fn test_parse_azure_response_empty_array() {
         let body = serde_json::json!({"value": []});
         let result = parse_azure_response(&body, 50);
-        assert!(result.stdout.is_empty());
-        assert!(result.stderr.is_empty());
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.stderr, "");
         assert_eq!(result.exit_code, 0);
     }
 
@@ -395,8 +395,8 @@ mod tests {
         });
         let result = parse_azure_response(&body, 100);
         // code is "", doesn't contain StdOut or StdErr
-        assert!(result.stdout.is_empty());
-        assert!(result.stderr.is_empty());
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.stderr, "");
     }
 
     #[test]
@@ -408,7 +408,7 @@ mod tests {
         });
         let result = parse_azure_response(&body, 100);
         // message defaults to ""
-        assert!(result.stdout.is_empty());
+        assert_eq!(result.stdout, "");
     }
 
     #[test]

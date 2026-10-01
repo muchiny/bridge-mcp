@@ -232,7 +232,7 @@ mod tests {
         let args: SshIoTraceArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = IoTraceTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "device": "sda", "duration": 10})).unwrap();
         let host = test_host_config();
         let cmd = IoTraceTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]

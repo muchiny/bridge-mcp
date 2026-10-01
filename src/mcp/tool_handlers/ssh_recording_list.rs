@@ -96,7 +96,7 @@ mod tests {
     fn test_schema() {
         let handler = SshRecordingListHandler;
         assert_eq!(handler.name(), "ssh_recording_list");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_recording_list");
     }

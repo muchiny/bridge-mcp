@@ -70,7 +70,7 @@ mod tests {
     fn test_scheme() {
         let handler = HealthResourceHandler;
         assert_eq!(handler.scheme(), "health");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
     }
 
     #[tokio::test]

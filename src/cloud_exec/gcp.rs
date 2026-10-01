@@ -217,7 +217,7 @@ mod tests {
     fn test_instance_name_format() {
         let instance = "my-web-server-01";
         assert!(!instance.contains('/'));
-        assert!(!instance.is_empty());
+        assert_ne!(instance, "");
     }
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn test_project_format() {
         let project = "my-gcp-project-123";
-        assert!(!project.is_empty());
+        assert_ne!(project, "");
     }
 
     #[test]

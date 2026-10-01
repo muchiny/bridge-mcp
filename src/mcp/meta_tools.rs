@@ -505,7 +505,7 @@ mod tests {
         .expect("meta tool");
         let payload = result.structured_content.expect("structured");
         let results = payload["results"].as_array().expect("array");
-        assert!(!results.is_empty());
+        assert_ne!(results.first(), None);
         for entry in results {
             let name = entry["name"].as_str().unwrap();
             let full_desc = registry.get(name).expect("registry has tool").description();

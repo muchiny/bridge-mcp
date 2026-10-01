@@ -281,7 +281,7 @@ mod tests {
     fn test_schema() {
         let handler = SshDbQueryHandler::new();
         assert_eq!(handler.name(), "ssh_db_query");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_db_query");

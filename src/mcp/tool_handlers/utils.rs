@@ -1192,13 +1192,13 @@ node-1   250m";
     #[test]
     fn test_shell_escape_for_cmd() {
         let escaped = shell_escape_for("hello world", ShellType::Cmd);
-        assert!(!escaped.is_empty());
+        assert_ne!(escaped, "");
     }
 
     #[test]
     fn test_shell_escape_for_powershell() {
         let escaped = shell_escape_for("it's a test", ShellType::PowerShell);
-        assert!(!escaped.is_empty());
+        assert_ne!(escaped, "");
     }
 
     #[test]

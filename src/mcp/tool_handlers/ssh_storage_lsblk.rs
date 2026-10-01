@@ -132,7 +132,7 @@ mod tests {
     fn test_schema() {
         let handler = SshStorageLsblkHandler::new();
         assert_eq!(handler.name(), "ssh_storage_lsblk");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_storage_lsblk");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -238,7 +238,7 @@ mod tests {
         let args: SshStorageLsblkArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = StorageLsblkTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("lsblk"));
     }
 
@@ -248,7 +248,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "json": true})).unwrap();
         let host = test_host_config();
         let cmd = StorageLsblkTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]

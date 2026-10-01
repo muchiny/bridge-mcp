@@ -344,7 +344,7 @@ mod tests {
     fn test_schema() {
         let handler = SshSessionExecHandler;
         assert_eq!(handler.name(), "ssh_session_exec");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_session_exec");

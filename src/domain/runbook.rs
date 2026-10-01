@@ -299,7 +299,7 @@ mod tests {
         let runbooks = builtin_runbooks();
         assert_eq!(runbooks.len(), 5, "Should have 5 built-in runbooks");
         for rb in &runbooks {
-            assert!(!rb.name.is_empty());
+            assert_ne!(rb.name, "");
             assert!(!rb.steps.is_empty());
         }
     }

@@ -288,7 +288,7 @@ mod tests {
     fn test_scheme() {
         let handler = MetricsResourceHandler;
         assert_eq!(handler.scheme(), "metrics");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
     }
 
     #[tokio::test]

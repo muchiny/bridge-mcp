@@ -433,7 +433,7 @@ mod tests {
         let mut replies = Vec::new();
         process_iac(b"hello world", &mut data, &mut replies);
         assert_eq!(data, b"hello world");
-        assert!(replies.is_empty());
+        assert_eq!(replies, [] as [u8; 0]);
     }
 
     #[test]
@@ -442,7 +442,7 @@ mod tests {
         let mut replies = Vec::new();
         process_iac(&[b'a', IAC, IAC, b'b'], &mut data, &mut replies);
         assert_eq!(data, vec![b'a', 0xFF, b'b']);
-        assert!(replies.is_empty());
+        assert_eq!(replies, [] as [u8; 0]);
     }
 
     #[test]
@@ -461,7 +461,7 @@ mod tests {
         let mut replies = Vec::new();
         // IAC DO SGA (0x03)
         process_iac(&[IAC, DO, 0x03], &mut data, &mut replies);
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
         assert_eq!(replies, vec![IAC, WONT, 0x03]);
     }
 
@@ -470,8 +470,8 @@ mod tests {
         let mut data = Vec::new();
         let mut replies = Vec::new();
         process_iac(&[IAC, DONT, 0x01, IAC, WONT, 0x02], &mut data, &mut replies);
-        assert!(data.is_empty());
-        assert!(replies.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
+        assert_eq!(replies, [] as [u8; 0]);
     }
 
     #[test]
@@ -487,7 +487,7 @@ mod tests {
             &mut replies,
         );
         assert_eq!(data, b"ok");
-        assert!(replies.is_empty());
+        assert_eq!(replies, [] as [u8; 0]);
     }
 
     #[test]

@@ -275,7 +275,7 @@ mod tests {
         };
         let output = pipeline_result_to_command_output(&result, 42);
         assert_eq!(output.stdout, "hello");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, "");
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.duration_ms, 42);
     }

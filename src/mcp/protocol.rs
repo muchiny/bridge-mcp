@@ -2161,7 +2161,7 @@ mod tests {
 
     #[test]
     fn test_server_name_not_empty() {
-        assert!(!SERVER_NAME.is_empty());
+        assert_ne!(SERVER_NAME, "");
     }
 
     #[test]

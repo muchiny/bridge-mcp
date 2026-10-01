@@ -1695,9 +1695,9 @@ mod tests {
             last_used_secs_ago: 0,
         };
 
-        assert!(info.id.is_empty());
-        assert!(info.host.is_empty());
-        assert!(info.cwd.is_empty());
+        assert_eq!(info.id, "");
+        assert_eq!(info.host, "");
+        assert_eq!(info.cwd, "");
     }
 
     // ============== SessionExecResult Tests ==============
@@ -1726,7 +1726,7 @@ mod tests {
             cwd: "/".to_string(),
         };
 
-        assert!(result.output.is_empty());
+        assert_eq!(result.output, "");
     }
 
     #[test]

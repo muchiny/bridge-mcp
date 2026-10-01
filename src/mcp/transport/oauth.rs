@@ -678,8 +678,8 @@ mod tests {
     fn test_oauth_config_default() {
         let config = OAuthConfig::default();
         assert!(!config.enabled);
-        assert!(config.issuer.is_empty());
-        assert!(config.required_scopes.is_empty());
+        assert_eq!(config.issuer, "");
+        assert_eq!(config.required_scopes, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -803,7 +803,7 @@ mod jwt_verification_tests {
         assert_eq!(metadata.resource, "https://mcp.example.com/mcp");
         assert_eq!(metadata.authorization_servers, ["https://auth.example.com"]);
         assert_eq!(metadata.bearer_methods_supported, ["header"]);
-        assert!(!metadata.scopes_supported.is_empty());
+        assert_ne!(metadata.scopes_supported, [] as [std::string::String; 0]);
     }
 
     /// With no audience configured there is still a `resource`, because the
@@ -815,7 +815,10 @@ mod jwt_verification_tests {
             "http://127.0.0.1:8080",
         );
         assert_eq!(metadata.resource, "http://127.0.0.1:8080");
-        assert!(metadata.authorization_servers.is_empty());
+        assert_eq!(
+            metadata.authorization_servers,
+            [] as [std::string::String; 0]
+        );
     }
 
     fn make_validator() -> OAuthValidator {

@@ -84,7 +84,7 @@ fn replay_basic_commands_error_handling() {
     // cat nonexistent file returns error
     let cat_err = responses["cat /nonexistent"];
     assert_eq!(cat_err.exit_code, 1);
-    assert!(cat_err.stdout.is_empty());
+    assert_eq!(cat_err.stdout, "");
     assert!(cat_err.stderr.contains("No such file or directory"));
 }
 

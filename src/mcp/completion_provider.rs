@@ -99,7 +99,7 @@ mod tests {
         let result = provider
             .complete_prompt_argument("system-health", "host", "", &ctx)
             .unwrap();
-        assert!(!result.is_empty());
+        assert_ne!(result, [] as [std::string::String; 0]);
         assert!(result.contains(&"server1".to_string()));
     }
 
@@ -111,7 +111,7 @@ mod tests {
         let result = provider
             .complete_prompt_argument("system-health", "host", "zzz-nonexistent", &ctx)
             .unwrap();
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -151,7 +151,7 @@ mod tests {
         let result = provider
             .complete_prompt_argument("system-health", "nonexistent", "", &ctx)
             .unwrap();
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -161,7 +161,7 @@ mod tests {
         let result = provider
             .complete_resource_argument("metrics://", "host", "", &ctx)
             .unwrap();
-        assert!(!result.is_empty());
+        assert_ne!(result, [] as [std::string::String; 0]);
         assert!(result.contains(&"server1".to_string()));
     }
 
@@ -172,6 +172,6 @@ mod tests {
         let result = provider
             .complete_resource_argument("metrics://", "path", "", &ctx)
             .unwrap();
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [std::string::String; 0]);
     }
 }

@@ -187,8 +187,11 @@ mod tests {
 
     #[test]
     fn declared_keys_is_empty_for_an_unreadable_schema() {
-        assert!(declared_keys(&json!({})).is_empty());
-        assert!(declared_keys(&json!("not an object")).is_empty());
+        assert_eq!(declared_keys(&json!({})), [] as [std::string::String; 0]);
+        assert_eq!(
+            declared_keys(&json!("not an object")),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

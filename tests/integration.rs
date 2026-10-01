@@ -389,10 +389,10 @@ fn test_default_security_config() {
     assert_eq!(config.mode, SecurityMode::Standard);
 
     // Default whitelist is empty
-    assert!(config.whitelist.is_empty());
+    assert_eq!(config.whitelist, [] as [std::string::String; 0]);
 
     // Default blacklist has dangerous commands
-    assert!(!config.blacklist.is_empty());
+    assert_ne!(config.blacklist, [] as [std::string::String; 0]);
     let blacklist_str = config.blacklist.join(" ");
     assert!(blacklist_str.contains("rm"));
     assert!(blacklist_str.contains("mkfs"));
@@ -402,7 +402,10 @@ fn test_default_security_config() {
     assert!(config.sanitize.enabled);
     // Builtin patterns are handled internally, custom patterns start empty
     assert!(config.sanitize.custom_patterns.is_empty());
-    assert!(config.sanitize.disable_builtin.is_empty());
+    assert_eq!(
+        config.sanitize.disable_builtin,
+        [] as [std::string::String; 0]
+    );
 }
 
 // =============================================================================
@@ -474,7 +477,7 @@ fn test_unix_agent_env_var() {
         Ok(path) => {
             println!("SSH_AUTH_SOCK is set to: {path}");
             // If set, it should be a path
-            assert!(!path.is_empty());
+            assert_ne!(path, "");
         }
         Err(_) => {
             println!("SSH_AUTH_SOCK is not set (no agent running)");

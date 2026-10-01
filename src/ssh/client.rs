@@ -1224,8 +1224,8 @@ mod tests {
             duration_ms: 0,
         };
 
-        assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout, "");
+        assert_eq!(output.stderr, "");
     }
 
     #[test]
@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn test_client_handler_empty_hostname() {
         let handler = ClientHandler::new(String::new(), 22, HostKeyVerification::Strict);
-        assert!(handler.hostname.is_empty());
+        assert_eq!(handler.hostname, "");
     }
 
     #[test]
@@ -1622,7 +1622,7 @@ mod tests {
         let error = BridgeError::SshTimeout { seconds: u64::MAX };
         let msg = error.to_string();
         // Should not panic
-        assert!(!msg.is_empty());
+        assert_ne!(msg, "");
     }
 
     #[test]

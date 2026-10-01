@@ -194,7 +194,7 @@ mod tests {
         let args: SshApparmorStatusArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = ApparmorStatusTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("apparmor"));
     }
 

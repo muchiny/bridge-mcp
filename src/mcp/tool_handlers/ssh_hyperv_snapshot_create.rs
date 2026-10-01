@@ -148,7 +148,7 @@ mod tests {
     fn test_schema() {
         let handler = SshHypervSnapshotCreateHandler::new();
         assert_eq!(handler.name(), "ssh_hyperv_snapshot_create");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         let required = schema_json["required"].as_array().unwrap();
@@ -265,7 +265,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = HypervSnapshotCreateTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {

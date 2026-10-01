@@ -268,7 +268,7 @@ mod tests {
         let args: SshSecurityAuditArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = SecurityAuditTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {

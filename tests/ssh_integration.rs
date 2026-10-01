@@ -173,7 +173,7 @@ async fn test_real_ssh_exec_simple() {
     let output = output.unwrap();
     assert_eq!(output.exit_code, 0);
     assert!(output.stdout.contains("hello world"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, "");
 
     let _ = client.close().await;
 }
@@ -309,7 +309,7 @@ async fn test_real_ssh_exec_environment() {
         .expect("Exec failed");
 
     assert_eq!(output.exit_code, 0);
-    assert!(!output.stdout.trim().is_empty());
+    assert_ne!(output.stdout.trim(), "");
 
     let _ = client.close().await;
 }
@@ -466,7 +466,7 @@ async fn test_real_ssh_exec_binary_output() {
         .expect("Exec failed");
 
     assert_eq!(output.exit_code, 0);
-    assert!(!output.stdout.is_empty());
+    assert_ne!(output.stdout, "");
 
     let _ = client.close().await;
 }

@@ -309,7 +309,7 @@ mod tests {
         // Unless OTEL_SERVICE_NAME is overridden, the default should apply.
         let config = TelemetryConfig::from_env(false);
         // The name is either the env var or the default — both are non-empty.
-        assert!(!config.service_name.is_empty());
+        assert_ne!(config.service_name, "");
     }
 
     #[test]

@@ -131,7 +131,7 @@ mod tests {
     fn test_schema() {
         let handler = SshCertCheckHandler::new();
         assert_eq!(handler.name(), "ssh_cert_check");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_cert_check");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -246,7 +246,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "target": "example.com"})).unwrap();
         let host = test_host_config();
         let cmd = CertCheckTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("example.com"));
     }
 
@@ -261,7 +261,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = CertCheckTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("8443"));
         assert!(cmd.contains("sni.example.com"));
     }

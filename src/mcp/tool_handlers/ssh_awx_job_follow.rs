@@ -281,7 +281,7 @@ mod tests {
     fn test_schema() {
         let handler = SshAwxJobFollowHandler::new();
         assert_eq!(handler.name(), "ssh_awx_job_follow");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_awx_job_follow");
         let schema_json: Value = serde_json::from_str(schema.input_schema).unwrap();

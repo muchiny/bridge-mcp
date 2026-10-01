@@ -97,7 +97,7 @@ mod tests {
     fn test_schema() {
         let handler = SshRunbookListHandler;
         assert_eq!(handler.name(), "ssh_runbook_list");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
     }
 
     #[tokio::test]

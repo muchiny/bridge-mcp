@@ -137,7 +137,7 @@ mod tests {
     fn test_schema() {
         let handler = SshHostTagsHandler::new();
         assert_eq!(handler.name(), "ssh_host_tags");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_host_tags");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -262,7 +262,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "action": "list"})).unwrap();
         let host = test_host_config();
         let cmd = HostTagsTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {

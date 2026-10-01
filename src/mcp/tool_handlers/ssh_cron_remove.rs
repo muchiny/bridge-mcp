@@ -130,7 +130,7 @@ mod tests {
     fn test_schema() {
         let handler = SshCronRemoveHandler::new();
         assert_eq!(handler.name(), "ssh_cron_remove");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_cron_remove");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -248,7 +248,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = CronRemoveTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("backup.sh") || cmd.contains("crontab"));
     }
 
