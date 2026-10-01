@@ -1,14 +1,19 @@
 //! Standard Tool Handler
 //!
-//! Generic handler that implements the common 16-step execution pipeline
-//! shared by most tool handlers; the rest are direct [`ToolHandler`] impls
-//! that run no part of this pipeline. Each standard tool only needs to define
-//! its args struct, schema, and `build_command` function.
+//! Generic handler that implements the common execution pipeline shared by most
+//! tool handlers; the rest are direct [`ToolHandler`] impls that write their own
+//! `handle`. Each standard tool only needs to define its args struct, schema,
+//! and `build_command` function.
 //!
-//! No count is written here on purpose — two stale ones lived on this line.
-//! The live split is the `shape` field (`standard` / `direct`) of
+//! No count is written here on purpose — three stale ones lived on these lines,
+//! including a step count that said 16 while the `// Step N` comments below ran
+//! 0 to 19. The live split is the `shape` field (`standard` / `direct`) of
 //! `scripts/tool_metadata.json`, which `scripts/validate_baseline.py`
-//! regenerates from `registry.rs` on every run.
+//! regenerates on every run.
+//!
+//! "Direct" means *not dispatched through this pipeline*, not *untouched by its
+//! code*: 43 of those handlers call [`apply_reduction_recorded`] for the
+//! reduction step and the pipeline-stats hook that comes with it.
 
 use std::marker::PhantomData;
 
@@ -292,8 +297,10 @@ pub fn validate_free_form_command(
 
 /// Generic handler that wraps a [`StandardTool`] and implements [`ToolHandler`].
 ///
-/// The 16-step execution pipeline is implemented once here and reused
-/// for every `StandardTool` implementation via monomorphization.
+/// The execution pipeline is implemented once here and reused for every
+/// `StandardTool` implementation via monomorphization. Its stages are the
+/// `// Step N` comments in [`Self::execute`]; no count is repeated here,
+/// because the one that used to be said 16 and the steps ran 0 to 19.
 pub struct StandardToolHandler<T: StandardTool>(PhantomData<T>);
 
 impl<T: StandardTool> Default for StandardToolHandler<T> {

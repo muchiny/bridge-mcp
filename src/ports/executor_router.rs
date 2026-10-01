@@ -5,7 +5,7 @@
 //! protocol adapters (`WinRM`, Telnet, K8s, Serial, SSM, Azure, GCP) are feature-gated.
 //!
 //! The router exposes the same public API as `ConnectionPool`, enabling a
-//! clean cut-over in `ToolContext` without changing any of the 337 tool handlers.
+//! clean cut-over in `ToolContext` without changing any of the tool handlers.
 
 use crate::config::{HostConfig, LimitsConfig, Protocol};
 use crate::error::Result;

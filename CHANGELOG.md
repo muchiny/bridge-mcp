@@ -646,7 +646,7 @@ nothing in the text below would otherwise tell you which is which.
 ### Added
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
-  the other 475 did not, so on a host where the interesting state is root-owned
+  the other 473 did not, so on a host where the interesting state is root-owned
   every specialised tool failed and the only way through was `ssh_exec` — which
   the server's own instructions tell clients to avoid. On a K3s host that was
   the whole `cri` group, `ssh_firewall_status`, and every systemd write.
