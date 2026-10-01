@@ -512,7 +512,7 @@ async fn test_real_sftp_upload_with_checksum() {
     );
 
     let checksum = transfer_result.checksum.unwrap();
-    assert!(!checksum.is_empty());
+    assert_ne!(checksum, "");
     assert_eq!(checksum.len(), 64); // SHA256 hex = 64 chars
 
     // Clean up

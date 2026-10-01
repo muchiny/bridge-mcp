@@ -97,7 +97,7 @@ async fn exec_returns_configured_stdout_and_exit_code() {
     let out = client.exec("echo hello", &limits).await.expect("exec");
 
     assert_eq!(out.stdout, "hello\n");
-    assert!(out.stderr.is_empty());
+    assert_eq!(out.stderr, "");
     assert_eq!(out.exit_code, 0);
     let _ = client.close().await;
 }
@@ -123,7 +123,7 @@ async fn exec_propagates_stderr_and_nonzero_exit_code() {
 
     assert_eq!(out.exit_code, 42);
     assert!(out.stderr.contains("boom"), "stderr: {}", out.stderr);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, "");
     let _ = client.close().await;
 }
 
