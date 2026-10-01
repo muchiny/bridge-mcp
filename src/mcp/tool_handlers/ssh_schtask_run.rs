@@ -207,7 +207,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "name": "MyTask"})).unwrap();
         let host = test_host_config();
         let cmd = SchtaskRunTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {

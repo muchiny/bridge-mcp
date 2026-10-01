@@ -195,7 +195,7 @@ mod tests {
         let args: SshSelinuxStatusArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = SelinuxStatusTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("sestatus") || cmd.contains("selinux") || cmd.contains("getenforce"));
     }
 

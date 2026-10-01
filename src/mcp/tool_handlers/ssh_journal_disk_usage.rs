@@ -197,7 +197,7 @@ mod tests {
         let args: SshJournalDiskUsageArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = JournalDiskUsageTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("journalctl") || cmd.contains("disk-usage"));
     }
 }

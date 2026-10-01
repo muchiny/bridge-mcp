@@ -154,7 +154,7 @@ mod tests {
     fn test_schema() {
         let handler = SshTemplateApplyHandler::new();
         assert_eq!(handler.name(), "ssh_template_apply");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         assert!(handler.description().contains("destructive"));
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_template_apply");

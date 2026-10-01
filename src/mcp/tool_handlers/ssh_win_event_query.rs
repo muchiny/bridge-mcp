@@ -274,7 +274,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "log": "Application"})).unwrap();
         let host = test_host_config();
         let cmd = WinEventQueryTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]

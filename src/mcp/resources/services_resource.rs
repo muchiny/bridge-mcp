@@ -223,7 +223,7 @@ mod tests {
     fn test_scheme() {
         let handler = ServicesResourceHandler;
         assert_eq!(handler.scheme(), "services");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
     }
 
     #[tokio::test]

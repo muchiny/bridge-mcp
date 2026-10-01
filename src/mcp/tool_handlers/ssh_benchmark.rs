@@ -243,7 +243,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "bench_type": "cpu"})).unwrap();
         let host = test_host_config();
         let cmd = BenchmarkTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "bench_type": "io"})).unwrap();
         let host = test_host_config();
         let cmd = BenchmarkTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "bench_type": "memory"})).unwrap();
         let host = test_host_config();
         let cmd = BenchmarkTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]

@@ -152,7 +152,7 @@ mod tests {
     fn test_schema() {
         let handler = SshPtyExecHandler::new();
         assert_eq!(handler.name(), "ssh_pty_exec");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         assert!(handler.description().contains("PTY"));
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_pty_exec");

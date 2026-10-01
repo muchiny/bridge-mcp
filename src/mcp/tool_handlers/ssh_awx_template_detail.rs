@@ -181,7 +181,7 @@ mod tests {
     fn test_schema() {
         let handler = SshAwxTemplateDetailHandler;
         assert_eq!(handler.name(), "ssh_awx_template_detail");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_awx_template_detail");

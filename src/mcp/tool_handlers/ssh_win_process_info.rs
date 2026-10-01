@@ -204,7 +204,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "pid": 1234})).unwrap();
         let host = test_host_config();
         let cmd = WinProcessInfoTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {

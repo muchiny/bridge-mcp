@@ -312,7 +312,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = NetConnectionsTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("ss"));
     }
 

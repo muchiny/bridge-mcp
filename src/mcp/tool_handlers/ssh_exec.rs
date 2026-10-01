@@ -472,7 +472,7 @@ mod tests {
     fn test_schema() {
         let handler = SshExecHandler;
         assert_eq!(handler.name(), "ssh_exec");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_exec");
@@ -611,7 +611,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             BridgeError::UnknownHost { host } => {
-                assert!(host.is_empty());
+                assert_eq!(host, "");
             }
             e => panic!("Expected UnknownHost error, got: {e:?}"),
         }

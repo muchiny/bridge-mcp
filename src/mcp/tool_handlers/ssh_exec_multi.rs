@@ -800,7 +800,7 @@ mod tests {
     fn test_schema() {
         let handler = SshExecMultiHandler;
         assert_eq!(handler.name(), "ssh_exec_multi");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -921,7 +921,7 @@ mod tests {
     #[test]
     fn test_handler_description_not_empty() {
         let handler = SshExecMultiHandler;
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         assert!(handler.description().contains("parallel"));
     }
 
@@ -1224,6 +1224,6 @@ mod tests {
         });
 
         let args: SshExecMultiArgs = serde_json::from_value(json).unwrap();
-        assert!(args.hosts.is_empty());
+        assert_eq!(args.hosts, [] as [std::string::String; 0]);
     }
 }

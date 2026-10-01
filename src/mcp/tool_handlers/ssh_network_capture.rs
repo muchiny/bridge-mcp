@@ -150,7 +150,7 @@ mod tests {
     fn test_schema() {
         let handler = SshNetworkCaptureHandler::new();
         assert_eq!(handler.name(), "ssh_network_capture");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_network_capture");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -264,7 +264,7 @@ mod tests {
         let args: SshNetworkCaptureArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = NetworkCaptureTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("tcpdump"));
     }
 

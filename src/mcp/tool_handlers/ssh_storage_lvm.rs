@@ -116,7 +116,7 @@ mod tests {
     fn test_schema() {
         let handler = SshStorageLvmHandler::new();
         assert_eq!(handler.name(), "ssh_storage_lvm");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_storage_lvm");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -218,7 +218,7 @@ mod tests {
         let args: SshStorageLvmArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = StorageLvmTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]

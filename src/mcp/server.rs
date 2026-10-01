@@ -4726,7 +4726,7 @@ rbac:
         assert_ne!(result["isError"].as_bool(), Some(true));
         let structured = &result["structuredContent"];
         let results = structured["results"].as_array().unwrap();
-        assert!(!results.is_empty());
+        assert_ne!(results.first(), None);
         assert!(results.len() <= 3);
     }
 
@@ -5879,7 +5879,7 @@ rbac:
         let result = response.result.unwrap();
         assert!(result["content"].is_array());
         let content = result["content"].as_array().unwrap();
-        assert!(!content.is_empty());
+        assert_ne!(content.first(), None);
         assert_eq!(content[0]["type"], "text");
     }
 
@@ -5942,7 +5942,7 @@ rbac:
         let result = response.result.unwrap();
         let messages = result["messages"].as_array().unwrap();
 
-        assert!(!messages.is_empty());
+        assert_ne!(messages.first(), None);
         assert_eq!(messages[0]["role"], "user");
         assert!(
             messages[0]["content"]["text"]
@@ -6112,7 +6112,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let messages = result["messages"].as_array().unwrap();
-        assert!(!messages.is_empty());
+        assert_ne!(messages.first(), None);
     }
 
     #[tokio::test]
@@ -7667,7 +7667,7 @@ rbac:
         let result = response.result.unwrap();
         assert!(result["contents"].is_array());
         let contents = result["contents"].as_array().unwrap();
-        assert!(!contents.is_empty());
+        assert_ne!(contents.first(), None);
     }
 
     /// G-7 (audit 2026-08-19): asking for a scheme the server does not serve
@@ -7842,7 +7842,7 @@ rbac:
         let result = response.result.unwrap();
         let templates = result["resourceTemplates"].as_array().unwrap();
         // No hosts configured, so no templates
-        assert!(templates.is_empty());
+        assert_eq!(templates.first(), None);
     }
 
     #[test]
@@ -8300,7 +8300,10 @@ rbac:
 
     #[test]
     fn test_resource_update_tick_with_no_subscriptions_is_empty() {
-        assert!(resource_update_tick(&[], true).is_empty());
+        assert_eq!(
+            resource_update_tick(&[], true),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[tokio::test]
@@ -8323,7 +8326,10 @@ rbac:
         assert_eq!(uris, vec!["history://recent".to_string()]);
 
         // Idle bridge: the tick emits nothing at all.
-        assert!(resource_update_tick(&uris, false).is_empty());
+        assert_eq!(
+            resource_update_tick(&uris, false),
+            [] as [std::string::String; 0]
+        );
         assert!(rx.try_recv().is_err());
 
         // A recorded command bumps the revision, so the tick emits.
@@ -9014,7 +9020,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert!(tools.is_empty());
+        assert_eq!(tools.first(), None);
     }
 
     /// D-F7 (audit 2026-08-20): `"18446744073709551615"` parses cleanly to
@@ -9034,7 +9040,7 @@ rbac:
 
         assert!(response.error.is_none(), "got: {:?}", response.error);
         let result = response.result.unwrap();
-        assert!(result["tools"].as_array().unwrap().is_empty());
+        assert_eq!(result["tools"].as_array().unwrap().first(), None);
         assert!(result["nextCursor"].is_null());
     }
 
@@ -9064,7 +9070,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert!(!tools.is_empty());
+        assert_ne!(tools.first(), None);
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
             assert!(
@@ -9086,7 +9092,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert!(!tools.is_empty());
+        assert_ne!(tools.first(), None);
         for tool in tools {
             let read_only = tool["annotations"]["readOnlyHint"]
                 .as_bool()

@@ -379,7 +379,7 @@ mod tests {
     fn test_used_params_empty() {
         let mut v = serde_json::json!({"host": "prod"});
         let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
-        assert!(args.used_params().is_empty());
+        assert_eq!(args.used_params(), [] as [&str; 0]);
     }
 
     #[test]

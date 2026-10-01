@@ -129,7 +129,7 @@ mod tests {
     fn test_schema() {
         let handler = SshCertExpiryHandler::new();
         assert_eq!(handler.name(), "ssh_cert_expiry");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_cert_expiry");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -244,7 +244,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "target": "example.com:443"})).unwrap();
         let host = test_host_config();
         let cmd = CertExpiryTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("example.com"));
     }
 
@@ -259,7 +259,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = CertExpiryTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("/etc/ssl/cert.pem"));
     }
 

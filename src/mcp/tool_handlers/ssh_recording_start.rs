@@ -132,7 +132,7 @@ mod tests {
     fn test_schema() {
         let handler = SshRecordingStartHandler;
         assert_eq!(handler.name(), "ssh_recording_start");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_recording_start");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();

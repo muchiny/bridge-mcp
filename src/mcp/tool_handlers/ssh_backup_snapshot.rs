@@ -135,7 +135,7 @@ mod tests {
     fn test_schema() {
         let handler = SshBackupSnapshotHandler::new();
         assert_eq!(handler.name(), "ssh_backup_snapshot");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_backup_snapshot");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();

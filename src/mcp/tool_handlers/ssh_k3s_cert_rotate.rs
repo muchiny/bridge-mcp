@@ -145,7 +145,7 @@ mod tests {
     fn test_schema() {
         let handler = SshK3sCertRotateHandler::new();
         assert_eq!(handler.name(), "ssh_k3s_cert_rotate");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         assert_eq!(schema_json["type"], "object");

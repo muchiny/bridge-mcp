@@ -1480,9 +1480,9 @@ mod tests {
     fn test_security_config_default() {
         let config = SecurityConfig::default();
         assert_eq!(config.mode, SecurityMode::Standard);
-        assert!(config.whitelist.is_empty());
-        assert!(!config.blacklist.is_empty()); // Has default blacklist
-        assert!(config.sanitize_patterns.is_empty());
+        assert_eq!(config.whitelist, [] as [std::string::String; 0]);
+        assert_ne!(config.blacklist, [] as [std::string::String; 0]); // Has default blacklist
+        assert_eq!(config.sanitize_patterns, [] as [std::string::String; 0]);
         assert!(config.sanitize.enabled);
     }
 
@@ -1714,7 +1714,10 @@ hosts:
 
     #[test]
     fn test_collect_secret_values_empty_config() {
-        assert!(Config::default().collect_secret_values().is_empty());
+        assert_eq!(
+            Config::default().collect_secret_values(),
+            [] as [std::string::String; 0]
+        );
     }
 
     // ============== LimitsConfig Tests ==============
@@ -1776,7 +1779,7 @@ hosts:
     fn test_sanitize_config_default() {
         let config = SanitizeConfig::default();
         assert!(config.enabled);
-        assert!(config.disable_builtin.is_empty());
+        assert_eq!(config.disable_builtin, [] as [std::string::String; 0]);
         assert!(config.custom_patterns.is_empty());
     }
 
@@ -2361,7 +2364,7 @@ hosts:
             "auth": {"type": "agent"}
         }"#;
         let host: HostConfig = serde_json::from_str(json).unwrap();
-        assert!(host.tags.is_empty());
+        assert_eq!(host.tags, [] as [std::string::String; 0]);
     }
 
     #[test]

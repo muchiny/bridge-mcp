@@ -155,7 +155,7 @@ mod tests {
     fn test_schema() {
         let handler = SshSslAuditHandler::new();
         assert_eq!(handler.name(), "ssh_ssl_audit");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_ssl_audit");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -281,7 +281,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = SslAuditTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("example.com"));
         assert!(cmd.contains("443"));
     }

@@ -292,7 +292,7 @@ mod tests {
         assert!(result.is_some());
 
         let (id, token) = result.unwrap();
-        assert!(!id.is_empty());
+        assert_ne!(id, "");
         assert!(!token.is_cancelled());
     }
 
