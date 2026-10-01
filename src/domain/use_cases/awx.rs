@@ -177,13 +177,24 @@ impl AwxCommandBuilder {
     const STATUS_MARKER: &'static str = "HTTP_STATUS:";
 
     /// Like [`Self::build_api_call`] but appends a `curl -w` write-out so the
-    /// HTTP status code can be recovered from stdout and classified by
-    /// [`Self::parse_checked_response`].
+    /// HTTP status code can be recovered from stdout.
     ///
     /// Plain `build_api_call` uses `curl -s`, which exits 0 on any HTTP
     /// response, so a 4xx/5xx would otherwise reach the model as an opaque
-    /// success. Use this variant for handlers where a non-2xx must be an error
-    /// (launch, relaunch, cancel, approvals, project sync).
+    /// success. That holds for a read as much as for a write — a 403 on a job
+    /// listing is not an empty listing — so this is the form **every** AWX
+    /// handler uses, the read-only ones included and not just the mutating
+    /// five (launch, relaunch, cancel, approvals, project sync) this paragraph
+    /// used to name. `build_api_call` has no caller left in production code —
+    /// only this function, plus the test modules of `awx.rs` itself and of
+    /// `ssh_awx_workflow_approvals.rs`.
+    ///
+    /// Most handlers then hand the raw stdout to
+    /// [`Self::parse_checked_response`], which splits the status off and
+    /// classifies it. `ssh_awx_job_follow` is the one exception and checks the
+    /// status in the shell instead, because its three curl bodies are consumed
+    /// inside the script it builds and never reach the handler; the
+    /// `build_follow_script` function there carries the argument.
     #[must_use]
     #[expect(clippy::too_many_arguments)]
     pub fn build_api_call_checked(

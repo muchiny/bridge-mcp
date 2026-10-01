@@ -1,8 +1,19 @@
 //! Standard Tool Handler
 //!
-//! Generic handler that implements the common 16-step execution pipeline
-//! shared by ~170 of the 337 tool handlers. Each standard tool only needs
-//! to define its args struct, schema, and `build_command` function.
+//! Generic handler that implements the common execution pipeline shared by most
+//! tool handlers; the rest are direct [`ToolHandler`] impls that write their own
+//! `handle`. Each standard tool only needs to define its args struct, schema,
+//! and `build_command` function.
+//!
+//! No count is written here on purpose — three stale ones lived on these lines,
+//! including a step count that said 16 while the `// Step N` comments below ran
+//! 0 to 19. The live split is the `shape` field (`standard` / `direct`) of
+//! `scripts/tool_metadata.json`, which `scripts/validate_baseline.py`
+//! regenerates on every run.
+//!
+//! "Direct" means *not dispatched through this pipeline*, not *untouched by its
+//! code*: 43 of those handlers call [`apply_reduction_recorded`] for the
+//! reduction step and the pipeline-stats hook that comes with it.
 
 use std::marker::PhantomData;
 
@@ -99,6 +110,29 @@ pub trait StandardTool: Send + Sync + 'static {
     /// tool call is reported as a success, and the exit code stays visible in
     /// the text (`format_for_llm`'s `[exit:N]`) and in the audit event.
     const NONZERO_EXIT_IS_ERROR: bool = true;
+
+    /// Whether this tool accepts the pipeline's `sudo` / `sudo_user` params.
+    ///
+    /// `true` (the default) is right for every tool whose command is a POSIX
+    /// one: elevation is what makes the specialised tools usable at all on a
+    /// host where the interesting state is root-owned, which is why
+    /// `PrivilegeArgs` was lifted into this pipeline in the first place (see
+    /// [`crate::domain::privilege`]).
+    ///
+    /// Set it to `false` for a tool whose far end is not a POSIX shell, so
+    /// there is no `sudo` there to run. That is not merely a no-op: elevation
+    /// happens at step 5b, BEFORE the blacklist at step 6, and it wraps the
+    /// built command in `sudo -n bash -c '…'` — so on a tool that splices
+    /// caller text into its command, `sudo: true` turns that text into a root
+    /// shell. Refusing the param is what keeps the elevation path from being
+    /// an escalation path for such a tool.
+    ///
+    /// Opting out does both halves: the param is not advertised
+    /// ([`ToolHandler::supports_elevation`]), and a request that sends it
+    /// anyway is refused rather than silently stripped — a caller who asked
+    /// for root and got an unelevated run would read the result as the
+    /// elevated one.
+    const ALLOWS_ELEVATION: bool = true;
 
     /// Optional JSON Schema (2020-12) string describing this tool's
     /// `structuredContent` return value. `None` (default) = no contract.
@@ -226,6 +260,16 @@ pub trait StandardTool: Send + Sync + 'static {
 /// string is `ssh_exec` in disguise, and must call this from `pre_execute` so
 /// it is subject to the same whitelist `ssh_exec` is subject to.
 ///
+/// **One documented exception: `ssh_net_equip_config`.** It splices raw
+/// request text and deliberately does not call this, because the whitelist
+/// judges POSIX command lines and that tool's legitimate payload is a
+/// multi-line Cisco or Juniper config body — whitelisting it would refuse
+/// every real call, while one permissive operator pattern would re-open the
+/// hole. It is bound to hosts tagged `NETWORK_EQUIPMENT_TAG` instead, which is
+/// a control that can actually be aimed at that input. Read
+/// `NetEquipConfigTool::validate` before adding the call here; a test in that
+/// module fails if you do.
+///
 /// `tool` is the caller's own name (its `StandardTool::NAME`) — see
 /// `ExecuteCommandUseCase::log_denied` for why it is mandatory.
 ///
@@ -253,8 +297,10 @@ pub fn validate_free_form_command(
 
 /// Generic handler that wraps a [`StandardTool`] and implements [`ToolHandler`].
 ///
-/// The 16-step execution pipeline is implemented once here and reused
-/// for every `StandardTool` implementation via monomorphization.
+/// The execution pipeline is implemented once here and reused for every
+/// `StandardTool` implementation via monomorphization. Its stages are the
+/// `// Step N` comments in [`Self::execute`]; no count is repeated here,
+/// because the one that used to be said 16 and the steps ran 0 to 19.
 pub struct StandardToolHandler<T: StandardTool>(PhantomData<T>);
 
 impl<T: StandardTool> Default for StandardToolHandler<T> {
@@ -299,8 +345,15 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 
     /// Every standard tool bar the Windows-only ones: elevation is applied by
     /// the shared pipeline, so it works without the handler knowing about it.
+    ///
+    /// [`StandardTool::ALLOWS_ELEVATION`] is the other way out, for a tool
+    /// whose far end is not a POSIX shell at all. Advertising the param and
+    /// then refusing it at step 5b would make the schema lie, and on the CLI
+    /// that lie is load-bearing: `bridge-mcp tool` rejects any key the
+    /// enriched schema does not declare, so leaving it out is what makes
+    /// `sudo=true` fail at parse time there instead of mid-pipeline.
     fn supports_elevation(&self) -> bool {
-        !matches!(T::OS_GUARD, Some(OsType::Windows))
+        T::ALLOWS_ELEVATION && !matches!(T::OS_GUARD, Some(OsType::Windows))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -375,8 +428,59 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             }
         }
 
-        // Step 4: Domain validation (optional)
-        T::validate(&args, host_config)?;
+        // Step 4: Domain validation (optional), and its denial is audited.
+        //
+        // This hook is where the specialised tools enforce what the whitelist
+        // would otherwise enforce for them: `validate_builtin` at step 6
+        // deliberately skips the whitelist *on the assumption that they
+        // validate their own inputs* — see `validate_identifier` in
+        // `domain::use_cases::network_equipment`, which says so in as many
+        // words. Until this call was wrapped, a rejection here left no trace,
+        // while the blacklist denial at step 6 was recorded. So refusals like
+        // `validate_service_name("x; rm -rf /")` were invisible, and that is
+        // what this closes.
+        //
+        // Two things this event does NOT mean, both measured rather than
+        // assumed, because an earlier version of this comment asserted the
+        // opposite and was wrong:
+        //
+        // - **Not every rejection here is `CommandDenied`.** The overwhelming
+        //   majority of the validators reachable from the 90 `validate` bodies
+        //   return it, but `validate_vm_name` and `validate_snapshot_name` in
+        //   `domain::use_cases::hyperv` return `McpInvalidRequest`, and they
+        //   are reached from the five `ssh_hyperv_*` handlers. That is what
+        //   the fallback arm below exists for — it stringifies any other
+        //   variant rather than dropping the reason.
+        // - **Not every rejection here is an attack.** The variant does not
+        //   settle the semantics: `validate_port`, `validate_duration`,
+        //   `validate_dimensions`, `validate_count`, `validate_bench_type`,
+        //   `validate_provider` and `validate_tag_action` all spell a
+        //   typo-class rejection `CommandDenied` ("Invalid port number: '99999'"),
+        //   and hyperv's shape checks (`is_empty`, `len() > 200`) are not
+        //   injection attempts either. A `command_denied` event from THIS site
+        //   therefore means "the tool refused this input", not "an attack was
+        //   refused" — read `reason` before alerting on it.
+        //
+        // Auditing it anyway is the right trade: the alternative is that the
+        // injection refusals in the same set stay invisible. It only ever
+        // fires on a REFUSED call, so it adds no audit volume to normal
+        // operation; a refused call is what an audit log is for.
+        //
+        // The command position is empty on purpose. No command has been built
+        // yet — step 5 is below — and a synthetic one would be a fabrication
+        // that a reader or a log parser could mistake for something that was
+        // going to run. The offending input is not lost where it matters: most
+        // of these validators interpolate it into their `reason` ("Invalid
+        // service name 'x; rm -rf /'"), which is where the forensics belong
+        // when the denial is about an argument rather than about a command.
+        if let Err(e) = T::validate(&args, host_config) {
+            let reason = match &e {
+                BridgeError::CommandDenied { reason } => reason.clone(),
+                _ => e.to_string(),
+            };
+            ctx.execute_use_case.log_denied(T::NAME, &host, "", &reason);
+            return Err(e);
+        }
 
         // Step 4b: Root scope validation for file-operation tools
         for path in T::scoped_paths(&args) {
@@ -397,6 +501,32 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // must see the command that will actually run, not the unelevated one
         // it was built from. Windows has no `sudo`, and the OS guard above has
         // already established which kind of host this is.
+        //
+        // A tool that opted out of elevation entirely is refused first, and
+        // with an `Err` rather than the `ToolCallResult::error` the Windows arm
+        // below returns: the Windows arm states a capability of the host ("this
+        // OS has no sudo"), whereas this one is a policy denial of the same
+        // class as the blacklist at step 6 — the tool forbids the param because
+        // honouring it would elevate caller-supplied text — and that class
+        // travels as `CommandDenied` everywhere else in this pipeline.
+        //
+        // Audited like every other denial here. Unlike step 4 this one has a
+        // command to name — the built, not-yet-elevated one — and naming it is
+        // what makes the trail readable: the event records what would have
+        // been wrapped in a root shell, which is the whole point of refusing.
+        if !T::ALLOWS_ELEVATION && privilege.is_elevated() {
+            let reason = format!(
+                "Tool '{}' does not accept 'sudo' or 'sudo_user'. Elevation wraps the \
+                 whole built command in a root shell and is applied before the command \
+                 blacklist, and this tool's command is not one that may be run that \
+                 way. Drop the parameter; there is no host on which it works for this \
+                 tool.",
+                T::NAME
+            );
+            ctx.execute_use_case
+                .log_denied(T::NAME, &host, &command, &reason);
+            return Err(BridgeError::CommandDenied { reason });
+        }
         let command = if host_config.os_type == OsType::Windows {
             if privilege.is_elevated() {
                 return Ok(ToolCallResult::error(format!(
@@ -1298,6 +1428,65 @@ mod tests {
             .execute(Some(json!({"host": "server1"})), &ctx)
             .await;
         assert!(result.is_err());
+    }
+
+    /// A `T::validate` rejection is audited, for every tool on this pipeline
+    /// and not just the one that prompted it.
+    ///
+    /// Step 4 is where 90 handlers enforce the input rules that stand in for
+    /// the whitelist `validate_builtin` skips on their behalf — a rejection
+    /// there is a policy denial of the same class as the blacklist at step 6,
+    /// and until this was wired it was the one denial class in the pipeline
+    /// that left no trace. `MockValidatingTool` refuses with
+    /// `BridgeError::Config`, not `CommandDenied`, which also covers the
+    /// fallback arm that stringifies any other variant rather than dropping
+    /// the reason.
+    ///
+    /// The `command` field is empty on purpose: no command exists at step 4,
+    /// and the offending input belongs in `reason`, where each validator
+    /// already names it.
+    #[tokio::test]
+    async fn a_validate_rejection_is_audited() {
+        let handler = StandardToolHandler::<MockValidatingTool>::new();
+        let ctx = create_test_context_with_host();
+        let _ = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .expect_err("MockValidatingTool always refuses");
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected one denial event: {events:?}");
+        let e = &events[0];
+        assert_eq!(e.event_type, "command_denied");
+        assert_eq!(e.host, "server1");
+        assert_eq!(e.tool_name.as_deref(), Some(MockValidatingTool::NAME));
+        assert_eq!(e.command, "", "no command is built before step 4");
+        match &e.result {
+            crate::security::CommandResult::Denied { reason } => assert!(
+                reason.contains("validation failed"),
+                "the validator's reason must survive, whatever the variant: {reason}"
+            ),
+            r => panic!("expected Denied, got {r:?}"),
+        }
+    }
+
+    /// The negative half: a tool that passes `validate` logs no denial. Without
+    /// it, a step 4 that audited unconditionally would satisfy the test above.
+    #[tokio::test]
+    async fn a_passing_validate_audits_no_denial() {
+        let handler = StandardToolHandler::<MockLinuxTool>::new();
+        let ctx = create_test_context_with_host();
+        let _ = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await;
+
+        let denials: Vec<_> = ctx
+            .audit_logger
+            .drain_for_test()
+            .into_iter()
+            .filter(|e| e.event_type == "command_denied")
+            .collect();
+        assert!(denials.is_empty(), "no denial expected: {denials:?}");
     }
 
     #[tokio::test]

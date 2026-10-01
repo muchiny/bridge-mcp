@@ -1,7 +1,7 @@
 //! Privilege elevation for built-in tool commands.
 //!
 //! Three of the crate's handlers — `ssh_exec`, `ssh_exec_multi`,
-//! `ssh_session_exec` — took a `sudo` argument. The other 475 did not, so on a
+//! `ssh_session_exec` — took a `sudo` argument. The other 473 did not, so on a
 //! host where the interesting state is root-owned, every specialised tool
 //! failed and the only way through was the escape hatch the server's own
 //! instructions tell clients to avoid ("PREFER SPECIALIZED TOOLS over

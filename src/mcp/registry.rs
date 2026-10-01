@@ -3362,7 +3362,10 @@ mod tests {
     }
 
     /// A Linux-guarded and an unguarded tool both elevate through the shared
-    /// pipeline; a Windows-only one has no `sudo` to reach.
+    /// pipeline. Two kinds do not, for two different reasons: a Windows-only
+    /// tool has no `sudo` to reach, and a tool that sets
+    /// `StandardTool::ALLOWS_ELEVATION = false` has refused the param because
+    /// elevating it would elevate caller-supplied text.
     #[test]
     fn standard_tools_advertise_elevation_except_on_windows() {
         let registry = create_filtered_registry(&all_enabled_tool_groups_config_for_test());
@@ -3387,6 +3390,14 @@ mod tests {
         assert!(
             !win.supports_elevation(),
             "Windows hosts have no sudo; advertising it would be a lie"
+        );
+
+        let net = registry
+            .get("ssh_net_equip_config")
+            .expect("ssh_net_equip_config missing");
+        assert!(
+            !net.supports_elevation(),
+            "the tool refuses sudo; advertising it would offer a param that always fails"
         );
     }
 

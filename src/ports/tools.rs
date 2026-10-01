@@ -569,7 +569,15 @@ pub mod mock {
 
         let validator = Arc::new(CommandValidator::new(&SecurityConfig::default()));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        // `for_test` and not `disabled`: identical behaviour (`for_test` is
+        // `disabled` plus an in-memory capture), but it lets a pipeline test
+        // assert that a denial was RECORDED and not only that it was refused.
+        // Every denial site in the pipeline calls `log_denied` itself — there
+        // is no catch-all upstream — so "was it audited" is a property each
+        // site needs its own test for, and a `disabled()` fixture cannot see
+        // it. The same `Arc` goes to `execute_use_case` and to the context, so
+        // `ctx.audit_logger.drain_for_test()` observes what the use case logged.
+        let audit_logger = Arc::new(AuditLogger::for_test());
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
             Arc::clone(&validator),
@@ -623,7 +631,7 @@ pub mod mock {
 
         let validator = Arc::new(CommandValidator::new(&SecurityConfig::default()));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
@@ -677,7 +685,7 @@ pub mod mock {
 
         let validator = Arc::new(CommandValidator::new(&SecurityConfig::default()));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
@@ -729,7 +737,7 @@ pub mod mock {
     ) -> ToolContext {
         let validator = Arc::new(CommandValidator::new(&config.security));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
@@ -774,7 +782,7 @@ pub mod mock {
         // any assertion about `validate()` was vacuous.
         let validator = Arc::new(CommandValidator::new(&config.security));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(

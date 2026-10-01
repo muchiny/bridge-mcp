@@ -11,10 +11,14 @@ Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
 reading it. Every item below was reproduced before the fix and measured after.
 
 **That provenance is the campaign's, and it stops there.** The exit-code
-follow-ups added later in this same unreleased cycle — the five `ToolHandler`
+follow-ups added later in this same unreleased cycle — five `ToolHandler`
 handlers brought into line (`ssh_file_write`, `ssh_disk_usage`, `ssh_tail`,
 `ssh_exec`, `ssh_exec_multi`) and the AWX curl-transport fix — were established
-by unit test and mutation testing. **None of them was ever run against a host.**
+by unit test and mutation testing. The sixth, `ssh_awx_job_follow`, was
+established by unit test **only**: no `cargo mutants` run covers it, and the
+basis for it is the generated script executed under `bash` against stub `curl`
+and `sleep` binaries, plus `make ci`. **None of them was ever run against a
+host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 
@@ -67,17 +71,18 @@ nothing in the text below would otherwise tell you which is which.
   `sudo_user` at all, so they were never probed) — they are the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
-  **Five of those 52 have since been brought into line**, in this same
+  **Six of those 52 have since been brought into line**, in this same
   unreleased cycle: `ssh_file_write`, `ssh_disk_usage` (without `path`),
-  `ssh_tail` (without `grep`), `ssh_exec`, and `ssh_exec_multi` against a
-  single host. The two entries below state what each now does; the paragraph
-  above is kept as written because it is the finding as it was measured, and
-  the list it gives is the one the follow-up work is tracked against. What is
+  `ssh_tail` (without `grep`), `ssh_exec`, `ssh_exec_multi` against a
+  single host, and `ssh_awx_job_follow`. The three entries below state what
+  each now does; the paragraph above is kept as written because it is the
+  finding as it was measured, and the list it gives is the one the follow-up
+  work is tracked against. What is
   still open, therefore: `ssh_session_exec`, `ssh_find`, `ssh_metrics`,
   `ssh_metrics_multi`, `ssh_exec_multi` across 2+ hosts, `ssh_disk_usage` with
-  a `path`, `ssh_tail` with a `grep`, and — of the AWX family — `ssh_awx_job_follow`
-  alone; the other 42 are closed by the fix to `parse_checked_response`, as the
-  next paragraph now states.
+  a `path`, and `ssh_tail` with a `grep`. **The AWX family is now closed
+  entirely**: the 42 by the fix to `parse_checked_response`, as the next
+  paragraph states, and `ssh_awx_job_follow` by its own entry below.
 
   **The AWX family is narrower than the raw count suggests.** 42 of the 43 route
   their response through `AwxCommandBuilder::parse_checked_response`
@@ -95,11 +100,13 @@ nothing in the text below would otherwise tell you which is which.
   An earlier draft of this entry deferred a "42-call-site sweep" on the grounds
   that AWX is unconfigured locally; the deferral was wrong about what the sites
   contain and is **withdrawn**, so do not go looking for that sweep. Do not start
-  from the marker-absent branch either. **The one handler that does still need
-  work is `ssh_awx_job_follow`**, which builds its requests with the unchecked
-  `build_api_call`, never parses a status, and returns `text(stdout)` regardless
-  — so it swallows HTTP errors too, not only transport failures. Its fix is to
-  move onto `build_api_call_checked`.
+  from the marker-absent branch either. **The one handler that still needed
+  work was `ssh_awx_job_follow`**, which built its requests with the unchecked
+  `build_api_call`, never parsed a status, and returned `text(stdout)` regardless
+  — so it swallowed HTTP errors too, not only transport failures. **It is fixed;
+  see its own entry below.** The fix prescribed here — "move onto
+  `build_api_call_checked`" — was not sufficient and, applied alone, would have
+  broken the tool: that entry says why.
 
   Two further boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when
   a `bridge-mcp daemon` serves the call the CLI reads the result back off the
@@ -110,16 +117,16 @@ nothing in the text below would otherwise tell you which is which.
 - **An MCP tool result now carries `isError: true` when its remote command
   failed** — again, for `StandardTool`-pipeline tools only. The 52 handlers
   listed above are **not** all unchanged, though, once the follow-ups later in
-  this same unreleased cycle are counted: **three** now set `isError` themselves
+  this same unreleased cycle are counted: **four** now set `isError` themselves
   (`ssh_file_write`, `ssh_disk_usage` without a `path`, `ssh_tail` without a
-  `grep` — see the entry below, they use the same `with_remote_exit_code`
-  constructor the pipeline does); **two** report the exit code and deliberately
-  decline the verdict (`ssh_exec`, `ssh_exec_multi` against a single host);
+  `grep`, and `ssh_awx_job_follow` — see the entries below, they use the same
+  `with_remote_exit_code` constructor the pipeline does); **two** report the
+  exit code and deliberately decline the verdict (`ssh_exec`, `ssh_exec_multi`
+  against a single host);
   **42** — the AWX handlers on `parse_checked_response` — now return `Err` for a
   curl transport failure, which the server wraps as a result with `isError: true`
-  where it used to be an empty success. Only **five** are genuinely unchanged:
-  `ssh_session_exec`, `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` and
-  `ssh_awx_job_follow`. A client
+  where it used to be an empty success. Only **four** are genuinely unchanged:
+  `ssh_session_exec`, `ssh_find`, `ssh_metrics` and `ssh_metrics_multi`. A client
   that treated every `tools/call` answer as a success, and read the outcome out
   of the text, will start seeing errors it did not see before, for calls that
   were already failing.
@@ -269,6 +276,194 @@ nothing in the text below would otherwise tell you which is which.
   change and was not taken here. Both halves are pinned by tests in
   `src/cli/runner.rs`, and `ports::protocol::tests::the_fact_never_crosses_the_mcp_wire`
   fails if the `skip` is ever lifted without revisiting this.
+
+- **`ssh_awx_job_follow` now exits 6 when the job it followed did not succeed,
+  and marks the result `isError`.** It exited **0** for every outcome. The
+  script's four terminal statuses shared one arm ending in `exit 0`, so a job
+  AWX finished in `failed`, `error` or `canceled` returned success; and the
+  timeout fall-through was the script's last command, whose `echo` returned 0,
+  so a job still running when `max_wait` ran out returned success too. Both
+  reproduced before the fix against a stubbed `curl`: exit 0 on all five
+  outcomes. `bridge-mcp tool ssh_awx_job_follow template_id=7 && next`
+  therefore ran `next` after a failed playbook, and after a playbook that was
+  still running. Now only `successful` exits 0; the other four exit **6**.
+
+  **No per-status code**, deliberately: the CLI flattens any remote failure to
+  one code and `remote_exit_code` is `#[serde(skip)]` on the MCP side, so a
+  distinct code per status would be observable nowhere. The exact status stays
+  where it always was, in the JSON result, and every arm still emits its full
+  document — including the summary on a failed job. The handler uses
+  `ToolCallResult::with_remote_exit_code`, which sets `isError` too, on the same
+  reading as `ssh_file_write` above: this tool wrote the script, the caller did
+  not, so a job that failed is a failure of what the tool was asked to do rather
+  than a fact for the caller to interpret.
+
+  **All three of its AWX requests are verified now; not one of them was.** They
+  went out through the unchecked `AwxCommandBuilder::build_api_call`, so
+  `curl -s` exited 0 on any HTTP response and nothing looked at the status.
+  Reproduced against a stubbed curl before the fix: a 403 on the status poll
+  made the tool poll until `max_wait` and exit 0 with `"status":"timeout"`; a
+  non-2xx on the host-summaries call put AWX's error body into the `summary`
+  field of an otherwise successful-looking document and exited 0; and a
+  transport failure on the poll killed the script under `set -e`, returning an
+  empty stdout with no diagnostic at all. Each of the three now emits a JSON
+  error naming **which** call failed, with its HTTP status, and exits non-zero —
+  `000` included, because the capture tolerates curl's own non-zero exit so the
+  check can run rather than `set -e` aborting first.
+
+  **The checks live in the shell, not in `parse_checked_response`, and that
+  divergence from the other 42 is deliberate.** This handler's curl bodies are
+  consumed *inside* the script it builds — they feed the job-id extraction, the
+  status extraction, and the document it emits — and the handler only ever sees
+  the script's final stdout. `parse_checked_response` classifies the **last**
+  marker in whatever it is given, so applied there it would classify whatever
+  leaked rather than an HTTP response. The script splits each `HTTP_STATUS:`
+  line with POSIX parameter expansion and checks the code per call;
+  `build_follow_script` in the handler carries the argument in full. The
+  paragraph above prescribed "move onto `build_api_call_checked`" as the whole
+  fix — that alone would have **broken** the tool, because the appended
+  write-out line makes the status body's `json.load` fail, the
+  `|| echo "unknown"` fallback fire on every poll, and the tool time out on
+  every single call.
+
+  **This tool needs `python3` on the AWX SSH host**, which nothing said before
+  and which the exit-code change above makes newly visible. The script parses
+  the launch and poll bodies with `python3 -c 'import sys,json; …'`; the job-id
+  extraction has a `grep`/`cut` fallback, but the *status* extraction does not
+  — its `|| echo "unknown"` arm sends every poll round the loop, so on a host
+  without `python3` every job runs to `max_wait` and reports
+  `"status":"timeout"`. That is not new. What is new is that the timeout path
+  now exits **6** instead of **0**, so a python3-less host turns a silent
+  wrong answer into a loud one on every call. If this tool starts returning
+  nothing but timeouts after the upgrade, check for `python3` on the host
+  before suspecting AWX.
+
+  **Also in the same pass:** the handler passed the literal string
+  `"ssh_awx_job_follow"` as the `command` argument of `process_success`, so its
+  audit event and history entry recorded the tool name where every other
+  handler records what ran. It now records the script — not the
+  `bash -c '<script>'` wrapper, because that form escapes every `'` as `'\''`,
+  which defeats the sanitizer's opaque-bearer pattern (it allows one optional
+  quote after `Bearer` and stops at the backslash) and would have written the
+  AWX token to `audit.log` and the history in clear. A test pins the redaction.
+
+  **And the two URLs it polled were never the right URLs.** The status and
+  host-summaries endpoints were written `/api/v2/jobs/'$JOB_ID'/`, the quotes
+  meant to close and reopen the single-quoted span the builder wraps a URL in.
+  They do not: `build_api_call_checked` escapes the URL it is handed, so each
+  `'` became `'\''` and curl was asked for a path holding a literal
+  `'$JOB_ID'`. Measured by logging what a stub curl received:
+  `https://awx.test/api/v2/jobs/'$JOB_ID'/`. Every poll therefore 404ed, the
+  status read back as `unknown`, and the tool ran to `max_wait` and reported a
+  timeout on **every** call — so none of the terminal-status paths above was
+  reachable in production before this, and the launched job ran on
+  unobserved. The id is now substituted *after* the escaping, and it is
+  refused unless it is a run of digits. That second check is a correctness
+  guard, not a security one: the id comes from AWX's own response through
+  `print(json.load(...)['id'])`, which prints whatever type AWX sent, and it
+  is interpolated unquoted into the `"job_id":` field of every document the
+  tool returns — a non-numeric id makes that document invalid JSON. It is
+  **not** a shell injection, and an earlier draft of this paragraph said it
+  was: the shell does not re-scan the result of a parameter expansion for
+  command substitution, so a `$(...)` in an AWX response reaches curl as
+  literal text. The check also replaces the `[ -z "$JOB_ID" ]` test, which let
+  anything non-empty through.
+
+  Established by unit test, running the generated script under `bash` against
+  stub `curl` and `sleep` binaries — not on a host; AWX is configured on no
+  machine this was written on. See the note under `[Unreleased]`.
+
+- **`ssh_net_equip_config` now refuses any host whose `tags` do not contain
+  `network-equipment`, and refuses `sudo` outright.** **An existing config that
+  uses this tool stops working until the operator adds that tag** to the host in
+  `config.yaml` — exact spelling, case-sensitive, not the case-insensitive
+  matching `HostConfig::has_tag` does elsewhere, so a grant is the literal
+  string that grants it. The refusal is a `CommandDenied` naming the host and
+  the tag to add.
+
+  Why the tool needed a host marker at all: it is the only one in the group that
+  sends caller-supplied COMMAND text. `NetworkEquipmentCommandBuilder::build_config_command`
+  interpolates `commands` verbatim, and for `EquipmentType::Generic` — the
+  default — the vendor wrapper is empty, so the text *is* the command. On the
+  `StandardTool` pipeline that text is seen only by `validate_builtin`, which
+  skips the whitelist by design for specialised tools. On a POSIX host the tool
+  was therefore `ssh_exec` with the whitelist removed, executing what `ssh_exec`
+  itself would have refused under the same config. It was the last of the six
+  command-injection sites found on 2026-07-25 still open.
+
+  `commands` stays unescaped and unwhitelisted, which is deliberate: a Cisco or
+  Juniper CLI needs multi-line input, `|` and `!`, and quoting the text would
+  break every legitimate call. What is constrained is the *host* — the operator
+  states that the far end speaks a device CLI and not a shell, and only then
+  does the tool run. A host nobody marked is refused, which is the pre-tag
+  default for every host in every existing config.
+
+  **`sudo` / `sudo_user` are refused on this tool**, not ignored. `PrivilegeArgs::extract`
+  runs for every pipeline tool, and elevation is applied at step 5b *before* the
+  blacklist, wrapping the built command in `sudo -n bash -c '…'` — so
+  `sudo: true` ran that verbatim `commands` text as root. The mechanism is a new
+  additive `StandardTool::ALLOWS_ELEVATION` const, `true` by default so the
+  other 398 tools on that pipeline are unchanged — the 77 direct handlers do
+  not implement the trait and never took `sudo` through this path at all; the
+  one tool that sets it `false` also stops advertising the param, which on the
+  CLI is what makes `sudo=true` fail at parse time (exit 5) rather than
+  mid-pipeline.
+
+  **Both refusals are audited, and so is every other `validate` rejection.**
+  Step 4 of the `StandardTool` pipeline now writes a `command_denied` event
+  when `T::validate` refuses — for all 399 tools on that pipeline, not only
+  this one. **The 77 direct handlers have no step 4 and are unaffected**, and
+  that gap is not academic: only 7 of the 77 call `log_denied` anywhere, and
+  none of the 43 `ssh_awx_*` handlers do, so an `AwxCommandBuilder::validate_id`
+  refusal still propagates with `?` and writes nothing. If you are sizing
+  alert-tuning work, size it on 399. That hook is what stands in for the
+  whitelist on the specialised tools, since `validate_builtin` at step 6 skips
+  the whitelist precisely on the assumption that they check their own inputs.
+  Until now the 90 handlers that implement it
+  refused injection attempts — `validate_service_name("x; rm -rf /")` among
+  them — and left no trace, while the blacklist denial in the same pipeline was
+  recorded. **This adds no audit volume to normal operation**: the event fires
+  only on a call that was refused. The event's `command` is empty at step 4,
+  where no command has been built yet and a synthetic one would be a
+  fabrication; most of these validators interpolate the offending input into
+  `reason` instead.
+
+  **What a `command_denied` event from step 4 does and does not tell you.** It
+  means the tool refused the input, not that an attack was refused, so read
+  `reason` before alerting on it. Among the validators reachable from those 90
+  `validate` bodies, some are genuine injection guards (`validate_service_name`)
+  and others are typo-class checks the repo happens to spell `CommandDenied` —
+  `validate_port` ("Invalid port number: '99999'"),
+  `validate_duration`, `validate_dimensions`, `validate_count`,
+  `validate_bench_type`, `validate_provider`, `validate_tag_action`. Two do not
+  return `CommandDenied` at all: `validate_vm_name` and `validate_snapshot_name`
+  (`domain::use_cases::hyperv`, reached from the five `ssh_hyperv_*` handlers)
+  return `McpInvalidRequest`. Its message is carried *inside* `reason` rather
+  than being it: the fallback arm stringifies the variant, and that variant's
+  `Display` is `"MCP invalid request: {0}"`, so `reason` reads
+  `"MCP invalid request: <message>"`. Nothing is dropped, but a matcher
+  anchored at the start of `reason` will not see the validator's own text. **If
+  you alert on `command_denied`, this widens what reaches that alert**; filter
+  on `tool_name` and `reason`, not on the event type alone.
+
+  **And it does not cover the guards that live in the builders.** A specialised
+  tool can also refuse inside `T::build_command` at step 5 — `validate_identifier`
+  (`domain::use_cases::network_equipment`), which rejects a shell metacharacter
+  in an interface or config-section name, is reached from
+  `build_show_run_command` and `build_show_interfaces_command` and from no
+  handler's `validate`. Step 5 propagates that error with `?` and no
+  `log_denied`, so such a refusal writes **no** audit event, before this change
+  or after it. Widening step 5 the way step 4 was widened is not part of this
+  release; it is recorded so nobody reads `command_denied` coverage as
+  "every input a tool refused".
+
+  The reserved tag is a `const NETWORK_EQUIPMENT_TAG` in
+  `src/domain/use_cases/network_equipment.rs`, on the existing `HostConfig.tags`
+  rather than a new `HostConfig` field: `tags` is already `#[serde(default)]`
+  and a new field would have meant editing 987 struct literals across 415
+  files, since only one of them uses `..Default::default()` and `HostConfig`
+  derives no `Default`. `build_config_command` and `EquipmentType` are
+  unchanged.
 
 ### Fixed
 
@@ -426,6 +621,20 @@ nothing in the text below would otherwise tell you which is which.
   the custom handlers are a follow-up. `bridge-mcp status` reports
   `"written_by": "mcp-server-and-cli"`.
 
+- **A patch is no longer reinterpreted by `printf`.**
+  `FileAdvancedCommandBuilder::build_patch_command` passed the patch as
+  `printf`'s **format** (`printf '<patch>'`). Correctly quoted, so never an
+  injection, but `printf` interprets its format: a `%s` in a hunk was consumed
+  and dropped, a `%d` printed `0`, a two-character `\t` became a real tab. Each
+  silently applied a patch that was not the one sent. It is now
+  `printf '%s' '<patch>'`, with the patch as data.
+
+- **`tool_handlers::utils::shell_escape` delegates to
+  `domain::use_cases::shell::escape`** instead of carrying its own copy of the
+  same quoting. Two implementations of a security primitive that agreed and that
+  nothing kept in agreement; behaviour is unchanged, the byte-for-byte identical
+  body is gone.
+
 ### Changed
 
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
@@ -437,7 +646,7 @@ nothing in the text below would otherwise tell you which is which.
 ### Added
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
-  the other 475 did not, so on a host where the interesting state is root-owned
+  the other 473 did not, so on a host where the interesting state is root-owned
   every specialised tool failed and the only way through was `ssh_exec` — which
   the server's own instructions tell clients to avoid. On a K3s host that was
   the whole `cri` group, `ssh_firewall_status`, and every systemd write.

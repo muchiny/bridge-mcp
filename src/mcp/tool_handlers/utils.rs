@@ -72,8 +72,13 @@ pub fn parse_transfer_mode_checked(
 ///
 /// Wraps the string in single quotes and escapes any existing single quotes.
 /// This is the POSIX-only variant. For shell-aware escaping, use [`shell_escape_for`].
+///
+/// Delegates to [`crate::domain::use_cases::shell::escape`] exactly as
+/// [`shell_escape_for`] does. It used to carry its own copy of the same
+/// `format!`/`replace` pair — two implementations of a security primitive that
+/// happened to agree and that nothing kept in agreement.
 pub fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    shell_escape_for(s, ShellType::Posix)
 }
 
 /// Shell escape a string for a specific shell type.

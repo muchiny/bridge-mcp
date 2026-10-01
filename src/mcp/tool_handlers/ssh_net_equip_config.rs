@@ -5,8 +5,10 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::network_equipment::{EquipmentType, NetworkEquipmentCommandBuilder};
-use crate::error::Result;
+use crate::domain::use_cases::network_equipment::{
+    EquipmentType, NETWORK_EQUIPMENT_TAG, NetworkEquipmentCommandBuilder,
+};
+use crate::error::{BridgeError, Result};
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
 
@@ -45,7 +47,10 @@ impl StandardTool for NetEquipConfigTool {
         Fortinet → `config system global ... end`; MikroTik/generic → commands sent as-is \
         (no wrapper). DESTRUCTIVE — requires elicitation confirmation. Read the running \
         config first with ssh_net_equip_show_run. Persist changes with ssh_net_equip_save \
-        (Cisco: write memory; Juniper: rescue save; MikroTik: backup file).";
+        (Cisco: write memory; Juniper: rescue save; MikroTik: backup file). \
+        Only runs on a host whose config.yaml 'tags' list contains \
+        'network-equipment': the commands text is sent as-is, so the operator must \
+        declare the far end is a device CLI and not a shell. 'sudo' is refused.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -82,6 +87,18 @@ impl StandardTool for NetEquipConfigTool {
         "required": ["host", "commands"]
     }"#;
 
+    /// `sudo` is refused on this tool, not ignored.
+    ///
+    /// The far end is a device CLI, so there is no POSIX `sudo` to run there in
+    /// the first place; the reason it has to be *refused* is what `sudo` would
+    /// do on a host that is not the device the operator believes it is. The
+    /// pipeline elevates at step 5b by wrapping the built command in
+    /// `sudo -n bash -c '…'`, and for `EquipmentType::Generic` the built
+    /// command is the request's `commands` text verbatim — so `sudo: true` here
+    /// used to run that text as root, ahead of the blacklist, with the
+    /// whitelist already skipped by `validate_builtin`.
+    const ALLOWS_ELEVATION: bool = false;
+
     fn build_command(args: &SshNetEquipConfigArgs, _host_config: &HostConfig) -> Result<String> {
         let eq_type = args
             .equipment_type
@@ -91,6 +108,57 @@ impl StandardTool for NetEquipConfigTool {
             eq_type,
             &args.commands,
         ))
+    }
+
+    /// Refuse any host the operator has not marked as network equipment.
+    ///
+    /// `commands` is interpolated verbatim into the remote command (see
+    /// [`NETWORK_EQUIPMENT_TAG`] for why it cannot be escaped or whitelisted),
+    /// so what keeps this tool from being `ssh_exec`-without-a-whitelist is the
+    /// *host*: the operator states in `config.yaml` that the far end speaks a
+    /// device CLI rather than a shell, and only then does the tool run.
+    ///
+    /// This lives in `validate` and not in [`Self::build_command`]: `validate`
+    /// is the pipeline step that is handed the [`HostConfig`], and
+    /// `build_command` is called directly by this module's own
+    /// `test_build_command_defaults`, so a guard there would be bypassed by
+    /// exactly the test that has to stay meaningful.
+    ///
+    /// # This handler does NOT call `validate_free_form_command`, deliberately
+    ///
+    /// [`validate_free_form_command`](crate::mcp::standard_tool::validate_free_form_command)
+    /// says a handler that splices raw request text into its command "must"
+    /// call it, so the text faces the same whitelist `ssh_exec` faces. This
+    /// handler is the textbook instance of that sentence and is the one
+    /// documented exception, because for this tool the remedy does not work:
+    /// the whitelist judges POSIX command lines, and a legitimate payload here
+    /// is a multi-line Cisco or Juniper config body. Whitelisting it would
+    /// refuse every real call while a single permissive operator pattern would
+    /// re-open the hole — the whitelist is not a control that can be aimed at
+    /// this input at all. The host tag replaces it: the text stays unjudged,
+    /// and what is judged is whether the far end is a device CLI.
+    ///
+    /// Wiring the whitelist in here would break production, so it is not left
+    /// to whoever reads that "must" next:
+    /// `a_marked_host_is_not_subject_to_the_command_whitelist` fails if anyone
+    /// does.
+    fn validate(args: &SshNetEquipConfigArgs, host_config: &HostConfig) -> Result<()> {
+        // Exact and case-sensitive, deliberately not `HostConfig::has_tag` —
+        // see `NETWORK_EQUIPMENT_TAG`.
+        if host_config.tags.iter().any(|t| t == NETWORK_EQUIPMENT_TAG) {
+            return Ok(());
+        }
+        Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Host '{}' is not marked as network equipment: add the tag \
+                 '{NETWORK_EQUIPMENT_TAG}' to its 'tags' list in config.yaml to allow \
+                 '{}' on it. The tool sends the 'commands' text to the host as-is, with \
+                 the command whitelist skipped, so it runs only where an operator has \
+                 declared that the far end is a device CLI and not a shell.",
+                args.host,
+                Self::NAME,
+            ),
+        })
     }
 }
 
@@ -176,6 +244,17 @@ mod tests {
         }
     }
 
+    /// `build_command` is deliberately unchanged by the host-tag guard, and is
+    /// called here directly — which is exactly why the guard lives in
+    /// `validate` instead. `test_host_config` carries no tags, so this call
+    /// would be refused through the pipeline; the builder itself still returns
+    /// the same string it always did.
+    ///
+    /// The assertion is the reason the guard had to exist: with no
+    /// `equipment_type`, `EquipmentType::Generic` applies, its wrapper is empty,
+    /// and the command IS the caller's `commands` text verbatim. Pinning that
+    /// keeps a future "generic gets a wrapper too" change from quietly removing
+    /// the premise the guard is argued from.
     #[test]
     fn test_build_command_defaults() {
         let args: SshNetEquipConfigArgs = serde_json::from_value(
@@ -184,7 +263,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = NetEquipConfigTool::build_command(&args, &host).unwrap();
-        assert_ne!(cmd, "");
+        assert_eq!(cmd, "interface Gi0/1\nno shutdown");
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {
@@ -196,7 +275,15 @@ mod tests {
         }
     }
 
-    fn server1_hosts() -> std::collections::HashMap<String, crate::config::HostConfig> {
+    /// One host named `server1`, carrying exactly `tags`.
+    ///
+    /// `tags` is a parameter and not `Vec::new()` because the tag is now the
+    /// difference between the tool running and the tool refusing — the two
+    /// directions have to be reachable from the same fixture, or "marked passes"
+    /// and "unmarked refuses" would be testing two different hosts.
+    fn server1_hosts(
+        tags: Vec<String>,
+    ) -> std::collections::HashMap<String, crate::config::HostConfig> {
         use crate::config::{AuthConfig, HostConfig, HostKeyVerification, OsType};
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(
@@ -211,7 +298,7 @@ mod tests {
                 proxy_jump: None,
                 socks_proxy: None,
                 sudo_password: None,
-                tags: Vec::new(),
+                tags,
                 os_type: OsType::default(),
                 shell: None,
                 retry: None,
@@ -229,9 +316,36 @@ mod tests {
         hosts
     }
 
-    fn permissive_ctx(mock_out: crate::ssh::CommandOutput) -> crate::ports::ToolContext {
+    /// The most permissive context this tool can be called in: mode
+    /// `Permissive`, empty blacklist. It is the point of the refusal tests
+    /// below that the guard holds even here — the security policy is not what
+    /// stops this tool, because `validate_builtin` skips the whitelist for
+    /// specialised tools by design.
+    fn permissive_ctx(
+        mock_out: crate::ssh::CommandOutput,
+        tags: Vec<String>,
+    ) -> crate::ports::ToolContext {
+        use crate::config::{SecurityConfig, SecurityMode};
+        ctx_with_security(
+            mock_out,
+            tags,
+            &SecurityConfig {
+                mode: SecurityMode::Permissive,
+                blacklist: Vec::new(),
+                ..SecurityConfig::default()
+            },
+        )
+    }
+
+    /// Same fixture with the security policy chosen by the caller, so a test
+    /// can pin what the policy does and does not decide for this tool.
+    fn ctx_with_security(
+        mock_out: crate::ssh::CommandOutput,
+        tags: Vec<String>,
+        sec: &crate::config::SecurityConfig,
+    ) -> crate::ports::ToolContext {
         use crate::config::SessionConfig;
-        use crate::config::{Config, LimitsConfig, SecurityConfig, SecurityMode};
+        use crate::config::{Config, LimitsConfig};
         use crate::domain::CommandHistory;
         use crate::domain::ExecuteCommandUseCase;
         use crate::domain::TunnelManager;
@@ -242,20 +356,20 @@ mod tests {
         use crate::security::{CommandValidator, Sanitizer};
         use crate::ssh::SessionManager;
         use std::sync::Arc;
-        let sec = SecurityConfig {
-            mode: SecurityMode::Permissive,
-            blacklist: Vec::new(),
-            ..SecurityConfig::default()
-        };
         let config = Config {
-            hosts: server1_hosts(),
+            hosts: server1_hosts(tags),
             security: sec.clone(),
             limits: LimitsConfig::default(),
             ..Config::default()
         };
-        let validator = Arc::new(CommandValidator::new(&sec));
+        let validator = Arc::new(CommandValidator::new(sec));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        // `for_test` rather than `disabled`: the refusals this module adds are
+        // the only security control on a destructive tool, so "it was refused"
+        // is only half the property — "and the refusal was recorded" is the
+        // other half, and `ctx.audit_logger.drain_for_test()` is what lets a
+        // test assert it.
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
             Arc::clone(&validator),
@@ -289,17 +403,188 @@ mod tests {
         }
     }
 
+    fn marked() -> Vec<String> {
+        vec![NETWORK_EQUIPMENT_TAG.to_string()]
+    }
+
+    /// The unmarked host is the pre-fix default, and it was the whole defect:
+    /// `commands` reached a POSIX shell verbatim, with the whitelist skipped by
+    /// `validate_builtin` and the context here as permissive as it gets. This
+    /// test was `test_full_pipeline_success` — the tool succeeded on a host
+    /// nobody had declared to be a network device.
     #[tokio::test]
-    async fn test_full_pipeline_success() {
+    async fn unmarked_host_is_refused() {
         let handler = SshNetEquipConfigHandler::new();
-        let ctx = permissive_ctx(mock_output("mock output"));
-        let result = handler
+        let ctx = permissive_ctx(mock_output("mock output"), Vec::new());
+        let err = handler
             .execute(
-                Some(json!({"host": "server1", "commands": "show version"})),
+                // A POSIX command, not a device one: on a host that is really a
+                // Linux box this is what used to run.
+                Some(json!({"host": "server1", "commands": "cat /etc/shadow"})),
                 &ctx,
             )
             .await
-            .unwrap();
+            .expect_err("an unmarked host must be refused");
+        match err {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("server1") && reason.contains(NETWORK_EQUIPMENT_TAG),
+                    "the refusal must name the host and the tag to add: {reason}"
+                );
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+        assert_denied_once(&ctx, "");
+    }
+
+    /// Refusing is half the control; recording the refusal is the other half.
+    /// Without it, repeated probing of unmarked hosts and repeated `sudo=true`
+    /// attempts are invisible to the audit log, while the functionally
+    /// identical blacklist denial at step 6 of the same pipeline is recorded.
+    ///
+    /// `expected_command` is what the event's `command` field must hold: empty
+    /// at step 4, where no command has been built and a synthetic one would be
+    /// a fabrication, and the built command at step 5b, where there is a real
+    /// one and it is what would have been wrapped in a root shell.
+    fn assert_denied_once(ctx: &crate::ports::ToolContext, expected_command: &str) {
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "exactly one denial expected: {events:?}");
+        let e = &events[0];
+        assert_eq!(e.event_type, "command_denied");
+        assert_eq!(e.host, "server1");
+        assert_eq!(
+            e.tool_name.as_deref(),
+            Some(NetEquipConfigTool::NAME),
+            "an unnamed denial cannot be told apart from ssh_exec's"
+        );
+        assert_eq!(e.command, expected_command);
+        assert!(
+            matches!(&e.result, crate::security::CommandResult::Denied { .. }),
+            "{:?}",
+            e.result
+        );
+    }
+
+    /// The other direction, and the one that makes the test above mean
+    /// something: without it a guard that refused every host would pass too.
+    #[tokio::test]
+    async fn marked_host_runs_the_command() {
+        let handler = SshNetEquipConfigHandler::new();
+        let ctx = permissive_ctx(mock_output("mock output"), marked());
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "commands": "interface Gi0/1\nno shutdown"})),
+                &ctx,
+            )
+            .await
+            .expect("a host tagged as network equipment must be allowed");
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    /// The whitelist is NOT this tool's refusal mechanism, and must not become
+    /// one. `validate_free_form_command`'s docstring tells a handler that
+    /// splices raw request text into its command that it "must" call the full
+    /// policy; this handler is the documented exception, because a legitimate
+    /// payload here is a Cisco config body and no whitelist can be aimed at
+    /// that without refusing every real call.
+    ///
+    /// That exception was a comment until this test existed. The context below
+    /// is `Strict` with a whitelist the config body does not match, so the call
+    /// succeeds only as long as nobody wires the whitelist in: do that, here or
+    /// in `pre_execute`, and this goes red. The other refusal tests could not
+    /// catch it — they run under `Permissive` with an empty blacklist, where
+    /// adding the whitelist call changes nothing.
+    #[tokio::test]
+    async fn a_marked_host_is_not_subject_to_the_command_whitelist() {
+        use crate::config::{SecurityConfig, SecurityMode};
+        let handler = SshNetEquipConfigHandler::new();
+        let ctx = ctx_with_security(
+            mock_output("mock output"),
+            marked(),
+            &SecurityConfig {
+                mode: SecurityMode::Strict,
+                // Matches nothing this tool ever sends, which is the realistic
+                // case: an operator's whitelist is written for POSIX commands.
+                whitelist: vec!["^uptime$".to_string()],
+                blacklist: Vec::new(),
+                ..SecurityConfig::default()
+            },
+        );
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1",
+                    "equipment_type": "cisco",
+                    "commands": "interface Gi0/1\n no shutdown\n!\nrouter bgp 65000",
+                })),
+                &ctx,
+            )
+            .await
+            .expect("the whitelist must not judge a device config body");
+        assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    /// A near-miss spelling is a non-match, not a grant: the comparison is
+    /// exact and case-sensitive, unlike `HostConfig::has_tag`, so a tag that
+    /// only looks right does not open the path.
+    #[tokio::test]
+    async fn a_tag_that_is_not_the_reserved_one_is_refused() {
+        for tag in ["Network-Equipment", "network_equipment", "network-equip"] {
+            let handler = SshNetEquipConfigHandler::new();
+            let ctx = permissive_ctx(mock_output("mock output"), vec![tag.to_string()]);
+            let err = handler
+                .execute(
+                    Some(json!({"host": "server1", "commands": "show version"})),
+                    &ctx,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, BridgeError::CommandDenied { .. }),
+                "{tag:?} must not grant the tool: {err:?}"
+            );
+        }
+    }
+
+    /// The escalation half of the defect. `PrivilegeArgs::extract` runs for
+    /// every pipeline tool, and step 5b elevates BEFORE the blacklist, so
+    /// `sudo: true` wrapped this tool's verbatim `commands` text in
+    /// `sudo -n bash -c '…'` and ran it as root. Marked host on purpose: the
+    /// tag guard must not be what refuses here.
+    #[tokio::test]
+    async fn sudo_is_refused_even_on_a_marked_host() {
+        let handler = SshNetEquipConfigHandler::new();
+        let ctx = permissive_ctx(mock_output("mock output"), marked());
+        let err = handler
+            .execute(
+                Some(json!({"host": "server1", "commands": "show version", "sudo": true})),
+                &ctx,
+            )
+            .await
+            .expect_err("sudo must be refused, not silently dropped");
+        match err {
+            BridgeError::CommandDenied { reason } => assert!(
+                reason.contains("sudo") && reason.contains(NetEquipConfigTool::NAME),
+                "the refusal must name the param and the tool: {reason}"
+            ),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+        // The built command, not the empty string: at step 5b there IS one,
+        // and it is exactly what `sudo -n bash -c '…'` would have wrapped.
+        assert_denied_once(&ctx, "show version");
+    }
+
+    /// The refusal above is the pipeline half; this is the schema half. The
+    /// param must also stop being advertised, or `describe-tool` would offer a
+    /// `sudo` that always fails — and on the CLI the schema is load-bearing:
+    /// `bridge-mcp tool` rejects keys the enriched schema does not declare, so
+    /// leaving `sudo` out is what makes it fail at parse time there instead of
+    /// mid-pipeline.
+    #[test]
+    fn the_tool_does_not_advertise_elevation() {
+        // A `const` block on purpose: flipping the const back should not
+        // compile this test, not merely fail it.
+        const { assert!(!NetEquipConfigTool::ALLOWS_ELEVATION) };
+        assert!(!SshNetEquipConfigHandler::new().supports_elevation());
     }
 }
