@@ -1,8 +1,19 @@
 //! Standard Tool Handler
 //!
-//! Generic handler that implements the common 16-step execution pipeline
-//! shared by ~170 of the 337 tool handlers. Each standard tool only needs
-//! to define its args struct, schema, and `build_command` function.
+//! Generic handler that implements the common execution pipeline shared by most
+//! tool handlers; the rest are direct [`ToolHandler`] impls that write their own
+//! `handle`. Each standard tool only needs to define its args struct, schema,
+//! and `build_command` function.
+//!
+//! No count is written here on purpose — three stale ones lived on these lines,
+//! including a step count that said 16 while the `// Step N` comments below ran
+//! 0 to 19. The live split is the `shape` field (`standard` / `direct`) of
+//! `scripts/tool_metadata.json`, which `scripts/validate_baseline.py`
+//! regenerates on every run.
+//!
+//! "Direct" means *not dispatched through this pipeline*, not *untouched by its
+//! code*: 43 of those handlers call [`apply_reduction_recorded`] for the
+//! reduction step and the pipeline-stats hook that comes with it.
 
 use std::marker::PhantomData;
 
@@ -79,6 +90,52 @@ pub trait StandardTool: Send + Sync + 'static {
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::RawText;
 
+    /// Whether a non-zero exit code from the remote command means this tool
+    /// call **failed**.
+    ///
+    /// `true` (the default) is the honest reading for almost every tool here:
+    /// `systemctl status` on a missing unit, `id` on a missing user, `kubectl
+    /// get` on a missing resource — the command reports failure and the tool
+    /// has nothing to return. Until this const existed the pipeline only
+    /// `warn!`ed on a non-zero exit and still built a plain
+    /// `ToolCallResult::text`, whose `is_error` is `None`: the failure was
+    /// written into the response *text* as `[exit:N]` and nowhere a caller
+    /// could test it, so `bridge-mcp tool … && next` ran `next` after a
+    /// failure.
+    ///
+    /// Set it to `false` for the handful of tools whose command answers **by**
+    /// its exit status, where a non-zero exit is a normal result and not an
+    /// error: a search that found nothing, a comparison that found a
+    /// difference, a probe whose verdict *is* the code. Opting out means the
+    /// tool call is reported as a success, and the exit code stays visible in
+    /// the text (`format_for_llm`'s `[exit:N]`) and in the audit event.
+    const NONZERO_EXIT_IS_ERROR: bool = true;
+
+    /// Whether this tool accepts the pipeline's `sudo` / `sudo_user` params.
+    ///
+    /// `true` (the default) is right for every tool whose command is a POSIX
+    /// one: elevation is what makes the specialised tools usable at all on a
+    /// host where the interesting state is root-owned, which is why
+    /// `PrivilegeArgs` was lifted into this pipeline in the first place (see
+    /// [`crate::domain::privilege`]).
+    ///
+    /// Set it to `false` for a tool whose far end is not a POSIX shell, so
+    /// there is no `sudo` there to run. That is not merely a no-op: elevation
+    /// happens at step 5b, BEFORE the blacklist at step 6, and it wraps the
+    /// built command in `sudo -n bash -c '…'` (or `sudo -S -p '' bash -c
+    /// 'exec 0</dev/null; …'` when the host has a `sudo_password` and the
+    /// transport is SSH) — so on a tool that splices
+    /// caller text into its command, `sudo: true` turns that text into a root
+    /// shell. Refusing the param is what keeps the elevation path from being
+    /// an escalation path for such a tool.
+    ///
+    /// Opting out does both halves: the param is not advertised
+    /// ([`ToolHandler::supports_elevation`]), and a request that sends it
+    /// anyway is refused rather than silently stripped — a caller who asked
+    /// for root and got an unelevated run would read the result as the
+    /// elevated one.
+    const ALLOWS_ELEVATION: bool = true;
+
     /// Optional JSON Schema (2020-12) string describing this tool's
     /// `structuredContent` return value. `None` (default) = no contract.
     ///
@@ -90,6 +147,12 @@ pub trait StandardTool: Send + Sync + 'static {
     ///
     /// This is the only method that MUST be implemented per tool.
     /// Return `Ok(command_string)` for the command to execute via SSH.
+    ///
+    /// **No builder may read fd 0.** The SSH channel's stdin is reserved for
+    /// the sudo password (`exec_with_stdin`), which bypasses command
+    /// validation by construction. Today `detach_stdin` redirects the elevated
+    /// child's stdin from `/dev/null`, but that is a safety net, not a licence:
+    /// a command that reads stdin must not be built here.
     fn build_command(args: &Self::Args, host_config: &HostConfig) -> Result<String>;
 
     /// Optional extra validation before command execution.
@@ -205,17 +268,36 @@ pub trait StandardTool: Send + Sync + 'static {
 /// string is `ssh_exec` in disguise, and must call this from `pre_execute` so
 /// it is subject to the same whitelist `ssh_exec` is subject to.
 ///
+/// **One documented exception: `ssh_net_equip_config`.** It splices raw
+/// request text and deliberately does not call this, because the whitelist
+/// judges POSIX command lines and that tool's legitimate payload is a
+/// multi-line Cisco or Juniper config body — whitelisting it would refuse
+/// every real call, while one permissive operator pattern would re-open the
+/// hole. It is bound to hosts tagged `NETWORK_EQUIPMENT_TAG` instead, which is
+/// a control that can actually be aimed at that input. Read
+/// `NetEquipConfigTool::validate` before adding the call here; a test in that
+/// module fails if you do.
+///
+/// `tool` is the caller's own name (its `StandardTool::NAME`) — see
+/// `ExecuteCommandUseCase::log_denied` for why it is mandatory.
+///
 /// # Errors
 ///
 /// Returns [`BridgeError::CommandDenied`] when the security policy rejects the
 /// fragment.
-pub fn validate_free_form_command(ctx: &ToolContext, host: &str, command: &str) -> Result<()> {
+pub fn validate_free_form_command(
+    ctx: &ToolContext,
+    tool: &str,
+    host: &str,
+    command: &str,
+) -> Result<()> {
     if let Err(e) = ctx.execute_use_case.validate(command) {
         let reason = match &e {
             BridgeError::CommandDenied { reason } => reason.clone(),
             _ => e.to_string(),
         };
-        ctx.execute_use_case.log_denied(host, command, &reason);
+        ctx.execute_use_case
+            .log_denied(tool, host, command, &reason);
         return Err(e);
     }
     Ok(())
@@ -223,8 +305,10 @@ pub fn validate_free_form_command(ctx: &ToolContext, host: &str, command: &str) 
 
 /// Generic handler that wraps a [`StandardTool`] and implements [`ToolHandler`].
 ///
-/// The 16-step execution pipeline is implemented once here and reused
-/// for every `StandardTool` implementation via monomorphization.
+/// The execution pipeline is implemented once here and reused for every
+/// `StandardTool` implementation via monomorphization. Its stages are the
+/// `// Step N` comments in [`Self::execute`]; no count is repeated here,
+/// because the one that used to be said 16 and the steps ran 0 to 19.
 pub struct StandardToolHandler<T: StandardTool>(PhantomData<T>);
 
 impl<T: StandardTool> Default for StandardToolHandler<T> {
@@ -269,8 +353,15 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
 
     /// Every standard tool bar the Windows-only ones: elevation is applied by
     /// the shared pipeline, so it works without the handler knowing about it.
+    ///
+    /// [`StandardTool::ALLOWS_ELEVATION`] is the other way out, for a tool
+    /// whose far end is not a POSIX shell at all. Advertising the param and
+    /// then refusing it at step 5b would make the schema lie, and on the CLI
+    /// that lie is load-bearing: `bridge-mcp tool` rejects any key the
+    /// enriched schema does not declare, so leaving it out is what makes
+    /// `sudo=true` fail at parse time there instead of mid-pipeline.
     fn supports_elevation(&self) -> bool {
-        !matches!(T::OS_GUARD, Some(OsType::Windows))
+        T::ALLOWS_ELEVATION && !matches!(T::OS_GUARD, Some(OsType::Windows))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -345,8 +436,59 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             }
         }
 
-        // Step 4: Domain validation (optional)
-        T::validate(&args, host_config)?;
+        // Step 4: Domain validation (optional), and its denial is audited.
+        //
+        // This hook is where the specialised tools enforce what the whitelist
+        // would otherwise enforce for them: `validate_builtin` at step 6
+        // deliberately skips the whitelist *on the assumption that they
+        // validate their own inputs* — see `validate_identifier` in
+        // `domain::use_cases::network_equipment`, which says so in as many
+        // words. Until this call was wrapped, a rejection here left no trace,
+        // while the blacklist denial at step 6 was recorded. So refusals like
+        // `validate_service_name("x; rm -rf /")` were invisible, and that is
+        // what this closes.
+        //
+        // Two things this event does NOT mean, both measured rather than
+        // assumed, because an earlier version of this comment asserted the
+        // opposite and was wrong:
+        //
+        // - **Not every rejection here is `CommandDenied`.** The overwhelming
+        //   majority of the validators reachable from the 90 `validate` bodies
+        //   return it, but `validate_vm_name` and `validate_snapshot_name` in
+        //   `domain::use_cases::hyperv` return `McpInvalidRequest`, and they
+        //   are reached from the five `ssh_hyperv_*` handlers. That is what
+        //   the fallback arm below exists for — it stringifies any other
+        //   variant rather than dropping the reason.
+        // - **Not every rejection here is an attack.** The variant does not
+        //   settle the semantics: `validate_port`, `validate_duration`,
+        //   `validate_dimensions`, `validate_count`, `validate_bench_type`,
+        //   `validate_provider` and `validate_tag_action` all spell a
+        //   typo-class rejection `CommandDenied` ("Invalid port number: '99999'"),
+        //   and hyperv's shape checks (`is_empty`, `len() > 200`) are not
+        //   injection attempts either. A `command_denied` event from THIS site
+        //   therefore means "the tool refused this input", not "an attack was
+        //   refused" — read `reason` before alerting on it.
+        //
+        // Auditing it anyway is the right trade: the alternative is that the
+        // injection refusals in the same set stay invisible. It only ever
+        // fires on a REFUSED call, so it adds no audit volume to normal
+        // operation; a refused call is what an audit log is for.
+        //
+        // The command position is empty on purpose. No command has been built
+        // yet — step 5 is below — and a synthetic one would be a fabrication
+        // that a reader or a log parser could mistake for something that was
+        // going to run. The offending input is not lost where it matters: most
+        // of these validators interpolate it into their `reason` ("Invalid
+        // service name 'x; rm -rf /'"), which is where the forensics belong
+        // when the denial is about an argument rather than about a command.
+        if let Err(e) = T::validate(&args, host_config) {
+            let reason = match &e {
+                BridgeError::CommandDenied { reason } => reason.clone(),
+                _ => e.to_string(),
+            };
+            ctx.execute_use_case.log_denied(T::NAME, &host, "", &reason);
+            return Err(e);
+        }
 
         // Step 4b: Root scope validation for file-operation tools
         for path in T::scoped_paths(&args) {
@@ -367,15 +509,55 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // must see the command that will actually run, not the unelevated one
         // it was built from. Windows has no `sudo`, and the OS guard above has
         // already established which kind of host this is.
-        let command = if host_config.os_type == OsType::Windows {
+        //
+        // A tool that opted out of elevation entirely is refused first, and
+        // with an `Err` rather than the `ToolCallResult::error` the Windows arm
+        // below returns: the Windows arm states a capability of the host ("this
+        // OS has no sudo"), whereas this one is a policy denial of the same
+        // class as the blacklist at step 6 — the tool forbids the param because
+        // honouring it would elevate caller-supplied text — and that class
+        // travels as `CommandDenied` everywhere else in this pipeline.
+        //
+        // Audited like every other denial here. Unlike step 4 this one has a
+        // command to name — the built, not-yet-elevated one — and naming it is
+        // what makes the trail readable: the event records what would have
+        // been wrapped in a root shell, which is the whole point of refusing.
+        if !T::ALLOWS_ELEVATION && privilege.is_elevated() {
+            let reason = format!(
+                "Tool '{}' does not accept 'sudo' or 'sudo_user'. Elevation wraps the \
+                 whole built command in a root shell and is applied before the command \
+                 blacklist, and this tool's command is not one that may be run that \
+                 way. Drop the parameter; there is no host on which it works for this \
+                 tool.",
+                T::NAME
+            );
+            ctx.execute_use_case
+                .log_denied(T::NAME, &host, &command, &reason);
+            return Err(BridgeError::CommandDenied { reason });
+        }
+        //
+        // The host's `sudo_password`, if any, travels as `stdin` — the bytes
+        // `sudo -S` reads on the SSH channel — and never in the command line,
+        // where the remote `ps` would show it. It is borrowed at step 11, not
+        // moved: the retry closure may run more than once.
+        let (command, stdin) = if host_config.os_type == OsType::Windows {
             if privilege.is_elevated() {
                 return Ok(ToolCallResult::error(format!(
                     "'sudo' is not supported on Windows host '{host}'."
                 )));
             }
-            command
+            (command, None)
         } else {
-            crate::domain::privilege::elevate(&command, &privilege)
+            // Only asked when elevation is: the helper warns on a non-SSH host,
+            // and that must not fire on every call of every tool.
+            let password = if privilege.is_elevated() {
+                host_config.sudo_password_for_exec(&host)
+            } else {
+                None
+            };
+            let elevated =
+                crate::domain::privilege::elevate_with_password(&command, &privilege, password);
+            (elevated.command, elevated.stdin)
         };
 
         // Step 6: Validate against security policy
@@ -385,7 +567,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied_for_tool(T::NAME, &host, &command, &reason);
+                .log_denied(T::NAME, &host, &command, &reason);
             return Err(e);
         }
 
@@ -464,6 +646,8 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 && annotations.destructive_hint != Some(true));
 
         let cancel_token = ctx.cancel_token.clone();
+        // Borrowed by the `async ||` closure below, which retry may call again.
+        let stdin_bytes: Option<&[u8]> = stdin.as_ref().map(|s| s.as_bytes());
         let output = with_retry_if(
             &retry_config,
             T::NAME,
@@ -479,10 +663,10 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                         () = token.cancelled() => {
                             Err(BridgeError::Cancelled)
                         }
-                        r = conn.exec(&command, &limits) => r,
+                        r = conn.exec_with_stdin(&command, stdin_bytes, &limits) => r,
                     }
                 } else {
-                    conn.exec(&command, &limits).await
+                    conn.exec_with_stdin(&command, stdin_bytes, &limits).await
                 };
 
                 match result {
@@ -496,15 +680,19 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             |e| is_retryable_error_for(e, safe_to_replay),
         )
         .await;
+        // The retry loop is done with the secret: wipe it now rather than at
+        // the end of `execute`, across `process_success` and the truncation
+        // awaits.
+        drop(stdin);
 
         // Step 12: Log failure
         let output = output.inspect_err(|e| {
             ctx.execute_use_case
-                .log_failure_for_tool(T::NAME, &host, &command, &e.to_string());
+                .log_failure(T::NAME, &host, &command, &e.to_string());
         })?;
 
         // Step 13: Process success (audit + history + sanitize)
-        let mut response = ctx.execute_use_case.process_success_for_tool(
+        let mut response = ctx.execute_use_case.process_success(
             T::NAME,
             &host,
             &command,
@@ -609,6 +797,30 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         // structured() returned None (backward-compat with App-based tools).
         if result.structured_content.is_none() {
             result = auto_populate_structured_content(result);
+        }
+
+        // Step 19: A failed remote command becomes a failed tool call.
+        //
+        // Step 14 above only `warn!`s. Without this step the response for a
+        // command that exited non-zero was an ordinary `ToolCallResult::text`
+        // with `is_error: None` — the failure appeared solely as the
+        // `[exit:N]` prefix `format_for_llm` writes into the text, which is
+        // presentation, not something a caller can test. The CLI derived its
+        // process exit code from `is_error` and so exited 0, and
+        // `bridge-mcp tool … && next` kept going after a failure.
+        //
+        // This runs last, after `post_process` / `enrich`, because the remote
+        // exit code is the authoritative statement about whether the command
+        // worked; a presentation hook must not be able to talk over it. Tools
+        // whose command answers *by* its exit status opt out through
+        // `NONZERO_EXIT_IS_ERROR` — for them nothing here applies and the code
+        // stays in the text only.
+        if T::NONZERO_EXIT_IS_ERROR && response.exit_code != 0 {
+            // `unwrap_or(1)` mirrors `run_exec_in_context`: no real process
+            // exit code overflows `i32`, and any value that did would still
+            // have to read as a failure rather than as a success.
+            let code = i32::try_from(response.exit_code).unwrap_or(1);
+            result = result.with_remote_exit_code(code);
         }
 
         Ok(result)
@@ -1244,6 +1456,65 @@ mod tests {
             .execute(Some(json!({"host": "server1"})), &ctx)
             .await;
         assert!(result.is_err());
+    }
+
+    /// A `T::validate` rejection is audited, for every tool on this pipeline
+    /// and not just the one that prompted it.
+    ///
+    /// Step 4 is where 90 handlers enforce the input rules that stand in for
+    /// the whitelist `validate_builtin` skips on their behalf — a rejection
+    /// there is a policy denial of the same class as the blacklist at step 6,
+    /// and until this was wired it was the one denial class in the pipeline
+    /// that left no trace. `MockValidatingTool` refuses with
+    /// `BridgeError::Config`, not `CommandDenied`, which also covers the
+    /// fallback arm that stringifies any other variant rather than dropping
+    /// the reason.
+    ///
+    /// The `command` field is empty on purpose: no command exists at step 4,
+    /// and the offending input belongs in `reason`, where each validator
+    /// already names it.
+    #[tokio::test]
+    async fn a_validate_rejection_is_audited() {
+        let handler = StandardToolHandler::<MockValidatingTool>::new();
+        let ctx = create_test_context_with_host();
+        let _ = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .expect_err("MockValidatingTool always refuses");
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected one denial event: {events:?}");
+        let e = &events[0];
+        assert_eq!(e.event_type, "command_denied");
+        assert_eq!(e.host, "server1");
+        assert_eq!(e.tool_name.as_deref(), Some(MockValidatingTool::NAME));
+        assert_eq!(e.command, "", "no command is built before step 4");
+        match &e.result {
+            crate::security::CommandResult::Denied { reason } => assert!(
+                reason.contains("validation failed"),
+                "the validator's reason must survive, whatever the variant: {reason}"
+            ),
+            r => panic!("expected Denied, got {r:?}"),
+        }
+    }
+
+    /// The negative half: a tool that passes `validate` logs no denial. Without
+    /// it, a step 4 that audited unconditionally would satisfy the test above.
+    #[tokio::test]
+    async fn a_passing_validate_audits_no_denial() {
+        let handler = StandardToolHandler::<MockLinuxTool>::new();
+        let ctx = create_test_context_with_host();
+        let _ = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await;
+
+        let denials: Vec<_> = ctx
+            .audit_logger
+            .drain_for_test()
+            .into_iter()
+            .filter(|e| e.event_type == "command_denied")
+            .collect();
+        assert!(denials.is_empty(), "no denial expected: {denials:?}");
     }
 
     #[tokio::test]
@@ -1896,6 +2167,138 @@ mod tests {
         assert!(text.contains("exit") || text.contains("error output"));
     }
 
+    /// The defect: the pipeline only `warn!`ed on a non-zero remote exit and
+    /// returned an ordinary `ToolCallResult::text`, whose `is_error` is
+    /// `None`. The failure existed only as the `[exit:N]` text prefix, so the
+    /// CLI derived exit 0 and an MCP client saw a successful call.
+    #[tokio::test]
+    async fn a_failed_remote_command_produces_a_failed_tool_call() {
+        let handler = StandardToolHandler::<MockTool>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output_with_exit("boom", 3),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "a remote command that exited 3 must mark the tool call as failed"
+        );
+        assert_eq!(
+            result.remote_exit_code,
+            Some(3),
+            "and the remote code must travel as data, so the CLI can tell it \
+             apart from a bridge-side error"
+        );
+    }
+
+    /// A success must not be labelled a failure, and must make no claim about
+    /// a remote exit code: `Some(0)` would be harmless for the CLI but it
+    /// would still be asserting something the field is not for.
+    #[tokio::test]
+    async fn a_successful_remote_command_makes_no_failure_claim() {
+        let handler = StandardToolHandler::<MockTool>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output("fine"),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, None, "a successful call is not an error");
+        assert_eq!(result.remote_exit_code, None);
+    }
+
+    /// The opt-out: a tool whose command answers *by* its exit status (a
+    /// search that found nothing, a comparison that found a difference) sets
+    /// `NONZERO_EXIT_IS_ERROR = false`, and a non-zero exit stays a normal
+    /// result. Without a working opt-out the blanket rule would turn every
+    /// such answer into a failed call and a non-zero process exit.
+    #[tokio::test]
+    async fn a_tool_that_answers_by_its_exit_status_can_opt_out() {
+        struct MockExitStatusIsTheAnswer;
+        impl StandardTool for MockExitStatusIsTheAnswer {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_exit_status_answer";
+            const DESCRIPTION: &'static str = "Mock tool whose exit code is the answer";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            const NONZERO_EXIT_IS_ERROR: bool = false;
+            fn build_command(_a: &MockArgs, _h: &HostConfig) -> Result<String> {
+                Ok("echo".to_string())
+            }
+        }
+
+        let handler = StandardToolHandler::<MockExitStatusIsTheAnswer>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output_with_exit("nothing matched", 1),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.is_error, None,
+            "an opted-out tool's non-zero exit is a normal answer"
+        );
+        assert_eq!(
+            result.remote_exit_code, None,
+            "and it must not be reported to the CLI as a remote failure"
+        );
+        // The code is still visible to a reader — nothing was removed.
+        let crate::ports::protocol::ToolContent::Text { text } = &result.content[0] else {
+            panic!("Expected text content")
+        };
+        assert!(
+            text.starts_with("[exit:1]"),
+            "the [exit:N] text stays for the reader, got {text:?}"
+        );
+    }
+
+    /// The remote exit code is authoritative: it is applied after
+    /// `post_process` and `enrich`, so a presentation hook cannot talk over a
+    /// failure by returning a result of its own.
+    #[tokio::test]
+    async fn a_post_process_hook_cannot_mask_a_remote_failure() {
+        struct MockMaskingTool;
+        impl StandardTool for MockMaskingTool {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_masking";
+            const DESCRIPTION: &'static str = "Mock tool whose post_process rebuilds the result";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            fn build_command(_a: &MockArgs, _h: &HostConfig) -> Result<String> {
+                Ok("echo".to_string())
+            }
+            fn post_process(
+                _result: ToolCallResult,
+                _args: &MockArgs,
+                _output: &str,
+                _dr: &crate::domain::data_reduction::DataReductionArgs,
+            ) -> ToolCallResult {
+                // A fresh result: `is_error` is `None` again.
+                ToolCallResult::text("looks fine to me")
+            }
+        }
+
+        let handler = StandardToolHandler::<MockMaskingTool>::new();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            server1_hosts(),
+            mock_output_with_exit("boom", 2),
+        );
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.remote_exit_code, Some(2));
+    }
+
     #[tokio::test]
     async fn test_full_pipeline_with_timeout_override() {
         let handler = StandardToolHandler::<MockTool>::new();
@@ -2219,6 +2622,146 @@ mod tests {
             result.is_ok(),
             "MockArgs declares neither param, yet the call must succeed: {result:?}"
         );
+    }
+
+    /// A host's `sudo_password` must reach a pipeline tool as stdin, and only
+    /// as stdin. Both halves are asserted: a pipeline that built the right
+    /// command but dropped the password would pass the first alone and fail
+    /// every `sudo -S` on a real host with no other symptom.
+    #[tokio::test]
+    async fn sudo_password_travels_on_stdin_and_not_in_the_command() {
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let (command, stdin) = &calls[0];
+        assert!(
+            command.contains("sudo -S"),
+            "must elevate with -S: {command}"
+        );
+        assert!(
+            !command.contains("hunter2-pw"),
+            "password leaked into the command: {command}"
+        );
+        assert_eq!(
+            stdin.as_deref(),
+            Some(b"hunter2-pw\n".as_slice()),
+            "password must arrive on stdin, newline-terminated"
+        );
+    }
+
+    /// Without `sudo`, a configured password must not be sent anywhere.
+    #[tokio::test]
+    async fn sudo_password_is_not_sent_when_no_elevation_is_asked() {
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None);
+        assert!(!calls[0].0.contains("hunter2-pw"));
+    }
+
+    /// A tool that opted out of elevation is refused before the password is
+    /// read: nothing reaches a connection at all.
+    #[tokio::test]
+    async fn sudo_password_is_unreachable_on_a_tool_that_opts_out() {
+        struct NoElevTool;
+        impl StandardTool for NoElevTool {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_no_elevation";
+            const DESCRIPTION: &'static str = "Mock tool opting out of elevation";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            const ALLOWS_ELEVATION: bool = false;
+
+            fn build_command(_args: &MockArgs, _host_config: &HostConfig) -> Result<String> {
+                Ok("echo hi".to_string())
+            }
+        }
+
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<NoElevTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            ctx.connection_pool.mock_calls(),
+            [] as [(String, Option<Vec<u8>>); 0],
+            "the ALLOWS_ELEVATION refusal must fire before any connection is made"
+        );
+    }
+
+    /// An empty `sudo_password` is no password: it must not switch the tool
+    /// to `sudo -S` and send a bare newline (a failed PAM auth per call).
+    #[tokio::test]
+    async fn an_empty_sudo_password_is_treated_as_absent() {
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from(""));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None);
+        assert!(calls[0].0.contains("sudo -n "), "{}", calls[0].0);
+    }
+
+    /// Off SSH there is no channel stdin: keep `sudo -n`, send no password.
+    #[cfg(feature = "telnet")]
+    #[tokio::test]
+    async fn a_non_ssh_host_keeps_sudo_n_and_sends_no_password() {
+        let mut hosts = server1_hosts();
+        let h = hosts.get_mut("server1").unwrap();
+        h.sudo_password = Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        h.protocol = crate::config::Protocol::Telnet;
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None, "stdin must never be Some off SSH");
+        assert!(calls[0].0.contains("sudo -n "), "{}", calls[0].0);
+        assert!(!calls[0].0.contains("hunter2-pw"));
     }
 
     #[tokio::test]

@@ -69,7 +69,7 @@ mod tests {
     fn test_schema() {
         let handler = SshTunnelListHandler;
         assert_eq!(handler.name(), "ssh_tunnel_list");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_tunnel_list");
@@ -82,7 +82,7 @@ mod tests {
 
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         assert_eq!(schema_json["type"], "object");
-        assert!(schema_json["required"].as_array().unwrap().is_empty());
+        assert_eq!(schema_json["required"].as_array().unwrap().first(), None);
     }
 
     #[tokio::test]

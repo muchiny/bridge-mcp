@@ -154,7 +154,7 @@ impl ToolHandler for SshAwxCredentialsHandler {
 
         let raw = ctx
             .execute_use_case
-            .process_success(host, &cmd, &output.into())
+            .process_success(self.name(), host, &cmd, &output.into(), &[])
             .stdout;
         let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction_recorded(
@@ -210,7 +210,7 @@ mod tests {
     fn test_schema() {
         let handler = SshAwxCredentialsHandler;
         assert_eq!(handler.name(), "ssh_awx_credentials");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_awx_credentials");

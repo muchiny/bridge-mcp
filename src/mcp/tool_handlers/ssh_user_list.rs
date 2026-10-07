@@ -215,7 +215,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = UserListTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         // Default: system=false, should filter UID >= 1000
         assert!(cmd.contains("awk") || cmd.contains("getent") || cmd.contains("passwd"));
     }
@@ -229,7 +229,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = UserListTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]

@@ -15,8 +15,6 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
 use crate::config::{HostConfig, ShellType};
 
-use super::utils::shell_escape;
-
 /// Arguments for `ssh_session_exec` tool
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +73,49 @@ impl SshSessionExecHandler {
     }"#;
 }
 
+/// Build the (possibly elevated) command to run in the session.
+///
+/// Elevation is a domain decision: `privilege::elevate*` wraps the whole line
+/// (`sudo -n bash -c '<all>'`, or the `printf … | sudo -S -p '' bash -c
+/// 'exec 0</dev/null; <all>'` pipe form when the host has a `sudo_password`).
+/// Prefixing it here would only elevate the first process; see the docs of
+/// `domain::privilege::elevate`.
+fn build_command(
+    args: &SshSessionExecArgs,
+    session_host_config: Option<&HostConfig>,
+    effective_shell: ShellType,
+) -> String {
+    if effective_shell != ShellType::Posix {
+        return args.command.clone();
+    }
+
+    let privilege = crate::domain::privilege::PrivilegeArgs {
+        sudo: args.sudo.unwrap_or(false),
+        sudo_user: args.sudo_user.clone(),
+    };
+    // Only cloned when elevation is actually requested: `sudo_password` is a
+    // `RedactedSecret` and this keeps its lifetime as narrow as the sudo
+    // branch it's used in, not every Posix command on this session.
+    let sudo_password = if privilege.sudo {
+        session_host_config
+            .and_then(|h| h.sudo_password.clone())
+            .filter(|p| !p.is_empty())
+    } else {
+        None
+    };
+    if sudo_password.is_some() {
+        tracing::warn!(
+            "Using sudo with password via stdin. \
+             Consider configuring NOPASSWD in sudoers for better security."
+        );
+    }
+    crate::domain::privilege::elevate_with_password_via_pipe(
+        &args.command,
+        &privilege,
+        sudo_password.as_deref(),
+    )
+}
+
 #[async_trait]
 impl ToolHandler for SshSessionExecHandler {
     fn name(&self) -> &'static str {
@@ -122,7 +163,7 @@ impl ToolHandler for SshSessionExecHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(audit_host, &args.command, &reason);
+                .log_denied(self.name(), audit_host, &args.command, &reason);
             return Err(e);
         }
 
@@ -137,29 +178,7 @@ impl ToolHandler for SshSessionExecHandler {
         let effective_shell =
             session_host_config.map_or(ShellType::Posix, HostConfig::effective_shell);
 
-        // Wrap command with sudo if requested (POSIX only; no-op on Windows)
-        let command = if args.sudo.unwrap_or(false) && effective_shell == ShellType::Posix {
-            let sudo_user = args.sudo_user.as_deref().unwrap_or("root");
-            let sudo_password = session_host_config.and_then(|h| h.sudo_password.clone());
-
-            if let Some(ref password) = sudo_password {
-                tracing::warn!(
-                    "Using sudo with password via stdin. \
-                     Consider configuring NOPASSWD in sudoers for better security."
-                );
-                // Use printf in a subshell to reduce password visibility in process list
-                format!(
-                    "printf '%s\\n' {} | sudo -S -u {} {}",
-                    shell_escape(password),
-                    shell_escape(sudo_user),
-                    args.command
-                )
-            } else {
-                format!("sudo -n -u {} {}", shell_escape(sudo_user), args.command)
-            }
-        } else {
-            args.command.clone()
-        };
+        let command = build_command(&args, session_host_config, effective_shell);
 
         info!(
             session_id = %args.session_id,
@@ -173,8 +192,12 @@ impl ToolHandler for SshSessionExecHandler {
             .exec(&args.session_id, &command, timeout_secs)
             .await
             .inspect_err(|e| {
-                ctx.execute_use_case
-                    .log_failure(audit_host, &args.command, &e.to_string());
+                ctx.execute_use_case.log_failure(
+                    self.name(),
+                    audit_host,
+                    &args.command,
+                    &e.to_string(),
+                );
             })?;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -182,8 +205,13 @@ impl ToolHandler for SshSessionExecHandler {
         // own response, so it must record the trace itself. `args.command` —
         // not `command` — because the latter carries the shell wrapper the
         // handler added, and the audit answers "what did the caller ask for".
-        ctx.execute_use_case
-            .log_success(audit_host, &args.command, result.exit_code, duration_ms);
+        ctx.execute_use_case.log_success(
+            self.name(),
+            audit_host,
+            &args.command,
+            result.exit_code,
+            duration_ms,
+        );
 
         if result.exit_code != 0 {
             warn!(
@@ -319,7 +347,7 @@ mod tests {
     fn test_schema() {
         let handler = SshSessionExecHandler;
         assert_eq!(handler.name(), "ssh_session_exec");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_session_exec");

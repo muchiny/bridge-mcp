@@ -11,7 +11,7 @@ use std::time::Instant;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, ShellType};
 use crate::domain::ExecuteCommandUseCase;
 use crate::domain::OutputCache;
 use crate::domain::output_truncator::truncate_output_with_cache;
@@ -21,7 +21,7 @@ use crate::mcp_tool;
 use crate::ports::ExecutorRouter;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::security::RateLimiter;
-use crate::ssh::{is_retryable_error, with_retry_if};
+use crate::ssh::{is_retryable_error_for, with_retry_if};
 
 use super::utils::shell_escape;
 
@@ -71,6 +71,18 @@ struct HostResult {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
+}
+
+/// Le code de sortie à remonter, ou `None` quand il n'a pas de référent unique.
+///
+/// Le garde compte les hôtes *demandés*, pas seulement les résultats : une
+/// tâche qui panique fait perdre un `HostResult`, et deux hôtes dont un
+/// panique donnent un seul résultat, qui n'est pas un appel mono-hôte.
+fn single_host_exit(results: &[HostResult], requested_hosts: usize) -> Option<u32> {
+    match results {
+        [only] if requested_hosts == 1 => only.exit_code,
+        _ => None,
+    }
 }
 
 /// Aggregated results for all hosts
@@ -301,6 +313,25 @@ impl ToolHandler for SshExecMultiHandler {
         let succeeded = results.iter().filter(|r| r.success).count();
         let failed = results.len() - succeeded;
 
+        // Le fait, pas le verdict — et seulement quand il a un référent unique.
+        //
+        // Un seul hôte : le code de sortie distant est celui-là, et il remonte
+        // comme pour `ssh_exec`, et pour le même motif on ne pose PAS
+        // `is_error` (l'appelant a choisi la ligne ; `grep` qui ne trouve rien
+        // sort 1 sans avoir échoué).
+        //
+        // Plusieurs hôtes : rien n'est posé, délibérément. Le compteur `failed`
+        // ci-dessus confond « la ligne a rendu non nul » et « l'hôte est
+        // injoignable » — `HostResult::success` est faux dans les deux cas —
+        // donc le mapper ferait dire au code 6 « le bridge n'a pas joint un
+        // hôte », en re-confondant précisément ce que 6 existe pour séparer.
+        // Le cas fan-out demeure donc ouvert plutôt que mal répondu.
+        //
+        // `exit_code` vaut `None` quand l'hôte n'a rien exécuté (annulation,
+        // quota de débit, échec de connexion) : ce cas ne prétend alors rien
+        // non plus.
+        let single_host_exit = single_host_exit(&results, args.hosts.len());
+
         // Optional: compute a multi-host diff (Sprint 3 Phase B.7).
         // Runs against whatever succeeded — failed hosts still appear
         // in the diff with their error output, which is usually what
@@ -358,7 +389,13 @@ impl ToolHandler for SshExecMultiHandler {
             }
         }
 
-        Ok(ToolCallResult::text(json_output))
+        let result = ToolCallResult::text(json_output);
+        if let Some(code) = single_host_exit.filter(|c| *c != 0) {
+            let code = i32::try_from(code).unwrap_or(1);
+            return Ok(result.with_remote_exit_code_only(code));
+        }
+
+        Ok(result)
     }
 }
 
@@ -421,20 +458,58 @@ async fn execute_on_host(
     };
 
     // Wrap command with sudo if requested
-    let wrapped_command = if use_sudo {
-        if let Some(ref password) = host_config.sudo_password {
-            format!(
-                "echo {} | sudo -S -u {} {}",
-                shell_escape(password),
-                shell_escape(&sudo_user),
-                command
-            )
-        } else {
-            format!("sudo -n -u {} {}", shell_escape(&sudo_user), command)
+    //
+    // Elevation is a domain decision: `privilege::elevate*` wraps the whole
+    // line (`sudo -n bash -c '<all>'`, or `sudo -S -p '' bash -c 'exec
+    // 0</dev/null; <all>'` when the host has a `sudo_password` and the
+    // transport is SSH). Prefixing it here would only elevate the first
+    // process; see the docs of `domain::privilege::elevate`.
+    //
+    // Like `ssh_exec`: the POSIX sudo wrapper only makes sense on a POSIX host.
+    // On a Windows host it failed, and the password still went into that
+    // host's command line.
+    if use_sudo && host_config.effective_shell() != ShellType::Posix {
+        // Per-host refusal: the other hosts of the call still run. Ignoring
+        // `sudo` silently would let an unelevated command report `success`.
+        // Same intent as step 5b of `standard_tool.rs` (refuse rather than
+        // silently downgrade the privilege), but neither the condition nor the
+        // wording is its own: 5b tests the OS (`os_type == Windows`), this
+        // tests the effective shell, which a `shell:` override can make
+        // non-POSIX on a Linux host.
+        if fail_fast {
+            cancel_token.cancel();
         }
+        return HostResult {
+            host: host_name.clone(),
+            success: false,
+            exit_code: None,
+            output: None,
+            error: Some(format!(
+                "'sudo' requires a POSIX shell; host '{host_name}' uses '{}'.",
+                format!("{:?}", host_config.effective_shell()).to_lowercase()
+            )),
+            duration_ms: Some(elapsed_ms(&start)),
+        };
+    }
+    let elevated = if use_sudo {
+        let privilege = crate::domain::privilege::PrivilegeArgs {
+            sudo: use_sudo,
+            sudo_user: Some(sudo_user.to_string()),
+        };
+        crate::domain::privilege::elevate_with_password(
+            &command,
+            &privilege,
+            host_config.sudo_password_for_exec(&host_name),
+        )
     } else {
-        command.clone()
+        crate::domain::privilege::Elevated {
+            command: command.clone(),
+            stdin: None,
+        }
     };
+    // The password travels on the channel's stdin, not in the remote argv.
+    let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
+    let wrapped_command = &elevated.command;
 
     // Build the actual command (with optional cd)
     let full_command = working_dir.as_ref().map_or_else(
@@ -466,7 +541,10 @@ async fn execute_on_host(
                 .get_connection_with_jump(&host_name, host_config, &limits, jump_host)
                 .await?;
 
-            match conn.exec(&full_command, &limits).await {
+            match conn
+                .exec_with_stdin(&full_command, stdin_bytes, &limits)
+                .await
+            {
                 Ok(output) => Ok(output),
                 Err(e) => {
                     conn.mark_failed();
@@ -474,15 +552,26 @@ async fn execute_on_host(
                 }
             }
         },
-        is_retryable_error,
+        // Like `ssh_exec`: the command is arbitrary and a timeout does not
+        // prove it did not run. Replaying also replayed the password.
+        |e| is_retryable_error_for(e, false),
     )
     .await;
+    // The retry loop is done with the secret: wipe it now rather than at the
+    // end of the function, across `process_success` and the truncation awaits.
+    drop(elevated);
 
     let duration_ms = Some(elapsed_ms(&start));
 
     match output {
         Ok(output) => {
-            let response = execute_use_case.process_success(&host_name, &command, &output.into());
+            let response = execute_use_case.process_success(
+                "ssh_exec_multi",
+                &host_name,
+                &command,
+                &output.into(),
+                &[],
+            );
             let truncated = truncate_output_with_cache(
                 &response.output,
                 max_chars,
@@ -505,7 +594,7 @@ async fn execute_on_host(
             }
         }
         Err(e) => {
-            execute_use_case.log_failure(&host_name, &command, &e.to_string());
+            execute_use_case.log_failure("ssh_exec_multi", &host_name, &command, &e.to_string());
 
             if fail_fast {
                 cancel_token.cancel();
@@ -536,6 +625,35 @@ mod tests {
     use crate::ports::mock::create_test_context;
     use serde_json::json;
     use std::collections::HashMap;
+
+    fn host_result(exit_code: Option<u32>) -> HostResult {
+        HostResult {
+            host: "h".to_string(),
+            success: exit_code == Some(0),
+            exit_code,
+            output: None,
+            error: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn single_host_exit_reports_the_code_for_one_requested_host() {
+        assert_eq!(single_host_exit(&[host_result(Some(1))], 1), Some(1));
+    }
+
+    #[test]
+    fn single_host_exit_is_none_when_a_task_was_lost() {
+        // Deux hôtes demandés, un seul résultat (JoinError) : pas mono-hôte.
+        assert_eq!(single_host_exit(&[host_result(Some(1))], 2), None);
+    }
+
+    #[test]
+    fn single_host_exit_is_none_for_several_results_or_no_code() {
+        let two = [host_result(Some(1)), host_result(Some(2))];
+        assert_eq!(single_host_exit(&two, 2), None);
+        assert_eq!(single_host_exit(&[host_result(None)], 1), None);
+    }
 
     fn create_test_context_with_hosts() -> ToolContext {
         let mut hosts = HashMap::new();
@@ -632,11 +750,128 @@ mod tests {
         crate::ports::mock::create_test_context_with_hosts(hosts)
     }
 
+    /// Les mêmes trois hôtes, mais avec une sortie distante simulée et une
+    /// config qui autorise la commande — en mode `Standard` par défaut la
+    /// liste blanche est vide et `validator.rs` refuse tout, bien avant que le
+    /// handler atteigne son propre code.
+    fn ctx_permissive_with_exit(exit_code: u32) -> ToolContext {
+        use crate::config::{SecurityConfig, SecurityMode};
+
+        let mut config = (*create_test_context_with_hosts().config).clone();
+        config.security = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            blacklist: vec![],
+            ..SecurityConfig::default()
+        };
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code,
+                duration_ms: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_single_host_nonzero_exit_is_a_fact_without_a_verdict() {
+        let ctx = ctx_permissive_with_exit(1);
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({"hosts": ["server1"], "command": "false"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code,
+            Some(1),
+            "le fait remonte : {result:?}"
+        );
+        assert_eq!(
+            result.is_error, None,
+            "le verdict n'est pas posé : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_windows_host_fails_that_host_only() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        config.hosts.get_mut("server1").expect("server1").os_type = crate::config::OsType::Windows;
+        ctx.config = Arc::new(config);
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({
+                    "hosts": ["server1", "server2"],
+                    "command": "id",
+                    "sudo": true
+                })),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ToolContent::Text { text } => text.clone(),
+            other => panic!("contenu texte attendu, obtenu {other:?}"),
+        };
+        assert!(
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'cmd'."),
+            "{text}"
+        );
+        assert!(text.contains("\"failed\":1"), "{text}");
+        assert!(text.contains("\"succeeded\":1"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_single_host_zero_exit_claims_nothing() {
+        let ctx = ctx_permissive_with_exit(0);
+        let result = SshExecMultiHandler
+            .execute(Some(json!({"hosts": ["server1"], "command": "true"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "une commande qui réussit ne pose aucun code : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_claims_nothing_even_when_every_host_failed() {
+        // Épingle l'abstention décrite au-dessus de `single_host_exit` : avec
+        // plusieurs hôtes, `failed` vaut 2 et pourtant rien n'est posé, parce
+        // que ce compteur ne distingue pas « la ligne a rendu non nul » de
+        // « l'hôte est injoignable ». Mapper `failed > 0` ferait dire au code
+        // 6 quelque chose qu'il a été créé pour ne PAS dire.
+        let ctx = ctx_permissive_with_exit(1);
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({"hosts": ["server1", "server2"], "command": "false"})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ToolContent::Text { text } => text.clone(),
+            other => panic!("contenu texte attendu, obtenu {other:?}"),
+        };
+        assert!(
+            text.contains("\"failed\":2"),
+            "les deux hôtes doivent avoir rendu non nul, sinon ce test \
+             n'atteint pas le cas fan-out : {text}"
+        );
+        assert_eq!(
+            result.remote_exit_code, None,
+            "le fan-out s'abstient : {result:?}"
+        );
+    }
+
     #[test]
     fn test_schema() {
         let handler = SshExecMultiHandler;
         assert_eq!(handler.name(), "ssh_exec_multi");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -757,7 +992,7 @@ mod tests {
     #[test]
     fn test_handler_description_not_empty() {
         let handler = SshExecMultiHandler;
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         assert!(handler.description().contains("parallel"));
     }
 
@@ -1060,6 +1295,6 @@ mod tests {
         });
 
         let args: SshExecMultiArgs = serde_json::from_value(json).unwrap();
-        assert!(args.hosts.is_empty());
+        assert_eq!(args.hosts, [] as [std::string::String; 0]);
     }
 }

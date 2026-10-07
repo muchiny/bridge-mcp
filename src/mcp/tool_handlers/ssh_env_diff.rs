@@ -175,7 +175,7 @@ mod tests {
     fn test_schema() {
         let handler = SshEnvDiffHandler::new();
         assert_eq!(handler.name(), "ssh_env_diff");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         let required = schema_json["required"].as_array().unwrap();

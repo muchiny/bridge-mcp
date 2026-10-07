@@ -95,7 +95,7 @@ mod tests {
     fn test_schema() {
         let handler = SshSessionCloseHandler;
         assert_eq!(handler.name(), "ssh_session_close");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_session_close");

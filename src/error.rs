@@ -1,5 +1,12 @@
 use thiserror::Error;
 
+/// The `SshExec` reason for a stdin handed to a non-SSH transport.
+///
+/// Shared with the retry test so a reword cannot silently make this
+/// deterministic refusal retryable: `is_retryable_error` reads "channel" or
+/// "connection" in an `SshExec` reason as transient.
+pub const STDIN_NOT_SSH_REASON: &str = "stdin is only supported on the SSH transport";
+
 /// Every error this crate produces.
 ///
 /// F5 (re-review of the 2026-08-19 audit corrections): this enum is
@@ -160,6 +167,9 @@ pub enum BridgeError {
     /// AWX (expired token → 401, RBAC → 403, bad id → 404, validation → 400) is
     /// reported as an error instead of being handed to the model as an opaque
     /// success. `detail` carries the AWX `detail`/`__all__` message when present.
+    ///
+    /// `status: 0` is not an HTTP status: it means curl obtained none (transport
+    /// failure: connection refused, timeout, DNS; curl's `%{http_code}` was `000`).
     #[error("AWX API error: HTTP {status} - {detail}")]
     AwxApi { status: u16, detail: String },
 

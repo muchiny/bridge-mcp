@@ -281,7 +281,7 @@ tmpfs          tmpfs     1.6G  166M  1.5G  11% /run
     fn test_schema() {
         let handler = SshStorageDfHandler::new();
         assert_eq!(handler.name(), "ssh_storage_df");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_storage_df");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -393,7 +393,7 @@ tmpfs          tmpfs     1.6G  166M  1.5G  11% /run
         let args: SshStorageDfArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = StorageDfTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("df"));
     }
 

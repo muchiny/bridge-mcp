@@ -151,7 +151,7 @@ impl ToolHandler for SshMetricsHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(&args.host, &command, &reason);
+                .log_denied(self.name(), &args.host, &command, &reason);
             return Err(e);
         }
 
@@ -212,15 +212,19 @@ impl ToolHandler for SshMetricsHandler {
 
         let output = output.inspect_err(|e| {
             ctx.execute_use_case
-                .log_failure(&args.host, &command, &e.to_string());
+                .log_failure(self.name(), &args.host, &command, &e.to_string());
         })?;
 
         let system_metrics = parse_sections(&output.stdout, &args.host, &args.metrics);
 
         // Log in history
-        let _ = ctx
-            .execute_use_case
-            .process_success(&args.host, &command, &output.into());
+        let _ = ctx.execute_use_case.process_success(
+            self.name(),
+            &args.host,
+            &command,
+            &output.into(),
+            &[],
+        );
 
         // Serialize to JSON and sanitize output
         let json_output = serde_json::to_string(&system_metrics)
@@ -303,7 +307,7 @@ mod tests {
     fn test_schema() {
         let handler = SshMetricsHandler;
         assert_eq!(handler.name(), "ssh_metrics");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();

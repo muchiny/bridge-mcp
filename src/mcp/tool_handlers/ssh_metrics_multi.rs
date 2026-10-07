@@ -300,6 +300,7 @@ impl ToolHandler for SshMetricsMultiHandler {
         for result in &sorted_results {
             if result.success {
                 let _ = ctx.execute_use_case.process_success(
+                    self.name(),
                     &result.host,
                     &command,
                     &CommandOutput {
@@ -308,6 +309,7 @@ impl ToolHandler for SshMetricsMultiHandler {
                         exit_code: 0,
                         duration_ms: result.duration_ms.unwrap_or(0),
                     },
+                    &[],
                 );
             }
         }
@@ -605,7 +607,7 @@ mod tests {
     fn test_schema() {
         let handler = SshMetricsMultiHandler;
         assert_eq!(handler.name(), "ssh_metrics_multi");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();

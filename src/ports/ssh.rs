@@ -301,8 +301,8 @@ mod tests {
             duration_ms: 0,
         };
 
-        assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout, "");
+        assert_eq!(output.stderr, "");
     }
 
     #[test]
@@ -322,13 +322,19 @@ mod tests {
     #[tokio::test]
     async fn test_mock_executor_new() {
         let mock = mock::MockSshExecutor::new();
-        assert!(mock.get_executed().is_empty());
+        assert_eq!(
+            mock.get_executed(),
+            [] as [(std::string::String, std::string::String); 0]
+        );
     }
 
     #[tokio::test]
     async fn test_mock_executor_default() {
         let mock = mock::MockSshExecutor::default();
-        assert!(mock.get_executed().is_empty());
+        assert_eq!(
+            mock.get_executed(),
+            [] as [(std::string::String, std::string::String); 0]
+        );
     }
 
     #[tokio::test]
@@ -342,7 +348,7 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output.exit_code, 0);
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, "");
     }
 
     #[tokio::test]

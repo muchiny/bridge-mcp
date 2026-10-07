@@ -167,7 +167,7 @@ mod tests {
     fn test_schema() {
         let handler = SshConfigGetHandler;
         assert_eq!(handler.name(), "ssh_config_get");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_config_get");

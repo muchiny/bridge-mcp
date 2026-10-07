@@ -770,6 +770,112 @@ bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 | 3 | SSH connection error |
 | 4 | Security denial |
 | 5 | Configuration error |
+| 6 | The remote command exited non-zero on the target host |
+
+**Codes 3, 4 and 6 are specific to `bridge-mcp tool`.** Code 2 is also clap's
+usage-error code, so every subcommand exits 2 on a bad flag or subcommand name.
+Beyond that, every other subcommand exits 1 for any error of its own
+(`bridge-mcp exec …` on an unknown host is 1, not 3). The one other exception
+is code 5 for a configuration file that fails to load, which applies to every
+subcommand. Details below.
+
+Codes 1-5 are the bridge's *own* failures: it could not run your command.
+Code 6 means the opposite — the command ran on the target host and exited
+non-zero. The distinction matters because before this release `bridge-mcp tool`
+exited **0** in that case, so `bridge-mcp tool … && next` ran `next` after a
+failure.
+
+In the CLI's output the remote command's own exit code is not a separate
+field; it appears in the result text as the `[exit:N]` prefix (an MCP result
+also carries it in `_meta`, see below). `--json` marks the call
+`"isError": true` — **except for the tools whose command you wrote yourself**,
+which report the code without the verdict. See the next section.
+
+**Which tools emit 6 — read this before relying on it.** Code 6 comes from the
+shared `StandardTool` pipeline, which is most of the catalogue but not all of
+it. 52 handlers run their remote command outside that pipeline; five of them
+now report a code of their own, 42 of the `ssh_awx_*` family raise a **bridge
+error** instead (see below the tables), and the remaining five **still exit 0
+when the remote command fails**:
+
+| Emits 6 outside the pipeline | When |
+|---|---|
+| `ssh_exec` | any non-zero exit |
+| `ssh_exec_multi` | **single host only** — see below |
+| `ssh_file_write` | any non-zero exit **on the shell path** — content whose length reaches `sftp_write_threshold_bytes` (64 KiB by default; `0` means every write) goes over SFTP, which runs no remote process and so has no code to report |
+| `ssh_disk_usage` | only without `path` (with one, the command is `du … && df …`, which exits 1 from an unreadable subdirectory while still answering) |
+| `ssh_tail` | only without `grep` (with one, exit 1 means "no match", which is not a failure) |
+
+| Still exits 0 on a remote failure | Count | When |
+|---|---|---|
+| `ssh_session_exec` | 1 | any non-zero exit. Deliberately excluded: its output parser *fabricates* exit code 1 for a missing or unparsable marker, so propagating it would announce a failure of your command where the truth is a bridge-side parse failure. |
+| `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` | 3 | any non-zero exit |
+| `ssh_exec_multi` across 2+ hosts | — | see below |
+| `ssh_awx_job_follow` | 1 | either an HTTP status >= 400 or a curl transport failure. It builds its requests with the unchecked `build_api_call`, parses no status at all, and returns the raw stdout whatever happened. |
+
+**The other 42 `ssh_awx_*` tools are not in that table, and never emit 6
+either.** They route their response through
+`AwxCommandBuilder::parse_checked_response` and propagate its error with `?`. An
+HTTP status >= 400 has always raised `BridgeError::AwxApi`; since the fix in this
+cycle a **curl transport failure** (connection refused, timeout, DNS — curl
+writes `%{http_code}` = `000`) raises it too, as `AwxApi { status: 0 }`, where
+`status` is not an HTTP status but the mark of "curl obtained none". That is a
+bridge error, so it **exits 1**, not 6. The call is arguable — curl did run on
+the target host and exit non-zero — but the curl command is the bridge's own, not
+one you wrote, so failing to reach the AWX API is counted as the bridge failing
+to run your request rather than as your request failing. Non-zero either way.
+
+The live-host sweep that found this measured 44 affected tools, and all 44 are
+pipeline tools, so the measured defect is closed — but the defect *class* is
+not, and the handlers still listed above as exiting 0 are its unmeasured
+remainder (CHANGELOG has the chain). The five that now emit 6 were brought into
+line later in the same cycle, by unit test and mutation rather than on a host —
+so they have left the remainder without ever having been measured on one. Until
+it is closed, treat exit 6 as "this tool told me the remote command failed",
+never exit 0 as "the remote command succeeded".
+
+**`ssh_exec` and `ssh_exec_multi` emit 6 without marking the call an error.**
+You wrote their command, and plenty of ordinary commands exit non-zero *as
+their answer*: `grep` matching nothing exits 1, `diff` finding a difference
+exits 1, `test` exits 1 for false, `systemctl is-active` exits 3 for a stopped
+unit. So the code reaches `$?` — your `&&` stops, which is what a shell caller
+expects — but the MCP result does **not** carry `"isError": true`, because
+nothing here can establish that your command failed. Every other tool in the
+first table sets both, since its command is one the bridge built and a non-zero
+exit really is a failure.
+
+**`ssh_exec_multi` reports a code only for a single host.** Across two or more
+it reports nothing, deliberately: the per-host `failed` counter cannot tell
+"the command exited non-zero" from "the host was unreachable", and mapping it
+onto exit 6 would make 6 mean "the bridge could not reach a host" — the exact
+conflation 6 was created to remove. Read the per-host `exit_code` values in the
+JSON result instead.
+
+Two further limits:
+
+- **Only the `tool` subcommand distinguishes 6, and only `tool` maps the
+  bridge's own failures onto 3 and 4** (2 is clap's usage code on every subcommand). `bridge-mcp exec` exits 1 on a failed remote
+  command, as it always has. Every other subcommand (`exec`, `status`,
+  `history`, `describe-tool`, `list-tools`, `validate`, `config-diff`, `upload`,
+  `download`, `daemon`, `serve`) exits 1 for any error of its own, whatever its
+  class — an unknown host under `exec` is 1, not 3. A configuration file that
+  fails to load for any reason — absent, unreadable, malformed, a referenced
+  SSH key file missing — exits 5 for every subcommand, `completions` included, since that happens
+  before any of them runs.
+- **Under a daemon, the code travels in a vendor `_meta` key.** With
+  `bridge-mcp daemon` running, the CLI forwards the call and reads the MCP
+  result back. The remote exit code is carried on that result under
+  `_meta["io.github.muchiny/remote-exit-code"]` (also when `summarize=true`),
+  and the CLI reads it, so the daemon path gives the same exit codes as the
+  direct path — 6 for a remote failure, 1 for a bridge refusal, including for
+  `ssh_exec` and `ssh_exec_multi`. The guarantee is for this project's own
+  CLI-over-daemon path: an MCP client that does not read that vendor key still
+  sees only `"isError"`. **It also requires the daemon serving the call to be
+  this build or later.** A daemon started from an earlier build accepts the same
+  protocol revision and reports the same crate version, but answers without the
+  key, and `ssh_exec` then exits 0 again. The CLI compares the daemon's build
+  revision to its own and prints a `warning:` on stderr when they differ (or
+  when the daemon reports none); restart the daemon when you see it.
 
 ### Shell completions
 

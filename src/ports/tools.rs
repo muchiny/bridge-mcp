@@ -569,7 +569,15 @@ pub mod mock {
 
         let validator = Arc::new(CommandValidator::new(&SecurityConfig::default()));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        // `for_test` and not `disabled`: identical behaviour (`for_test` is
+        // `disabled` plus an in-memory capture), but it lets a pipeline test
+        // assert that a denial was RECORDED and not only that it was refused.
+        // Every denial site in the pipeline calls `log_denied` itself — there
+        // is no catch-all upstream — so "was it audited" is a property each
+        // site needs its own test for, and a `disabled()` fixture cannot see
+        // it. The same `Arc` goes to `execute_use_case` and to the context, so
+        // `ctx.audit_logger.drain_for_test()` observes what the use case logged.
+        let audit_logger = Arc::new(AuditLogger::for_test());
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
             Arc::clone(&validator),
@@ -623,7 +631,7 @@ pub mod mock {
 
         let validator = Arc::new(CommandValidator::new(&SecurityConfig::default()));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
@@ -677,7 +685,59 @@ pub mod mock {
 
         let validator = Arc::new(CommandValidator::new(&SecurityConfig::default()));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        let audit_logger = Arc::new(AuditLogger::for_test());
+        let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
+
+        let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
+            Arc::clone(&validator),
+            Arc::clone(&sanitizer),
+            Arc::clone(&audit_logger),
+            Arc::clone(&history),
+        ));
+
+        ToolContext {
+            mrtr: crate::ports::MrtrSlot::default(),
+            config: Arc::new(config),
+            validator,
+            sanitizer,
+            audit_logger,
+            history,
+            connection_pool: Arc::new(ExecutorRouter::mock(mock_output)),
+            execute_use_case,
+            rate_limiter: Arc::new(RateLimiter::new(0)),
+            session_manager: Arc::new(SessionManager::new(SessionConfig::default())),
+            tunnel_manager: Arc::new(TunnelManager::new(20)),
+            output_cache: None,
+            runtime_max_output_chars: None,
+            roots: Vec::new(),
+            session_recorder: None,
+            metrics: None,
+            cancel_token: None,
+            notification_tx: None,
+            progress_token: None,
+            client_supports_elicitation: false,
+            client_supports_sampling: false,
+            mcp_logger: None,
+        }
+    }
+
+    /// Like [`create_test_context_with_mock_executor`], but takes the whole
+    /// `Config` instead of only the host table.
+    ///
+    /// Needed because the other helper pins `SecurityConfig::default()`, i.e.
+    /// Standard mode with an empty whitelist, where `CommandValidator` refuses
+    /// **every** command (`src/security/validator.rs:173-186`). Free-form
+    /// tools such as `ssh_exec` and `ssh_exec_multi` cannot be tested through
+    /// it, and `ssh_find.rs:415-455` already hand-assembled a context for that
+    /// very reason.
+    #[must_use]
+    pub fn create_test_context_with_config_and_mock_executor(
+        config: Config,
+        mock_output: crate::ssh::CommandOutput,
+    ) -> ToolContext {
+        let validator = Arc::new(CommandValidator::new(&config.security));
+        let sanitizer = Arc::new(Sanitizer::with_defaults());
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
@@ -722,7 +782,7 @@ pub mod mock {
         // any assertion about `validate()` was vacuous.
         let validator = Arc::new(CommandValidator::new(&config.security));
         let sanitizer = Arc::new(Sanitizer::with_defaults());
-        let audit_logger = Arc::new(AuditLogger::disabled());
+        let audit_logger = Arc::new(AuditLogger::for_test());
         let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
 
         let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
@@ -987,5 +1047,27 @@ mod tests {
         assert!(ctx.validate_root_scope("/srv/app/data").is_ok());
         assert!(ctx.validate_root_scope("/srv/app").is_ok());
         assert!(ctx.validate_root_scope("/srv/applications").is_err());
+    }
+
+    #[test]
+    fn a_mock_context_can_carry_both_a_config_and_a_nonzero_exit_code() {
+        // `HostConfig` n'a pas de `Default` : on part de l'hôte "server1" de
+        // `create_test_context_with_host` plutôt que d'en construire un.
+        let config = (*mock::create_test_context_with_host().config).clone();
+
+        let ctx = mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 3,
+                stdout: "out".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        // Ce test ne prouve que la construction : la config passée survit. Il
+        // ne prouve PAS que la sortie simulée est câblée ; c'est le test
+        // `a_failing_df_reaches_the_caller_as_data` (ssh_disk_usage) qui le
+        // prouve, en faisant traverser `exit_code: 1` à un vrai handler.
+        assert!(ctx.config.hosts.contains_key("server1"));
     }
 }

@@ -219,7 +219,7 @@ mod tests {
     fn test_scheme() {
         let handler = FileResourceHandler;
         assert_eq!(handler.scheme(), "file");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
     }
 
     #[test]

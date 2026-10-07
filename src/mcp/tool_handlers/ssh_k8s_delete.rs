@@ -217,7 +217,7 @@ mod tests {
     fn test_schema() {
         let handler = SshK8sDeleteHandler::new();
         assert_eq!(handler.name(), "ssh_k8s_delete");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_k8s_delete");

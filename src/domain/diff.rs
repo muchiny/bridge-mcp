@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(d.summary.total, 3);
         assert_eq!(d.summary.matching, 3);
         assert_eq!(d.summary.divergent, 0);
-        assert!(d.summary.divergent_hosts.is_empty());
+        assert_eq!(d.summary.divergent_hosts, [] as [std::string::String; 0]);
         for entry in d.hosts.values() {
             assert!(entry.matches_baseline);
             assert!(entry.diff.is_none());

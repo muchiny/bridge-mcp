@@ -174,7 +174,7 @@ mod tests {
     fn test_schema() {
         let handler = SshHypervSnapshotListHandler::new();
         assert_eq!(handler.name(), "ssh_hyperv_snapshot_list");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         let required = schema_json["required"].as_array().unwrap();
@@ -287,7 +287,7 @@ mod tests {
             serde_json::from_value(json!({"host": "s", "vm_name": "TestVM"})).unwrap();
         let host = test_host_config();
         let cmd = HypervSnapshotListTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     #[test]

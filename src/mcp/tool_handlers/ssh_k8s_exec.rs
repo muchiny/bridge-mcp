@@ -182,7 +182,7 @@ mod tests {
     fn test_schema() {
         let handler = SshK8sExecHandler::new();
         assert_eq!(handler.name(), "ssh_k8s_exec");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_k8s_exec");

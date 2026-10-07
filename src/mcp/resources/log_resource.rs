@@ -205,7 +205,7 @@ mod tests {
     fn test_scheme() {
         let handler = LogResourceHandler;
         assert_eq!(handler.scheme(), "log");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
     }
 
     #[test]

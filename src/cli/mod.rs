@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 pub use runner::{
-    DataReductionFlags, run_config_diff, run_describe_tool, run_download, run_exec, run_history,
-    run_list_tools, run_status, run_tool, run_upload, run_validate,
+    DataReductionFlags, EXIT_CONFIG_ERROR, EXIT_REMOTE_FAILURE, map_exit_code, run_config_diff,
+    run_describe_tool, run_download, run_exec, run_history, run_list_tools, run_status, run_tool,
+    run_upload, run_validate,
 };
 
 /// Bridge MCP - Secure SSH access to air-gapped environments

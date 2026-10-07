@@ -37,6 +37,12 @@ impl StandardTool for TimerInfoTool {
 
     const NAME: &'static str = "ssh_timer_info";
 
+    /// Same as `ssh_service_status`, and for the same command: this builds
+    /// `systemctl show … && systemctl status …`, so the pipeline's code is
+    /// `systemctl status`'s — 3 for a timer that exists and is inactive.
+    /// See that tool for what opting out costs (ruling R32).
+    const NONZERO_EXIT_IS_ERROR: bool = false;
+
     const DESCRIPTION: &'static str = "Show detailed information about a specific systemd timer \
         on a remote host (Linux/systemd only). Runs both `systemctl show` and `systemctl status` \
         to report the timer's OnCalendar/OnBootSec schedule expression, next and last trigger \
@@ -213,7 +219,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = TimerInfoTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("apt-daily"));
     }
 

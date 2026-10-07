@@ -130,7 +130,7 @@ mod tests {
     fn test_schema() {
         let handler = SshRedisInfoHandler::new();
         assert_eq!(handler.name(), "ssh_redis_info");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_redis_info");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
@@ -242,7 +242,7 @@ mod tests {
         let args: SshRedisInfoArgs = serde_json::from_value(json!({"host": "s"})).unwrap();
         let host = test_host_config();
         let cmd = RedisInfoTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
         assert!(cmd.contains("redis"));
     }
 
@@ -257,7 +257,7 @@ mod tests {
         .unwrap();
         let host = test_host_config();
         let cmd = RedisInfoTool::build_command(&args, &host).unwrap();
-        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {

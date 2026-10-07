@@ -1012,7 +1012,7 @@ mod tests {
         {
             let cfg = shared_config.read().await;
             assert_eq!(cfg.security.mode, SecurityMode::Standard);
-            assert!(cfg.security.whitelist.is_empty());
+            assert_eq!(cfg.security.whitelist, [] as [std::string::String; 0]);
         }
 
         // Reload: permissive mode with blacklist

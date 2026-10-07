@@ -37,6 +37,18 @@ extend-ignore-identifiers-re = [
 nore = "nore"
 # French words used in documentation
 projet = "projet"
+# `domain::privilege::elevate` handler call-site comments and one test message
+# (src/domain/privilege.rs, src/mcp/tool_handlers/ssh_exec*.rs,
+# ssh_session_exec.rs): "enveloppe" (wraps) reads as "envelope".
+#
+# The `raison`, `sur` and `reste` entries that used to stand here existed only
+# for the French doc comment on `elevate_with_password`, which is now in
+# English. No file `typos` reads uses them any more. `.specify/memory/
+# constitution.md` is full of them and is tracked, but it lives under a dot
+# directory, which `typos` skips unless it is run with `--hidden` — so putting
+# the three bare words back is not the answer if that day comes; an
+# `extend-exclude` for that one file is.
+enveloppe = "enveloppe"
 # Legitimate code patterns
 secur = "secur"
 routeros = "routeros"
@@ -51,13 +63,19 @@ extend-exclude = [
     "PLAN.md",
     # Internal French research/planning artifact — prose, not shipped docs
     "docs/feature-research-2026-06.md",
-    # Live-probe harness and campaign case files: French prose in docstrings and
+    # Live-probe harness and campaign files: French prose in docstrings and
     # comments, same rationale as the line above — internal test scaffolding, not
     # shipped docs. `typos` reads `sur`/`mesure`/`groupe`/`classe` as English
     # misspellings and flags ~340 of them across run.py, selftest_check.py and
     # coverage.py. Correcting them would mean translating the harness's own
     # documentation, which is deliberately written in French like the campaign
-    # reports it produces. Scoped to this directory rather than allowing the
-    # individual words, which would disable those corrections repository-wide.
+    # reports it produces.
+    #
+    # This directory also holds captured evidence, not only prose: the
+    # `campaign/*/report-*.json` artefacts store each case's stdout/stderr
+    # truncated by `run.py --report` at `out[:400]`, which cuts words mid-token
+    # (`(code=exited, statu` -> `statu` -> `status`). Those files record what a
+    # tool actually printed on a real host, so "correcting" a word inside one
+    # would falsify the record. They are covered by this same directory entry.
     "scripts/live_probe/",
 ]

@@ -132,7 +132,7 @@ impl ToolHandler for SshAwxJobStdoutHandler {
 
         let raw = ctx
             .execute_use_case
-            .process_success(host, &cmd, &output.into())
+            .process_success(self.name(), host, &cmd, &output.into(), &[])
             .stdout;
         let stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         Ok(ToolCallResult::text(stdout))
@@ -161,7 +161,7 @@ mod tests {
     fn test_schema() {
         let handler = SshAwxJobStdoutHandler;
         assert_eq!(handler.name(), "ssh_awx_job_stdout");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_awx_job_stdout");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();

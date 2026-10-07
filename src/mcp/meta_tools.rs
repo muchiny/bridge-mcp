@@ -413,6 +413,8 @@ fn success_json(value: Value) -> ToolCallResult {
         content: vec![ToolContent::Text { text }],
         is_error: Some(false),
         structured_content: Some(value),
+        // Meta-tools answer from the registry; no remote command runs.
+        remote_exit_code: None,
     }
 }
 
@@ -503,7 +505,7 @@ mod tests {
         .expect("meta tool");
         let payload = result.structured_content.expect("structured");
         let results = payload["results"].as_array().expect("array");
-        assert!(!results.is_empty());
+        assert_ne!(results.first(), None);
         for entry in results {
             let name = entry["name"].as_str().unwrap();
             let full_desc = registry.get(name).expect("registry has tool").description();

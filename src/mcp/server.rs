@@ -198,6 +198,11 @@ struct SealedResult {
     structured: Option<Value>,
     #[serde(default)]
     is_error: bool,
+    /// The remote command's exit code. Sealed because the retry rebuilds the
+    /// result from this struct alone, and the retry is the answer the caller
+    /// scripts against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_exit_code: Option<i32>,
 }
 
 impl SealedResult {
@@ -212,13 +217,22 @@ impl SealedResult {
             text,
             structured: result.structured_content.clone(),
             is_error: result.is_error.unwrap_or(false),
+            remote_exit_code: result.remote_exit_code,
         }
     }
 
     fn into_result(self) -> ToolCallResult {
+        // NOTE: this rebuilds the result from the four fields a sealed result
+        // carries. `remote_exit_code` is one of them since the daemon path
+        // started reading it (`_meta[REMOTE_EXIT_CODE_META_KEY]`): a
+        // `summarize=true` retry answers from here, so dropping it would
+        // exit 0 for exactly the calls that took the summary round trip.
+        // Any NEW field of `ToolCallResult` that a client reads must be added
+        // to `SealedResult` too; this rebuild is not an invariant.
         let mut result = ToolCallResult::text(self.text);
         result.structured_content = self.structured;
         result.is_error = Some(self.is_error);
+        result.remote_exit_code = self.remote_exit_code;
         result
     }
 }
@@ -723,9 +737,15 @@ impl McpServer {
         text.push_str("\n=== LLM SUMMARY ===\n");
         text.push_str(summary);
 
+        // NOTE: same as `SealedResult::into_result` — this rebuilds the result,
+        // so every field a client reads must be copied by hand.
+        // `remote_exit_code` is one (it is the daemon path's exit code), and
+        // the summary is appended AFTER a sealed result is unsealed, so this
+        // is the last place it could be lost.
         let mut enriched = ToolCallResult::text(text);
         enriched.structured_content = result.structured_content;
         enriched.is_error = result.is_error;
+        enriched.remote_exit_code = result.remote_exit_code;
         enriched
     }
 
@@ -2536,7 +2556,7 @@ impl McpServer {
         match self.resume_sealed_result(&call_params, session) {
             SealedResume::None => {}
             SealedResume::Done(result) => {
-                return JsonRpcResponse::success_or_serialize_error(id, &result);
+                return JsonRpcResponse::tool_result(id, &result);
             }
             SealedResume::BadState(detail) => {
                 return JsonRpcResponse::error(id, JsonRpcError::invalid_params(detail));
@@ -2713,7 +2733,7 @@ impl McpServer {
                     return JsonRpcResponse::success_or_serialize_error(id, &asking);
                 }
 
-                JsonRpcResponse::success_or_serialize_error(id, &result)
+                JsonRpcResponse::tool_result(id, &result)
             }
             Err(e) => {
                 let elapsed_ms = start.elapsed().as_millis();
@@ -2918,7 +2938,7 @@ impl McpServer {
                 Ok(tool_result) => {
                     let tool_result = tool_result.without_apps();
                     let result_value =
-                        serde_json::to_value(&tool_result).unwrap_or_else(|e| json!({
+                        super::protocol::tool_result_value(&tool_result).unwrap_or_else(|e| json!({
                             "content": [{"type": "text", "text": format!("Serialization error: {e}")}],
                             "isError": true,
                         }));
@@ -4716,7 +4736,7 @@ rbac:
         assert_ne!(result["isError"].as_bool(), Some(true));
         let structured = &result["structuredContent"];
         let results = structured["results"].as_array().unwrap();
-        assert!(!results.is_empty());
+        assert_ne!(results.first(), None);
         assert!(results.len() <= 3);
     }
 
@@ -5003,6 +5023,46 @@ rbac:
         let mut result = ToolCallResult::text("disk 91% full\nnginx failed");
         result.structured_content = Some(json!({ "disk_pct": 91 }));
         result
+    }
+
+    /// The `summarize=true` round trip must not lose the remote exit code:
+    /// the retry answers from the sealed state alone, and a missing code is
+    /// exit 0 for a failed command on the daemon path. Goes through the real
+    /// serialize/deserialize the state takes, and the real wire serializer.
+    #[test]
+    fn a_sealed_result_keeps_the_remote_exit_code_through_the_summary_round_trip() {
+        let finished = ToolCallResult::text("[exit:2]\nboom").with_remote_exit_code_only(2);
+        let sealed: SealedResult =
+            serde_json::from_value(serde_json::to_value(SealedResult::of(&finished)).unwrap())
+                .unwrap();
+        let unsealed = sealed.into_result();
+        assert_eq!(unsealed.remote_exit_code, Some(2));
+        assert_eq!(
+            unsealed.is_error,
+            Some(false),
+            "the verdict is not invented"
+        );
+
+        let summarised = McpServer::append_summary(unsealed, "it failed");
+        assert_eq!(summarised.remote_exit_code, Some(2), "enrichment keeps it");
+        let wire = super::super::protocol::tool_result_value(&summarised).unwrap();
+        assert_eq!(
+            wire["_meta"][super::super::protocol::REMOTE_EXIT_CODE_META_KEY],
+            json!(2)
+        );
+    }
+
+    /// A result with no remote code stays free of the key.
+    #[test]
+    fn a_sealed_result_without_a_remote_exit_code_carries_none() {
+        let sealed = SealedResult::of(&finished_result());
+        assert!(
+            serde_json::to_value(&sealed)
+                .unwrap()
+                .get("remote_exit_code")
+                .is_none()
+        );
+        assert_eq!(sealed.into_result().remote_exit_code, None);
     }
 
     /// A recorded request is lifted into an `input_required` carrying the
@@ -5869,7 +5929,7 @@ rbac:
         let result = response.result.unwrap();
         assert!(result["content"].is_array());
         let content = result["content"].as_array().unwrap();
-        assert!(!content.is_empty());
+        assert_ne!(content.first(), None);
         assert_eq!(content[0]["type"], "text");
     }
 
@@ -5932,7 +5992,7 @@ rbac:
         let result = response.result.unwrap();
         let messages = result["messages"].as_array().unwrap();
 
-        assert!(!messages.is_empty());
+        assert_ne!(messages.first(), None);
         assert_eq!(messages[0]["role"], "user");
         assert!(
             messages[0]["content"]["text"]
@@ -6102,7 +6162,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let messages = result["messages"].as_array().unwrap();
-        assert!(!messages.is_empty());
+        assert_ne!(messages.first(), None);
     }
 
     #[tokio::test]
@@ -7657,7 +7717,7 @@ rbac:
         let result = response.result.unwrap();
         assert!(result["contents"].is_array());
         let contents = result["contents"].as_array().unwrap();
-        assert!(!contents.is_empty());
+        assert_ne!(contents.first(), None);
     }
 
     /// G-7 (audit 2026-08-19): asking for a scheme the server does not serve
@@ -7832,7 +7892,7 @@ rbac:
         let result = response.result.unwrap();
         let templates = result["resourceTemplates"].as_array().unwrap();
         // No hosts configured, so no templates
-        assert!(templates.is_empty());
+        assert_eq!(templates.first(), None);
     }
 
     #[test]
@@ -8290,7 +8350,10 @@ rbac:
 
     #[test]
     fn test_resource_update_tick_with_no_subscriptions_is_empty() {
-        assert!(resource_update_tick(&[], true).is_empty());
+        assert_eq!(
+            resource_update_tick(&[], true),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[tokio::test]
@@ -8313,7 +8376,10 @@ rbac:
         assert_eq!(uris, vec!["history://recent".to_string()]);
 
         // Idle bridge: the tick emits nothing at all.
-        assert!(resource_update_tick(&uris, false).is_empty());
+        assert_eq!(
+            resource_update_tick(&uris, false),
+            [] as [std::string::String; 0]
+        );
         assert!(rx.try_recv().is_err());
 
         // A recorded command bumps the revision, so the tick emits.
@@ -9004,7 +9070,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert!(tools.is_empty());
+        assert_eq!(tools.first(), None);
     }
 
     /// D-F7 (audit 2026-08-20): `"18446744073709551615"` parses cleanly to
@@ -9024,7 +9090,7 @@ rbac:
 
         assert!(response.error.is_none(), "got: {:?}", response.error);
         let result = response.result.unwrap();
-        assert!(result["tools"].as_array().unwrap().is_empty());
+        assert_eq!(result["tools"].as_array().unwrap().first(), None);
         assert!(result["nextCursor"].is_null());
     }
 
@@ -9054,7 +9120,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert!(!tools.is_empty());
+        assert_ne!(tools.first(), None);
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
             assert!(
@@ -9076,7 +9142,7 @@ rbac:
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert!(!tools.is_empty());
+        assert_ne!(tools.first(), None);
         for tool in tools {
             let read_only = tool["annotations"]["readOnlyHint"]
                 .as_bool()

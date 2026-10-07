@@ -303,8 +303,8 @@ mod tests {
         let role = Role::default();
         assert_eq!(role.allowed_tools, vec!["*"]);
         assert_eq!(role.allowed_hosts, vec!["*"]);
-        assert!(role.denied_tools.is_empty());
-        assert!(role.denied_hosts.is_empty());
+        assert_eq!(role.denied_tools, [] as [std::string::String; 0]);
+        assert_eq!(role.denied_hosts, [] as [std::string::String; 0]);
     }
 
     #[test]

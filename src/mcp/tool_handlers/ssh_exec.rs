@@ -17,8 +17,6 @@ use crate::ssh::{is_retryable_error_for, with_retry_if};
 use crate::config::ShellType;
 use crate::domain::use_cases::shell;
 
-use super::utils::shell_escape;
-
 /// Arguments for `ssh_exec` tool
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,7 +133,7 @@ impl ToolHandler for SshExecHandler {
                 _ => e.to_string(),
             };
             ctx.execute_use_case
-                .log_denied(&args.host, &args.command, &reason);
+                .log_denied(self.name(), &args.host, &args.command, &reason);
             return Err(e);
         }
 
@@ -162,27 +160,56 @@ impl ToolHandler for SshExecHandler {
         // Derive effective shell for this host
         let effective_shell = host_config.effective_shell();
 
-        // Wrap command with sudo if requested (POSIX only; no-op on Windows)
-        let command = if args.sudo.unwrap_or(false) && effective_shell == ShellType::Posix {
-            let sudo_user = args.sudo_user.as_deref().unwrap_or("root");
-            if let Some(ref password) = host_config.sudo_password {
-                format!(
-                    "echo {} | sudo -S -u {} {}",
-                    shell_escape(password),
-                    shell_escape(sudo_user),
-                    args.command
-                )
+        // Elevation is a domain decision: `privilege::elevate*` wraps the
+        // whole line (`sudo -n bash -c '<all>'`, or `sudo -S -p '' bash -c
+        // 'exec 0</dev/null; <all>'` when the host has a `sudo_password` and the
+        // transport is SSH). Prefixing it here would only elevate the first
+        // process; see the docs of `domain::privilege::elevate`.
+        let elevated = if effective_shell == ShellType::Posix {
+            let privilege = crate::domain::privilege::PrivilegeArgs {
+                sudo: args.sudo.unwrap_or(false),
+                sudo_user: args.sudo_user.clone(),
+            };
+            // Only asked when elevation is: the helper warns on a non-SSH host,
+            // and that must not fire on calls that never wanted sudo.
+            let password = if privilege.sudo {
+                host_config.sudo_password_for_exec(&args.host)
             } else {
-                format!("sudo -n -u {} {}", shell_escape(sudo_user), args.command)
-            }
+                None
+            };
+            crate::domain::privilege::elevate_with_password(&args.command, &privilege, password)
         } else {
-            args.command.clone()
+            // `sudo` makes no sense off POSIX. The POSIX line used to fail
+            // loudly there; ignoring it silently would let an unelevated
+            // command report success. Same intent as step 5b of
+            // `standard_tool.rs`, but neither the condition nor the wording is
+            // its own: 5b tests the OS (`os_type == Windows`), this tests the
+            // effective shell, which a `shell:` override can make non-POSIX on
+            // a Linux host.
+            if args.sudo.unwrap_or(false) {
+                // The effective shell, not the OS: a Linux host with a
+                // non-POSIX `shell:` reaches this branch too.
+                return Ok(ToolCallResult::error(format!(
+                    "'sudo' requires a POSIX shell; host '{}' uses '{}'.",
+                    args.host,
+                    format!("{effective_shell:?}").to_lowercase()
+                )));
+            }
+            crate::domain::privilege::Elevated {
+                command: args.command.clone(),
+                stdin: None,
+            }
         };
+        // The sudo password travels on the SSH channel's stdin, not in the
+        // command line (which becomes the remote shell's argv, readable with
+        // `ps`). Borrowed, never cloned: `RedactedSecret` wipes it on drop.
+        let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
+        let command = &elevated.command;
 
         // Build the actual command (with optional cd, shell-aware)
         let full_command = args.working_dir.as_ref().map_or_else(
             || command.clone(),
-            |dir| shell::cd_and_run(dir, &command, effective_shell),
+            |dir| shell::cd_and_run(dir, command, effective_shell),
         );
 
         // Get retry config
@@ -206,7 +233,10 @@ impl ToolHandler for SshExecHandler {
                     .get_connection_with_jump(&args.host, host_config, &limits, jump_host)
                     .await?;
 
-                match conn.exec(&full_command, &limits).await {
+                match conn
+                    .exec_with_stdin(&full_command, stdin_bytes, &limits)
+                    .await
+                {
                     Ok(output) => Ok(output),
                     Err(e) => {
                         // Mark connection as failed so it won't be returned to pool
@@ -225,16 +255,28 @@ impl ToolHandler for SshExecHandler {
             |e| is_retryable_error_for(e, false),
         )
         .await;
+        // The retry loop is done with the secret: wipe it now rather than at
+        // the end of `handle`, across `process_success` and the truncation
+        // awaits.
+        drop(elevated);
 
         let output = output.inspect_err(|e| {
-            ctx.execute_use_case
-                .log_failure(&args.host, &args.command, &e.to_string());
+            ctx.execute_use_case.log_failure(
+                self.name(),
+                &args.host,
+                &args.command,
+                &e.to_string(),
+            );
         })?;
 
         // Process success using the use case (handles audit, history, formatting, sanitization)
-        let response =
-            ctx.execute_use_case
-                .process_success(&args.host, &args.command, &output.into());
+        let response = ctx.execute_use_case.process_success(
+            self.name(),
+            &args.host,
+            &args.command,
+            &output.into(),
+            &[],
+        );
 
         if response.exit_code != 0 {
             warn!(
@@ -269,7 +311,26 @@ impl ToolHandler for SshExecHandler {
             }
         }
 
-        Ok(ToolCallResult::text(output_text))
+        let result = ToolCallResult::text(output_text);
+
+        // Le fait, pas le verdict. `ssh_exec` exécute la ligne que l'appelant
+        // a écrite, et bien des lignes ordinaires sortent non nul *comme
+        // réponse* : `grep` qui ne trouve rien, `diff` qui voit une
+        // différence, `test` pour faux. Le code doit donc atteindre `$?` — un
+        // script en `&& suite` doit s'arrêter — sans que `is_error` aille dire
+        // à un client MCP que son propre `grep` a échoué. D'où
+        // `with_remote_exit_code_only` et non `with_remote_exit_code`, qui
+        // poserait le verdict par ricochet.
+        //
+        // Posé en dernier, dans le résultat final : `output_text` a déjà
+        // absorbé la troncature et le `save_output`, et aucun de ces deux
+        // chemins ne reconstruit le résultat.
+        if response.exit_code != 0 {
+            let code = i32::try_from(response.exit_code).unwrap_or(1);
+            return Ok(result.with_remote_exit_code_only(code));
+        }
+
+        Ok(result)
     }
 }
 
@@ -278,6 +339,122 @@ mod tests {
     use super::*;
     use crate::ports::mock::{create_test_context, create_test_context_with_host};
     use serde_json::json;
+
+    /// Contexte qui autorise n'importe quelle commande, avec une sortie
+    /// distante simulée.
+    ///
+    /// Le mode par défaut est `Standard` avec une liste blanche vide, où
+    /// `validator.rs` refuse **toute** commande : `ssh_exec` ferait demi-tour
+    /// avant d'atteindre son propre code. La forme de config vient de
+    /// `ssh_find.rs`, qui résout déjà le même problème.
+    fn ctx_permissive_with_exit(exit_code: u32) -> crate::ports::ToolContext {
+        use crate::config::{SecurityConfig, SecurityMode};
+
+        // `HostConfig` n'implémente pas `Default` : on emprunte l'hôte
+        // "server1" que le mock partagé fournit déjà.
+        let mut config = (*create_test_context_with_host().config).clone();
+        config.security = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            blacklist: vec![],
+            ..SecurityConfig::default()
+        };
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code,
+                duration_ms: 1,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_nonzero_exit_is_reported_as_a_fact_without_a_verdict() {
+        // `false` rend 1. Le code doit atteindre l'appelant — mais `is_error`
+        // doit rester absent : l'appelant a choisi cette commande, et un
+        // `grep` qui ne trouve rien rend 1 sans avoir échoué.
+        let ctx = ctx_permissive_with_exit(1);
+        let result = SshExecHandler
+            .execute(Some(json!({"host": "server1", "command": "false"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code,
+            Some(1),
+            "le fait remonte : {result:?}"
+        );
+        assert_eq!(
+            result.is_error, None,
+            "le verdict n'est pas posé : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_windows_host_is_refused_not_silently_dropped() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        config.hosts.get_mut("server1").expect("server1").os_type = crate::config::OsType::Windows;
+        ctx.config = std::sync::Arc::new(config);
+        let result = SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "dir", "sudo": true})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.is_error, Some(true), "refus attendu : {result:?}");
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'cmd'."),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_linux_host_with_a_powershell_override_names_the_shell_not_the_os() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        let host = config.hosts.get_mut("server1").expect("server1");
+        host.os_type = crate::config::OsType::Linux;
+        host.shell = Some(ShellType::PowerShell);
+        ctx.config = std::sync::Arc::new(config);
+        let result = SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "id", "sudo": true})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.is_error, Some(true), "refus attendu : {result:?}");
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'powershell'."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Windows"),
+            "un hôte Linux n'est pas un hôte Windows : {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_exit_claims_nothing_at_all() {
+        // Épingle le fait que la pose est CONDITIONNELLE. Sans la garde
+        // `!= 0`, ce test verrait `Some(0)` : inoffensif pour `$?`, mais une
+        // affirmation que rien dans l'arbre n'émet (voir la documentation des
+        // trois états de `remote_exit_code`).
+        let ctx = ctx_permissive_with_exit(0);
+        let result = SshExecHandler
+            .execute(Some(json!({"host": "server1", "command": "true"})), &ctx)
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(
+            result.remote_exit_code, None,
+            "une commande qui réussit ne pose aucun code : {result:?}"
+        );
+        assert_eq!(result.is_error, None, "ni aucun verdict : {result:?}");
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {
@@ -378,7 +555,7 @@ mod tests {
     fn test_schema() {
         let handler = SshExecHandler;
         assert_eq!(handler.name(), "ssh_exec");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
 
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_exec");
@@ -517,7 +694,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             BridgeError::UnknownHost { host } => {
-                assert!(host.is_empty());
+                assert_eq!(host, "");
             }
             e => panic!("Expected UnknownHost error, got: {e:?}"),
         }

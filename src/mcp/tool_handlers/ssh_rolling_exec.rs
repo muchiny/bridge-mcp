@@ -112,9 +112,9 @@ fn validate_rolling_commands(
     args: &SshRollingExecArgs,
     ctx: &ToolContext,
 ) -> Result<Option<ToolCallResult>> {
-    validate_free_form_command(ctx, &args.host, &args.command)?;
+    validate_free_form_command(ctx, RollingExecTool::NAME, &args.host, &args.command)?;
     if let Some(health_check) = args.health_check.as_deref().filter(|hc| !hc.is_empty()) {
-        validate_free_form_command(ctx, &args.host, health_check)?;
+        validate_free_form_command(ctx, RollingExecTool::NAME, &args.host, health_check)?;
     }
     Ok(None)
 }
@@ -158,7 +158,7 @@ mod tests {
     fn test_schema() {
         let handler = SshRollingExecHandler::new();
         assert_eq!(handler.name(), "ssh_rolling_exec");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         let required = schema_json["required"].as_array().unwrap();

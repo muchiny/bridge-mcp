@@ -10,8 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
 reading it. Every item below was reproduced before the fix and measured after.
 
+**That provenance is the campaign's, and it stops there.** The exit-code
+follow-ups added later in this same unreleased cycle — five `ToolHandler`
+handlers brought into line (`ssh_file_write`, `ssh_disk_usage`, `ssh_tail`,
+`ssh_exec`, `ssh_exec_multi`) and the AWX curl-transport fix — were established
+by unit test and mutation testing. The sixth, `ssh_awx_job_follow`, was
+established by unit test **only**: no `cargo mutants` run covers it, and the
+basis for it is the generated script executed under `bash` against stub `curl`
+and `sleep` binaries, plus `make ci`. **None of them was ever run against a
+host.**
+That is a sound basis, but it is not the basis the sentence above describes, and
+nothing in the text below would otherwise tell you which is which.
+
 ### BREAKING
 
+- **A config that fails to load now exits 5, not 1** (README promised 5; it
+  failed inside `main` before `run_tool` and flattened through anyhow).
+  `main` classifies any `load_config` failure as 5 by call site
+  (`EXIT_CONFIG_ERROR`), not by variant, so a missing SSH key file or an
+  unreadable file is 5 too; `map_exit_code` also maps `ConfigNotFound`,
+  `ConfigInvalid` and `Yaml` to 5.
+- **(lib API) `map_exit_code` moved from `src/main.rs` into
+  `bridge_mcp::cli` and is now `pub fn map_exit_code(&BridgeError) -> i32`.**
+  It used to declare `-> anyhow::Error` while never returning
+  (`std::process::exit`), and was untestable. `main` now prints the error and
+  exits on the returned code. The collision test now walks the function instead
+  of asserting `!(0..=5).contains(&6)`.
 - **`bridge-mcp tool <name>` rejects arguments the tool does not declare**,
   exiting 5. Any invocation passing an extra key stops working. They used to be
   parsed and dropped in silence, and the keys most likely to be mistyped are the
@@ -27,15 +51,494 @@ reading it. Every item below was reproduced before the fix and measured after.
   unguarded one. The gate follows
   `security.require_elicitation_on_destructive`; set it false to disable.
 
+- **A remote command that fails now makes `bridge-mcp tool` exit non-zero — for
+  `StandardTool`-pipeline tools.** The code is **6**, "the command ran on the
+  target host and exited non-zero", distinct from 1-5, which are the bridge's
+  own failures. **This is the most user-visible change in this release.** A
+  script doing `bridge-mcp tool … && next` used to run `next` after a remote
+  failure, because the pipeline wrote the failure into the response *text* as
+  `[exit:N]` and nowhere a caller could test it; the process exited 0. Measured
+  on a live host: 44 of the 45 `readOnlyHint` tools that were probed behaved
+  this way.
+
+  **The measured defect is closed; the defect class is not.** Every tool the
+  campaign could probe is a `StandardTool`-pipeline tool, so all 44 are fixed.
+  The chain, so you can check it rather than take it: the sweep skipped 14 tools
+  because their schema advertises no `sudo_user` property
+  (`waivers-F.json`, key `_d1_sweep_14_no_sudo_user`, and `report.md:242-245`, in
+  `.superpowers/campaign/2026-09-09/` — gitignored, and present only in the main
+  checkout, not in a worktree), and `sudo_user` is injected by
+  `PrivilegeArgs::extract`, which has exactly **one** production call site —
+  `src/mcp/standard_tool.rs:339`. A probed tool therefore went through the
+  pipeline by construction.
+
+  **What was not closed when this first landed** (the next paragraphs say what
+  changed since): 52 handlers implemented `ToolHandler` directly, ran their
+  remote command outside that pipeline, and **still exited 0 when it failed** —
+  `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
+  `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, plus
+  the `ssh_awx_*` family as qualified below. So
+  `bridge-mcp tool ssh_exec host=x command=false` exited 0 while the same failure
+  through a `StandardTool` tool exited 6. **None of these 52 was ever in the
+  measured set** (`ssh_tail`, `ssh_metrics` and `ssh_find` declared no
+  `sudo_user` at all, so they were never probed) — they were the *unmeasured*
+  remainder of the same defect class, not a gap in the fix.
+
+  **Six of those 52 have since been brought into line**, in this same
+  unreleased cycle: `ssh_file_write`, `ssh_disk_usage` (without `path`),
+  `ssh_tail` (without `grep`), `ssh_exec`, `ssh_exec_multi` against a
+  single host, and `ssh_awx_job_follow`. The three entries below state what
+  each now does; the paragraph above is kept as written because it is the
+  finding as it was measured, and the list it gives is the one the follow-up
+  work is tracked against. What is
+  still open, therefore: `ssh_session_exec`, `ssh_find`, `ssh_metrics`,
+  `ssh_metrics_multi`, `ssh_exec_multi` across 2+ hosts, `ssh_disk_usage` with
+  a `path`, and `ssh_tail` with a `grep`. **The AWX family is now closed
+  entirely**: the 42 by the fix to `parse_checked_response`, as the next
+  paragraph states, and `ssh_awx_job_follow` by its own entry below.
+
+  **The AWX family is narrower than the raw count suggests.** 42 of the 43 route
+  their response through `AwxCommandBuilder::parse_checked_response`
+  (`AwxCommandBuilder::parse_checked_response`), which already raises
+  `BridgeError::AwxApi` for any HTTP status >= 400. A **transport-level curl
+  failure** — connection refused, timeout — does NOT lack a marker: curl writes
+  its `-w` output even when it fails, with `%{http_code}` = `000`, so the marker
+  is present and `"000".parse().unwrap_or(0)` gave 0, which `>= 400` let through
+  as `Ok("")`. **`parse_checked_response` is fixed** (`000` or any unreadable
+  status now returns `AwxApi { status: 0 }`), **and for 42 of the 43 that is the
+  whole fix.** Each of those 42 holds exactly one call site —
+  `AwxCommandBuilder::parse_checked_response(&raw)?`, one of two byte-identical
+  lines — and the `?` already propagates the new error, which reaches the CLI as
+  exit **1**, a bridge error, not 6. There is nothing at those sites to change.
+  An earlier draft of this entry deferred a "42-call-site sweep" on the grounds
+  that AWX is unconfigured locally; the deferral was wrong about what the sites
+  contain and is **withdrawn**, so do not go looking for that sweep. Do not start
+  from the marker-absent branch either. **The one handler that still needed
+  work was `ssh_awx_job_follow`**, which built its requests with the unchecked
+  `build_api_call`, never parsed a status, and returned `text(stdout)` regardless
+  — so it swallowed HTTP errors too, not only transport failures. **It is fixed;
+  see its own entry below.** The fix prescribed here — "move onto
+  `build_api_call_checked`" — was not sufficient and, applied alone, would have
+  broken the tool: that entry says why.
+
+  `bridge-mcp exec` still exits 1 (unchanged). The daemon boundary this
+  paragraph used to state (a remote failure exiting 1 rather than 6 through a
+  daemon) is superseded: the code now travels in `_meta`, see "Added".
+
+- **An MCP tool result now carries `isError: true` when its remote command
+  failed** — again, for `StandardTool`-pipeline tools only. The 52 handlers
+  listed above are **not** all unchanged, though, once the follow-ups later in
+  this same unreleased cycle are counted: **four** now set `isError` themselves
+  (`ssh_file_write`, `ssh_disk_usage` without a `path`, `ssh_tail` without a
+  `grep`, and `ssh_awx_job_follow` — see the entries below, they use the same
+  `with_remote_exit_code` constructor the pipeline does); **two** report the
+  exit code and deliberately decline the verdict (`ssh_exec`, `ssh_exec_multi`
+  against a single host);
+  **42** — the AWX handlers on `parse_checked_response` — now return `Err` for a
+  curl transport failure, which the server wraps as a result with `isError: true`
+  where it used to be an empty success. Only **four** are genuinely unchanged:
+  `ssh_session_exec`, `ssh_find`, `ssh_metrics` and `ssh_metrics_multi`. A client
+  that treated every `tools/call` answer as a success, and read the outcome out
+  of the text, will start seeing errors it did not see before, for calls that
+  were already failing.
+
+  **Three tools are exempt, because their command answers *by* its exit code
+  under default arguments.** They set the new
+  `StandardTool::NONZERO_EXIT_IS_ERROR = false`: `ssh_service_status` and
+  `ssh_timer_info` (`systemctl status` exits **3** for a unit that exists and is
+  stopped) and `ssh_k8s_diff` (`kubectl diff` exits **1** when there *are*
+  differences). For those three a non-zero exit stays what it was before this
+  chain: an ordinary success whose code is visible in the text as `[exit:N]` and
+  in the audit event, and the CLI exits 0.
+
+  An earlier draft of this entry defended the opposite choice as "the intended
+  trade-off". The live campaign then measured it: `ssh_service_status` on a
+  loaded-but-stopped unit — the commonest status query there is — returned
+  `isError` and exit 6 while the audit line for the same call recorded
+  `Success{exit_code:3}`, so the product contradicted itself (defect D1, cases
+  `H07`/`H07b`). Ruling **R32** settled it on that evidence: opting these three
+  out restores exactly their pre-plan behaviour, so it is a regression for
+  nobody, and it removes a daily false failure.
+
+  **What opting out costs, stated rather than hidden:** a per-tool boolean
+  cannot separate "here is your answer" from "I failed", and each of these three
+  commands uses non-zero for both — `systemctl` also exits 4 for "no such unit",
+  `kubectl diff` >1 for a real kubectl failure. Those cases exit 0 again. That
+  is the narrower loss: it is the behaviour every one of these tools had before
+  the chain, whereas the false failure was new.
+
+  **`ssh_helm_diff` is deliberately NOT in the set, and that is a decision, not
+  an omission.** It was, in a first cut of this wave; the ruling that removed it
+  is the one worth recording. Its non-zero-is-the-answer mode is
+  `--detailed-exitcode` (exit **2** on changes), and `detailed_exitcode`
+  **defaults to false** — without it `helm diff` exits 0 whether or not there
+  are differences. So under default arguments a non-zero exit from that tool is
+  a *real* failure (the builder's own `exit 4` for a missing helm-diff plugin,
+  an unknown release, a broken `helm`), and opting out would hide precisely what
+  this chain exists to surface while removing no false positive, because there
+  is none by default. R32's justification — "returns the tool to exactly its
+  pre-plan behaviour, so it is a regression for nobody, and it removes a new
+  daily false failure" — holds for the three above and inverts for this one.
+
+  The limitation that leaves is named in the tool's own description rather than
+  papered over: a caller who *does* pass `detailed_exitcode=true` gets `isError`
+  / CLI exit 6 when a difference is found, and must read 6 as "changes found"
+  itself, because a trait const cannot condition on an argument. Corroboration
+  that this is the right way round: the committed live case `B93`
+  (`scripts/live_probe/campaign/B-k8s.json`) calls `ssh_helm_diff` and expects
+  `error=`, i.e. a non-zero rc — an expectation written against the const being
+  `true`, which the opt-out would have inverted.
+
 - **`AuditEvent` gains a public field `reduction: Vec<&'static str>`.** Any
   struct-literal construction outside this crate must add it;
   `AuditEvent::new` and `AuditEvent::denied` set it empty.
+
+- **`ToolCallResult` gains a public field `remote_exit_code: Option<i32>`.** Any
+  struct-literal construction outside this crate must add it; `ToolCallResult::
+  text` and `::error` set it `None`. It is `#[serde(skip)]`, so no serialized
+  result body and no `outputSchema` changes; the server separately copies the
+  code into `_meta` (see "Added").
 
 - **`ExecuteCommandUseCase::process_success_for_tool` takes a new
   `reduction: &[&'static str]` parameter.** Existing callers must pass the
   reduction params actually used, or `&[]`.
 
+- **`ssh_session_exec` refuses a command whose top-level word is `exit`**,
+  returning an invalid-request error (CLI exit 1) instead of running it. It used
+  to be run — and since the command is fed to the session's own interactive
+  shell, that ended the *session*, so every later call on it failed with
+  "session not found". The error names the isolated forms that do what the caller
+  meant: `( exit 7 )` for a subshell, `sh -c 'exit 7'` for a child shell.
+  `sudo`-elevated commands are unaffected, because elevation already wraps them
+  in a child shell. The rule is "the first word of a top-level command segment is
+  `exit`" — quote-, comment- and subshell-aware, so `grep exit /etc/passwd` and
+  `( exit 7 )` still run — and every gap known to it is listed and pinned by a
+  test on `command_runs_exit_in_session_shell`. It applies to `cmd.exe` and
+  PowerShell sessions too, where `exit` ends the shell the same way.
+
+- **`ssh_file_write`, `ssh_disk_usage` and `ssh_tail` now exit 6 when the
+  remote command fails, and mark the result `isError` — two of them under a
+  condition stated below.** All three used to exit
+  **0** with the failure visible only in the result text, so
+  `bridge-mcp tool ssh_file_write … && next` ran `next` after a refused write.
+  They now use `ToolCallResult::with_remote_exit_code`, the same constructor the
+  pipeline uses, which sets `isError: true` as well — so an MCP client that read
+  every `tools/call` answer as a success will start seeing errors on calls that
+  were already failing.
+
+  **Two of the three are conditional, and the condition is the substance.**
+  `ssh_disk_usage` reports a code only when called **without** `path`: with one,
+  the command is `du -sh <p> && df -h <p>`, which exits 1 from an unreadable
+  subdirectory *while having printed a total*, and the `&&` has already
+  suppressed the `df` half. That is a partial answer, and calling it a failure
+  would be a new false claim in the opposite direction. `ssh_tail` reports a code only
+  **without** `grep`: with one, the pipeline's status is `grep -E`'s, and exit 1
+  there means "no match", the ordinary answer. `ssh_file_write` is
+  unconditional on its shell path; its SFTP path (content reaching
+  `sftp_write_threshold_bytes`, 64 KiB by default) runs no remote process and
+  reports no code, so the same call can report 6 or nothing depending on that
+  config value. Known restriction, not a defect of this change.
+
+  Established by unit test and mutation testing, not on a host — see the note
+  under `[Unreleased]`.
+
+- **`ssh_exec` and `ssh_exec_multi` now exit 6 when the remote command exits
+  non-zero — but they do not call it an error.** `bridge-mcp tool ssh_exec
+  host=x command=false` exited **0**; it now exits **6**, so a script doing
+  `bridge-mcp tool ssh_exec … && next` stops where it used to continue. That is
+  the breaking half, and it is the point: the failure used to live only in the
+  result text as `[exit:N]`, where no caller could test it.
+
+  **The MCP surface is deliberately unchanged.** These two run a command *you*
+  wrote, and plenty of ordinary commands exit non-zero as their answer — `grep`
+  matching nothing exits 1, `diff` finding a difference exits 1, `test` exits 1
+  for false, `systemctl is-active` exits 3 for a stopped unit. The pipeline
+  solved its version of this with a per-tool `NONZERO_EXIT_IS_ERROR`, which
+  cannot work here: the tool is `ssh_exec` and the command is an *argument*. So
+  the result reports the fact (`remote_exit_code`) and declines the verdict
+  (`is_error` stays absent), via a second constructor,
+  `ToolCallResult::with_remote_exit_code_only`. An MCP client is not told that
+  its own `grep` failed; a shell caller still gets a non-zero `$?`. Every other
+  handler keeps welding the two, and `with_remote_exit_code` is untouched.
+
+  **`ssh_exec_multi` reports a code only for a single host.** Across two or
+  more it reports nothing. The per-host `failed` counter does not distinguish
+  "the command exited non-zero" from "the host was unreachable" — `success` is
+  false for both — so mapping it onto exit 6 would make 6 mean "the bridge
+  could not reach a host", re-conflating precisely what 6 was created to
+  separate. The fan-out case is left open rather than answered wrongly; the
+  per-host `exit_code` values are in the JSON result.
+
+  **`ssh_session_exec` is excluded and stays at exit 0.** Its output parser
+  *fabricates* exit code 1 for a missing marker and for an unparsable one
+  (`src/ssh/session.rs`, `parse_exec_output`), so propagating that code would
+  announce a failure of your command where the truth is a bridge-side parse
+  failure — the exact conflation this whole chain exists to remove.
+
+  **Superseded later in this cycle: the daemon asymmetry is closed.** This
+  paragraph used to say that under `bridge-mcp daemon` these two exited 0 where
+  the direct path exits 6, because the CLI could only read `isError` off the
+  wire. The remote code now travels in `_meta` under
+  `io.github.muchiny/remote-exit-code` (see "Added" above), so both paths exit
+  6. `$? -eq 6` therefore holds for `ssh_exec`/`ssh_exec_multi` under a daemon
+  too, **provided the daemon is this build or later**: a daemon from before the
+  port answers without the key and the CLI falls back to `isError`, i.e. 0.
+  `remote_exit_code` itself is still `#[serde(skip)]`; the key is a separate
+  `_meta` entry added by the server. The tests this paragraph cited
+  (`the_daemon_path_cannot_distinguish…`, `the_daemon_path_reports_nothing_at_all…`)
+  were rewritten into
+  `the_daemon_path_distinguishes_a_remote_failure_from_a_bridge_refusal` and
+  `the_daemon_path_reports_a_free_form_tool_s_remote_failure`.
+
+- **`ssh_awx_job_follow` now exits 6 when the job it followed did not succeed,
+  and marks the result `isError`.** It exited **0** for every outcome. The
+  script's four terminal statuses shared one arm ending in `exit 0`, so a job
+  AWX finished in `failed`, `error` or `canceled` returned success; and the
+  timeout fall-through was the script's last command, whose `echo` returned 0,
+  so a job still running when `max_wait` ran out returned success too. Both
+  reproduced before the fix against a stubbed `curl`: exit 0 on all five
+  outcomes. `bridge-mcp tool ssh_awx_job_follow template_id=7 && next`
+  therefore ran `next` after a failed playbook, and after a playbook that was
+  still running. Now only `successful` exits 0; the other four exit **6**.
+
+  **No per-status code**, deliberately: the CLI flattens any remote failure to
+  one code, so a distinct code per status would be observable nowhere on the
+  CLI. The exact status stays
+  where it always was, in the JSON result, and every arm still emits its full
+  document — including the summary on a failed job. The handler uses
+  `ToolCallResult::with_remote_exit_code`, which sets `isError` too, on the same
+  reading as `ssh_file_write` above: this tool wrote the script, the caller did
+  not, so a job that failed is a failure of what the tool was asked to do rather
+  than a fact for the caller to interpret.
+
+  **All three of its AWX requests are verified now; not one of them was.** They
+  went out through the unchecked `AwxCommandBuilder::build_api_call`, so
+  `curl -s` exited 0 on any HTTP response and nothing looked at the status.
+  Reproduced against a stubbed curl before the fix: a 403 on the status poll
+  made the tool poll until `max_wait` and exit 0 with `"status":"timeout"`; a
+  non-2xx on the host-summaries call put AWX's error body into the `summary`
+  field of an otherwise successful-looking document and exited 0; and a
+  transport failure on the poll killed the script under `set -e`, returning an
+  empty stdout with no diagnostic at all. Each of the three now emits a JSON
+  error naming **which** call failed, with its HTTP status, and exits non-zero —
+  `000` included, because the capture tolerates curl's own non-zero exit so the
+  check can run rather than `set -e` aborting first.
+
+  **The checks live in the shell, not in `parse_checked_response`, and that
+  divergence from the other 42 is deliberate.** This handler's curl bodies are
+  consumed *inside* the script it builds — they feed the job-id extraction, the
+  status extraction, and the document it emits — and the handler only ever sees
+  the script's final stdout. `parse_checked_response` classifies the **last**
+  marker in whatever it is given, so applied there it would classify whatever
+  leaked rather than an HTTP response. The script splits each `HTTP_STATUS:`
+  line with POSIX parameter expansion and checks the code per call;
+  `build_follow_script` in the handler carries the argument in full. The
+  paragraph above prescribed "move onto `build_api_call_checked`" as the whole
+  fix — that alone would have **broken** the tool, because the appended
+  write-out line makes the status body's `json.load` fail, the
+  `|| echo "unknown"` fallback fire on every poll, and the tool time out on
+  every single call.
+
+  **This tool needs `python3` on the AWX SSH host**, which nothing said before
+  and which the exit-code change above makes newly visible. The script parses
+  the launch and poll bodies with `python3 -c 'import sys,json; …'`; the job-id
+  extraction has a `grep`/`cut` fallback, but the *status* extraction does not
+  — its `|| echo "unknown"` arm sends every poll round the loop, so on a host
+  without `python3` every job runs to `max_wait` and reports
+  `"status":"timeout"`. That is not new. What is new is that the timeout path
+  now exits **6** instead of **0**, so a python3-less host turns a silent
+  wrong answer into a loud one on every call. If this tool starts returning
+  nothing but timeouts after the upgrade, check for `python3` on the host
+  before suspecting AWX.
+
+  **Also in the same pass:** the handler passed the literal string
+  `"ssh_awx_job_follow"` as the `command` argument of `process_success`, so its
+  audit event and history entry recorded the tool name where every other
+  handler records what ran. It now records the script — not the
+  `bash -c '<script>'` wrapper, because that form escapes every `'` as `'\''`,
+  which defeats the sanitizer's opaque-bearer pattern (it allows one optional
+  quote after `Bearer` and stops at the backslash) and would have written the
+  AWX token to `audit.log` and the history in clear. A test pins the redaction.
+
+  **And the two URLs it polled were never the right URLs.** The status and
+  host-summaries endpoints were written `/api/v2/jobs/'$JOB_ID'/`, the quotes
+  meant to close and reopen the single-quoted span the builder wraps a URL in.
+  They do not: `build_api_call_checked` escapes the URL it is handed, so each
+  `'` became `'\''` and curl was asked for a path holding a literal
+  `'$JOB_ID'`. Measured by logging what a stub curl received:
+  `https://awx.test/api/v2/jobs/'$JOB_ID'/`. Every poll therefore 404ed, the
+  status read back as `unknown`, and the tool ran to `max_wait` and reported a
+  timeout on **every** call — so none of the terminal-status paths above was
+  reachable in production before this, and the launched job ran on
+  unobserved. The id is now substituted *after* the escaping, and it is
+  refused unless it is a run of digits. That second check is a correctness
+  guard, not a security one: the id comes from AWX's own response through
+  `print(json.load(...)['id'])`, which prints whatever type AWX sent, and it
+  is interpolated unquoted into the `"job_id":` field of every document the
+  tool returns — a non-numeric id makes that document invalid JSON. It is
+  **not** a shell injection, and an earlier draft of this paragraph said it
+  was: the shell does not re-scan the result of a parameter expansion for
+  command substitution, so a `$(...)` in an AWX response reaches curl as
+  literal text. The check also replaces the `[ -z "$JOB_ID" ]` test, which let
+  anything non-empty through.
+
+  Established by unit test, running the generated script under `bash` against
+  stub `curl` and `sleep` binaries — not on a host; AWX is configured on no
+  machine this was written on. See the note under `[Unreleased]`.
+
+- **`ssh_net_equip_config` now refuses any host whose `tags` do not contain
+  `network-equipment`, and refuses `sudo` outright.** **An existing config that
+  uses this tool stops working until the operator adds that tag** to the host in
+  `config.yaml` — exact spelling, case-sensitive, not the case-insensitive
+  matching `HostConfig::has_tag` does elsewhere, so a grant is the literal
+  string that grants it. The refusal is a `CommandDenied` naming the host and
+  the tag to add.
+
+  Why the tool needed a host marker at all: it is the only one in the group that
+  sends caller-supplied COMMAND text. `NetworkEquipmentCommandBuilder::build_config_command`
+  interpolates `commands` verbatim, and for `EquipmentType::Generic` — the
+  default — the vendor wrapper is empty, so the text *is* the command. On the
+  `StandardTool` pipeline that text is seen only by `validate_builtin`, which
+  skips the whitelist by design for specialised tools. On a POSIX host the tool
+  was therefore `ssh_exec` with the whitelist removed, executing what `ssh_exec`
+  itself would have refused under the same config. It was the last of the six
+  command-injection sites found on 2026-07-25 still open.
+
+  `commands` stays unescaped and unwhitelisted, which is deliberate: a Cisco or
+  Juniper CLI needs multi-line input, `|` and `!`, and quoting the text would
+  break every legitimate call. What is constrained is the *host* — the operator
+  states that the far end speaks a device CLI and not a shell, and only then
+  does the tool run. A host nobody marked is refused, which is the pre-tag
+  default for every host in every existing config.
+
+  **`sudo` / `sudo_user` are refused on this tool**, not ignored. `PrivilegeArgs::extract`
+  runs for every pipeline tool, and elevation is applied at step 5b *before* the
+  blacklist, wrapping the built command in `sudo -n bash -c '…'` — so
+  `sudo: true` ran that verbatim `commands` text as root. The mechanism is a new
+  additive `StandardTool::ALLOWS_ELEVATION` const, `true` by default so the
+  other 398 tools on that pipeline are unchanged — the 77 direct handlers do
+  not implement the trait and never took `sudo` through this path at all; the
+  one tool that sets it `false` also stops advertising the param, which on the
+  CLI is what makes `sudo=true` fail at parse time (exit 5) rather than
+  mid-pipeline.
+
+  **Both refusals are audited, and so is every other `validate` rejection.**
+  Step 4 of the `StandardTool` pipeline now writes a `command_denied` event
+  when `T::validate` refuses — for all 399 tools on that pipeline, not only
+  this one. **The 77 direct handlers have no step 4 and are unaffected**, and
+  that gap is not academic: only 7 of the 77 call `log_denied` anywhere, and
+  none of the 43 `ssh_awx_*` handlers do, so an `AwxCommandBuilder::validate_id`
+  refusal still propagates with `?` and writes nothing. If you are sizing
+  alert-tuning work, size it on 399. That hook is what stands in for the
+  whitelist on the specialised tools, since `validate_builtin` at step 6 skips
+  the whitelist precisely on the assumption that they check their own inputs.
+  Until now the 90 handlers that implement it
+  refused injection attempts — `validate_service_name("x; rm -rf /")` among
+  them — and left no trace, while the blacklist denial in the same pipeline was
+  recorded. **This adds no audit volume to normal operation**: the event fires
+  only on a call that was refused. The event's `command` is empty at step 4,
+  where no command has been built yet and a synthetic one would be a
+  fabrication; most of these validators interpolate the offending input into
+  `reason` instead.
+
+  **What a `command_denied` event from step 4 does and does not tell you.** It
+  means the tool refused the input, not that an attack was refused, so read
+  `reason` before alerting on it. Among the validators reachable from those 90
+  `validate` bodies, some are genuine injection guards (`validate_service_name`)
+  and others are typo-class checks the repo happens to spell `CommandDenied` —
+  `validate_port` ("Invalid port number: '99999'"),
+  `validate_duration`, `validate_dimensions`, `validate_count`,
+  `validate_bench_type`, `validate_provider`, `validate_tag_action`. Two do not
+  return `CommandDenied` at all: `validate_vm_name` and `validate_snapshot_name`
+  (`domain::use_cases::hyperv`, reached from the five `ssh_hyperv_*` handlers)
+  return `McpInvalidRequest`. Its message is carried *inside* `reason` rather
+  than being it: the fallback arm stringifies the variant, and that variant's
+  `Display` is `"MCP invalid request: {0}"`, so `reason` reads
+  `"MCP invalid request: <message>"`. Nothing is dropped, but a matcher
+  anchored at the start of `reason` will not see the validator's own text. **If
+  you alert on `command_denied`, this widens what reaches that alert**; filter
+  on `tool_name` and `reason`, not on the event type alone.
+
+  **And it does not cover the guards that live in the builders.** A specialised
+  tool can also refuse inside `T::build_command` at step 5 — `validate_identifier`
+  (`domain::use_cases::network_equipment`), which rejects a shell metacharacter
+  in an interface or config-section name, is reached from
+  `build_show_run_command` and `build_show_interfaces_command` and from no
+  handler's `validate`. Step 5 propagates that error with `?` and no
+  `log_denied`, so such a refusal writes **no** audit event, before this change
+  or after it. Widening step 5 the way step 4 was widened is not part of this
+  release; it is recorded so nobody reads `command_denied` coverage as
+  "every input a tool refused".
+
+  The reserved tag is a `const NETWORK_EQUIPMENT_TAG` in
+  `src/domain/use_cases/network_equipment.rs`, on the existing `HostConfig.tags`
+  rather than a new `HostConfig` field: `tags` is already `#[serde(default)]`
+  and a new field would have meant editing 987 struct literals across 415
+  files, since only one of them uses `..Default::default()` and `HostConfig`
+  derives no `Default`. `build_config_command` and `EquipmentType` are
+  unchanged.
+
+- **`hosts.<name>.sudo_password` no longer appears in the remote `ps`.**
+  `ssh_exec` and `ssh_exec_multi` used to send
+  `printf '%s\n' '<pw>' | sudo -S ...` as the SSH exec request, which becomes
+  the argv of the remote shell for the whole call. The password now travels on
+  the SSH channel's stdin (`sudo -S` reads it there) and the command text no
+  longer contains it. `ssh_session_exec` still delivers the password in the line it
+  writes to a live shell, which remains its legitimate form (the pipe form was
+  never in an argv there); it now also detaches the child's stdin and treats an
+  empty password as absent.
+  - **Library API.** `domain::privilege::elevate_with_password` now returns the
+    new `pub struct Elevated { command, stdin }` instead of `String`
+    (`stdin: Option<RedactedSecret>`, password plus `\n`);
+    `elevate_with_password_via_pipe` is the old string form, kept for
+    `ssh_session_exec`. `ConnectionGuard`, the pool guard and `SshClient` gain
+    `exec_with_stdin`; `exec` is unchanged.
+  - **Behaviour.** A host whose `protocol` is `telnet`, `serial`, `k8s-exec`,
+    `ssm`, `azure` or `gcp`, with `os_type: linux` and a `sudo_password`, no
+    longer has the password used by `ssh_exec` / `ssh_exec_multi`: only SSH has
+    a channel stdin to carry it, so those hosts get `sudo -n` and a `warn!`
+    naming the host and protocol (never the password). The old pipe form put
+    the password in the pod exec argv, a cloud API invocation record, or the
+    bridge host's own `gcloud` argv. Configure `NOPASSWD` in sudoers for such a
+    host, or reach it over SSH. An empty `sudo_password` is treated as absent.
+  - **`sudo: true` on a non-POSIX host is now refused**, in `ssh_exec` and
+    `ssh_exec_multi`, with `'sudo' requires a POSIX shell; host '<host>' uses '<shell>'.`,
+    where `<shell>` is the host's effective shell (`cmd` or `powershell`), which
+    a `shell:` override can set on a Linux host too. In `ssh_exec_multi` the
+    refusal is per host: the others still run. `ssh_exec_multi` also no longer
+    replays a command that may have run, because the command it replayed was the one
+    carrying the password: three argv exposures for one call.
+  - **The `StandardTool` pipeline now uses `hosts.<name>.sudo_password` too: the
+    command it emits changes on a password host.** On any host that has a
+    `sudo_password` (SSH transport, `sudo: true`), the 398 pipeline tools that
+    accept elevation emit `sudo -S -p '' bash -c 'exec 0</dev/null; …'` instead
+    of `sudo -n bash -c '…'`. **A `security.blacklist` entry or SIEM rule keyed
+    on the literal `sudo -n` silently stops matching on those hosts**, so a rule
+    meant to forbid elevation no longer denies it. Re-key such rules on `sudo`.
+    Hosts without a `sudo_password`, and every non-SSH transport, still emit
+    `sudo -n`. Details in the "now reaches the 398 `StandardTool` tools" entry
+    under Known issues.
+
 ### Fixed
+
+- **A slow command no longer destroys its session.** Every `Err` from reading a
+  session's output evicted and closed the session, under a comment asserting
+  "Shell is dead" — a diagnosis the code had never made. A deadline expiring
+  proves nothing about the shell, so eviction now happens only on a channel EOF
+  or close, decided by error **variant** and never by message text. What a
+  timeout does leave behind is handled too: the timed-out command is still
+  running, and its output and its markers arrive later on the same channel, so
+  its end marker is remembered and drained before the next command is sent.
+  Without that, the next call's result would have been the previous command's
+  bytes — a wrong answer where there had been a loud failure. If the earlier
+  command still has not finished 10 s into the drain, the session is kept and the
+  call is refused with a message saying so; only a closed channel closes it.
+
+- **Session output that does not end in a newline is no longer lost.**
+  `parse_exec_output` cut the output back to the last `\n` before the marker, so
+  when a command had not ended its output with one the marker shared that line
+  and the whole output became the empty string. `printf sans-nl`, and any `cat`
+  of a file with no final newline, looked as if they had produced nothing at all.
 
 - **A redacted secrets YAML parses again.** The entropy marker replaced a
   base64 token but left its `=` padding behind (`tls.key:
@@ -172,6 +675,20 @@ reading it. Every item below was reproduced before the fix and measured after.
   the custom handlers are a follow-up. `bridge-mcp status` reports
   `"written_by": "mcp-server-and-cli"`.
 
+- **A patch is no longer reinterpreted by `printf`.**
+  `FileAdvancedCommandBuilder::build_patch_command` passed the patch as
+  `printf`'s **format** (`printf '<patch>'`). Correctly quoted, so never an
+  injection, but `printf` interprets its format: a `%s` in a hunk was consumed
+  and dropped, a `%d` printed `0`, a two-character `\t` became a real tab. Each
+  silently applied a patch that was not the one sent. It is now
+  `printf '%s' '<patch>'`, with the patch as data.
+
+- **`tool_handlers::utils::shell_escape` delegates to
+  `domain::use_cases::shell::escape`** instead of carrying its own copy of the
+  same quoting. Two implementations of a security primitive that agreed and that
+  nothing kept in agreement; behaviour is unchanged, the byte-for-byte identical
+  body is gone.
+
 ### Changed
 
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
@@ -182,8 +699,29 @@ reading it. Every item below was reproduced before the fix and measured after.
 
 ### Added
 
+- **`tests/cli_exit_code.rs` — the first test that observes a real process's
+  exit code.** It runs the built binary with no network and no SSH host and
+  asserts 4 (destructive gate, no terminal), 3 (unknown host) and 5 (config that
+  fails to load). It does NOT observe a remote command
+  failing under the daemon (`ssh_exec host=X command=false`): that needs a
+  reachable SSH host and remains unmeasured by any test.
+- **`tools/call` results carry the remote command's exit code in `_meta`,
+  under `io.github.muchiny/remote-exit-code`** (a JSON integer, present only
+  when a command ran on the target host and reported a code). Public protocol
+  surface: the key is vendor-owned, derived from the registry name in
+  `server.json` like the existing `io.github.muchiny/build`, and not under the
+  spec's reserved `io.modelcontextprotocol/` prefix. The result body and every
+  `outputSchema` are unchanged (`remote_exit_code` stays `#[serde(skip)]`).
+  Effect: `bridge-mcp tool ssh_exec host=X command=false` now exits **6**
+  through the daemon, as it does on the direct path. Before, `ssh_exec` and
+  `ssh_exec_multi` — which report the code without setting `isError` — exited
+  **0** through the daemon, so a script that stopped on `&&` on the direct path
+  silently stopped stopping. The code also survives the MCP `summarize=true`
+  round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
+  built by the real serializer; no test spawns a daemon process.
+
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
-  the other 475 did not, so on a host where the interesting state is root-owned
+  the other 473 did not, so on a host where the interesting state is root-owned
   every specialised tool failed and the only way through was `ssh_exec` — which
   the server's own instructions tell clients to avoid. On a K3s host that was
   the whole `cri` group, `ssh_firewall_status`, and every systemd write.
@@ -209,6 +747,154 @@ reading it. Every item below was reproduced before the fix and measured after.
   CLI; the docs previously implied otherwise.
 - `limits.max_concurrent_commands` does not apply to CLI invocations, which are
   one process each.
+- **Nothing tests the exit-6 seam end to end.** No test at any level runs a
+  `bridge-mcp` process and observes its exit code, so the headline claim — that
+  a failed remote command now makes the CLI exit 6 — is assembled from two
+  separately-tested halves that nothing exercises together: `--lib` unit tests
+  on the `ToolCallResult` a handler returns, and unit tests on `tool_exit_code`
+  (`src/cli/runner.rs:64`) in isolation. **`make e2e-docker` does not close
+  this**, contrary to what an earlier note claimed:
+  `test_docker_ssh_exec_nonzero_exit` (`tests/e2e_docker.rs:277-294`,
+  `#[ignore]`, and therefore skipped by `make ci`) asserts on the struct the
+  handler returned and never spawns a process or reads a process exit status.
+  Closing it needs a test that actually runs the binary — spawn
+  `env!("CARGO_BIN_EXE_bridge-mcp")` with `tool …` against a reachable host and
+  assert on `status.code()`.
+
+- **52 handlers still exit 0 when their remote command fails**, because they run
+  it outside the `StandardTool` pipeline that the exit-code fix above lives in.
+  They implement `ToolHandler` directly, and each still does `warn!(…)` on a
+  non-zero exit and then returns `ToolCallResult::text(…)`, whose `is_error` is
+  `None`. **None of them was in the campaign's measured population** — the
+  measured 44 are all pipeline tools (see the BREAKING entry for the chain) —
+  so this is the unmeasured remainder of the same defect class.
+
+  **Nine confirmed, with the exit code plainly dropped:** `ssh_exec`
+  (`src/mcp/tool_handlers/ssh_exec.rs:246-279` — warns, then `:279` returns
+  `text(...)`), `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
+  `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`.
+
+  **The 43 `ssh_awx_*`, but narrower than the count suggests:** 42 route their
+  response through `AwxCommandBuilder::parse_checked_response`
+  (`AwxCommandBuilder::parse_checked_response`), which already raises
+  `BridgeError::AwxApi` on HTTP >= 400. A transport-level curl failure (connection
+  refused, timeout) used to reach `Ok("")` and exit 0 — not through a missing
+  marker (curl writes `-w` even on failure, with `%{http_code}` = `000`) but
+  because `000` parsed as 0 and `0 >= 400` is false; fixed in the function,
+  which is the whole fix for those 42 — each holds one
+  `parse_checked_response(&raw)?` call site and the `?` already propagates.
+  `ssh_awx_job_follow` is the exception: it uses the
+  unchecked `build_api_call`, parses no status, and returns `text(stdout)`
+  regardless, so it swallows HTTP errors too.
+
+  **Shape of the fix — and it does not fit AWX.** For the nine confirmed
+  handlers it is a mechanical sweep, one edit each: after the result is built,
+  `if response.exit_code != 0 { result = result
+  .with_remote_exit_code(i32::try_from(response.exit_code).unwrap_or(1)); }` —
+  the same line the pipeline's step 19 runs, placed last so a post-processing
+  hook cannot mask it. The builder already exists and is public.
+  **The AWX handlers need a different fix:** they never read `exit_code` at all,
+  so there is nothing for that line to test. Their failure mode was a curl
+  transport error whose marker reads `000` (not an absent marker);
+  `parse_checked_response` now rejects it, and the 42 call sites need nothing:
+  each is a single `parse_checked_response(&raw)?` that already propagates. What
+  remains is moving `ssh_awx_job_follow` onto `build_api_call_checked`. Do not
+  start from the one-line shape there.
+
+  Watch, in either group, for handlers where a non-zero exit is the *answer*
+  rather than a failure — the same judgment the `NONZERO_EXIT_IS_ERROR` note
+  above describes, which for a direct handler has to be made per call site since
+  there is no trait const to set. `ssh_exec` is the one to think hardest about:
+  it runs whatever the caller asked for, so its exit code is arguably the
+  caller's to interpret — but exiting 0 on a failed `command=false` is what the
+  fix above exists to stop.
+
+  **The three candidates that stood here as UNVERIFIED are not candidates at
+  all** — checked, rather than passed on: none of the three runs a remote
+  command, so none of them can exit 0 when one fails. `ssh_runbook_execute`
+  resolves a runbook into a plan and returns the text of it
+  (`format_execution_plan`); the steps are meant to be run *afterwards* through
+  `ssh_exec`, which is where the "many exec call sites" impression came from.
+  `ssh_health` and `ssh_history` read `ctx.history`, `ctx.session_manager` and
+  `ctx.connection_pool` — local state — and the `entry.exit_code` they touch is
+  a tally over already-recorded history, not a code they receive from a host.
+  Decisive check: `grep -nE 'execute_use_case|execute_command|\.exec\('` over
+  the three files matches nothing. So the remainder is the 52 above, and that
+  list is now closed rather than open-ended.
+
+- **20 of the 77 handlers that implement `ToolHandler` directly write no audit
+  event at all.** This is the complement of the question asked about the audit
+  on this branch: that one inventoried which *events* carry no `tool_name`, and
+  nobody asked which *operations* produce no event to name. Making the name
+  mandatory on the four entry points cannot reach these, by construction — they
+  call none of them.
+
+  Counted, not estimated: of the 77 files under `src/mcp/tool_handlers/` with an
+  `impl ToolHandler for`, 20 mention none of `log_success`, `log_failure`,
+  `log_denied`, `process_success`, `AuditEvent` or `audit_logger` outside their
+  `#[cfg(test)]` module. **Seven of the 20 open a connection or change server
+  state, and those are the ones that matter:** `ssh_session_create`,
+  `ssh_session_close`, `ssh_tunnel_create`, `ssh_tunnel_close`,
+  `ssh_config_set`, `ssh_recording_start`, `ssh_recording_stop`. The other 13
+  are local reads: `ssh_status`, `ssh_health`, `ssh_history`, `ssh_config_get`,
+  `ssh_output_fetch`, `ssh_session_list`, `ssh_tunnel_list`,
+  `ssh_runbook_execute`, `ssh_runbook_list`, `ssh_runbook_validate`,
+  `ssh_recording_list`, `ssh_recording_replay`, `ssh_recording_verify`.
+
+  **Nothing central covers them.** Neither the MCP dispatcher nor the CLI's
+  tool path writes an audit event per tool call. Outside the handlers themselves,
+  the only code that constructs an `AuditEvent` is
+  `src/domain/use_cases/execute_command.rs` — the four entry points, which a
+  caller has to invoke by name, as the `bridge-mcp exec` subcommand does — and
+  the four SFTP sites of `bridge-mcp upload` / `download` in `src/cli/runner.rs`
+  (`grep -rn 'AuditEvent::new\|AuditEvent::denied' src/`). So
+  `ssh_session_create host=pi` opens an SSH session to a host and leaves no line
+  behind saying it did.
+
+- **The `NONZERO_EXIT_IS_ERROR` opt-out has three users out of 399, and 355 of
+  the 399 have never been measured.** The exit-code change flips the behaviour
+  of every `StandardTool` tool at once — 399 of them
+  (`grep -rho 'impl StandardTool for' src/mcp/tool_handlers/ | wc -l`; 399 plus
+  the 77 direct handlers is the whole 476-tool baseline). The judgment behind
+  flipping them all rests on the 44 the live campaign could probe. Of the three
+  opt-outs above, `ssh_service_status` is the one measured live on this branch
+  (case `H07`, `report-pass4-B.json`). Whether `ssh_timer_info` or
+  `ssh_k8s_diff` were among that 44 is not recorded in any artefact in this tree
+  — the sweep's own reports are gitignored and exist only in the main checkout —
+  so treat their non-zero semantics as read off their command
+  (`systemctl status`, `kubectl diff`) rather than as measured. Nothing here says
+  the 355 unprobed tools have no normal non-zero answer of their own; it says
+  only that nobody has looked. When one turns up, the fix is one const on that
+  tool — and `ssh_helm_diff` above is the worked example of a candidate that
+  looks like one and is not, because its non-zero answer depends on an argument
+  the const cannot see.
+
+- **`hosts.<name>.sudo_password` now reaches the 398 `StandardTool` tools that accept elevation.**
+  The pipeline's step 5b used to call the password-less
+  `domain::privilege::elevate`, so `sudo: true` on a host that demands a
+  password worked on `ssh_exec`, `ssh_exec_multi` and `ssh_session_exec` and
+  failed at once (`sudo -n`) on every other tool. Step 5b now calls
+  `elevate_with_password` and the password goes to `exec_with_stdin` — on the
+  SSH channel's stdin, never in the command line. `ALLOWS_ELEVATION = false`
+  tools are still refused before any elevation, so a password is not
+  reachable on them. On a non-SSH protocol the password is ignored with a
+  `warn!` and `sudo -n` is kept; an empty `sudo_password` counts as absent.
+  - **Operator-visible: the emitted command changes.** For a host that has a
+    `sudo_password`, the pipeline now emits `sudo -S -p '' …` instead of
+    `sudo -n …`. **A blacklist entry or SIEM rule keyed on the literal
+    `sudo -n` silently stops matching** — a rule meant to forbid elevation no
+    longer denies it. Re-key such rules on `sudo`.
+  - **Hardening: the elevated child's stdin is detached.** `sudo -S` reads
+    stdin only when it must authenticate; under `NOPASSWD` or a warm
+    credential cache it does not, and the unread `password\n` became fd 0 of
+    `bash -c '<cmd>'` (`printf 'pw\n' | sudo -S -p '' bash -c cat` prints
+    it). A caller-supplied command (`ssh_exec`, `ssh_exec_multi`,
+    `ssh_session_exec`) could read it back, e.g. through `base64`, which the
+    exact-match masker does not catch. Both `elevate_with_password` and
+    `elevate_with_password_via_pipe` now wrap the command as
+    `exec 0</dev/null` followed by the command; `sudo` still authenticates
+    from the channel. Nothing was written to a channel stdin before, so no
+    tool can depend on its content.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 

@@ -89,7 +89,8 @@ impl StandardTool for FleetDiffTool {
         ctx: &ToolContext,
     ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
         std::future::ready(
-            validate_free_form_command(ctx, &args.host, &args.command).map(|()| None),
+            validate_free_form_command(ctx, FleetDiffTool::NAME, &args.host, &args.command)
+                .map(|()| None),
         )
     }
 
@@ -139,7 +140,7 @@ mod tests {
     fn test_schema() {
         let handler = SshFleetDiffHandler::new();
         assert_eq!(handler.name(), "ssh_fleet_diff");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
         let required = schema_json["required"].as_array().unwrap();

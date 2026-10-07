@@ -5,7 +5,7 @@
 //! protocol adapters (`WinRM`, Telnet, K8s, Serial, SSM, Azure, GCP) are feature-gated.
 //!
 //! The router exposes the same public API as `ConnectionPool`, enabling a
-//! clean cut-over in `ToolContext` without changing any of the 337 tool handlers.
+//! clean cut-over in `ToolContext` without changing any of the tool handlers.
 
 use crate::config::{HostConfig, LimitsConfig, Protocol};
 use crate::error::Result;
@@ -36,6 +36,10 @@ pub struct ExecutorRouter {
     /// `mock_output` is also set.
     #[cfg(test)]
     mock_delay: Option<std::time::Duration>,
+    /// Every `exec` / `exec_with_stdin` the mock connections served, in
+    /// order. Lets a test observe what actually reached the channel.
+    #[cfg(test)]
+    mock_calls: MockCalls,
 }
 
 impl ExecutorRouter {
@@ -54,6 +58,8 @@ impl ExecutorRouter {
             mock_output: None,
             #[cfg(test)]
             mock_delay: None,
+            #[cfg(test)]
+            mock_calls: MockCalls::default(),
         }
     }
 
@@ -72,6 +78,8 @@ impl ExecutorRouter {
             mock_output: None,
             #[cfg(test)]
             mock_delay: None,
+            #[cfg(test)]
+            mock_calls: MockCalls::default(),
         }
     }
 
@@ -115,7 +123,8 @@ impl ExecutorRouter {
             let conn = match self.mock_delay {
                 Some(delay) => MockConnection::new_with_delay(output.clone(), delay),
                 None => MockConnection::new(output.clone()),
-            };
+            }
+            .with_calls(self.mock_calls.clone());
             return Ok(ConnectionGuard::Mock(conn));
         }
 
@@ -265,6 +274,31 @@ pub enum ConnectionGuard<'a> {
     Psrp(crate::psrp::PsrpConnection),
 }
 
+/// Callers gate on `HostConfig::sudo_password_for_exec`, so this is a backstop.
+/// The message must not contain "connection": `is_retryable_error` treats that
+/// substring in an `SshExec` reason as transient, and this refusal is not.
+///
+/// Non-SSH protocols have no channel to write a stdin to; refuse rather than
+/// drop the bytes (the only use is a POSIX `sudo -S` password).
+#[cfg(any(
+    feature = "winrm",
+    feature = "telnet",
+    feature = "k8s-exec",
+    feature = "serial",
+    feature = "ssm",
+    feature = "azure",
+    feature = "gcp",
+    feature = "psrp"
+))]
+fn reject_stdin(stdin: Option<&[u8]>) -> Result<()> {
+    if stdin.is_some() {
+        return Err(crate::error::BridgeError::SshExec {
+            reason: crate::error::STDIN_NOT_SSH_REASON.to_string(),
+        });
+    }
+    Ok(())
+}
+
 impl ConnectionGuard<'_> {
     /// Execute a command using this connection.
     ///
@@ -296,6 +330,79 @@ impl ConnectionGuard<'_> {
             Self::Gcp(conn) => conn.exec(command, limits).await,
             #[cfg(feature = "psrp")]
             Self::Psrp(conn) => conn.exec(command, limits).await,
+        }
+    }
+
+    /// Execute a command, feeding `stdin` to the remote process over the
+    /// channel rather than through the command text.
+    ///
+    /// **`stdin` carries the sudo password and nothing else.** It must never
+    /// be reached by caller-supplied bytes: command validation (whitelist and
+    /// blacklist) inspects only the command text, so anything delivered here
+    /// bypasses it by construction. A tool that exposed stdin to callers would
+    /// let `bash` read a script from it and defeat the blacklist. Do not
+    /// generalize this parameter without validating what it carries.
+    ///
+    /// Only SSH has a channel to write to. With `stdin: None` every protocol
+    /// behaves exactly like [`Self::exec`]; with `Some`, every non-SSH
+    /// protocol returns an error rather than silently dropping the bytes
+    /// (the one use is a POSIX `sudo -S` password, which means nothing
+    /// there). The test-only mock records `stdin` (see `ExecutorRouter::mock_calls`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command execution fails, or if `stdin` is
+    /// `Some` on a non-SSH connection.
+    pub async fn exec_with_stdin(
+        &mut self,
+        command: &str,
+        stdin: Option<&[u8]>,
+        limits: &LimitsConfig,
+    ) -> Result<CommandOutput> {
+        match self {
+            Self::Ssh(guard) => guard.exec_with_stdin(command, stdin, limits).await,
+            #[cfg(test)]
+            Self::Mock(conn) => conn.exec_with_stdin(command, stdin, limits).await,
+            #[cfg(feature = "winrm")]
+            Self::WinRm(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "telnet")]
+            Self::Telnet(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "k8s-exec")]
+            Self::K8sExec(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "serial")]
+            Self::Serial(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "ssm")]
+            Self::Ssm(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "azure")]
+            Self::Azure(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "gcp")]
+            Self::Gcp(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "psrp")]
+            Self::Psrp(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
         }
     }
 
@@ -341,10 +448,23 @@ pub struct MockConnection {
     /// to simulate a long-running command that can be interrupted by a
     /// `CancellationToken` racing against it in a `tokio::select!`.
     delay: Option<std::time::Duration>,
+    /// Shared with the router that made this connection.
+    calls: MockCalls,
 }
+
+/// `(command, stdin)` for every call a mock connection served.
+#[cfg(test)]
+type MockCalls = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<Vec<u8>>)>>>;
 
 #[cfg(test)]
 impl MockConnection {
+    /// Record into `calls` instead of a private log.
+    #[must_use]
+    fn with_calls(mut self, calls: MockCalls) -> Self {
+        self.calls = calls;
+        self
+    }
+
     /// Create a mock connection that returns the given output immediately.
     #[must_use]
     pub fn new(output: CommandOutput) -> Self {
@@ -352,6 +472,7 @@ impl MockConnection {
             output,
             failed: false,
             delay: None,
+            calls: MockCalls::default(),
         }
     }
 
@@ -366,11 +487,26 @@ impl MockConnection {
             output,
             failed: false,
             delay: Some(delay),
+            calls: MockCalls::default(),
         }
     }
 
     /// Execute returns the pre-configured output, optionally after a delay.
-    pub async fn exec(&self, _command: &str, _limits: &LimitsConfig) -> Result<CommandOutput> {
+    pub async fn exec(&self, command: &str, limits: &LimitsConfig) -> Result<CommandOutput> {
+        self.exec_with_stdin(command, None, limits).await
+    }
+
+    /// Like [`Self::exec`], recording the command and the stdin it was given.
+    pub async fn exec_with_stdin(
+        &self,
+        command: &str,
+        stdin: Option<&[u8]>,
+        _limits: &LimitsConfig,
+    ) -> Result<CommandOutput> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((command.to_string(), stdin.map(<[u8]>::to_vec)));
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
         }
@@ -401,6 +537,7 @@ impl ExecutorRouter {
             psrp_pool: crate::psrp::pool::PsrpPool::new(),
             mock_output: Some(output),
             mock_delay: None,
+            mock_calls: MockCalls::default(),
         }
     }
 
@@ -422,7 +559,17 @@ impl ExecutorRouter {
             psrp_pool: crate::psrp::pool::PsrpPool::new(),
             mock_output: Some(output),
             mock_delay: Some(delay),
+            mock_calls: MockCalls::default(),
         }
+    }
+
+    /// What the mock connections received so far: `(command, stdin)` pairs.
+    #[must_use]
+    pub fn mock_calls(&self) -> Vec<(String, Option<Vec<u8>>)> {
+        self.mock_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 

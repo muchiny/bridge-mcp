@@ -177,13 +177,24 @@ impl AwxCommandBuilder {
     const STATUS_MARKER: &'static str = "HTTP_STATUS:";
 
     /// Like [`Self::build_api_call`] but appends a `curl -w` write-out so the
-    /// HTTP status code can be recovered from stdout and classified by
-    /// [`Self::parse_checked_response`].
+    /// HTTP status code can be recovered from stdout.
     ///
     /// Plain `build_api_call` uses `curl -s`, which exits 0 on any HTTP
     /// response, so a 4xx/5xx would otherwise reach the model as an opaque
-    /// success. Use this variant for handlers where a non-2xx must be an error
-    /// (launch, relaunch, cancel, approvals, project sync).
+    /// success. That holds for a read as much as for a write — a 403 on a job
+    /// listing is not an empty listing — so this is the form **every** AWX
+    /// handler uses, the read-only ones included and not just the mutating
+    /// five (launch, relaunch, cancel, approvals, project sync) this paragraph
+    /// used to name. `build_api_call` has no caller left in production code —
+    /// only this function, plus the test modules of `awx.rs` itself and of
+    /// `ssh_awx_workflow_approvals.rs`.
+    ///
+    /// Most handlers then hand the raw stdout to
+    /// [`Self::parse_checked_response`], which splits the status off and
+    /// classifies it. `ssh_awx_job_follow` is the one exception and checks the
+    /// status in the shell instead, because its three curl bodies are consumed
+    /// inside the script it builds and never reach the handler; the
+    /// `build_follow_script` function there carries the argument.
     #[must_use]
     #[expect(clippy::too_many_arguments)]
     pub fn build_api_call_checked(
@@ -216,23 +227,48 @@ impl AwxCommandBuilder {
     /// from the response body.
     ///
     /// Returns the body on a 2xx/3xx status, and a [`BridgeError::AwxApi`]
-    /// carrying the status and AWX `detail` message on a status `>= 400`. If the
-    /// marker is absent (e.g. curl failed at the transport level before the
-    /// write-out), the raw text is returned unchanged.
+    /// carrying the status and AWX `detail` message on a status `>= 400`.
+    ///
+    /// A curl **transport failure** (connection refused, timeout, DNS) is not a
+    /// missing marker: curl writes its `-w` output even when it fails, with
+    /// `%{http_code}` = `000`. The marker is therefore present and carries no
+    /// real HTTP status. That case, and any marker whose value is not a valid
+    /// status (`100..=599`), returns [`BridgeError::AwxApi`] with `status: 0`.
+    /// Only text with no marker at all is returned unchanged: it did not come
+    /// from [`Self::build_api_call_checked`].
     ///
     /// # Errors
     ///
-    /// Returns [`BridgeError::AwxApi`] when AWX responded with HTTP `>= 400`.
+    /// Returns [`BridgeError::AwxApi`] when AWX responded with HTTP `>= 400`,
+    /// or when curl never obtained an HTTP status (`status: 0`).
     pub fn parse_checked_response(raw: &str) -> Result<String> {
         let Some(idx) = raw.rfind(Self::STATUS_MARKER) else {
             return Ok(raw.to_string());
         };
-        let status: u16 = raw[idx + Self::STATUS_MARKER.len()..]
-            .trim()
-            .parse()
-            .unwrap_or(0);
         // Body is everything before the marker; drop the newline curl inserted.
         let body = raw[..idx].trim_end_matches(['\n', '\r']).to_string();
+        let value = raw[idx + Self::STATUS_MARKER.len()..].trim();
+        // `000` parses fine as 0, so parsing alone cannot tell "curl reached no
+        // server" from a status: accept only a real HTTP status, and treat
+        // everything else as a transport failure instead of defaulting to 0.
+        let Some(status) = value
+            .parse::<u16>()
+            .ok()
+            .filter(|s| (100..=599).contains(s))
+        else {
+            return Err(BridgeError::AwxApi {
+                status: 0,
+                detail: format!(
+                    "curl transport failure (HTTP_STATUS:{value}): no HTTP response \
+                     was obtained from AWX{}",
+                    if body.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {body}")
+                    }
+                ),
+            });
+        };
         if status >= 400 {
             Err(BridgeError::AwxApi {
                 status,
@@ -313,6 +349,61 @@ impl AwxCommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_curl_transport_failure_is_not_a_success() {
+        // curl écrit son `-w` même quand il n'a pas pu se connecter, avec
+        // %{http_code} = 000. Le marqueur EST donc présent, `"000".parse()`
+        // rend 0, et `0 >= 400` est faux : l'appel rendait Ok("").
+        let raw = format!("{}000", AwxCommandBuilder::STATUS_MARKER);
+        let err = AwxCommandBuilder::parse_checked_response(&raw)
+            .expect_err("un échec de transport ne doit pas être un succès");
+        let msg = err.to_string();
+        assert!(msg.contains("000"), "l'erreur doit citer le 000 : {msg}");
+        assert!(
+            msg.to_lowercase().contains("transport"),
+            "l'erreur doit nommer l'échec de transport : {msg}"
+        );
+    }
+
+    #[test]
+    fn text_without_a_marker_is_returned_unchanged() {
+        // Cas documenté : sans marqueur, le texte ne vient pas de
+        // `build_api_call_checked` (ou curl est mort avant son write-out,
+        // tué par le délai SSH) et passe tel quel, en succès. Ce test
+        // fait de cette phrase un garde : la changer doit être délibéré.
+        let raw = "{\"count\":1}";
+        assert_eq!(
+            AwxCommandBuilder::parse_checked_response(raw).expect("sans marqueur : Ok"),
+            raw
+        );
+    }
+
+    #[test]
+    fn an_unreadable_status_marker_is_not_a_success() {
+        let empty = AwxCommandBuilder::STATUS_MARKER.to_string();
+        assert!(AwxCommandBuilder::parse_checked_response(&empty).is_err());
+        let junk = format!("{}abc", AwxCommandBuilder::STATUS_MARKER);
+        assert!(AwxCommandBuilder::parse_checked_response(&junk).is_err());
+    }
+
+    #[test]
+    fn a_real_http_error_still_reports_its_status() {
+        let raw = format!(
+            "{{\"detail\":\"Not found.\"}}\n{}404",
+            AwxCommandBuilder::STATUS_MARKER
+        );
+        let err =
+            AwxCommandBuilder::parse_checked_response(&raw).expect_err("404 doit être une erreur");
+        assert!(err.to_string().contains("404"), "{err}");
+    }
+
+    #[test]
+    fn a_successful_call_still_returns_its_body() {
+        let raw = format!("{{\"count\":1}}\n{}200", AwxCommandBuilder::STATUS_MARKER);
+        let body = AwxCommandBuilder::parse_checked_response(&raw).expect("200 doit réussir");
+        assert_eq!(body, "{\"count\":1}");
+    }
 
     #[test]
     fn resolve_timeout_falls_back_to_config_when_absent() {

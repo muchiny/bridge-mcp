@@ -124,7 +124,7 @@ impl ToolHandler for SshAwxJobSummaryHandler {
 
         let raw = ctx
             .execute_use_case
-            .process_success(host, &cmd, &output.into())
+            .process_success(self.name(), host, &cmd, &output.into(), &[])
             .stdout;
         let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction_recorded(
@@ -159,7 +159,7 @@ mod tests {
     fn test_schema() {
         let handler = SshAwxJobSummaryHandler;
         assert_eq!(handler.name(), "ssh_awx_job_summary");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_awx_job_summary");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();

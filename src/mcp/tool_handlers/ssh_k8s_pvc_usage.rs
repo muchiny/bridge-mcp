@@ -176,7 +176,7 @@ mod tests {
     fn test_schema() {
         let handler = SshK8sPvcUsageHandler::new();
         assert_eq!(handler.name(), "ssh_k8s_pvc_usage");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
         let schema = handler.schema();
         assert_eq!(schema.name, "ssh_k8s_pvc_usage");
         let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();

@@ -229,7 +229,7 @@ mod tests {
     fn test_scheme() {
         let handler = HistoryResourceHandler;
         assert_eq!(handler.scheme(), "history");
-        assert!(!handler.description().is_empty());
+        assert_ne!(handler.description(), "");
     }
 
     #[tokio::test]

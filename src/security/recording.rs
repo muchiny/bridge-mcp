@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].host, "myhost");
         assert_eq!(list[0].event_count, 2);
-        assert!(!list[0].file_path.is_empty());
+        assert_ne!(list[0].file_path, "");
     }
 
     #[test]

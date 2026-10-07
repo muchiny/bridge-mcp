@@ -186,7 +186,7 @@ fn test_use_case_process_success_sanitization() {
         duration_ms: 100,
     };
 
-    let response = use_case.process_success("test-server", "cat config", &output);
+    let response = use_case.process_success("test_tool", "test-server", "cat config", &output, &[]);
 
     // Password should be sanitized
     assert!(!response.output.contains("secret123"));
@@ -208,7 +208,7 @@ fn test_use_case_process_success_with_stderr() {
         duration_ms: 50,
     };
 
-    let response = use_case.process_success("test-server", "ls", &output);
+    let response = use_case.process_success("test_tool", "test-server", "ls", &output, &[]);
 
     assert!(response.output.contains("output line 1"));
     assert!(response.output.contains("STDERR"));
@@ -227,7 +227,7 @@ fn test_use_case_process_success_nonzero_exit() {
         duration_ms: 10,
     };
 
-    let response = use_case.process_success("test-server", "bad-cmd", &output);
+    let response = use_case.process_success("test_tool", "test-server", "bad-cmd", &output, &[]);
 
     assert_eq!(response.exit_code, 127);
     assert!(response.output.contains("127"));
@@ -389,10 +389,10 @@ fn test_default_security_config() {
     assert_eq!(config.mode, SecurityMode::Standard);
 
     // Default whitelist is empty
-    assert!(config.whitelist.is_empty());
+    assert_eq!(config.whitelist, [] as [std::string::String; 0]);
 
     // Default blacklist has dangerous commands
-    assert!(!config.blacklist.is_empty());
+    assert_ne!(config.blacklist, [] as [std::string::String; 0]);
     let blacklist_str = config.blacklist.join(" ");
     assert!(blacklist_str.contains("rm"));
     assert!(blacklist_str.contains("mkfs"));
@@ -402,7 +402,10 @@ fn test_default_security_config() {
     assert!(config.sanitize.enabled);
     // Builtin patterns are handled internally, custom patterns start empty
     assert!(config.sanitize.custom_patterns.is_empty());
-    assert!(config.sanitize.disable_builtin.is_empty());
+    assert_eq!(
+        config.sanitize.disable_builtin,
+        [] as [std::string::String; 0]
+    );
 }
 
 // =============================================================================
@@ -474,7 +477,7 @@ fn test_unix_agent_env_var() {
         Ok(path) => {
             println!("SSH_AUTH_SOCK is set to: {path}");
             // If set, it should be a path
-            assert!(!path.is_empty());
+            assert_ne!(path, "");
         }
         Err(_) => {
             println!("SSH_AUTH_SOCK is not set (no agent running)");

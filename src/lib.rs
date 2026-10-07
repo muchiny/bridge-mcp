@@ -1,6 +1,3 @@
-// The 337-handler vec! in create_filtered_registry exceeds 16 KiB on the stack
-// during test compilation; suppress this lint for test builds.
-#![cfg_attr(test, allow(clippy::large_stack_arrays))]
 // No unwrap/expect in production code (tests are exempted via
 // allow-unwrap-in-tests / allow-expect-in-tests in clippy.toml).
 #![warn(clippy::unwrap_used, clippy::expect_used)]

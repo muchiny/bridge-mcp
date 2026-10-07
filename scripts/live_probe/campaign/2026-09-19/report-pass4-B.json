@@ -1,0 +1,23 @@
+{
+  "binary": "./target/debug/bridge-mcp",
+  "host": "raspberry",
+  "baseline": true,
+  "results": {
+    "H07": {
+      "cli": {
+        "ok": true,
+        "out": "[exit:3]\n* apt-daily.service - Daily apt download activities\n     Loaded: loaded (/usr/lib/systemd/system/apt-daily.service; static)\n     Active: inactive (dead) since Mon 2026-09-28 20:36:15 CEST; 14h ago\n Invocation: c479e41b028c40bbadb364c7613971fc\nTriggeredBy: * apt-daily.timer\n       Docs: man:apt(8)\n   Main PID: 588221 (code=exited, status=0/SUCCESS)\n   Mem peak: 34.4M\n        CPU: 962ms\n\nSe",
+        "err": "",
+        "rc": 0
+      }
+    },
+    "H07b": {
+      "mcp": {
+        "ok": true,
+        "out": "[exit:3]\n* apt-daily.service - Daily apt download activities\n     Loaded: loaded (/usr/lib/systemd/system/apt-daily.service; static)\n     Active: inactive (dead) since Mon 2026-09-28 20:36:15 CEST; 14h ago\n Invocation: c479e41b028c40bbadb364c7613971fc\nTriggeredBy: * apt-daily.timer\n       Docs: man:apt(8)\n   Main PID: 588221 (code=exited, status=0/SUCCESS)\n   Mem peak: 34.4M\n        CPU: 962ms\n\nSe",
+        "err": "",
+        "rc": 0
+      }
+    }
+  }
+}

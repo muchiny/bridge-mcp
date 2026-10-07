@@ -819,6 +819,30 @@ impl SshClient {
     /// - The command times out
     /// - The output exceeds the maximum allowed size
     pub async fn exec(&self, command: &str, limits: &LimitsConfig) -> Result<CommandOutput> {
+        self.exec_with_stdin(command, None, limits).await
+    }
+
+    /// Like [`Self::exec`], but writes `stdin` to the channel after the exec
+    /// request and then sends EOF.
+    ///
+    /// This is how a secret (a `sudo -S` password) reaches the remote process
+    /// without being part of the command text, which becomes the argv of the
+    /// remote shell and is readable with `ps`. With `None` the channel's stdin
+    /// is left open, exactly as before: closing it unasked would make
+    /// `read_command_output` see a channel closed without an exit status.
+    ///
+    /// `stdin` is for the sudo password only and bypasses command validation;
+    /// see `ConnectionGuard::exec_with_stdin` before widening its use.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::exec`], plus a failure to write to the channel.
+    pub async fn exec_with_stdin(
+        &self,
+        command: &str,
+        stdin: Option<&[u8]>,
+        limits: &LimitsConfig,
+    ) -> Result<CommandOutput> {
         let start = std::time::Instant::now();
 
         let mut channel =
@@ -835,6 +859,22 @@ impl SshClient {
             .map_err(|e| BridgeError::SshExec {
                 reason: format!("Failed to execute command: {e}"),
             })?;
+
+        if let Some(bytes) = stdin {
+            channel
+                .data(bytes)
+                .await
+                .map_err(|e| BridgeError::SshExec {
+                    reason: format!("Failed to write to command stdin: {e}"),
+                })?;
+            // Load-bearing: without EOF, `sudo -S` on a host that rejects the
+            // password blocks on a second read until `command_timeout` (the
+            // hang `sudo -n` prevents on the no-password path). Never write
+            // stdin without closing it.
+            channel.eof().await.map_err(|e| BridgeError::SshExec {
+                reason: format!("Failed to close command stdin: {e}"),
+            })?;
+        }
 
         let (stdout, stderr, exit_code) = Self::read_command_output(&mut channel, limits).await?;
 
@@ -1224,8 +1264,8 @@ mod tests {
             duration_ms: 0,
         };
 
-        assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout, "");
+        assert_eq!(output.stderr, "");
     }
 
     #[test]
@@ -1558,7 +1598,7 @@ mod tests {
     #[test]
     fn test_client_handler_empty_hostname() {
         let handler = ClientHandler::new(String::new(), 22, HostKeyVerification::Strict);
-        assert!(handler.hostname.is_empty());
+        assert_eq!(handler.hostname, "");
     }
 
     #[test]
@@ -1622,7 +1662,7 @@ mod tests {
         let error = BridgeError::SshTimeout { seconds: u64::MAX };
         let msg = error.to_string();
         // Should not panic
-        assert!(!msg.is_empty());
+        assert_ne!(msg, "");
     }
 
     #[test]
