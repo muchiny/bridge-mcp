@@ -274,6 +274,10 @@ pub enum ConnectionGuard<'a> {
     Psrp(crate::psrp::PsrpConnection),
 }
 
+/// Callers gate on `HostConfig::sudo_password_for_exec`, so this is a backstop.
+/// The message must not contain "connection": `is_retryable_error` treats that
+/// substring in an `SshExec` reason as transient, and this refusal is not.
+///
 /// Non-SSH protocols have no channel to write a stdin to; refuse rather than
 /// drop the bytes (the only use is a POSIX `sudo -S` password).
 #[cfg(any(
@@ -289,7 +293,7 @@ pub enum ConnectionGuard<'a> {
 fn reject_stdin(stdin: Option<&[u8]>) -> Result<()> {
     if stdin.is_some() {
         return Err(crate::error::BridgeError::SshExec {
-            reason: "stdin is only supported on SSH connections".to_string(),
+            reason: "stdin is only supported on the SSH transport".to_string(),
         });
     }
     Ok(())

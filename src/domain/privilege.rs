@@ -170,7 +170,10 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// calls [`elevate_with_password`] with the host's `sudo_password`, and hands
 /// the returned `stdin` to `exec_with_stdin`, so all 399 pipeline tools honour
 /// a configured password without it ever entering the remote command line.
-/// This function remains for callers that have no password to offer.
+/// This function remains for callers that have no password to offer, and it is
+/// what every non-SSH transport falls back to: only SSH has a channel stdin to
+/// carry a password, so on telnet, serial, k8s-exec, ssm, azure and gcp the
+/// `sudo_password` is ignored (with a warning) and `sudo -n` is used.
 #[must_use]
 pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     if !args.sudo {
@@ -207,6 +210,22 @@ pub struct Elevated {
     pub stdin: Option<crate::config::RedactedSecret>,
 }
 
+/// Prefix `command` with `exec 0</dev/null` so the elevated shell cannot read
+/// what `sudo -S` left on its stdin.
+///
+/// `sudo -S` reads stdin only when it must authenticate. Under `NOPASSWD` or
+/// with a warm credential cache it never does, so the password line stays in
+/// the buffer and becomes fd 0 of the `bash -c` child: `printf 'pw\n' | sudo
+/// -S -p '' bash -c cat` prints the password. A caller-supplied command
+/// (`ssh_exec`, `ssh_session_exec`) could then read it back. `sudo` itself
+/// still reads the real stdin to authenticate; only its child is detached.
+///
+/// Safe for every tool: before the password was sent on the channel's stdin
+/// nothing was ever written there, so no command can depend on its content.
+fn detach_stdin(command: &str) -> String {
+    format!("exec 0</dev/null\n{command}")
+}
+
 /// Like [`elevate`], but for a host whose configuration carries a `sudo`
 /// password.
 ///
@@ -238,7 +257,7 @@ pub fn elevate_with_password(
             stdin: None,
         };
     };
-    let quoted = shell::escape(command, ShellType::Posix);
+    let quoted = shell::escape(&detach_stdin(command), ShellType::Posix);
     let command = args.sudo_user.as_ref().map_or_else(
         || format!("sudo -S -p '' bash -c {quoted}"),
         |user| {
@@ -279,7 +298,7 @@ pub fn elevate_with_password_via_pipe(
     let Some(password) = password else {
         return elevate(command, args);
     };
-    let quoted = shell::escape(command, ShellType::Posix);
+    let quoted = shell::escape(&detach_stdin(command), ShellType::Posix);
     let pw = shell::escape(password, ShellType::Posix);
     args.sudo_user.as_ref().map_or_else(
         || format!("printf '%s\\n' {pw} | sudo -S -p '' bash -c {quoted}"),
@@ -432,7 +451,7 @@ mod tests {
             "the injected `;` must not escape the quoting around sudo_user: {got}"
         );
         assert!(
-            got.contains("-u 'root; touch /tmp/pwned' bash -c 'id'"),
+            got.contains("-u 'root; touch /tmp/pwned' bash -c 'exec 0</dev/null\nid'"),
             "sudo_user must be single-quoted exactly like command: {got}"
         );
     }
@@ -497,7 +516,7 @@ mod tests {
         // Sans cette seconde assertion, une fonction qui jette le mot de passe
         // en silence passerait aussi.
         assert_eq!(
-            got.stdin.as_ref().map(|s| s.as_str()),
+            got.stdin.as_deref(),
             Some("hunter2\n"),
             "le mot de passe doit voyager sur stdin"
         );
@@ -512,6 +531,48 @@ mod tests {
             sudo_user: None,
         };
         let got = elevate_with_password_via_pipe("id", &args, Some("hunter2"));
-        assert_eq!(got, "printf '%s\\n' 'hunter2' | sudo -S -p '' bash -c 'id'");
+        assert!(
+            got.starts_with("printf '%s\\n' 'hunter2' | sudo -S -p '' bash -c '"),
+            "{got}"
+        );
+        assert_detached_before(&got, "id");
+    }
+
+    /// The redirect must come BEFORE the command inside the `bash -c` payload:
+    /// after it, it would be useless. Ordering, not mere presence.
+    fn assert_detached_before(line: &str, command: &str) {
+        let redirect = line
+            .find("exec 0</dev/null")
+            .unwrap_or_else(|| panic!("no stdin redirect in: {line}"));
+        let cmd = line
+            .rfind(command)
+            .unwrap_or_else(|| panic!("command missing in: {line}"));
+        assert!(redirect < cmd, "redirect must precede the command: {line}");
+    }
+
+    /// `sudo -S` leaves the password line unread under NOPASSWD, and it would
+    /// become the elevated command's stdin (`... bash -c cat` prints it).
+    #[test]
+    fn elevate_with_password_detaches_the_child_stdin_before_the_command() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: None,
+        };
+        let got = elevate_with_password("cat", &args, Some("hunter2"));
+        assert!(
+            got.command
+                .starts_with("sudo -S -p '' bash -c 'exec 0</dev/null")
+        );
+        assert_detached_before(&got.command, "cat");
+    }
+
+    #[test]
+    fn via_pipe_detaches_the_child_stdin_before_the_command() {
+        let args = PrivilegeArgs {
+            sudo: true,
+            sudo_user: Some("postgres".to_string()),
+        };
+        let got = elevate_with_password_via_pipe("cat", &args, Some("hunter2"));
+        assert_detached_before(&got, "cat");
     }
 }

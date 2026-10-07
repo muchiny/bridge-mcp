@@ -498,7 +498,7 @@ async fn execute_on_host(
         crate::domain::privilege::elevate_with_password(
             &command,
             &privilege,
-            host_config.sudo_password.as_deref(),
+            host_config.sudo_password_for_exec(&host_name),
         )
     } else {
         crate::domain::privilege::Elevated {

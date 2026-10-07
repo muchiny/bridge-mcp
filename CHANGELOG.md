@@ -480,15 +480,13 @@ nothing in the text below would otherwise tell you which is which.
     `ssh_session_exec`. `ConnectionGuard`, the pool guard and `SshClient` gain
     `exec_with_stdin`; `exec` is unchanged.
   - **Behaviour.** A host whose `protocol` is `telnet`, `serial`, `k8s-exec`,
-    `ssm`, `azure` or `gcp`, with `os_type: linux` and a `sudo_password`, now
-    gets `stdin is only supported on SSH connections` from `ssh_exec` and
-    `ssh_exec_multi`; the pipe form used to work there. It fails closed on
-    purpose: on k8s-exec, SSM, Azure and GCP the command text (and so the
-    password) reached the pod exec argv, a cloud API invocation record, or the
-    bridge host's own `gcloud` argv; on telnet and serial it was written to a
-    shell, but both transports log the full command at `debug`. An operator
-    with such a host should configure `NOPASSWD` in sudoers and omit
-    `sudo_password`, or reach the host over SSH.
+    `ssm`, `azure` or `gcp`, with `os_type: linux` and a `sudo_password`, no
+    longer has the password used by `ssh_exec` / `ssh_exec_multi`: only SSH has
+    a channel stdin to carry it, so those hosts get `sudo -n` and a `warn!`
+    naming the host and protocol (never the password). The old pipe form put
+    the password in the pod exec argv, a cloud API invocation record, or the
+    bridge host's own `gcloud` argv. Configure `NOPASSWD` in sudoers for such a
+    host, or reach it over SSH. An empty `sudo_password` is treated as absent.
   - **`sudo: true` on a non-POSIX host is now refused**, in `ssh_exec` and
     `ssh_exec_multi`, with `'sudo' requires a POSIX shell; host '<host>' uses '<shell>'.`,
     where `<shell>` is the host's effective shell (`cmd` or `powershell`), which
@@ -834,10 +832,24 @@ nothing in the text below would otherwise tell you which is which.
   `elevate_with_password` and the password goes to `exec_with_stdin` — on the
   SSH channel's stdin, never in the command line. `ALLOWS_ELEVATION = false`
   tools are still refused before any elevation, so a password is not
-  reachable on them. A non-SSH protocol (`telnet`, `serial`, `k8s-exec`,
-  `ssm`, `azure`, `gcp`) with `os_type: linux`, a `sudo_password` and
-  `sudo: true` now gets `stdin is only supported on SSH connections` instead of
-  `sudo -n` failing.
+  reachable on them. On a non-SSH protocol the password is ignored with a
+  `warn!` and `sudo -n` is kept; an empty `sudo_password` counts as absent.
+  - **Operator-visible: the emitted command changes.** For a host that has a
+    `sudo_password`, the pipeline now emits `sudo -S -p '' …` instead of
+    `sudo -n …`. **A blacklist entry or SIEM rule keyed on the literal
+    `sudo -n` silently stops matching** — a rule meant to forbid elevation no
+    longer denies it. Re-key such rules on `sudo`.
+  - **Hardening: the elevated child's stdin is detached.** `sudo -S` reads
+    stdin only when it must authenticate; under `NOPASSWD` or a warm
+    credential cache it does not, and the unread `password\n` became fd 0 of
+    `bash -c '<cmd>'` (`printf 'pw\n' | sudo -S -p '' bash -c cat` prints
+    it). A caller-supplied command (`ssh_exec`, `ssh_exec_multi`,
+    `ssh_session_exec`) could read it back, e.g. through `base64`, which the
+    exact-match masker does not catch. Both `elevate_with_password` and
+    `elevate_with_password_via_pipe` now wrap the command as
+    `exec 0</dev/null` followed by the command; `sudo` still authenticates
+    from the channel. Nothing was written to a channel stdin before, so no
+    tool can depend on its content.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 

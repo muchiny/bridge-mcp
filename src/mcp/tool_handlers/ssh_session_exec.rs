@@ -96,7 +96,9 @@ fn build_command(
     // `RedactedSecret` and this keeps its lifetime as narrow as the sudo
     // branch it's used in, not every Posix command on this session.
     let sudo_password = if privilege.sudo {
-        session_host_config.and_then(|h| h.sudo_password.clone())
+        session_host_config
+            .and_then(|h| h.sudo_password.clone())
+            .filter(|p| !p.is_empty())
     } else {
         None
     };

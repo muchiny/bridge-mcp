@@ -172,7 +172,7 @@ impl ToolHandler for SshExecHandler {
             crate::domain::privilege::elevate_with_password(
                 &args.command,
                 &privilege,
-                host_config.sudo_password.as_deref(),
+                host_config.sudo_password_for_exec(&args.host),
             )
         } else {
             // `sudo` n'a pas de sens hors POSIX. Avant, la ligne POSIX

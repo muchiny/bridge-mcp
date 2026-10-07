@@ -543,7 +543,7 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             let elevated = crate::domain::privilege::elevate_with_password(
                 &command,
                 &privilege,
-                host_config.sudo_password.as_deref(),
+                host_config.sudo_password_for_exec(&host),
             );
             (elevated.command, elevated.stdin)
         };
@@ -668,6 +668,10 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             |e| is_retryable_error_for(e, safe_to_replay),
         )
         .await;
+        // The retry loop is done with the secret: wipe it now rather than at
+        // the end of `execute`, across `process_success` and the truncation
+        // awaits.
+        drop(stdin);
 
         // Step 12: Log failure
         let output = output.inspect_err(|e| {
@@ -2696,6 +2700,52 @@ mod tests {
 
         assert!(result.is_err(), "{result:?}");
         assert!(ctx.connection_pool.mock_calls().is_empty());
+    }
+
+    /// An empty `sudo_password` is no password: it must not switch the tool
+    /// to `sudo -S` and send a bare newline (a failed PAM auth per call).
+    #[tokio::test]
+    async fn an_empty_sudo_password_is_treated_as_absent() {
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from(""));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None);
+        assert!(calls[0].0.contains("sudo -n "), "{}", calls[0].0);
+    }
+
+    /// Off SSH there is no channel stdin: keep `sudo -n`, send no password.
+    #[cfg(feature = "telnet")]
+    #[tokio::test]
+    async fn a_non_ssh_host_keeps_sudo_n_and_sends_no_password() {
+        let mut hosts = server1_hosts();
+        let h = hosts.get_mut("server1").unwrap();
+        h.sudo_password = Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        h.protocol = crate::config::Protocol::Telnet;
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None, "stdin must never be Some off SSH");
+        assert!(calls[0].0.contains("sudo -n "), "{}", calls[0].0);
+        assert!(!calls[0].0.contains("hunter2-pw"));
     }
 
     #[tokio::test]
