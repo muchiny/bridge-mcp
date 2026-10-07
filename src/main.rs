@@ -10,9 +10,9 @@ use tracing::info;
 
 use bridge_mcp::McpServer;
 use bridge_mcp::cli::{
-    Cli, Commands, DaemonAction, DataReductionFlags, map_exit_code, run_config_diff,
-    run_describe_tool, run_download, run_exec, run_history, run_list_tools, run_status, run_tool,
-    run_upload, run_validate,
+    Cli, Commands, DaemonAction, DataReductionFlags, EXIT_CONFIG_ERROR, map_exit_code,
+    run_config_diff, run_describe_tool, run_download, run_exec, run_history, run_list_tools,
+    run_status, run_tool, run_upload, run_validate,
 };
 use bridge_mcp::config::{default_config_path, load_config};
 use bridge_mcp::daemon;
@@ -46,14 +46,17 @@ async fn main() -> Result<()> {
     let config = match load_config(&config_path) {
         Ok(config) => config,
         Err(err) => {
-            // A failed load is the commonest configuration error there is, and
-            // the documented code for it is 5. Letting it flow through anyhow
-            // flattened it to 1, so route it through `map_exit_code` too.
+            // Any failure of `load_config` is a configuration error, by call
+            // site rather than by variant: the ways it can fail (absent,
+            // unreadable, malformed, a referenced key file missing, ...) are an
+            // open set that lives in another module, and a list of them here
+            // would go stale. From the user's side it is one class: the config
+            // they gave did not load. The `{err}` Display carries the cause.
             eprintln!(
                 "Error: Failed to load config from {}\n\nCaused by:\n    {err}",
                 config_path.display()
             );
-            std::process::exit(map_exit_code(&err));
+            std::process::exit(EXIT_CONFIG_ERROR);
         }
     };
 

@@ -49,7 +49,10 @@ nothing in the text below would otherwise tell you which is which.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
-  `map_exit_code` also maps `ConfigNotFound`, `ConfigInvalid` and `Yaml` to 5.
+  `main` classifies any `load_config` failure as 5 by call site
+  (`EXIT_CONFIG_ERROR`), not by variant, so a missing SSH key file or an
+  unreadable file is 5 too; `map_exit_code` also maps `ConfigNotFound`,
+  `ConfigInvalid` and `Yaml` to 5.
 - **(lib API) `map_exit_code` moved from `src/main.rs` into
   `bridge_mcp::cli` and is now `pub fn map_exit_code(&BridgeError) -> i32`.**
   It used to declare `-> anyhow::Error` while never returning

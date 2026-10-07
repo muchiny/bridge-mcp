@@ -60,6 +60,11 @@ fn an_unknown_host_exits_3_not_1_and_not_the_remote_failure_code() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    // Pin the cause: 3 would also come out of an `SshConnection` error.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nope"),
+        "stderr should name the unknown host"
+    );
 }
 
 #[test]
@@ -70,4 +75,36 @@ fn a_config_that_fails_to_load_exits_5() {
     // Fails inside `main` before `run_tool`; `main` routes it through
     // `map_exit_code`. Before that routing it exited 1 (measured).
     assert_eq!(out.status.code(), Some(5));
+    // Pin the cause: 5 would also come out of any other configuration error.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Failed to load config") && stderr.contains("absent.yaml"),
+        "stderr should name the config path, got {stderr}"
+    );
+}
+
+/// Not `ConfigNotFound`/`ConfigInvalid`: `load_config` returns `SshKeyNotFound`
+/// here, a variant `map_exit_code` does not list. It exits 5 because `main`
+/// classifies any load failure by call site (measured: 1 before).
+#[test]
+fn a_missing_ssh_key_file_exits_5_like_any_config_that_fails_to_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    let missing_key = dir.path().join("no-such-key");
+    std::fs::write(
+        &path,
+        format!(
+            "hosts:\n  real:\n    hostname: \"10.0.0.1\"\n    user: u\n    auth:\n      type: key\n      path: {}\n",
+            missing_key.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let out = run(&path, &["status"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(5), "stderr={stderr}");
+    assert!(
+        stderr.contains("no-such-key"),
+        "stderr should name the key: {stderr}"
+    );
 }

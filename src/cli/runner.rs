@@ -42,6 +42,10 @@ use crate::ssh::{
 /// So a remote failure gets a code of its own.
 pub const EXIT_REMOTE_FAILURE: i32 = 6;
 
+/// Process exit code for a configuration error, including any failure of
+/// `load_config`, which `main` classifies by call site.
+pub const EXIT_CONFIG_ERROR: i32 = 5;
+
 /// Map a `BridgeError` to the process exit code of `bridge-mcp tool`.
 ///
 /// - 1: tool / command execution error (and every variant not listed)
@@ -66,7 +70,7 @@ pub fn map_exit_code(err: &BridgeError) -> i32 {
         BridgeError::Config(_)
         | BridgeError::ConfigNotFound { .. }
         | BridgeError::ConfigInvalid { .. }
-        | BridgeError::Yaml(_) => 5,
+        | BridgeError::Yaml(_) => EXIT_CONFIG_ERROR,
         _ => 1,
     }
 }
@@ -4505,8 +4509,8 @@ mod tests {
 
     /// Exit 6 is reserved: no code `map_exit_code` can return may equal it.
     ///
-    /// Walks `map_exit_code` itself, over one value per class of error it
-    /// maps plus catch-all variants, so a new arm returning
+    /// Walks `map_exit_code` itself, over one value per arm of the match (every
+    /// variant it names) plus catch-all variants, so a new arm returning
     /// `EXIT_REMOTE_FAILURE` fails here. The `_ => 1` arm cannot collide
     /// unless its literal is edited, which the catch-all samples (`SshExec`,
     /// `Cancelled`, `Io`) would catch; a variant added later falls into that
@@ -4528,6 +4532,10 @@ mod tests {
                 field: "f".into(),
                 reason: "r".into(),
             },
+            BridgeError::Yaml(
+                serde_saphyr::from_str::<std::collections::HashMap<String, String>>("a: [")
+                    .unwrap_err(),
+            ),
             BridgeError::SshExec { reason: "r".into() },
             BridgeError::Cancelled,
             BridgeError::Io(std::io::Error::other("io")),

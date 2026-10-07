@@ -772,6 +772,11 @@ bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 | 5 | Configuration error |
 | 6 | The remote command exited non-zero on the target host |
 
+**Codes 2, 3, 4 and 6 are specific to `bridge-mcp tool`.** Every other
+subcommand exits 1 for any error of its own (`bridge-mcp exec … ` on an unknown
+host is 1, not 3). The one exception is code 5 for a configuration file that
+fails to load, which applies to every subcommand. Details below.
+
 Codes 1-5 are the bridge's *own* failures: it could not run your command.
 Code 6 means the opposite — the command ran on the target host and exited
 non-zero. The distinction matters because before this release `bridge-mcp tool`
@@ -852,8 +857,9 @@ Two further limits:
   `history`, `describe-tool`, `list-tools`, `validate`, `config-diff`, `upload`,
   `download`, `daemon`, `serve`) exits 1 for any error of its own, whatever its
   class — an unknown host under `exec` is 1, not 3. A configuration file that
-  fails to load exits 5 for every subcommand, since that happens before any of
-  them runs.
+  fails to load for any reason — absent, unreadable, malformed, a referenced
+  SSH key file missing — exits 5 for every subcommand, `completions` included, since that happens
+  before any of them runs.
 - **Under a daemon, the code travels in a vendor `_meta` key.** With
   `bridge-mcp daemon` running, the CLI forwards the call and reads the MCP
   result back. The remote exit code is carried on that result under
