@@ -33,7 +33,7 @@ use crate::ssh::{
 /// Process exit code for **the remote command failed**, as opposed to the
 /// bridge failing to run it.
 ///
-/// `map_exit_code` in `src/main.rs` and the exit-code table in `README.md`
+/// [`map_exit_code`] and the exit-code table in `README.md`
 /// already own 1-5 for the bridge's *own* failures: 1 execution error,
 /// 2 CLI usage, 3 SSH connection, 4 security denial, 5 configuration. Reusing
 /// any of them for a remote failure would leave a caller unable to tell
@@ -41,6 +41,39 @@ use crate::ssh::{
 /// no" — the same conflation, one storey up, that this code exists to remove.
 /// So a remote failure gets a code of its own.
 pub const EXIT_REMOTE_FAILURE: i32 = 6;
+
+/// Process exit code for a configuration error, including any failure of
+/// `load_config`, which `main` classifies by call site.
+pub const EXIT_CONFIG_ERROR: i32 = 5;
+
+/// Map a `BridgeError` to the process exit code of `bridge-mcp tool`.
+///
+/// - 1: tool / command execution error (and every variant not listed)
+/// - 2: CLI usage error (unknown tool, bad args)
+/// - 3: connection / SSH error
+/// - 4: security denial
+/// - 5: configuration error (including a config that fails to load or parse)
+///
+/// The `_ => 1` arm is deliberate: an error nobody classified is a generic
+/// failure, and a new `BridgeError` variant lands there until someone decides
+/// it deserves a code of its own.
+///
+/// Pure on purpose: `src/main.rs` prints the error and calls
+/// `std::process::exit` on the value returned here. Never returns
+/// [`EXIT_REMOTE_FAILURE`], which is reserved for a command that ran remotely.
+#[must_use]
+pub fn map_exit_code(err: &BridgeError) -> i32 {
+    match err {
+        BridgeError::CommandDenied { .. } => 4,
+        BridgeError::UnknownHost { .. } | BridgeError::SshConnection { .. } => 3,
+        BridgeError::McpUnknownTool { .. } => 2,
+        BridgeError::Config(_)
+        | BridgeError::ConfigNotFound { .. }
+        | BridgeError::ConfigInvalid { .. }
+        | BridgeError::Yaml(_) => EXIT_CONFIG_ERROR,
+        _ => 1,
+    }
+}
 
 /// Derive the process exit code for `bridge-mcp tool` from a tool result.
 ///
@@ -62,9 +95,16 @@ pub const EXIT_REMOTE_FAILURE: i32 = 6;
 /// Reading this field first is what lets the process still stop on `&&` while
 /// the MCP result stays free of a verdict nobody can justify.
 fn tool_exit_code(result: &crate::mcp::protocol::ToolCallResult) -> i32 {
-    match result.remote_exit_code {
+    exit_code_from(result.remote_exit_code, result.is_error.unwrap_or(false))
+}
+
+/// The contract of [`tool_exit_code`] over its two raw inputs, so the direct
+/// path (a `ToolCallResult`) and the daemon path (a JSON value read off the
+/// wire) cannot drift apart.
+fn exit_code_from(remote_exit_code: Option<i32>, is_error: bool) -> i32 {
+    match remote_exit_code {
         Some(code) if code != 0 => EXIT_REMOTE_FAILURE,
-        _ => i32::from(result.is_error.unwrap_or(false)),
+        _ => i32::from(is_error),
     }
 }
 
@@ -170,6 +210,38 @@ async fn try_forward_to_daemon(
     Ok(Some(response))
 }
 
+/// Warning for a daemon whose build differs from this CLI's, or that does not
+/// say which build it is. `None` when the revisions match.
+///
+/// Read from `result._meta[serverInfo]._meta[BUILD_META_KEY].rev`, which the
+/// server stamps on every result. A daemon older than the `_meta` exit-code
+/// port reports the same protocol revision and crate version as this build, so
+/// the build revision is the only thing that tells them apart.
+fn daemon_build_warning(result: &serde_json::Value) -> Option<String> {
+    let rev = result
+        .get("_meta")
+        .and_then(|m| m.get(crate::mcp::request_meta::keys::SERVER_INFO))
+        .and_then(|i| i.get("_meta"))
+        .and_then(|m| m.get(crate::mcp::protocol::BUILD_META_KEY))
+        .and_then(|b| b.get("rev"))
+        .and_then(serde_json::Value::as_str);
+    match rev {
+        Some(rev) if rev == crate::mcp::protocol::BUILD_REV => None,
+        Some(rev) => Some(format!(
+            "warning: the daemon serving this call is build {rev}, this CLI is {}; \
+             an older daemon does not carry the remote exit code, so `ssh_exec` may exit 0 \
+             where it should exit 6. Restart the daemon.",
+            crate::mcp::protocol::BUILD_REV
+        )),
+        None => Some(
+            "warning: the daemon serving this call does not report its build; it may predate \
+             the remote exit code, so `ssh_exec` may exit 0 where it should exit 6. \
+             Restart the daemon."
+                .to_string(),
+        ),
+    }
+}
+
 /// Print a JSON-RPC response from the daemon in the format the user
 /// expects (JSON or text-pretty). Returns the appropriate exit code.
 fn print_daemon_response(response: &serde_json::Value, json_output: bool) -> Result<i32> {
@@ -197,7 +269,38 @@ fn print_daemon_response(response: &serde_json::Value, json_output: bool) -> Res
         .get("isError")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let exit_code = i32::from(is_error);
+    // The remote command's own exit code, carried in `_meta` because the
+    // result body deliberately cannot hold it. Without this, `ssh_exec` and
+    // `ssh_exec_multi` (which never set `isError`) exited 0 through the
+    // daemon while exiting 6 on the direct path. A value that is not an
+    // integer fitting `i32` is ignored rather than guessed at.
+    let remote_exit_code = result
+        .get("_meta")
+        .and_then(|m| m.get(crate::mcp::protocol::REMOTE_EXIT_CODE_META_KEY))
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|c| i32::try_from(c).ok());
+    let mut exit_code = exit_code_from(remote_exit_code, is_error);
+
+    // The exit-code guarantee above depends on the daemon's build: one from
+    // before the `_meta` port answers without the key, and `ssh_exec` then exits
+    // 0 again. Make that visible instead of silent. stderr only.
+    if let Some(warning) = daemon_build_warning(result) {
+        eprintln!("{warning}");
+    }
+
+    // A `resultType` other than `complete` (e.g. `input_required`) means the
+    // call did not run to completion; printing its content and exiting 0 would
+    // claim success for something that never ran. Absent means `complete`.
+    if let Some(kind) = result
+        .get("resultType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|k| *k != "complete")
+    {
+        eprintln!("Error: the daemon answered resultType={kind:?}, not a completed result");
+        if exit_code == 0 {
+            exit_code = 1;
+        }
+    }
 
     if json_output {
         println!(
@@ -4457,77 +4560,165 @@ mod tests {
         );
     }
 
-    /// Exit 6 is reserved: it must be distinct from every code the CLI
-    /// already uses for its own errors (1 execution, 2 usage, 3 SSH,
-    /// 4 security, 5 config — `map_exit_code` in `src/main.rs`).
+    /// Exit 6 is reserved: no code `map_exit_code` can return may equal it.
+    ///
+    /// Walks `map_exit_code` itself, over one value per arm of the match (every
+    /// variant it names) plus catch-all variants, so a new arm returning
+    /// `EXIT_REMOTE_FAILURE` fails here. The `_ => 1` arm cannot collide
+    /// unless its literal is edited, which the catch-all samples (`SshExec`,
+    /// `Cancelled`, `Io`) would catch; a variant added later falls into that
+    /// arm and is covered by it. A *new arm* for a new variant is the case
+    /// this cannot see until the variant is added to `samples` below.
     #[test]
     fn the_remote_failure_code_does_not_collide_with_the_cli_s_own_codes() {
+        let samples = [
+            BridgeError::CommandDenied { reason: "r".into() },
+            BridgeError::UnknownHost { host: "h".into() },
+            BridgeError::SshConnection {
+                host: "h".into(),
+                reason: "r".into(),
+            },
+            BridgeError::McpUnknownTool { tool: "t".into() },
+            BridgeError::Config("c".into()),
+            BridgeError::ConfigNotFound { path: "p".into() },
+            BridgeError::ConfigInvalid {
+                field: "f".into(),
+                reason: "r".into(),
+            },
+            BridgeError::Yaml(
+                serde_saphyr::from_str::<std::collections::HashMap<String, String>>("a: [")
+                    .unwrap_err(),
+            ),
+            BridgeError::SshExec { reason: "r".into() },
+            BridgeError::Cancelled,
+            BridgeError::Io(std::io::Error::other("io")),
+        ];
+        let codes: std::collections::BTreeSet<i32> = samples.iter().map(map_exit_code).collect();
         assert!(
-            !(0..=5).contains(&EXIT_REMOTE_FAILURE),
-            "EXIT_REMOTE_FAILURE={EXIT_REMOTE_FAILURE} collides with a CLI error code"
+            codes.len() > 1,
+            "the samples must reach more than one arm, got {codes:?}"
         );
+        for err in &samples {
+            let code = map_exit_code(err);
+            assert_ne!(
+                code, EXIT_REMOTE_FAILURE,
+                "map_exit_code({err:?}) = {code} collides with EXIT_REMOTE_FAILURE"
+            );
+            assert_ne!(code, 0, "an error must not map to success: {err:?}");
+        }
     }
 
-    /// Known and documented gap, pinned so it cannot change unnoticed: the
-    /// daemon path reads the result back off the MCP wire, where
-    /// `remote_exit_code` is not carried (`#[serde(skip)]`). It can only see
-    /// `isError`, so it cannot tell a remote failure from a bridge-side one
-    /// and reports 1. Still non-zero — `&&` behaves the same — but the
-    /// discrimination is lost. Closing it would mean putting the code on the
-    /// wire, which is a protocol change, not a CLI fix.
+    /// The daemon path now reads the remote exit code from
+    /// `_meta[REMOTE_EXIT_CODE_META_KEY]`, so a bridge-side refusal (no code,
+    /// `isError`) is 1 and a remote failure that the tool also calls an error
+    /// is 6 — the same two numbers the direct path gives. Responses are built
+    /// by the real producer, `JsonRpcResponse::tool_result`, not hand-written
+    /// JSON, so a rename of the key breaks the test.
     #[test]
-    fn the_daemon_path_cannot_distinguish_a_remote_failure_and_says_so_with_1() {
-        let resp = serde_json::json!({
-            "result": {"isError": true, "content": [{"type": "text", "text": "[exit:3]\nboom"}]}
-        });
-        let code = print_daemon_response(&resp, false).unwrap();
+    fn the_daemon_path_distinguishes_a_remote_failure_from_a_bridge_refusal() {
+        let remote =
+            crate::mcp::protocol::ToolCallResult::text("[exit:3]\nboom").with_remote_exit_code(3);
+        let resp = daemon_response_for(&remote);
         assert_eq!(
-            code, 1,
-            "the daemon path must report 1, not claim a remote failure it cannot establish"
+            print_daemon_response(&resp, false).unwrap(),
+            EXIT_REMOTE_FAILURE,
+            "a remote failure through the daemon must be 6, as on the direct path"
         );
-        assert_ne!(
-            code, EXIT_REMOTE_FAILURE,
-            "and it must not borrow the remote-failure code on a signal that does not prove one"
+        assert_eq!(
+            print_daemon_response(&resp, false).unwrap(),
+            tool_exit_code(&remote)
         );
+
+        let refusal = crate::mcp::protocol::ToolCallResult::error("Rate limit exceeded.");
+        assert_eq!(
+            print_daemon_response(&daemon_response_for(&refusal), false).unwrap(),
+            1,
+            "a bridge-side refusal carries no remote code and stays 1"
+        );
+
+        // `isError` with no `_meta` at all (an older daemon): still 1.
+        let legacy = serde_json::json!({
+            "result": {"isError": true, "content": [{"type": "text", "text": "x"}]}
+        });
+        assert_eq!(print_daemon_response(&legacy, false).unwrap(), 1);
     }
 
-    /// The same gap, one notch wider, for the free-form tools — pinned
-    /// because it is the one thing that did NOT get fixed alongside them.
+    /// The acceptance criterion: `ssh_exec host=X command=false` must leave a
+    /// non-zero `$?` under the daemon. `ssh_exec` reports the code WITHOUT
+    /// `isError` (the caller wrote the command), so before the `_meta` key the
+    /// daemon path read nothing and exited 0 while the direct path exited 6.
     ///
-    /// `ssh_exec` and `ssh_exec_multi` report a non-zero remote exit as a fact
-    /// (`remote_exit_code`) and deliberately do NOT set `isError`: the caller
-    /// wrote the command, and a `grep` that matches nothing exits 1 without
-    /// having failed. The direct CLI path reads the fact and exits 6. The
-    /// daemon path can read neither — the fact is `#[serde(skip)]`, and there
-    /// is no verdict to read instead — so it exits 0.
-    ///
-    /// That is NOT a regression: before the fact was reported at all, these
-    /// tools set no `isError` either, so this path already exited 0. What
-    /// changed is that the direct path no longer agrees with it. Closing the
-    /// gap means putting the code on the wire, which is a protocol change.
-    /// Until then `$? -eq 6` is environment-dependent and `$? -ne 0` is not a
-    /// safe substitute on this path either, which is why it is pinned rather
-    /// than left to be rediscovered.
+    /// Observed at `print_daemon_response` on a response the real server
+    /// serializer produced; no daemon process is spawned.
     #[test]
-    fn the_daemon_path_reports_nothing_at_all_for_a_free_form_tool() {
-        let resp = serde_json::json!({
-            "result": {"content": [{"type": "text", "text": "[exit:1]\n"}]}
-        });
-        let code = print_daemon_response(&resp, false).unwrap();
-        assert_eq!(
-            code, 0,
-            "no isError and no readable remote code leaves the daemon path with nothing to report"
-        );
-
-        // And the direct path, on the very same outcome, says 6. The two
-        // numbers on one line are the asymmetry itself.
+    fn the_daemon_path_reports_a_free_form_tool_s_remote_failure() {
         let direct =
             crate::mcp::protocol::ToolCallResult::text("[exit:1]\n").with_remote_exit_code_only(1);
-        assert_eq!(
-            tool_exit_code(&direct),
-            EXIT_REMOTE_FAILURE,
-            "the direct path reads the fact the wire dropped"
+        let resp = daemon_response_for(&direct);
+        assert!(
+            resp["result"].get("isError").is_none(),
+            "this tool sets no verdict, so the code is the only signal: {resp}"
         );
+        let code = print_daemon_response(&resp, false).unwrap();
+        assert_eq!(code, EXIT_REMOTE_FAILURE);
+        assert_eq!(code, tool_exit_code(&direct), "both paths now agree");
+
+        // A successful free-form call still exits 0 (no `_meta` key).
+        let ok = crate::mcp::protocol::ToolCallResult::text("fine");
+        assert_eq!(
+            print_daemon_response(&daemon_response_for(&ok), false).unwrap(),
+            0
+        );
+
+        // A malformed value is ignored, not guessed at.
+        let bad = serde_json::json!({
+            "result": {"content": [], "_meta": {
+                crate::mcp::protocol::REMOTE_EXIT_CODE_META_KEY: "1"
+            }}
+        });
+        assert_eq!(print_daemon_response(&bad, false).unwrap(), 0);
+    }
+
+    /// What a daemon would hand back for `result`: the real server
+    /// serializer, wrapped as a JSON-RPC response and round-tripped as text.
+    fn daemon_response_for(result: &crate::mcp::protocol::ToolCallResult) -> serde_json::Value {
+        let response =
+            crate::mcp::protocol::JsonRpcResponse::tool_result(Some(serde_json::json!(1)), result);
+        serde_json::from_str(&serde_json::to_string(&response).unwrap()).unwrap()
+    }
+
+    /// A daemon built from another revision, or one that names none, must not
+    /// silently lose the exit-code guarantee: the warning fires on a mismatch
+    /// and stays silent on a match.
+    #[test]
+    fn a_daemon_of_another_build_is_warned_about_and_a_matching_one_is_not() {
+        let stamp = |rev: &str| {
+            serde_json::json!({
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "_meta": {"io.github.muchiny/build": {"rev": rev}}
+                    }
+                }
+            })
+        };
+        assert!(daemon_build_warning(&stamp(crate::mcp::protocol::BUILD_REV)).is_none());
+        let other = daemon_build_warning(&stamp("0000000-old")).expect("mismatch must warn");
+        assert!(other.contains("0000000-old") && other.contains(crate::mcp::protocol::BUILD_REV));
+        assert!(
+            daemon_build_warning(&serde_json::json!({})).is_some(),
+            "a daemon that reports no build must warn"
+        );
+    }
+
+    /// An answer that is not `complete` must not exit 0.
+    #[test]
+    fn a_daemon_answer_that_is_not_complete_does_not_exit_zero() {
+        let pending = serde_json::json!({
+            "result": {"resultType": "input_required", "content": []}
+        });
+        assert_eq!(print_daemon_response(&pending, false).unwrap(), 1);
+        let done = serde_json::json!({"result": {"resultType": "complete", "content": []}});
+        assert_eq!(print_daemon_response(&done, false).unwrap(), 0);
     }
 
     /// A successful call stays 0 even though `remote_exit_code` is carried.

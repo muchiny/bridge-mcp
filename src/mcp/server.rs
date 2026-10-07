@@ -198,6 +198,11 @@ struct SealedResult {
     structured: Option<Value>,
     #[serde(default)]
     is_error: bool,
+    /// The remote command's exit code. Sealed because the retry rebuilds the
+    /// result from this struct alone, and the retry is the answer the caller
+    /// scripts against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_exit_code: Option<i32>,
 }
 
 impl SealedResult {
@@ -212,19 +217,22 @@ impl SealedResult {
             text,
             structured: result.structured_content.clone(),
             is_error: result.is_error.unwrap_or(false),
+            remote_exit_code: result.remote_exit_code,
         }
     }
 
     fn into_result(self) -> ToolCallResult {
-        // NOTE: this rebuilds the result from the three fields a sealed result
-        // carries, so `remote_exit_code` does not survive the round-trip — it
-        // is not an invariant of `ToolCallResult`. Harmless today: the field is
-        // `#[serde(skip)]` and read only by the direct CLI path, which never
-        // seals anything. Anything that starts reading it on the MCP side must
-        // carry it through here (and through `SealedResult`) first.
+        // NOTE: this rebuilds the result from the four fields a sealed result
+        // carries. `remote_exit_code` is one of them since the daemon path
+        // started reading it (`_meta[REMOTE_EXIT_CODE_META_KEY]`): a
+        // `summarize=true` retry answers from here, so dropping it would
+        // exit 0 for exactly the calls that took the summary round trip.
+        // Any NEW field of `ToolCallResult` that a client reads must be added
+        // to `SealedResult` too; this rebuild is not an invariant.
         let mut result = ToolCallResult::text(self.text);
         result.structured_content = self.structured;
         result.is_error = Some(self.is_error);
+        result.remote_exit_code = self.remote_exit_code;
         result
     }
 }
@@ -729,13 +737,15 @@ impl McpServer {
         text.push_str("\n=== LLM SUMMARY ===\n");
         text.push_str(summary);
 
-        // NOTE: same as `SealedResult::into_result` — rebuilding the result
-        // drops `remote_exit_code`. Latent only (this is the MCP summary path,
-        // and the field is read by the direct CLI path), but do not assume the
-        // field survives an enrichment hook.
+        // NOTE: same as `SealedResult::into_result` — this rebuilds the result,
+        // so every field a client reads must be copied by hand.
+        // `remote_exit_code` is one (it is the daemon path's exit code), and
+        // the summary is appended AFTER a sealed result is unsealed, so this
+        // is the last place it could be lost.
         let mut enriched = ToolCallResult::text(text);
         enriched.structured_content = result.structured_content;
         enriched.is_error = result.is_error;
+        enriched.remote_exit_code = result.remote_exit_code;
         enriched
     }
 
@@ -2546,7 +2556,7 @@ impl McpServer {
         match self.resume_sealed_result(&call_params, session) {
             SealedResume::None => {}
             SealedResume::Done(result) => {
-                return JsonRpcResponse::success_or_serialize_error(id, &result);
+                return JsonRpcResponse::tool_result(id, &result);
             }
             SealedResume::BadState(detail) => {
                 return JsonRpcResponse::error(id, JsonRpcError::invalid_params(detail));
@@ -2723,7 +2733,7 @@ impl McpServer {
                     return JsonRpcResponse::success_or_serialize_error(id, &asking);
                 }
 
-                JsonRpcResponse::success_or_serialize_error(id, &result)
+                JsonRpcResponse::tool_result(id, &result)
             }
             Err(e) => {
                 let elapsed_ms = start.elapsed().as_millis();
@@ -2928,7 +2938,7 @@ impl McpServer {
                 Ok(tool_result) => {
                     let tool_result = tool_result.without_apps();
                     let result_value =
-                        serde_json::to_value(&tool_result).unwrap_or_else(|e| json!({
+                        super::protocol::tool_result_value(&tool_result).unwrap_or_else(|e| json!({
                             "content": [{"type": "text", "text": format!("Serialization error: {e}")}],
                             "isError": true,
                         }));
@@ -5013,6 +5023,46 @@ rbac:
         let mut result = ToolCallResult::text("disk 91% full\nnginx failed");
         result.structured_content = Some(json!({ "disk_pct": 91 }));
         result
+    }
+
+    /// The `summarize=true` round trip must not lose the remote exit code:
+    /// the retry answers from the sealed state alone, and a missing code is
+    /// exit 0 for a failed command on the daemon path. Goes through the real
+    /// serialize/deserialize the state takes, and the real wire serializer.
+    #[test]
+    fn a_sealed_result_keeps_the_remote_exit_code_through_the_summary_round_trip() {
+        let finished = ToolCallResult::text("[exit:2]\nboom").with_remote_exit_code_only(2);
+        let sealed: SealedResult =
+            serde_json::from_value(serde_json::to_value(SealedResult::of(&finished)).unwrap())
+                .unwrap();
+        let unsealed = sealed.into_result();
+        assert_eq!(unsealed.remote_exit_code, Some(2));
+        assert_eq!(
+            unsealed.is_error,
+            Some(false),
+            "the verdict is not invented"
+        );
+
+        let summarised = McpServer::append_summary(unsealed, "it failed");
+        assert_eq!(summarised.remote_exit_code, Some(2), "enrichment keeps it");
+        let wire = super::super::protocol::tool_result_value(&summarised).unwrap();
+        assert_eq!(
+            wire["_meta"][super::super::protocol::REMOTE_EXIT_CODE_META_KEY],
+            json!(2)
+        );
+    }
+
+    /// A result with no remote code stays free of the key.
+    #[test]
+    fn a_sealed_result_without_a_remote_exit_code_carries_none() {
+        let sealed = SealedResult::of(&finished_result());
+        assert!(
+            serde_json::to_value(&sealed)
+                .unwrap()
+                .get("remote_exit_code")
+                .is_none()
+        );
+        assert_eq!(sealed.into_result().remote_exit_code, None);
     }
 
     /// A recorded request is lifted into an `input_required` carrying the
