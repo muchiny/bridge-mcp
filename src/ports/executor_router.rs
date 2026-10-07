@@ -36,6 +36,10 @@ pub struct ExecutorRouter {
     /// `mock_output` is also set.
     #[cfg(test)]
     mock_delay: Option<std::time::Duration>,
+    /// Every `exec` / `exec_with_stdin` the mock connections served, in
+    /// order. Lets a test observe what actually reached the channel.
+    #[cfg(test)]
+    mock_calls: MockCalls,
 }
 
 impl ExecutorRouter {
@@ -54,6 +58,8 @@ impl ExecutorRouter {
             mock_output: None,
             #[cfg(test)]
             mock_delay: None,
+            #[cfg(test)]
+            mock_calls: MockCalls::default(),
         }
     }
 
@@ -72,6 +78,8 @@ impl ExecutorRouter {
             mock_output: None,
             #[cfg(test)]
             mock_delay: None,
+            #[cfg(test)]
+            mock_calls: MockCalls::default(),
         }
     }
 
@@ -115,7 +123,8 @@ impl ExecutorRouter {
             let conn = match self.mock_delay {
                 Some(delay) => MockConnection::new_with_delay(output.clone(), delay),
                 None => MockConnection::new(output.clone()),
-            };
+            }
+            .with_calls(self.mock_calls.clone());
             return Ok(ConnectionGuard::Mock(conn));
         }
 
@@ -334,7 +343,7 @@ impl ConnectionGuard<'_> {
     /// behaves exactly like [`Self::exec`]; with `Some`, every non-SSH
     /// protocol returns an error rather than silently dropping the bytes
     /// (the one use is a POSIX `sudo -S` password, which means nothing
-    /// there). The test-only mock accepts and ignores `stdin`.
+    /// there). The test-only mock records `stdin` (see `ExecutorRouter::mock_calls`).
     ///
     /// # Errors
     ///
@@ -349,7 +358,7 @@ impl ConnectionGuard<'_> {
         match self {
             Self::Ssh(guard) => guard.exec_with_stdin(command, stdin, limits).await,
             #[cfg(test)]
-            Self::Mock(conn) => conn.exec(command, limits).await,
+            Self::Mock(conn) => conn.exec_with_stdin(command, stdin, limits).await,
             #[cfg(feature = "winrm")]
             Self::WinRm(conn) => {
                 reject_stdin(stdin)?;
@@ -435,10 +444,23 @@ pub struct MockConnection {
     /// to simulate a long-running command that can be interrupted by a
     /// `CancellationToken` racing against it in a `tokio::select!`.
     delay: Option<std::time::Duration>,
+    /// Shared with the router that made this connection.
+    calls: MockCalls,
 }
+
+/// `(command, stdin)` for every call a mock connection served.
+#[cfg(test)]
+type MockCalls = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<Vec<u8>>)>>>;
 
 #[cfg(test)]
 impl MockConnection {
+    /// Record into `calls` instead of a private log.
+    #[must_use]
+    fn with_calls(mut self, calls: MockCalls) -> Self {
+        self.calls = calls;
+        self
+    }
+
     /// Create a mock connection that returns the given output immediately.
     #[must_use]
     pub fn new(output: CommandOutput) -> Self {
@@ -446,6 +468,7 @@ impl MockConnection {
             output,
             failed: false,
             delay: None,
+            calls: MockCalls::default(),
         }
     }
 
@@ -460,11 +483,26 @@ impl MockConnection {
             output,
             failed: false,
             delay: Some(delay),
+            calls: MockCalls::default(),
         }
     }
 
     /// Execute returns the pre-configured output, optionally after a delay.
-    pub async fn exec(&self, _command: &str, _limits: &LimitsConfig) -> Result<CommandOutput> {
+    pub async fn exec(&self, command: &str, limits: &LimitsConfig) -> Result<CommandOutput> {
+        self.exec_with_stdin(command, None, limits).await
+    }
+
+    /// Like [`Self::exec`], recording the command and the stdin it was given.
+    pub async fn exec_with_stdin(
+        &self,
+        command: &str,
+        stdin: Option<&[u8]>,
+        _limits: &LimitsConfig,
+    ) -> Result<CommandOutput> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((command.to_string(), stdin.map(<[u8]>::to_vec)));
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
         }
@@ -495,6 +533,7 @@ impl ExecutorRouter {
             psrp_pool: crate::psrp::pool::PsrpPool::new(),
             mock_output: Some(output),
             mock_delay: None,
+            mock_calls: MockCalls::default(),
         }
     }
 
@@ -516,7 +555,17 @@ impl ExecutorRouter {
             psrp_pool: crate::psrp::pool::PsrpPool::new(),
             mock_output: Some(output),
             mock_delay: Some(delay),
+            mock_calls: MockCalls::default(),
         }
+    }
+
+    /// What the mock connections received so far: `(command, stdin)` pairs.
+    #[must_use]
+    pub fn mock_calls(&self) -> Vec<(String, Option<Vec<u8>>)> {
+        self.mock_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 

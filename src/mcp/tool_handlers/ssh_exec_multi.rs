@@ -470,7 +470,11 @@ async fn execute_on_host(
     if use_sudo && host_config.effective_shell() != ShellType::Posix {
         // Refus par hôte : les autres hôtes de l'appel tournent. Ignorer
         // `sudo` en silence ferait rendre `success` à une commande non élevée.
-        // Même message que `standard_tool.rs` (5b).
+        // Même intention que l'étape 5b de `standard_tool.rs` (refuser plutôt
+        // que dégrader le privilège en silence), mais ni la condition ni le
+        // libellé ne sont les siens : 5b teste l'OS (`os_type == Windows`),
+        // ici on teste le shell effectif, qu'un `shell:` peut rendre non
+        // POSIX sur un hôte Linux.
         if fail_fast {
             cancel_token.cancel();
         }

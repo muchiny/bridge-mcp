@@ -163,22 +163,14 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// `'root'`, which `sudo -u` reads identically), and for anything else it
 /// keeps the payload a single, inert argument instead of a shell metacharacter.
 ///
-/// # This function has no password path, and it is the one 399 tools use
+/// # This function has no password path, by design
 ///
-/// The `StandardTool` pipeline elevates here (`src/mcp/standard_tool.rs`, step
-/// 5b), so all 399 pipeline tools get `sudo -n` and nothing else: a
-/// `sudo_password` in the host's config is never offered to them. `sudo -n`
-/// succeeds only where sudoers grants `NOPASSWD` and otherwise fails at once
-/// with "a password is required" — so on a host that genuinely demands a
-/// password, `sudo: true` works for the three handlers that build their own
-/// `PrivilegeArgs` and call [`elevate_with_password`] (`ssh_exec`,
-/// `ssh_exec_multi`, `ssh_session_exec`) and for no other tool.
-///
-/// That split is deliberate for now, not an oversight: the one-line remedy is
-/// to pass the host's `sudo_password` to [`elevate_with_password`] here too,
-/// but it would change the behaviour of 399 tools on every password host at
-/// once, and only the three above have ever been exercised on one. It is a
-/// named known issue in `CHANGELOG.md` waiting for its own measurement.
+/// `sudo -n` succeeds only where sudoers grants `NOPASSWD`. The `StandardTool`
+/// pipeline (`src/mcp/standard_tool.rs`, step 5b) no longer calls this: it
+/// calls [`elevate_with_password`] with the host's `sudo_password`, and hands
+/// the returned `stdin` to `exec_with_stdin`, so all 399 pipeline tools honour
+/// a configured password without it ever entering the remote command line.
+/// This function remains for callers that have no password to offer.
 #[must_use]
 pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
     if !args.sudo {

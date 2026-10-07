@@ -826,23 +826,18 @@ nothing in the text below would otherwise tell you which is which.
   looks like one and is not, because its non-zero answer depends on an argument
   the const cannot see.
 
-- **`sudo: true` reaches two different functions, and only one of them can use
-  a configured `sudo_password`.** `domain::privilege::elevate` (no password,
-  `sudo -n` only) is what the `StandardTool` pipeline calls, so it governs 399
-  tools; `elevate_with_password` is reached only by `ssh_exec`,
-  `ssh_exec_multi` and `ssh_session_exec`, the three handlers that build their
-  own `PrivilegeArgs`. On a host that carries a `sudo_password` *and* genuinely
-  demands one, `sudo: true` therefore works on those 3 and fails immediately on
-  the other 399, which need `NOPASSWD` on the remote host — and where
-  `NOPASSWD` is granted the configured password was never needed in the first
-  place, which is why the split has gone unnoticed. **This predates the
-  branch** — the
-  pipeline called the password-less `elevate` before it too — and it is left
-  alone deliberately: the remedy is one line (pass the host's `sudo_password`
-  to `elevate_with_password` at `src/mcp/standard_tool.rs`, step 5b), but it
-  changes the behaviour of 399 tools on every password host at once and only
-  the three have ever been exercised on one. It wants its own measurement, and
-  both functions' rustdoc now says so.
+- **`hosts.<name>.sudo_password` now reaches the 399 `StandardTool` tools.**
+  The pipeline's step 5b used to call the password-less
+  `domain::privilege::elevate`, so `sudo: true` on a host that demands a
+  password worked on `ssh_exec`, `ssh_exec_multi` and `ssh_session_exec` and
+  failed at once (`sudo -n`) on every other tool. Step 5b now calls
+  `elevate_with_password` and the password goes to `exec_with_stdin` — on the
+  SSH channel's stdin, never in the command line. `ALLOWS_ELEVATION = false`
+  tools are still refused before any elevation, so a password is not
+  reachable on them. A non-SSH protocol (`telnet`, `serial`, `k8s-exec`,
+  `ssm`, `azure`, `gcp`) with `os_type: linux`, a `sudo_password` and
+  `sudo: true` now gets `stdin is only supported on SSH connections` instead of
+  `sudo -n` failing.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 

@@ -177,7 +177,11 @@ impl ToolHandler for SshExecHandler {
         } else {
             // `sudo` n'a pas de sens hors POSIX. Avant, la ligne POSIX
             // échouait bruyamment ; l'ignorer en silence ferait réussir une
-            // commande non élevée. Même refus que `standard_tool.rs` (5b).
+            // commande non élevée. Même intention que l'étape 5b de
+            // `standard_tool.rs`, mais ni la condition ni le libellé ne sont
+            // les siens : 5b teste l'OS (`os_type == Windows`), ici on teste
+            // le shell effectif, qu'un `shell:` peut rendre non POSIX sur un
+            // hôte Linux.
             if args.sudo.unwrap_or(false) {
                 // Le shell effectif, pas l'OS : un hôte Linux avec `shell:`
                 // non POSIX atteint aussi cette branche.
