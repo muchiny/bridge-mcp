@@ -164,7 +164,7 @@ impl ToolHandler for SshExecHandler {
         // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
         // ici n'élèverait que le premier processus — voir la documentation de
         // `domain::privilege::elevate`.
-        let command = if effective_shell == ShellType::Posix {
+        let elevated = if effective_shell == ShellType::Posix {
             let privilege = crate::domain::privilege::PrivilegeArgs {
                 sudo: args.sudo.unwrap_or(false),
                 sudo_user: args.sudo_user.clone(),
@@ -175,13 +175,21 @@ impl ToolHandler for SshExecHandler {
                 host_config.sudo_password.as_deref(),
             )
         } else {
-            args.command.clone()
+            crate::domain::privilege::Elevated {
+                command: args.command.clone(),
+                stdin: None,
+            }
         };
+        // Le mot de passe sudo voyage sur le stdin du canal SSH, pas dans la
+        // ligne de commande (qui devient l'argv du shell distant, lisible
+        // avec `ps`). Emprunté, jamais cloné : `Zeroizing` l'efface au drop.
+        let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
+        let command = &elevated.command;
 
         // Build the actual command (with optional cd, shell-aware)
         let full_command = args.working_dir.as_ref().map_or_else(
             || command.clone(),
-            |dir| shell::cd_and_run(dir, &command, effective_shell),
+            |dir| shell::cd_and_run(dir, command, effective_shell),
         );
 
         // Get retry config
@@ -205,7 +213,10 @@ impl ToolHandler for SshExecHandler {
                     .get_connection_with_jump(&args.host, host_config, &limits, jump_host)
                     .await?;
 
-                match conn.exec(&full_command, &limits).await {
+                match conn
+                    .exec_with_stdin(&full_command, stdin_bytes, &limits)
+                    .await
+                {
                     Ok(output) => Ok(output),
                     Err(e) => {
                         // Mark connection as failed so it won't be returned to pool

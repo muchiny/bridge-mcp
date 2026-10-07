@@ -106,7 +106,7 @@ fn build_command(
              Consider configuring NOPASSWD in sudoers for better security."
         );
     }
-    crate::domain::privilege::elevate_with_password(
+    crate::domain::privilege::elevate_with_password_via_pipe(
         &args.command,
         &privilege,
         sudo_password.as_deref(),

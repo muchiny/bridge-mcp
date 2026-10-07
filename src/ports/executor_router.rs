@@ -265,6 +265,27 @@ pub enum ConnectionGuard<'a> {
     Psrp(crate::psrp::PsrpConnection),
 }
 
+/// Non-SSH protocols have no channel to write a stdin to; refuse rather than
+/// drop the bytes (the only use is a POSIX `sudo -S` password).
+#[cfg(any(
+    feature = "winrm",
+    feature = "telnet",
+    feature = "k8s-exec",
+    feature = "serial",
+    feature = "ssm",
+    feature = "azure",
+    feature = "gcp",
+    feature = "psrp"
+))]
+fn reject_stdin(stdin: Option<&[u8]>) -> Result<()> {
+    if stdin.is_some() {
+        return Err(crate::error::BridgeError::SshExec {
+            reason: "stdin is only supported on SSH connections".to_string(),
+        });
+    }
+    Ok(())
+}
+
 impl ConnectionGuard<'_> {
     /// Execute a command using this connection.
     ///
@@ -296,6 +317,72 @@ impl ConnectionGuard<'_> {
             Self::Gcp(conn) => conn.exec(command, limits).await,
             #[cfg(feature = "psrp")]
             Self::Psrp(conn) => conn.exec(command, limits).await,
+        }
+    }
+
+    /// Execute a command, feeding `stdin` to the remote process over the
+    /// channel rather than through the command text.
+    ///
+    /// Only SSH has a channel to write to. With `stdin: None` every protocol
+    /// behaves exactly like [`Self::exec`]; with `Some`, every non-SSH
+    /// protocol returns an error rather than silently dropping the bytes
+    /// (the one use is a POSIX `sudo -S` password, which means nothing
+    /// there). The test-only mock accepts and ignores `stdin`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command execution fails, or if `stdin` is
+    /// `Some` on a non-SSH connection.
+    pub async fn exec_with_stdin(
+        &mut self,
+        command: &str,
+        stdin: Option<&[u8]>,
+        limits: &LimitsConfig,
+    ) -> Result<CommandOutput> {
+        match self {
+            Self::Ssh(guard) => guard.exec_with_stdin(command, stdin, limits).await,
+            #[cfg(test)]
+            Self::Mock(conn) => conn.exec(command, limits).await,
+            #[cfg(feature = "winrm")]
+            Self::WinRm(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "telnet")]
+            Self::Telnet(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "k8s-exec")]
+            Self::K8sExec(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "serial")]
+            Self::Serial(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "ssm")]
+            Self::Ssm(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "azure")]
+            Self::Azure(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "gcp")]
+            Self::Gcp(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
+            #[cfg(feature = "psrp")]
+            Self::Psrp(conn) => {
+                reject_stdin(stdin)?;
+                conn.exec(command, limits).await
+            }
         }
     }
 

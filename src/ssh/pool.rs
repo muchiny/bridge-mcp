@@ -392,6 +392,21 @@ impl PooledConnectionGuard<'_> {
     /// `BridgeError::SshConnection` rather than a panic so the calling
     /// tool surfaces a clean MCP error instead of crashing the process.
     pub async fn exec(&mut self, command: &str, limits: &LimitsConfig) -> Result<CommandOutput> {
+        self.exec_with_stdin(command, None, limits).await
+    }
+
+    /// Like [`Self::exec`], but feeds `stdin` to the remote command's stdin
+    /// over the SSH channel (then EOF) instead of through the command text.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::exec`].
+    pub async fn exec_with_stdin(
+        &mut self,
+        command: &str,
+        stdin: Option<&[u8]>,
+        limits: &LimitsConfig,
+    ) -> Result<CommandOutput> {
         let conn =
             self.connection
                 .as_mut()
@@ -401,7 +416,7 @@ impl PooledConnectionGuard<'_> {
                         .to_string(),
                 })?;
         conn.touch();
-        conn.client.exec(command, limits).await
+        conn.client.exec_with_stdin(command, stdin, limits).await
     }
 
     /// Mark this connection as failed (won't be returned to pool)

@@ -819,6 +819,27 @@ impl SshClient {
     /// - The command times out
     /// - The output exceeds the maximum allowed size
     pub async fn exec(&self, command: &str, limits: &LimitsConfig) -> Result<CommandOutput> {
+        self.exec_with_stdin(command, None, limits).await
+    }
+
+    /// Like [`Self::exec`], but writes `stdin` to the channel after the exec
+    /// request and then sends EOF.
+    ///
+    /// This is how a secret (a `sudo -S` password) reaches the remote process
+    /// without being part of the command text, which becomes the argv of the
+    /// remote shell and is readable with `ps`. With `None` the channel's stdin
+    /// is left open, exactly as before: closing it unasked would make
+    /// `read_command_output` see a channel closed without an exit status.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::exec`], plus a failure to write to the channel.
+    pub async fn exec_with_stdin(
+        &self,
+        command: &str,
+        stdin: Option<&[u8]>,
+        limits: &LimitsConfig,
+    ) -> Result<CommandOutput> {
         let start = std::time::Instant::now();
 
         let mut channel =
@@ -835,6 +856,18 @@ impl SshClient {
             .map_err(|e| BridgeError::SshExec {
                 reason: format!("Failed to execute command: {e}"),
             })?;
+
+        if let Some(bytes) = stdin {
+            channel
+                .data(bytes)
+                .await
+                .map_err(|e| BridgeError::SshExec {
+                    reason: format!("Failed to write to command stdin: {e}"),
+                })?;
+            channel.eof().await.map_err(|e| BridgeError::SshExec {
+                reason: format!("Failed to close command stdin: {e}"),
+            })?;
+        }
 
         let (stdout, stderr, exit_code) = Self::read_command_output(&mut channel, limits).await?;
 

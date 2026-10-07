@@ -11,7 +11,7 @@ use std::time::Instant;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, ShellType};
 use crate::domain::ExecuteCommandUseCase;
 use crate::domain::OutputCache;
 use crate::domain::output_truncator::truncate_output_with_cache;
@@ -21,7 +21,7 @@ use crate::mcp_tool;
 use crate::ports::ExecutorRouter;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::security::RateLimiter;
-use crate::ssh::{is_retryable_error, with_retry_if};
+use crate::ssh::{is_retryable_error_for, with_retry_if};
 
 use super::utils::shell_escape;
 
@@ -463,7 +463,11 @@ async fn execute_on_host(
     // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
     // ici n'élèverait que le premier processus — voir la documentation de
     // `domain::privilege::elevate`.
-    let wrapped_command = if use_sudo {
+    //
+    // Comme `ssh_exec` : l'enveloppe sudo POSIX ne vaut que pour un hôte POSIX.
+    // Sur un hôte Windows elle échouait, et le mot de passe passait quand même
+    // dans la ligne de commande de cet hôte.
+    let elevated = if use_sudo && host_config.effective_shell() == ShellType::Posix {
         let privilege = crate::domain::privilege::PrivilegeArgs {
             sudo: use_sudo,
             sudo_user: Some(sudo_user.to_string()),
@@ -474,8 +478,14 @@ async fn execute_on_host(
             host_config.sudo_password.as_deref(),
         )
     } else {
-        command.clone()
+        crate::domain::privilege::Elevated {
+            command: command.clone(),
+            stdin: None,
+        }
     };
+    // Le mot de passe voyage sur le stdin du canal, pas dans l'argv distant.
+    let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
+    let wrapped_command = &elevated.command;
 
     // Build the actual command (with optional cd)
     let full_command = working_dir.as_ref().map_or_else(
@@ -507,7 +517,10 @@ async fn execute_on_host(
                 .get_connection_with_jump(&host_name, host_config, &limits, jump_host)
                 .await?;
 
-            match conn.exec(&full_command, &limits).await {
+            match conn
+                .exec_with_stdin(&full_command, stdin_bytes, &limits)
+                .await
+            {
                 Ok(output) => Ok(output),
                 Err(e) => {
                     conn.mark_failed();
@@ -515,7 +528,9 @@ async fn execute_on_host(
                 }
             }
         },
-        is_retryable_error,
+        // Comme `ssh_exec` : la commande est arbitraire, un timeout ne prouve
+        // pas qu'elle n'a pas tourné. Rejouer rejouait aussi le mot de passe.
+        |e| is_retryable_error_for(e, false),
     )
     .await;
 
