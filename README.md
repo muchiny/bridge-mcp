@@ -772,10 +772,12 @@ bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
 | 5 | Configuration error |
 | 6 | The remote command exited non-zero on the target host |
 
-**Codes 2, 3, 4 and 6 are specific to `bridge-mcp tool`.** Every other
-subcommand exits 1 for any error of its own (`bridge-mcp exec … ` on an unknown
-host is 1, not 3). The one exception is code 5 for a configuration file that
-fails to load, which applies to every subcommand. Details below.
+**Codes 3, 4 and 6 are specific to `bridge-mcp tool`.** Code 2 is also clap's
+usage-error code, so every subcommand exits 2 on a bad flag or subcommand name.
+Beyond that, every other subcommand exits 1 for any error of its own
+(`bridge-mcp exec …` on an unknown host is 1, not 3). The one other exception
+is code 5 for a configuration file that fails to load, which applies to every
+subcommand. Details below.
 
 Codes 1-5 are the bridge's *own* failures: it could not run your command.
 Code 6 means the opposite — the command ran on the target host and exited
@@ -852,7 +854,7 @@ JSON result instead.
 Two further limits:
 
 - **Only the `tool` subcommand distinguishes 6, and only `tool` maps the
-  bridge's own failures onto 2-4.** `bridge-mcp exec` exits 1 on a failed remote
+  bridge's own failures onto 3 and 4** (2 is clap's usage code on every subcommand). `bridge-mcp exec` exits 1 on a failed remote
   command, as it always has. Every other subcommand (`exec`, `status`,
   `history`, `describe-tool`, `list-tools`, `validate`, `config-diff`, `upload`,
   `download`, `daemon`, `serve`) exits 1 for any error of its own, whatever its
@@ -868,7 +870,12 @@ Two further limits:
   direct path — 6 for a remote failure, 1 for a bridge refusal, including for
   `ssh_exec` and `ssh_exec_multi`. The guarantee is for this project's own
   CLI-over-daemon path: an MCP client that does not read that vendor key still
-  sees only `"isError"`.
+  sees only `"isError"`. **It also requires the daemon serving the call to be
+  this build or later.** A daemon started from an earlier build accepts the same
+  protocol revision and reports the same crate version, but answers without the
+  key, and `ssh_exec` then exits 0 again. The CLI compares the daemon's build
+  revision to its own and prints a `warning:` on stderr when they differ (or
+  when the daemon reports none); restart the daemon when you see it.
 
 ### Shell completions
 

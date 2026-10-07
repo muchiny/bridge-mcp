@@ -1,8 +1,9 @@
 //! The first test in this repo that observes the exit code of a real process.
 //!
 //! Scope, stated plainly: these runs need no network and no SSH host, so they
-//! observe the codes the bridge produces for ITS OWN failures (`map_exit_code`
-//! and the anyhow flattening in `main`). They do NOT observe a remote command
+//! observe the codes the bridge produces for ITS OWN failures: `map_exit_code`
+//! (destructive gate, unknown host) and `main`'s `EXIT_CONFIG_ERROR` for any
+//! config that fails to load. They do NOT observe a remote command
 //! failing under the daemon (`ssh_exec host=X command=false`), which needs a
 //! reachable SSH host.
 
@@ -72,8 +73,9 @@ fn a_config_that_fails_to_load_exits_5() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("absent.yaml");
     let out = run(&missing, &["tool", "ssh_exec", "host=x", "command=false"]);
-    // Fails inside `main` before `run_tool`; `main` routes it through
-    // `map_exit_code`. Before that routing it exited 1 (measured).
+    // Fails inside `main` before `run_tool`; `main` exits `EXIT_CONFIG_ERROR`
+    // for any `load_config` failure, by call site and NOT through
+    // `map_exit_code`. Before that it exited 1 (measured).
     assert_eq!(out.status.code(), Some(5));
     // Pin the cause: 5 would also come out of any other configuration error.
     let stderr = String::from_utf8_lossy(&out.stderr);

@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install lint-stable
 
 # ---------------------------------------------------------------------------
 # Guards around optional tooling.
@@ -20,8 +20,9 @@
 # There is deliberately no `want` macro. Make runs each recipe line in its OWN
 # shell, so a guard line ending in `exit 0` only ends THAT line — make then runs
 # the next line, tool absent or not. The guard and the command must share one
-# shell, so optional tooling uses the explicit `if/else` block below (the same
-# shape the `typos` target has always used).
+# shell, so genuinely optional tooling uses an explicit `if/else` block (see
+# `outdated`). Nothing in `ci` is optional: `typos` used to be, and `make ci`
+# went green on a machine without it having checked nothing.
 #
 # Neither form masks a failure: once the tool runs, its exit code is the recipe's.
 need = command -v $(1) >/dev/null 2>&1 || { echo "$(1) not installed. $(2)"; exit 1; }
@@ -120,40 +121,46 @@ lint:
 #   - stable toolchain not installed -> FAIL, saying so (`rustup toolchain
 #     install stable`), not a bogus "version mismatch";
 #   - network reachable, versions differ -> FAIL (run `rustup update stable`);
-#   - network unreachable, OR reachable but the response has no `[pkg.rust]
+#   - fetch failed (no network, or an HTTP status >= 400), OR it answered but the response has no `[pkg.rust]
 #     version` line (upstream reformatted; the parser needs updating) -> loud
 #     WARNING saying which, then lint anyway. A local gate must work offline;
 #     this is about the dev machine, not the air-gapped hosts. On a networked
 #     machine a warning is a SIGNAL (the parser broke), not background noise.
 # Cost: `curl -m 10` can add up to 10 s to an offline `make ci`.
-# Test hooks, all echoed when in use because they disarm the check:
+# Test hooks, all echoed when in use because they disarm the check. They are
+# honoured ONLY when passed on the make command line (`make TEST_X=... lint-stable`);
+# an exported environment variable is ignored, so a stray one cannot silently
+# disarm the check:
 #   TEST_STABLE_CHANNEL_URL       where to fetch (unroutable / file:// fixture)
 #   TEST_UPSTREAM_STABLE_VERSION  skip the fetch: "1.99.0 (b940084d7 2026-09-28)"
 #   TEST_STABLE_RUSTC             command replacing `rustc` (e.g. `false`)
 # `rustup update stable` is deliberately NOT run here: a lint target must not
 # mutate the developer's toolchain.
-STABLE_CHANNEL_URL := $(or $(TEST_STABLE_CHANNEL_URL),https://static.rust-lang.org/dist/channel-rust-stable.toml)
-TEST_UPSTREAM_STABLE_VERSION ?=
-TEST_STABLE_RUSTC ?= rustc
+cmdline = $(if $(filter command line,$(origin $(1))),$($(1)))
+STABLE_CHANNEL_URL := $(or $(call cmdline,TEST_STABLE_CHANNEL_URL),https://static.rust-lang.org/dist/channel-rust-stable.toml)
+UP_OVERRIDE := $(call cmdline,TEST_UPSTREAM_STABLE_VERSION)
+RUSTC_CMD := $(or $(call cmdline,TEST_STABLE_RUSTC),rustc)
 lint-stable:
-	@if [ -n '$(TEST_UPSTREAM_STABLE_VERSION)' ]; then echo "NOTICE: lint-stable: TEST_UPSTREAM_STABLE_VERSION='$(TEST_UPSTREAM_STABLE_VERSION)' is set; the upstream check is replaced by this constant"; fi; \
-	if [ -n '$(TEST_STABLE_CHANNEL_URL)' ]; then echo "NOTICE: lint-stable: TEST_STABLE_CHANNEL_URL='$(TEST_STABLE_CHANNEL_URL)' is set; not fetching the real channel file"; fi; \
-	if [ '$(TEST_STABLE_RUSTC)' != rustc ]; then echo "NOTICE: lint-stable: TEST_STABLE_RUSTC='$(TEST_STABLE_RUSTC)' is set; not asking the real rustc"; fi; \
-	local=$$(RUSTUP_TOOLCHAIN=stable $(TEST_STABLE_RUSTC) --version 2>/dev/null | sed 's/^rustc //'); \
+	@if [ -n '$(UP_OVERRIDE)' ]; then echo "NOTICE: lint-stable: TEST_UPSTREAM_STABLE_VERSION='$(UP_OVERRIDE)' is set; the upstream check is replaced by this constant"; fi; \
+	if [ '$(STABLE_CHANNEL_URL)' != 'https://static.rust-lang.org/dist/channel-rust-stable.toml' ]; then echo "NOTICE: lint-stable: TEST_STABLE_CHANNEL_URL='$(STABLE_CHANNEL_URL)' is set; not fetching the real channel file"; fi; \
+	if [ '$(RUSTC_CMD)' != rustc ]; then echo "NOTICE: lint-stable: TEST_STABLE_RUSTC='$(RUSTC_CMD)' is set; not asking the real rustc"; fi; \
+	raw=$$(RUSTUP_TOOLCHAIN=stable $(RUSTC_CMD) --version 2>&1); \
+	local=$$(printf '%s\n' "$$raw" | sed -n 's/^rustc //p'); \
 	if [ -z "$$local" ]; then \
-		echo "ERROR: lint-stable: could not get a version from the stable toolchain; it is probably not installed. Run 'rustup toolchain install stable'."; \
+		echo "ERROR: lint-stable: could not get a version from the stable toolchain; it is probably not installed. Run 'rustup toolchain install stable'. Its output was:"; \
+		printf '%s\n' "$$raw"; \
 		exit 1; \
 	fi; \
 	echo "lint-stable: local stable compiler = $$local"; \
-	up='$(TEST_UPSTREAM_STABLE_VERSION)'; fetched=ok; \
+	up='$(UP_OVERRIDE)'; fetched=ok; \
 	if [ -z "$$up" ]; then \
 		toml=$$(curl -fsS -m 10 '$(STABLE_CHANNEL_URL)' 2>/dev/null) || fetched=failed; \
 		up=$$(printf '%s\n' "$$toml" | awk '/^\[pkg\.rust\]/{f=1;next} f&&/^version/{gsub(/^version = "|"$$/,"");print;exit}'); \
 	fi; \
 	if [ "$$fetched" = failed ]; then \
-		echo "WARNING: lint-stable: upstream stable unreachable ($(STABLE_CHANNEL_URL)); cannot tell whether $$local is current. A newer clippy may still fail CI."; \
+		echo "WARNING: lint-stable: could not fetch $(STABLE_CHANNEL_URL) (no network, or the server answered with an HTTP error, status >= 400); cannot tell whether $$local is current. A newer clippy may still fail CI."; \
 	elif [ -z "$$up" ]; then \
-		echo "WARNING: lint-stable: $(STABLE_CHANNEL_URL) answered but its response has no [pkg.rust] version line; the parser in this recipe needs updating. Cannot tell whether $$local is current."; \
+		echo "WARNING: lint-stable: $(STABLE_CHANNEL_URL) answered but its response has no [pkg.rust] version line (upstream reformatted the file, in which case the parser in this recipe needs updating, or something else answered, such as a captive portal). Cannot tell whether $$local is current."; \
 	elif [ "$$up" != "$$local" ]; then \
 		echo "ERROR: lint-stable: local stable is $$local but upstream stable is $$up. CI lints upstream stable; run 'rustup update stable'."; \
 		exit 1; \
@@ -263,11 +270,8 @@ dev:
 
 # Check for typos in code
 typos:
-	@if command -v typos >/dev/null 2>&1; then \
-		typos; \
-	else \
-		echo "typos not installed, skipping"; \
-	fi
+	@$(call need,typos,cargo install typos-cli)
+	typos
 
 # Check for unused dependencies
 machete:
@@ -301,6 +305,12 @@ quality: fmt-check lint typos machete
 # passed on a doc comment that linked a public item to a private one, and the
 # red arrived on the PR instead. Docs still fails the PR's CI run; it just
 # does not block the merge button.
+#
+# Not covered: CI's Tests job also runs `make verify-install
+# BIN=target/debug/bridge-mcp`. It is not here because it is noisy against a
+# stale local target/debug, so a `build.rs` regression that makes
+# BRIDGE_MCP_BUILD_REV fall back to `unknown` passes `make ci` and fails the
+# required Tests context on the PR. `make ci` is not the whole of CI.
 ci: fmt-check lint lint-stable test doc-check audit deny typos
 
 # Full CI check (comprehensive - replaces GitHub Actions)

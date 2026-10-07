@@ -210,6 +210,38 @@ async fn try_forward_to_daemon(
     Ok(Some(response))
 }
 
+/// Warning for a daemon whose build differs from this CLI's, or that does not
+/// say which build it is. `None` when the revisions match.
+///
+/// Read from `result._meta[serverInfo]._meta[BUILD_META_KEY].rev`, which the
+/// server stamps on every result. A daemon older than the `_meta` exit-code
+/// port reports the same protocol revision and crate version as this build, so
+/// the build revision is the only thing that tells them apart.
+fn daemon_build_warning(result: &serde_json::Value) -> Option<String> {
+    let rev = result
+        .get("_meta")
+        .and_then(|m| m.get(crate::mcp::request_meta::keys::SERVER_INFO))
+        .and_then(|i| i.get("_meta"))
+        .and_then(|m| m.get(crate::mcp::protocol::BUILD_META_KEY))
+        .and_then(|b| b.get("rev"))
+        .and_then(serde_json::Value::as_str);
+    match rev {
+        Some(rev) if rev == crate::mcp::protocol::BUILD_REV => None,
+        Some(rev) => Some(format!(
+            "warning: the daemon serving this call is build {rev}, this CLI is {}; \
+             an older daemon does not carry the remote exit code, so `ssh_exec` may exit 0 \
+             where it should exit 6. Restart the daemon.",
+            crate::mcp::protocol::BUILD_REV
+        )),
+        None => Some(
+            "warning: the daemon serving this call does not report its build; it may predate \
+             the remote exit code, so `ssh_exec` may exit 0 where it should exit 6. \
+             Restart the daemon."
+                .to_string(),
+        ),
+    }
+}
+
 /// Print a JSON-RPC response from the daemon in the format the user
 /// expects (JSON or text-pretty). Returns the appropriate exit code.
 fn print_daemon_response(response: &serde_json::Value, json_output: bool) -> Result<i32> {
@@ -247,7 +279,28 @@ fn print_daemon_response(response: &serde_json::Value, json_output: bool) -> Res
         .and_then(|m| m.get(crate::mcp::protocol::REMOTE_EXIT_CODE_META_KEY))
         .and_then(serde_json::Value::as_i64)
         .and_then(|c| i32::try_from(c).ok());
-    let exit_code = exit_code_from(remote_exit_code, is_error);
+    let mut exit_code = exit_code_from(remote_exit_code, is_error);
+
+    // The exit-code guarantee above depends on the daemon's build: one from
+    // before the `_meta` port answers without the key, and `ssh_exec` then exits
+    // 0 again. Make that visible instead of silent. stderr only.
+    if let Some(warning) = daemon_build_warning(result) {
+        eprintln!("{warning}");
+    }
+
+    // A `resultType` other than `complete` (e.g. `input_required`) means the
+    // call did not run to completion; printing its content and exiting 0 would
+    // claim success for something that never ran. Absent means `complete`.
+    if let Some(kind) = result
+        .get("resultType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|k| *k != "complete")
+    {
+        eprintln!("Error: the daemon answered resultType={kind:?}, not a completed result");
+        if exit_code == 0 {
+            exit_code = 1;
+        }
+    }
 
     if json_output {
         println!(
@@ -4632,6 +4685,40 @@ mod tests {
         let response =
             crate::mcp::protocol::JsonRpcResponse::tool_result(Some(serde_json::json!(1)), result);
         serde_json::from_str(&serde_json::to_string(&response).unwrap()).unwrap()
+    }
+
+    /// A daemon built from another revision, or one that names none, must not
+    /// silently lose the exit-code guarantee: the warning fires on a mismatch
+    /// and stays silent on a match.
+    #[test]
+    fn a_daemon_of_another_build_is_warned_about_and_a_matching_one_is_not() {
+        let stamp = |rev: &str| {
+            serde_json::json!({
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "_meta": {"io.github.muchiny/build": {"rev": rev}}
+                    }
+                }
+            })
+        };
+        assert!(daemon_build_warning(&stamp(crate::mcp::protocol::BUILD_REV)).is_none());
+        let other = daemon_build_warning(&stamp("0000000-old")).expect("mismatch must warn");
+        assert!(other.contains("0000000-old") && other.contains(crate::mcp::protocol::BUILD_REV));
+        assert!(
+            daemon_build_warning(&serde_json::json!({})).is_some(),
+            "a daemon that reports no build must warn"
+        );
+    }
+
+    /// An answer that is not `complete` must not exit 0.
+    #[test]
+    fn a_daemon_answer_that_is_not_complete_does_not_exit_zero() {
+        let pending = serde_json::json!({
+            "result": {"resultType": "input_required", "content": []}
+        });
+        assert_eq!(print_daemon_response(&pending, false).unwrap(), 1);
+        let done = serde_json::json!({"result": {"resultType": "complete", "content": []}});
+        assert_eq!(print_daemon_response(&done, false).unwrap(), 0);
     }
 
     /// A successful call stays 0 even though `remote_exit_code` is carried.

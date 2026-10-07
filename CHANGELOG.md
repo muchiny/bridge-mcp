@@ -95,7 +95,8 @@ nothing in the text below would otherwise tell you which is which.
   `src/mcp/standard_tool.rs:339`. A probed tool therefore went through the
   pipeline by construction.
 
-  **What is not closed:** 52 handlers implement `ToolHandler` directly, run their
+  **What was not closed when this first landed** (the next paragraphs say what
+  changed since): 52 handlers implement `ToolHandler` directly, run their
   remote command outside that pipeline, and **still exit 0 when it fails** —
   `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
   `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, plus
@@ -143,11 +144,9 @@ nothing in the text below would otherwise tell you which is which.
   `build_api_call_checked`" — was not sufficient and, applied alone, would have
   broken the tool: that entry says why.
 
-  Two further boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when
-  a `bridge-mcp daemon` serves the call the CLI reads the result back off the
-  MCP wire, which does not carry the remote/bridge distinction — a remote
-  failure then exits 1 rather than 6. Non-zero either way, so `&&` behaves the
-  same; a caller branching on `$? -eq 6` specifically is environment-dependent.
+  `bridge-mcp exec` still exits 1 (unchanged). The daemon boundary this
+  paragraph used to state (a remote failure exiting 1 rather than 6 through a
+  daemon) is superseded: the code now travels in `_meta`, see "Added".
 
 - **An MCP tool result now carries `isError: true` when its remote command
   failed** — again, for `StandardTool`-pipeline tools only. The 52 handlers
@@ -220,7 +219,8 @@ nothing in the text below would otherwise tell you which is which.
 - **`ToolCallResult` gains a public field `remote_exit_code: Option<i32>`.** Any
   struct-literal construction outside this crate must add it; `ToolCallResult::
   text` and `::error` set it `None`. It is `#[serde(skip)]`, so no serialized
-  result and no `outputSchema` changes.
+  result body and no `outputSchema` changes; the server separately copies the
+  code into `_meta` (see "Added").
 
 - **`ExecuteCommandUseCase::process_success_for_tool` takes a new
   `reduction: &[&'static str]` parameter.** Existing callers must pass the
@@ -298,19 +298,20 @@ nothing in the text below would otherwise tell you which is which.
   announce a failure of your command where the truth is a bridge-side parse
   failure — the exact conflation this whole chain exists to remove.
 
-  **Known asymmetry, not closed.** When a `bridge-mcp daemon` serves the call,
-  the CLI reads the result back off the MCP wire, and `remote_exit_code` is
-  `#[serde(skip)]` — it is an in-process channel, not a protocol extension. The
-  daemon path can only read `isError`, which these two deliberately do not set,
-  so **it exits 0** where the direct path exits 6. This is not a regression:
-  that path already exited 0 for these tools, since they set no `isError`
-  before either. What is new is that the two paths now disagree. For every
-  other tool the daemon path exits 1, so the usual advice — branch on
-  `$? -ne 0`, not `$? -eq 6` — holds there but **not** for these two. Closing
-  it means putting the remote code on the MCP wire, which is a response-format
-  change and was not taken here. Both halves are pinned by tests in
-  `src/cli/runner.rs`, and `ports::protocol::tests::the_fact_never_crosses_the_mcp_wire`
-  fails if the `skip` is ever lifted without revisiting this.
+  **Superseded later in this cycle: the daemon asymmetry is closed.** This
+  paragraph used to say that under `bridge-mcp daemon` these two exited 0 where
+  the direct path exits 6, because the CLI could only read `isError` off the
+  wire. The remote code now travels in `_meta` under
+  `io.github.muchiny/remote-exit-code` (see "Added" above), so both paths exit
+  6. `$? -eq 6` therefore holds for `ssh_exec`/`ssh_exec_multi` under a daemon
+  too, **provided the daemon is this build or later**: a daemon from before the
+  port answers without the key and the CLI falls back to `isError`, i.e. 0.
+  `remote_exit_code` itself is still `#[serde(skip)]`; the key is a separate
+  `_meta` entry added by the server. The tests this paragraph cited
+  (`the_daemon_path_cannot_distinguish…`, `the_daemon_path_reports_nothing_at_all…`)
+  were rewritten into
+  `the_daemon_path_distinguishes_a_remote_failure_from_a_bridge_refusal` and
+  `the_daemon_path_reports_a_free_form_tool_s_remote_failure`.
 
 - **`ssh_awx_job_follow` now exits 6 when the job it followed did not succeed,
   and marks the result `isError`.** It exited **0** for every outcome. The
@@ -324,8 +325,8 @@ nothing in the text below would otherwise tell you which is which.
   still running. Now only `successful` exits 0; the other four exit **6**.
 
   **No per-status code**, deliberately: the CLI flattens any remote failure to
-  one code and `remote_exit_code` is `#[serde(skip)]` on the MCP side, so a
-  distinct code per status would be observable nowhere. The exact status stays
+  one code, so a distinct code per status would be observable nowhere on the
+  CLI. The exact status stays
   where it always was, in the JSON result, and every arm still emits its full
   document — including the summary on a failed job. The handler uses
   `ToolCallResult::with_remote_exit_code`, which sets `isError` too, on the same
