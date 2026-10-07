@@ -459,22 +459,23 @@ async fn execute_on_host(
 
     // Wrap command with sudo if requested
     //
-    // L'élévation est une décision du domaine : `privilege::elevate*`
-    // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
-    // ici n'élèverait que le premier processus — voir la documentation de
-    // `domain::privilege::elevate`.
+    // Elevation is a domain decision: `privilege::elevate*` wraps the whole
+    // line (`sudo -n bash -c '<all>'`, or `sudo -S -p '' bash -c 'exec
+    // 0</dev/null; <all>'` when the host has a `sudo_password` and the
+    // transport is SSH). Prefixing it here would only elevate the first
+    // process; see the docs of `domain::privilege::elevate`.
     //
-    // Comme `ssh_exec` : l'enveloppe sudo POSIX ne vaut que pour un hôte POSIX.
-    // Sur un hôte Windows elle échouait, et le mot de passe passait quand même
-    // dans la ligne de commande de cet hôte.
+    // Like `ssh_exec`: the POSIX sudo wrapper only makes sense on a POSIX host.
+    // On a Windows host it failed, and the password still went into that
+    // host's command line.
     if use_sudo && host_config.effective_shell() != ShellType::Posix {
-        // Refus par hôte : les autres hôtes de l'appel tournent. Ignorer
-        // `sudo` en silence ferait rendre `success` à une commande non élevée.
-        // Même intention que l'étape 5b de `standard_tool.rs` (refuser plutôt
-        // que dégrader le privilège en silence), mais ni la condition ni le
-        // libellé ne sont les siens : 5b teste l'OS (`os_type == Windows`),
-        // ici on teste le shell effectif, qu'un `shell:` peut rendre non
-        // POSIX sur un hôte Linux.
+        // Per-host refusal: the other hosts of the call still run. Ignoring
+        // `sudo` silently would let an unelevated command report `success`.
+        // Same intent as step 5b of `standard_tool.rs` (refuse rather than
+        // silently downgrade the privilege), but neither the condition nor the
+        // wording is its own: 5b tests the OS (`os_type == Windows`), this
+        // tests the effective shell, which a `shell:` override can make
+        // non-POSIX on a Linux host.
         if fail_fast {
             cancel_token.cancel();
         }
@@ -506,7 +507,7 @@ async fn execute_on_host(
             stdin: None,
         }
     };
-    // Le mot de passe voyage sur le stdin du canal, pas dans l'argv distant.
+    // The password travels on the channel's stdin, not in the remote argv.
     let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
     let wrapped_command = &elevated.command;
 
@@ -551,11 +552,14 @@ async fn execute_on_host(
                 }
             }
         },
-        // Comme `ssh_exec` : la commande est arbitraire, un timeout ne prouve
-        // pas qu'elle n'a pas tourné. Rejouer rejouait aussi le mot de passe.
+        // Like `ssh_exec`: the command is arbitrary and a timeout does not
+        // prove it did not run. Replaying also replayed the password.
         |e| is_retryable_error_for(e, false),
     )
     .await;
+    // The retry loop is done with the secret: wipe it now rather than at the
+    // end of the function, across `process_success` and the truncation awaits.
+    drop(elevated);
 
     let duration_ms = Some(elapsed_ms(&start));
 

@@ -97,8 +97,17 @@ fn shell_escape(s: &str) -> String {
 ///   password (prevents a TOCTOU window where another process reads the
 ///   default-mode file).
 /// - `printf '...' '<pw>' > $TMPF` writes the file content. The password
-///   is a `printf` format-arg, not a CLI flag value visible to other
-///   processes' `ps`.
+///   is a `printf` format-arg, so it is never a flag of the `mysql` client
+///   binary, and the tempfile is `chmod 600` and `shred -u`'d.
+///
+/// **Known gap, not protected:** the command string itself is the remote
+/// shell's argv (`bash -c '<whole string>'`) for the duration of the call, so
+/// the password is readable with `ps` on the target. And because `db_password`
+/// arrives as a caller argument rather than from config, it is not in the
+/// config-derived masker's value set, so it also reaches the audit trail
+/// unmasked. Fixing this is a separate task; the `exec_with_stdin` seam is not
+/// directly reusable, since its one stdin is documented as carrying the sudo
+/// password and nothing else.
 ///
 /// `shred -u` overwrites the inode before unlink (defense against forensic
 /// recovery of swapped-out tempfile content). On BusyBox/Alpine where

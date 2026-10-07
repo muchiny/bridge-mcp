@@ -867,6 +867,10 @@ impl SshClient {
                 .map_err(|e| BridgeError::SshExec {
                     reason: format!("Failed to write to command stdin: {e}"),
                 })?;
+            // Load-bearing: without EOF, `sudo -S` on a host that rejects the
+            // password blocks on a second read until `command_timeout` (the
+            // hang `sudo -n` prevents on the no-password path). Never write
+            // stdin without closing it.
             channel.eof().await.map_err(|e| BridgeError::SshExec {
                 reason: format!("Failed to close command stdin: {e}"),
             })?;

@@ -122,7 +122,9 @@ pub trait StandardTool: Send + Sync + 'static {
     /// Set it to `false` for a tool whose far end is not a POSIX shell, so
     /// there is no `sudo` there to run. That is not merely a no-op: elevation
     /// happens at step 5b, BEFORE the blacklist at step 6, and it wraps the
-    /// built command in `sudo -n bash -c '…'` — so on a tool that splices
+    /// built command in `sudo -n bash -c '…'` (or `sudo -S -p '' bash -c
+    /// 'exec 0</dev/null; …'` when the host has a `sudo_password` and the
+    /// transport is SSH) — so on a tool that splices
     /// caller text into its command, `sudo: true` turns that text into a root
     /// shell. Refusing the param is what keeps the elevation path from being
     /// an escalation path for such a tool.
@@ -145,6 +147,12 @@ pub trait StandardTool: Send + Sync + 'static {
     ///
     /// This is the only method that MUST be implemented per tool.
     /// Return `Ok(command_string)` for the command to execute via SSH.
+    ///
+    /// **No builder may read fd 0.** The SSH channel's stdin is reserved for
+    /// the sudo password (`exec_with_stdin`), which bypasses command
+    /// validation by construction. Today `detach_stdin` redirects the elevated
+    /// child's stdin from `/dev/null`, but that is a safety net, not a licence:
+    /// a command that reads stdin must not be built here.
     fn build_command(args: &Self::Args, host_config: &HostConfig) -> Result<String>;
 
     /// Optional extra validation before command execution.

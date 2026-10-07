@@ -494,8 +494,18 @@ nothing in the text below would otherwise tell you which is which.
     where `<shell>` is the host's effective shell (`cmd` or `powershell`), which
     a `shell:` override can set on a Linux host too. In `ssh_exec_multi` the
     refusal is per host: the others still run. `ssh_exec_multi` also no longer
-    replays a timed-out command, because the command it replayed was the one
+    replays a command that may have run, because the command it replayed was the one
     carrying the password: three argv exposures for one call.
+  - **The `StandardTool` pipeline now uses `hosts.<name>.sudo_password` too: the
+    command it emits changes on a password host.** On any host that has a
+    `sudo_password` (SSH transport, `sudo: true`), the 398 pipeline tools that
+    accept elevation emit `sudo -S -p '' bash -c 'exec 0</dev/null; …'` instead
+    of `sudo -n bash -c '…'`. **A `security.blacklist` entry or SIEM rule keyed
+    on the literal `sudo -n` silently stops matching on those hosts**, so a rule
+    meant to forbid elevation no longer denies it. Re-key such rules on `sudo`.
+    Hosts without a `sudo_password`, and every non-SSH transport, still emit
+    `sudo -n`. Details in the "now reaches the 398 `StandardTool` tools" entry
+    under Known issues.
 
 ### Fixed
 
@@ -826,7 +836,7 @@ nothing in the text below would otherwise tell you which is which.
   looks like one and is not, because its non-zero answer depends on an argument
   the const cannot see.
 
-- **`hosts.<name>.sudo_password` now reaches the 399 `StandardTool` tools.**
+- **`hosts.<name>.sudo_password` now reaches the 398 `StandardTool` tools that accept elevation.**
   The pipeline's step 5b used to call the password-less
   `domain::privilege::elevate`, so `sudo: true` on a host that demands a
   password worked on `ssh_exec`, `ssh_exec_multi` and `ssh_session_exec` and

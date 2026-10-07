@@ -75,9 +75,10 @@ impl SshSessionExecHandler {
 
 /// Build the (possibly elevated) command to run in the session.
 ///
-/// L'élévation est une décision du domaine : `privilege::elevate*` enveloppe
-/// la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer ici n'élèverait
-/// que le premier processus — voir la documentation de
+/// Elevation is a domain decision: `privilege::elevate*` wraps the whole line
+/// (`sudo -n bash -c '<all>'`, or the `printf … | sudo -S -p '' bash -c
+/// 'exec 0</dev/null; <all>'` pipe form when the host has a `sudo_password`).
+/// Prefixing it here would only elevate the first process; see the docs of
 /// `domain::privilege::elevate`.
 fn build_command(
     args: &SshSessionExecArgs,

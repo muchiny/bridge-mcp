@@ -152,10 +152,17 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// about the real cause. `-n` turns that into an immediate, legible
 /// "a password is required".
 ///
+/// The password path has no `-n`, so its counterpart is the `eof()` that
+/// `SshClient::exec_with_stdin` sends right after writing the password:
+/// without it, `sudo -S` on a host that rejects the password blocks on its
+/// second read until the command timeout, which is exactly the hang `-n`
+/// exists to prevent. That EOF is load-bearing for this reason; writing the
+/// password without closing stdin would bring the hang back.
+///
 /// The command **and** the target user, when one is given, are single-quoted
 /// with POSIX escaping, so nothing inside either is interpreted by the outer
 /// shell. `sudo_user` reaches here as a plain `String` from three handlers
-/// that build their own `PrivilegeArgs` directly — unlike the ~90 tools that
+/// that build their own `PrivilegeArgs` directly — unlike the 399 tools that
 /// go through [`PrivilegeArgs::extract`] and its [`validate_sudo_user`], it is
 /// not constrained to `[A-Za-z0-9._-]` before it gets here. Escaping it is
 /// what keeps `-u <user>` from being a second injection point beside the
@@ -203,6 +210,10 @@ pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
 pub struct Elevated {
     /// The command line to send. Never contains the password.
     pub command: String,
+    /// Reserved for the sudo password and nothing else: the channel's stdin
+    /// bypasses command validation by construction, and no builder may read
+    /// fd 0 (see `detach_stdin` and `StandardTool::build_command`).
+    ///
     /// The password plus a trailing newline. A `RedactedSecret`: zeroized on
     /// drop and rendered `[REDACTED]` by `Debug`, `Display` and `Serialize`,
     /// so a stray `{:?}` or `tracing` field cannot leak it. `None` when no
@@ -510,15 +521,15 @@ mod tests {
         let got = elevate_with_password("id", &args, Some("hunter2"));
         assert!(
             !got.command.contains("hunter2"),
-            "le mot de passe ne doit jamais apparaître dans la ligne de commande : {}",
+            "the password must never appear in the command line: {}",
             got.command
         );
-        // Sans cette seconde assertion, une fonction qui jette le mot de passe
-        // en silence passerait aussi.
+        // Without this second assertion, a function that silently drops the
+        // password would pass too.
         assert_eq!(
             got.stdin.as_deref(),
             Some("hunter2\n"),
-            "le mot de passe doit voyager sur stdin"
+            "the password must travel on stdin"
         );
     }
 

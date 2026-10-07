@@ -160,10 +160,11 @@ impl ToolHandler for SshExecHandler {
         // Derive effective shell for this host
         let effective_shell = host_config.effective_shell();
 
-        // L'élévation est une décision du domaine : `privilege::elevate*`
-        // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
-        // ici n'élèverait que le premier processus — voir la documentation de
-        // `domain::privilege::elevate`.
+        // Elevation is a domain decision: `privilege::elevate*` wraps the
+        // whole line (`sudo -n bash -c '<all>'`, or `sudo -S -p '' bash -c
+        // 'exec 0</dev/null; <all>'` when the host has a `sudo_password` and the
+        // transport is SSH). Prefixing it here would only elevate the first
+        // process; see the docs of `domain::privilege::elevate`.
         let elevated = if effective_shell == ShellType::Posix {
             let privilege = crate::domain::privilege::PrivilegeArgs {
                 sudo: args.sudo.unwrap_or(false),
@@ -178,16 +179,16 @@ impl ToolHandler for SshExecHandler {
             };
             crate::domain::privilege::elevate_with_password(&args.command, &privilege, password)
         } else {
-            // `sudo` n'a pas de sens hors POSIX. Avant, la ligne POSIX
-            // échouait bruyamment ; l'ignorer en silence ferait réussir une
-            // commande non élevée. Même intention que l'étape 5b de
-            // `standard_tool.rs`, mais ni la condition ni le libellé ne sont
-            // les siens : 5b teste l'OS (`os_type == Windows`), ici on teste
-            // le shell effectif, qu'un `shell:` peut rendre non POSIX sur un
-            // hôte Linux.
+            // `sudo` makes no sense off POSIX. The POSIX line used to fail
+            // loudly there; ignoring it silently would let an unelevated
+            // command report success. Same intent as step 5b of
+            // `standard_tool.rs`, but neither the condition nor the wording is
+            // its own: 5b tests the OS (`os_type == Windows`), this tests the
+            // effective shell, which a `shell:` override can make non-POSIX on
+            // a Linux host.
             if args.sudo.unwrap_or(false) {
-                // Le shell effectif, pas l'OS : un hôte Linux avec `shell:`
-                // non POSIX atteint aussi cette branche.
+                // The effective shell, not the OS: a Linux host with a
+                // non-POSIX `shell:` reaches this branch too.
                 return Ok(ToolCallResult::error(format!(
                     "'sudo' requires a POSIX shell; host '{}' uses '{}'.",
                     args.host,
@@ -199,9 +200,9 @@ impl ToolHandler for SshExecHandler {
                 stdin: None,
             }
         };
-        // Le mot de passe sudo voyage sur le stdin du canal SSH, pas dans la
-        // ligne de commande (qui devient l'argv du shell distant, lisible
-        // avec `ps`). Emprunté, jamais cloné : `Zeroizing` l'efface au drop.
+        // The sudo password travels on the SSH channel's stdin, not in the
+        // command line (which becomes the remote shell's argv, readable with
+        // `ps`). Borrowed, never cloned: `RedactedSecret` wipes it on drop.
         let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
         let command = &elevated.command;
 
@@ -254,6 +255,10 @@ impl ToolHandler for SshExecHandler {
             |e| is_retryable_error_for(e, false),
         )
         .await;
+        // The retry loop is done with the secret: wipe it now rather than at
+        // the end of `handle`, across `process_success` and the truncation
+        // awaits.
+        drop(elevated);
 
         let output = output.inspect_err(|e| {
             ctx.execute_use_case.log_failure(
