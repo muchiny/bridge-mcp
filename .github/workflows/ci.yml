@@ -317,9 +317,15 @@ jobs:
           tool: cargo-llvm-cov,cargo-nextest
 
       # Phase A: start the SSH test container and generate the integration
-      # test config so the previously-#[ignore]'d tests in
-      # ssh_integration.rs / sftp_integration.rs / e2e_docker.rs are picked
-      # up by --include-ignored. Container is stopped in the always() step.
+      # test config so the #[ignore]'d tests are picked up by
+      # `--run-ignored all` (nextest's flag; `--include-ignored` is libtest's).
+      # Counted 2026-10-07 with grep '#\[ignore': 6 files carry them, all under
+      # tests/: ssh_integration.rs, sftp_integration.rs, e2e_docker.rs,
+      # integration.rs, builder_syntax.rs, e2e_raspberry.rs — the last is
+      # filtered out by `not test(rpi::)` below. src/ carries none now; until
+      # the sudo-password fix, src/domain/privilege.rs held one that failed on
+      # purpose and killed this whole job for a month, so re-grep src/ too.
+      # Container is stopped in the always() step.
       - name: Start test SSH container
         run: |
           # Pre-pull with backoff: the lscr.io/Docker Hub registry
@@ -351,10 +357,18 @@ jobs:
             remote_test_dir: "/tmp/bridge-mcp-tests"
           EOF
 
+      # --no-fail-fast AND continue-on-error, both: --no-fail-fast alone still
+      # exits non-zero, so `Report coverage` would not run and the artifact
+      # would stay empty — which is what happened for a month. With both, one
+      # failing test no longer erases the measurement; the step is marked
+      # failed-but-continued, and the last step re-fails the job on it.
       - name: Collect coverage (with integration tests)
+        id: collect
+        continue-on-error: true
         run: |
           mkdir -p coverage
           cargo llvm-cov --no-report nextest --all-features \
+            --no-fail-fast \
             --run-ignored all \
             -E 'not test(rpi::)'
 
@@ -385,7 +399,18 @@ jobs:
         with:
           name: coverage-report
           path: coverage/
+          # upload-artifact defaults to `warn`: an empty coverage/ would pass
+          # green having measured nothing.
+          if-no-files-found: error
           retention-days: 30
+
+      # continue-on-error hides a test failure from the job status; surface it
+      # here, after the report and the artifact exist.
+      - name: Fail if the collection step failed
+        if: steps.collect.outcome == 'failure'
+        run: |
+          echo "::error::a test failed during coverage collection (report was still produced)"
+          exit 1
 
   docs:
     name: Docs

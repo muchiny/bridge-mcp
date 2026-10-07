@@ -59,9 +59,19 @@ check:
 # The second line is not redundant: nextest cannot run doctests, so on any
 # machine where the nextest path succeeds the compiled examples in src/ would
 # otherwise never be built or executed (they weren't, anywhere, until 2026-08).
+# Same command as the CI `Tests` job (--all-targets --all-features), so a green
+# local run covers the same code. The fallback fires ONLY when nextest is not
+# installed (`command -v`); a failing test fails the recipe, with nextest's
+# report visible. The old `nextest 2>/dev/null || cargo test` replayed the whole
+# suite under the slow harness on any test failure and threw the report away.
 test:
-	cargo nextest run 2>/dev/null || cargo test
-	cargo test --doc
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run --all-targets --all-features; \
+	else \
+		echo "cargo-nextest not installed, falling back to cargo test"; \
+		cargo test --all-targets --all-features; \
+	fi
+	cargo test --doc --all-features
 
 # Run tests with OpenTelemetry feature enabled
 # Validates the feature-gated telemetry module and OTLP plumbing compiles
@@ -224,15 +234,23 @@ outdated:
 # Full quality check (all linters)
 quality: fmt-check lint typos machete
 
-# Full CI check (quick). Mirrors the required ci.yml checks
-# (Format/Clippy/Tests/Docs/Deny/Typos); CI additionally runs coverage (70%),
-# feature-powerset and markdownlint.
+# Full CI check (quick). Mirrors the REQUIRED branch-protection contexts
+# (Format, Clippy, Tests, Deny (advisories + licenses), Typos) and also runs
+# Docs and `audit`, which are not required. CI additionally runs coverage
+# (COVERAGE_MIN, 93%), feature-powerset and markdownlint.
 #
-# `doc-check` is in this list because Docs is a REQUIRED check in ci.yml and
-# was not: `make ci` passed on a doc comment that linked a public item to a
-# private one, and the red arrived on the PR instead. A pre-commit gate that
-# omits a required check is the false green it exists to prevent.
-ci: fmt-check lint test doc-check audit deny typos
+# `lint-stable` is in this list because CI's Clippy runs real stable
+# (RUSTUP_TOOLCHAIN: stable at workflow level) while `lint` runs the 1.98.0
+# pinned by rust-toolchain.toml. `lint` alone went green three times on a PR
+# whose Clippy was red, and clippy 1.99's `assert_is_empty` put 618 violations
+# on every PR. `lint` stays: it is the MSRV check. `test` uses --all-features
+# for the same reason: CI's Tests job does.
+#
+# `doc-check` is in this list although Docs is NOT a required check: `make ci`
+# passed on a doc comment that linked a public item to a private one, and the
+# red arrived on the PR instead. Docs still fails the PR's CI run; it just
+# does not block the merge button.
+ci: fmt-check lint lint-stable test doc-check audit deny typos
 
 # Full CI check (comprehensive - replaces GitHub Actions)
 ci-full: fmt-check lint lint-stable test audit typos hack geiger doc-check
@@ -450,8 +468,10 @@ e2e-mock:
 
 # Docker-based E2E tests (real SSH, requires docker)
 e2e-docker: e2e-docker-up
-	cargo test --test e2e_docker -- --ignored --test-threads=1 --nocapture
-	$(MAKE) e2e-docker-down
+	status=0; \
+	cargo test --test e2e_docker -- --ignored --test-threads=1 --nocapture || status=$$?; \
+	$(MAKE) e2e-docker-down; \
+	exit $$status
 
 # Start Docker SSH test server
 e2e-docker-up:
