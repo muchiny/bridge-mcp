@@ -30,6 +30,8 @@ fn empty_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
     path
 }
 
+// The destructive gate runs before the host lookup, which is why the unknown-host
+// test passes `--yes`; if that order changes, these two move together.
 #[test]
 fn a_destructive_tool_without_a_terminal_exits_4() {
     let dir = tempfile::tempdir().unwrap();
@@ -61,11 +63,11 @@ fn an_unknown_host_exits_3_not_1_and_not_the_remote_failure_code() {
 }
 
 #[test]
-fn an_unreadable_config_exits_1_through_main_s_anyhow_path() {
+fn a_config_that_fails_to_load_exits_5() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("absent.yaml");
     let out = run(&missing, &["tool", "ssh_exec", "host=x", "command=false"]);
-    // Not routed through `map_exit_code`: pins the flattening so a change to it
-    // is a decision, not an accident.
-    assert_eq!(out.status.code(), Some(1));
+    // Fails inside `main` before `run_tool`; `main` routes it through
+    // `map_exit_code`. Before that routing it exited 1 (measured).
+    assert_eq!(out.status.code(), Some(5));
 }

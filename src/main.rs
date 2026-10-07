@@ -43,8 +43,19 @@ async fn main() -> Result<()> {
     info!(config = %config_path.display(), "Loading configuration");
 
     // Load configuration
-    let config = load_config(&config_path)
-        .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
+    let config = match load_config(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            // A failed load is the commonest configuration error there is, and
+            // the documented code for it is 5. Letting it flow through anyhow
+            // flattened it to 1, so route it through `map_exit_code` too.
+            eprintln!(
+                "Error: Failed to load config from {}\n\nCaused by:\n    {err}",
+                config_path.display()
+            );
+            std::process::exit(map_exit_code(&err));
+        }
+    };
 
     let config = Arc::new(config);
 

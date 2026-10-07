@@ -778,8 +778,9 @@ non-zero. The distinction matters because before this release `bridge-mcp tool`
 exited **0** in that case, so `bridge-mcp tool … && next` ran `next` after a
 failure.
 
-The remote command's own exit code is not returned as a separate field; it
-appears in the result text as the `[exit:N]` prefix. `--json` marks the call
+In the CLI's output the remote command's own exit code is not a separate
+field; it appears in the result text as the `[exit:N]` prefix (an MCP result
+also carries it in `_meta`, see below). `--json` marks the call
 `"isError": true` — **except for the tools whose command you wrote yourself**,
 which report the code without the verdict. See the next section.
 
@@ -845,19 +846,23 @@ JSON result instead.
 
 Two further limits:
 
-- **Only the `tool` subcommand distinguishes 6.** `bridge-mcp exec` exits 1 on
-  a failed remote command, as it always has.
-- **Not when a daemon serves the call.** With `bridge-mcp daemon` running, the
-  CLI forwards the call and reads the MCP result back off the wire, which does
-  not carry the remote exit code at all. All it can read is `"isError"`, so:
-  a tool that sets the verdict exits **1** instead of 6 — still non-zero, only
-  the discrimination is lost — while `ssh_exec` and `ssh_exec_multi`, which
-  deliberately do not set it, exit **0**. On that path `$? -ne 0` is *not* a
-  safe substitute for those two; it is the one place where the exit code still
-  cannot tell you their remote command failed. Closing it means putting the
-  code on the MCP wire, which is a protocol change and is not done. Until then,
-  if you script `ssh_exec` against `$?`, make sure no daemon is serving your
-  calls, or read the `[exit:N]` prefix out of the output.
+- **Only the `tool` subcommand distinguishes 6, and only `tool` maps the
+  bridge's own failures onto 2-4.** `bridge-mcp exec` exits 1 on a failed remote
+  command, as it always has. Every other subcommand (`exec`, `status`,
+  `history`, `describe-tool`, `list-tools`, `validate`, `config-diff`, `upload`,
+  `download`, `daemon`, `serve`) exits 1 for any error of its own, whatever its
+  class — an unknown host under `exec` is 1, not 3. A configuration file that
+  fails to load exits 5 for every subcommand, since that happens before any of
+  them runs.
+- **Under a daemon, the code travels in a vendor `_meta` key.** With
+  `bridge-mcp daemon` running, the CLI forwards the call and reads the MCP
+  result back. The remote exit code is carried on that result under
+  `_meta["io.github.muchiny/remote-exit-code"]` (also when `summarize=true`),
+  and the CLI reads it, so the daemon path gives the same exit codes as the
+  direct path — 6 for a remote failure, 1 for a bridge refusal, including for
+  `ssh_exec` and `ssh_exec_multi`. The guarantee is for this project's own
+  CLI-over-daemon path: an MCP client that does not read that vendor key still
+  sees only `"isError"`.
 
 ### Shell completions
 

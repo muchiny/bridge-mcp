@@ -48,7 +48,11 @@ pub const EXIT_REMOTE_FAILURE: i32 = 6;
 /// - 2: CLI usage error (unknown tool, bad args)
 /// - 3: connection / SSH error
 /// - 4: security denial
-/// - 5: configuration error
+/// - 5: configuration error (including a config that fails to load or parse)
+///
+/// The `_ => 1` arm is deliberate: an error nobody classified is a generic
+/// failure, and a new `BridgeError` variant lands there until someone decides
+/// it deserves a code of its own.
 ///
 /// Pure on purpose: `src/main.rs` prints the error and calls
 /// `std::process::exit` on the value returned here. Never returns
@@ -59,7 +63,10 @@ pub fn map_exit_code(err: &BridgeError) -> i32 {
         BridgeError::CommandDenied { .. } => 4,
         BridgeError::UnknownHost { .. } | BridgeError::SshConnection { .. } => 3,
         BridgeError::McpUnknownTool { .. } => 2,
-        BridgeError::Config(_) => 5,
+        BridgeError::Config(_)
+        | BridgeError::ConfigNotFound { .. }
+        | BridgeError::ConfigInvalid { .. }
+        | BridgeError::Yaml(_) => 5,
         _ => 1,
     }
 }
@@ -4516,6 +4523,11 @@ mod tests {
             },
             BridgeError::McpUnknownTool { tool: "t".into() },
             BridgeError::Config("c".into()),
+            BridgeError::ConfigNotFound { path: "p".into() },
+            BridgeError::ConfigInvalid {
+                field: "f".into(),
+                reason: "r".into(),
+            },
             BridgeError::SshExec { reason: "r".into() },
             BridgeError::Cancelled,
             BridgeError::Io(std::io::Error::other("io")),

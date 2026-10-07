@@ -26,8 +26,8 @@ nothing in the text below would otherwise tell you which is which.
 
 - **`tests/cli_exit_code.rs` — the first test that observes a real process's
   exit code.** It runs the built binary with no network and no SSH host and
-  asserts 4 (destructive gate, no terminal), 3 (unknown host) and 1 (unreadable
-  config, via `main`'s anyhow path). It does NOT observe a remote command
+  asserts 4 (destructive gate, no terminal), 3 (unknown host) and 5 (config that
+  fails to load). It does NOT observe a remote command
   failing under the daemon (`ssh_exec host=X command=false`): that needs a
   reachable SSH host and remains unmeasured by any test.
 - **`tools/call` results carry the remote command's exit code in `_meta`,
@@ -47,6 +47,9 @@ nothing in the text below would otherwise tell you which is which.
 
 ### BREAKING
 
+- **A config that fails to load now exits 5, not 1** (README promised 5; it
+  failed inside `main` before `run_tool` and flattened through anyhow).
+  `map_exit_code` also maps `ConfigNotFound`, `ConfigInvalid` and `Yaml` to 5.
 - **(lib API) `map_exit_code` moved from `src/main.rs` into
   `bridge_mcp::cli` and is now `pub fn map_exit_code(&BridgeError) -> i32`.**
   It used to declare `-> anyhow::Error` while never returning
