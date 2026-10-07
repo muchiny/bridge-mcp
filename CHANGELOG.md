@@ -908,7 +908,9 @@ nothing in the text below would otherwise tell you which is which.
 
   **The honest numbers, not the flattering one.** 399 tools read, 67 groups
   passed — but only **79 distinct tools**, about **20 %** of the pipeline, were
-  explicitly adjudicated one way or the other. The remaining four fifths are
+  explicitly adjudicated one way or the other (that count comes from the sweep's own
+  reports, which are gitignored, so it cannot be reproduced from the tree; the 399, 77,
+  476 and 67 can). The remaining four fifths are
   classed "a non-zero exit is a plain failure" **by default, not by
   examination**. Of the three opt-outs, `ssh_service_status` was measured live
   (case `H07`, `report-pass4-B.json`) and `ssh_timer_info` has since been
