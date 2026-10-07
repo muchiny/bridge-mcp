@@ -400,6 +400,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sudo_on_a_linux_host_with_a_powershell_override_names_the_shell_not_the_os() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        let host = config.hosts.get_mut("server1").expect("server1");
+        host.os_type = crate::config::OsType::Linux;
+        host.shell = Some(ShellType::PowerShell);
+        ctx.config = std::sync::Arc::new(config);
+        let result = SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "id", "sudo": true})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.is_error, Some(true), "refus attendu : {result:?}");
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'powershell'."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Windows"),
+            "un hôte Linux n'est pas un hôte Windows : {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_zero_exit_claims_nothing_at_all() {
         // Épingle le fait que la pose est CONDITIONNELLE. Sans la garde
         // `!= 0`, ce test verrait `Some(0)` : inoffensif pour `$?`, mais une
