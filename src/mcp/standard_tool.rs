@@ -2711,7 +2711,11 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "{result:?}");
-        assert!(ctx.connection_pool.mock_calls().is_empty());
+        assert_eq!(
+            ctx.connection_pool.mock_calls(),
+            [] as [(String, Option<Vec<u8>>); 0],
+            "the ALLOWS_ELEVATION refusal must fire before any connection is made"
+        );
     }
 
     /// An empty `sudo_password` is no password: it must not switch the tool

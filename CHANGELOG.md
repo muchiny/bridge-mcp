@@ -465,7 +465,6 @@ nothing in the text below would otherwise tell you which is which.
   derives no `Default`. `build_config_command` and `EquipmentType` are
   unchanged.
 
-
 - **`hosts.<name>.sudo_password` no longer appears in the remote `ps`.**
   `ssh_exec` and `ssh_exec_multi` used to send
   `printf '%s\n' '<pw>' | sudo -S ...` as the SSH exec request, which becomes
