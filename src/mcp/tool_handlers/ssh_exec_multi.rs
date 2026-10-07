@@ -480,7 +480,8 @@ async fn execute_on_host(
             exit_code: None,
             output: None,
             error: Some(format!(
-                "'sudo' is not supported on Windows host '{host_name}'."
+                "'sudo' requires a POSIX shell; host '{host_name}' uses '{}'.",
+                format!("{:?}", host_config.effective_shell()).to_lowercase()
             )),
             duration_ms: Some(elapsed_ms(&start)),
         };
@@ -808,7 +809,7 @@ mod tests {
             other => panic!("contenu texte attendu, obtenu {other:?}"),
         };
         assert!(
-            text.contains("'sudo' is not supported on Windows host 'server1'."),
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'cmd'."),
             "{text}"
         );
         assert!(text.contains("\"failed\":1"), "{text}");

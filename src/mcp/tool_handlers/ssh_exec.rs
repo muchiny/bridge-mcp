@@ -179,9 +179,12 @@ impl ToolHandler for SshExecHandler {
             // échouait bruyamment ; l'ignorer en silence ferait réussir une
             // commande non élevée. Même refus que `standard_tool.rs` (5b).
             if args.sudo.unwrap_or(false) {
+                // Le shell effectif, pas l'OS : un hôte Linux avec `shell:`
+                // non POSIX atteint aussi cette branche.
                 return Ok(ToolCallResult::error(format!(
-                    "'sudo' is not supported on Windows host '{}'.",
-                    args.host
+                    "'sudo' requires a POSIX shell; host '{}' uses '{}'.",
+                    args.host,
+                    format!("{effective_shell:?}").to_lowercase()
                 )));
             }
             crate::domain::privilege::Elevated {
@@ -391,7 +394,7 @@ mod tests {
         assert_eq!(result.is_error, Some(true), "refus attendu : {result:?}");
         let text = format!("{result:?}");
         assert!(
-            text.contains("'sudo' is not supported on Windows host 'server1'."),
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'cmd'."),
             "{text}"
         );
     }

@@ -490,10 +490,12 @@ nothing in the text below would otherwise tell you which is which.
     with such a host should configure `NOPASSWD` in sudoers and omit
     `sudo_password`, or reach the host over SSH.
   - **`sudo: true` on a non-POSIX host is now refused**, in `ssh_exec` and
-    `ssh_exec_multi`, with `'sudo' is not supported on Windows host '<host>'.`
-    (same wording as the pipeline's step 5b). In `ssh_exec_multi` the refusal
-    is per host: the others still run. `ssh_exec_multi` also no longer replays
-    a timed-out command.
+    `ssh_exec_multi`, with `'sudo' requires a POSIX shell; host '<host>' uses '<shell>'.`,
+    where `<shell>` is the host's effective shell (`cmd` or `powershell`), which
+    a `shell:` override can set on a Linux host too. In `ssh_exec_multi` the
+    refusal is per host: the others still run. `ssh_exec_multi` also no longer
+    replays a timed-out command, because the command it replayed was the one
+    carrying the password: three argv exposures for one call.
 
 ### Fixed
 
