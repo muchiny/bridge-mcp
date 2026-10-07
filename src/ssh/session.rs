@@ -80,7 +80,10 @@ pub struct SessionInfo {
 pub struct SessionExecResult {
     pub session_id: String,
     pub output: String,
-    pub exit_code: u32,
+    /// The shell's own answer for the command. `None` means the bridge could
+    /// not read it (begin marker missing, or the code line did not parse as a
+    /// `u32`) — which is not the same as the command having exited 1.
+    pub exit_code: Option<u32>,
     pub cwd: String,
 }
 
@@ -339,7 +342,7 @@ impl SessionManager {
 
         debug!(
             session_id = %session_id,
-            exit_code = exit_code,
+            exit_code = ?exit_code,
             cwd = %new_cwd,
             "Session command executed"
         );
@@ -1110,8 +1113,13 @@ impl SessionManager {
     /// {cwd}
     /// {end_marker}  (may or may not be present)
     /// ```
+    ///
+    /// The exit code is `None` when it could not be read: begin marker absent,
+    /// or the code line missing / not a decimal `u32`. It is never invented —
+    /// a real `1` from the shell and "the parser understood nothing" must stay
+    /// distinguishable for every consumer downstream.
     #[allow(clippy::option_if_let_else)]
-    fn parse_exec_output(raw: &str, begin_marker: &str) -> (String, u32, String) {
+    fn parse_exec_output(raw: &str, begin_marker: &str) -> (String, Option<u32>, String) {
         if let Some(begin_pos) = raw.find(begin_marker) {
             // The output is everything that precedes the marker. The previous
             // split walked back to the last `\n` BEFORE the marker, which
@@ -1127,10 +1135,7 @@ impl SessionManager {
             let metadata = raw[after_begin..].trim();
             let mut lines = metadata.lines();
 
-            let exit_code: u32 = lines
-                .next()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(1);
+            let exit_code: Option<u32> = lines.next().and_then(|s| s.trim().parse().ok());
 
             let cwd = lines
                 .next()
@@ -1138,9 +1143,10 @@ impl SessionManager {
 
             (command_output, exit_code, cwd)
         } else {
-            // Fallback: couldn't find begin marker, return raw output with error
+            // Fallback: couldn't find begin marker, return the raw output and
+            // no exit code — none was read.
             warn!("Could not find begin marker in session output");
-            (raw.to_string(), 1, "/".to_string())
+            (raw.to_string(), None, "/".to_string())
         }
     }
 }
@@ -1156,7 +1162,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "hello world\nline 2");
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/home/user");
     }
 
@@ -1167,7 +1173,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "error output");
-        assert_eq!(exit_code, 127);
+        assert_eq!(exit_code, Some(127));
         assert_eq!(cwd, "/tmp");
     }
 
@@ -1178,7 +1184,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "");
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/root");
     }
 
@@ -1189,7 +1195,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "line 1\nline 2\nline 3");
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/var/log");
     }
 
@@ -1198,8 +1204,27 @@ mod tests {
         let (output, exit_code, cwd) =
             SessionManager::parse_exec_output("some output", "---MISSING---");
         assert_eq!(output, "some output");
-        assert_eq!(exit_code, 1);
+        // No begin marker: no code was read, and none may be invented.
+        assert_eq!(exit_code, None);
         assert_eq!(cwd, "/");
+    }
+
+    /// The property of the whole change: a command that really exited 1, a
+    /// missing begin marker and an unparsable code line are three different
+    /// states, and only the first carries a number.
+    #[test]
+    fn a_real_one_is_distinguishable_from_an_unread_code() {
+        let begin = "---SSHB_B_three---";
+        let real = format!("out\n{begin}\n1\n/tmp\n");
+        let garbled = format!("out\n{begin}\ngarbage\n/tmp\n");
+        let (_, real_code, _) = SessionManager::parse_exec_output(&real, begin);
+        let (_, garbled_code, _) = SessionManager::parse_exec_output(&garbled, begin);
+        let (_, no_marker_code, _) = SessionManager::parse_exec_output("out", begin);
+        assert_eq!(real_code, Some(1));
+        assert_eq!(garbled_code, None);
+        assert_eq!(no_marker_code, None);
+        assert_ne!(real_code, garbled_code);
+        assert_ne!(real_code, no_marker_code);
     }
 
     #[test]
@@ -1310,7 +1335,7 @@ mod tests {
         let result = SessionExecResult {
             session_id: "session-123".to_string(),
             output: "command output".to_string(),
-            exit_code: 0,
+            exit_code: Some(0),
             cwd: "/var/log".to_string(),
         };
 
@@ -1325,7 +1350,7 @@ mod tests {
         let result = SessionExecResult {
             session_id: "sess1".to_string(),
             output: "hello\nworld".to_string(),
-            exit_code: 127,
+            exit_code: Some(127),
             cwd: "/opt".to_string(),
         };
 
@@ -1341,7 +1366,7 @@ mod tests {
         let result = SessionExecResult {
             session_id: "debug-session".to_string(),
             output: "test output".to_string(),
-            exit_code: 1,
+            exit_code: Some(1),
             cwd: "/home".to_string(),
         };
 
@@ -1358,7 +1383,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "output line");
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/home");
     }
 
@@ -1371,7 +1396,7 @@ mod tests {
         // Output should contain CRLF as-is
         assert!(output.contains("line1"));
         assert!(output.contains("line2"));
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
     }
 
     #[test]
@@ -1391,8 +1416,8 @@ mod tests {
         let raw = format!("output\n{begin}\nnot_a_number\n/tmp\n");
 
         let (_, exit_code, actual_cwd) = SessionManager::parse_exec_output(&raw, begin);
-        // When exit code can't be parsed, default to 1
-        assert_eq!(exit_code, 1);
+        // A code line that does not parse is "not read", not "exited 1".
+        assert_eq!(exit_code, None);
         assert_eq!(actual_cwd, "/tmp");
     }
 
@@ -1402,7 +1427,7 @@ mod tests {
         let raw = format!("output\n{begin}\n0\n");
 
         let (_, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         // When cwd is missing, default to "/"
         assert_eq!(cwd, "/");
     }
@@ -1411,7 +1436,8 @@ mod tests {
     fn test_parse_exec_output_empty_raw() {
         let (output, exit_code, cwd) = SessionManager::parse_exec_output("", "---MARKER---");
         assert_eq!(output, "");
-        assert_eq!(exit_code, 1);
+        // Empty input has no marker, hence no code.
+        assert_eq!(exit_code, None);
         assert_eq!(cwd, "/");
     }
 
@@ -1422,7 +1448,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "");
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/root");
     }
 
@@ -1443,7 +1469,7 @@ mod tests {
         let raw = format!("output\n{begin}\n4294967295\n/tmp\n");
 
         let (_, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
-        assert_eq!(exit_code, u32::MAX);
+        assert_eq!(exit_code, Some(u32::MAX));
     }
 
     #[test]
@@ -1452,8 +1478,8 @@ mod tests {
         let raw = format!("output\n{begin}\n-1\n/tmp\n");
 
         let (_, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
-        // Negative numbers should fail to parse, default to 1
-        assert_eq!(exit_code, 1);
+        // A negative number is not a u32: the code was not read, not 1.
+        assert_eq!(exit_code, None);
     }
 
     // ============== SessionManager Lifecycle Tests ==============
@@ -1557,7 +1583,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "");
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/home");
     }
 
@@ -1569,7 +1595,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output.len(), 100_000);
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/tmp");
     }
 
@@ -1580,7 +1606,7 @@ mod tests {
 
         let (output, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
         assert!(output.contains("output"));
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
     }
 
     #[test]
@@ -1607,7 +1633,7 @@ mod tests {
         let raw = format!("output\n{begin}\n  42  \n/tmp\n");
 
         let (_, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
-        assert_eq!(exit_code, 42);
+        assert_eq!(exit_code, Some(42));
     }
 
     #[test]
@@ -1617,8 +1643,8 @@ mod tests {
         let raw = format!("output\n{begin}\n4294967296\n/tmp\n");
 
         let (_, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
-        // Should default to 1 on parse failure
-        assert_eq!(exit_code, 1);
+        // Out of u32 range: not read. Never a fabricated 1.
+        assert_eq!(exit_code, None);
     }
 
     #[test]
@@ -1627,8 +1653,8 @@ mod tests {
         let raw = format!("output\n{begin}\n1.5\n/tmp\n");
 
         let (_, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
-        // Float won't parse as u32
-        assert_eq!(exit_code, 1);
+        // A float is not a decimal u32: not read. Never a fabricated 1.
+        assert_eq!(exit_code, None);
     }
 
     #[test]
@@ -1637,8 +1663,8 @@ mod tests {
         let raw = format!("output\n{begin}\n0xFF\n/tmp\n");
 
         let (_, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
-        // Hex won't parse as decimal u32
-        assert_eq!(exit_code, 1);
+        // Hex is not a decimal u32: not read. Never a fabricated 1.
+        assert_eq!(exit_code, None);
     }
 
     #[test]
@@ -1649,7 +1675,7 @@ mod tests {
 
         let (output, exit_code, _) = SessionManager::parse_exec_output(&raw, begin);
         assert!(output.contains("---SSHB---"));
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
     }
 
     // ============== SessionInfo Tests ==============
@@ -1707,13 +1733,13 @@ mod tests {
         let result = SessionExecResult {
             session_id: "session-xyz".to_string(),
             output: "Hello, World!\n".to_string(),
-            exit_code: 0,
+            exit_code: Some(0),
             cwd: "/home/user".to_string(),
         };
 
         assert_eq!(result.session_id, "session-xyz");
         assert_eq!(result.output, "Hello, World!\n");
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.cwd, "/home/user");
     }
 
@@ -1722,7 +1748,7 @@ mod tests {
         let result = SessionExecResult {
             session_id: "sess".to_string(),
             output: String::new(),
-            exit_code: 0,
+            exit_code: Some(0),
             cwd: "/".to_string(),
         };
 
@@ -1735,7 +1761,7 @@ mod tests {
         let result = SessionExecResult {
             session_id: "large".to_string(),
             output: large_output.clone(),
-            exit_code: 0,
+            exit_code: Some(0),
             cwd: "/".to_string(),
         };
 
@@ -1747,7 +1773,7 @@ mod tests {
         let result = SessionExecResult {
             session_id: "test-123".to_string(),
             output: "output\nwith\nnewlines".to_string(),
-            exit_code: 42,
+            exit_code: Some(42),
             cwd: "/test".to_string(),
         };
 
@@ -1759,6 +1785,16 @@ mod tests {
         // Verify it can be deserialized (if we had Deserialize)
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["exit_code"], 42);
+
+        let unread = SessionExecResult {
+            exit_code: None,
+            ..result
+        };
+        let value: serde_json::Value = serde_json::to_value(&unread).unwrap();
+        assert!(
+            value["exit_code"].is_null(),
+            "unread code serializes as null"
+        );
     }
 
     // ============== SessionConfig Edge Cases ==============
@@ -2015,7 +2051,7 @@ mod tests {
 
         let (output, exit_code, cwd) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(output, "output here");
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, Some(0));
         assert_eq!(cwd, "/home/user");
     }
 
@@ -2072,7 +2108,7 @@ mod tests {
             out, "sans-nl",
             "output without a trailing newline was thrown away"
         );
-        assert_eq!(rc, 0);
+        assert_eq!(rc, Some(0));
         assert_eq!(cwd, "/home/muchini");
     }
 
@@ -2082,7 +2118,7 @@ mod tests {
         let raw = format!("avec-nl\n{begin}\n0\n/home/muchini\n");
         let (out, rc, _) = SessionManager::parse_exec_output(&raw, begin);
         assert_eq!(out, "avec-nl");
-        assert_eq!(rc, 0);
+        assert_eq!(rc, Some(0));
     }
 
     // ============== Task 4: a top-level `exit` is refused, not run ==============

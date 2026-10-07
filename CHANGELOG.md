@@ -43,6 +43,15 @@ nothing in the text below would otherwise tell you which is which.
   looks exactly like a working call. A close miss now names its fix
   ("Did you mean `jq_filter`?"). `--json-args` is unaffected.
 
+- **(lib API) `SessionExecResult::exit_code` is now `Option<u32>`, and the
+  `ssh_session_exec` JSON `exit_code` can be `null`.** `None`/`null` means the
+  bridge could not read the shell's reply (begin marker missing, or the code line
+  is not a decimal `u32`). It used to be a fabricated `1`, indistinguishable from
+  a command that really exited 1, and that `1` was written to the audit trail as
+  the command's own code. An unread code is now audited as an outcome-unknown
+  entry (no number), and a real non-zero code reaches `bridge-mcp tool` as exit 6
+  through `with_remote_exit_code_only`, without setting `is_error`.
+
 - **A tool annotated `destructiveHint` is now gated in the CLI.** It prompts on
   a terminal and is refused with exit 4 when stdin is not one; scripts must pass
   `--yes`, which is logged. Previously the direct path ran destructive tools

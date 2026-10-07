@@ -116,6 +116,51 @@ fn build_command(
     )
 }
 
+/// Record the outcome of a session command in the audit trail, and log it.
+///
+/// `log_success` takes a bare `u32`, and no number may be written for a code
+/// that was never read (a `1` there would read as the command's own answer).
+/// So an unread code is recorded through `log_failure`: the command is still
+/// in the trail, with its text and tool name, and the entry says outright that
+/// the outcome is unknown.
+fn audit_outcome(
+    ctx: &ToolContext,
+    tool: &str,
+    host: &str,
+    command: &str,
+    session_id: &str,
+    exit_code: Option<u32>,
+    duration_ms: u64,
+) {
+    if let Some(code) = exit_code {
+        ctx.execute_use_case
+            .log_success(tool, host, command, code, duration_ms);
+        if code != 0 {
+            warn!(session_id = %session_id, command = %command, exit_code = code, "Session command failed");
+        }
+    } else {
+        ctx.execute_use_case.log_failure(
+            tool,
+            host,
+            command,
+            "exit code not read: the shell's reply could not be parsed",
+        );
+        warn!(
+            session_id = %session_id,
+            command = %command,
+            "Session command ran but its exit code could not be read"
+        );
+    }
+}
+
+/// The remote exit code to propagate, if there is a fact to propagate: only a
+/// code that was read AND is non-zero. An unread code yields nothing.
+fn remote_fact(exit_code: Option<u32>) -> Option<i32> {
+    exit_code
+        .filter(|&c| c != 0)
+        .map(|c| i32::try_from(c).unwrap_or(1))
+}
+
 #[async_trait]
 impl ToolHandler for SshSessionExecHandler {
     fn name(&self) -> &'static str {
@@ -127,8 +172,10 @@ impl ToolHandler for SshSessionExecHandler {
          ssh_session_create). Unlike ssh_exec (stateless, one-shot), the session retains \
          working directory and environment variables between calls — ideal for multi-step \
          workflows such as 'cd /app', then 'npm install', then 'npm run build'. Returns JSON \
-         with fields: session_id, exit_code, cwd (updated after cd commands), output. Obtain \
-         session_id from ssh_session_create or ssh_session_list. Use ssh_session_close when \
+         with fields: session_id, exit_code, cwd (updated after cd commands), output. exit_code \
+         is null when the shell's reply could not be read, which is not the same as the \
+         command having exited 1. Obtain session_id from ssh_session_create or \
+         ssh_session_list. Use ssh_session_close when \
          the workflow is complete."
     }
 
@@ -205,22 +252,16 @@ impl ToolHandler for SshSessionExecHandler {
         // own response, so it must record the trace itself. `args.command` —
         // not `command` — because the latter carries the shell wrapper the
         // handler added, and the audit answers "what did the caller ask for".
-        ctx.execute_use_case.log_success(
+        // The unread-code case is explained on `audit_outcome`.
+        audit_outcome(
+            ctx,
             self.name(),
             audit_host,
             &args.command,
+            &args.session_id,
             result.exit_code,
             duration_ms,
         );
-
-        if result.exit_code != 0 {
-            warn!(
-                session_id = %args.session_id,
-                command = %args.command,
-                exit_code = result.exit_code,
-                "Session command failed"
-            );
-        }
 
         // Sanitize output
         let sanitized_output = ctx.sanitizer.sanitize(&result.output);
@@ -237,6 +278,8 @@ impl ToolHandler for SshSessionExecHandler {
             None,
         )
         .await;
+
+        let exit_code = result.exit_code;
 
         // Build response with metadata
         let response = serde_json::json!({
@@ -257,7 +300,17 @@ impl ToolHandler for SshSessionExecHandler {
             }
         }
 
-        Ok(ToolCallResult::text(json))
+        let result = ToolCallResult::text(json);
+
+        // The fact, not the verdict — same reasoning as `ssh_exec`: the
+        // caller wrote the command, so a non-zero code is an answer, and
+        // `is_error` must stay unset. Nothing is set when the code was never
+        // read: the absence of the fact is the honest report.
+        if let Some(code) = remote_fact(exit_code) {
+            return Ok(result.with_remote_exit_code_only(code));
+        }
+
+        Ok(result)
     }
 }
 
@@ -341,6 +394,14 @@ mod tests {
             client_supports_sampling: false,
             mcp_logger: None,
         }
+    }
+
+    #[test]
+    fn only_a_read_nonzero_code_is_a_fact() {
+        assert_eq!(remote_fact(Some(1)), Some(1));
+        assert_eq!(remote_fact(Some(127)), Some(127));
+        assert_eq!(remote_fact(Some(0)), None);
+        assert_eq!(remote_fact(None), None, "an unread code must set nothing");
     }
 
     #[test]
