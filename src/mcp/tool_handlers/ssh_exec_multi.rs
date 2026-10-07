@@ -11,7 +11,7 @@ use std::time::Instant;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, ShellType};
 use crate::domain::ExecuteCommandUseCase;
 use crate::domain::OutputCache;
 use crate::domain::output_truncator::truncate_output_with_cache;
@@ -21,7 +21,7 @@ use crate::mcp_tool;
 use crate::ports::ExecutorRouter;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::security::RateLimiter;
-use crate::ssh::{is_retryable_error, with_retry_if};
+use crate::ssh::{is_retryable_error_for, with_retry_if};
 
 use super::utils::shell_escape;
 
@@ -459,11 +459,39 @@ async fn execute_on_host(
 
     // Wrap command with sudo if requested
     //
-    // L'élévation est une décision du domaine : `privilege::elevate*`
-    // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
-    // ici n'élèverait que le premier processus — voir la documentation de
-    // `domain::privilege::elevate`.
-    let wrapped_command = if use_sudo {
+    // Elevation is a domain decision: `privilege::elevate*` wraps the whole
+    // line (`sudo -n bash -c '<all>'`, or `sudo -S -p '' bash -c 'exec
+    // 0</dev/null; <all>'` when the host has a `sudo_password` and the
+    // transport is SSH). Prefixing it here would only elevate the first
+    // process; see the docs of `domain::privilege::elevate`.
+    //
+    // Like `ssh_exec`: the POSIX sudo wrapper only makes sense on a POSIX host.
+    // On a Windows host it failed, and the password still went into that
+    // host's command line.
+    if use_sudo && host_config.effective_shell() != ShellType::Posix {
+        // Per-host refusal: the other hosts of the call still run. Ignoring
+        // `sudo` silently would let an unelevated command report `success`.
+        // Same intent as step 5b of `standard_tool.rs` (refuse rather than
+        // silently downgrade the privilege), but neither the condition nor the
+        // wording is its own: 5b tests the OS (`os_type == Windows`), this
+        // tests the effective shell, which a `shell:` override can make
+        // non-POSIX on a Linux host.
+        if fail_fast {
+            cancel_token.cancel();
+        }
+        return HostResult {
+            host: host_name.clone(),
+            success: false,
+            exit_code: None,
+            output: None,
+            error: Some(format!(
+                "'sudo' requires a POSIX shell; host '{host_name}' uses '{}'.",
+                format!("{:?}", host_config.effective_shell()).to_lowercase()
+            )),
+            duration_ms: Some(elapsed_ms(&start)),
+        };
+    }
+    let elevated = if use_sudo {
         let privilege = crate::domain::privilege::PrivilegeArgs {
             sudo: use_sudo,
             sudo_user: Some(sudo_user.to_string()),
@@ -471,11 +499,17 @@ async fn execute_on_host(
         crate::domain::privilege::elevate_with_password(
             &command,
             &privilege,
-            host_config.sudo_password.as_deref(),
+            host_config.sudo_password_for_exec(&host_name),
         )
     } else {
-        command.clone()
+        crate::domain::privilege::Elevated {
+            command: command.clone(),
+            stdin: None,
+        }
     };
+    // The password travels on the channel's stdin, not in the remote argv.
+    let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
+    let wrapped_command = &elevated.command;
 
     // Build the actual command (with optional cd)
     let full_command = working_dir.as_ref().map_or_else(
@@ -507,7 +541,10 @@ async fn execute_on_host(
                 .get_connection_with_jump(&host_name, host_config, &limits, jump_host)
                 .await?;
 
-            match conn.exec(&full_command, &limits).await {
+            match conn
+                .exec_with_stdin(&full_command, stdin_bytes, &limits)
+                .await
+            {
                 Ok(output) => Ok(output),
                 Err(e) => {
                     conn.mark_failed();
@@ -515,9 +552,14 @@ async fn execute_on_host(
                 }
             }
         },
-        is_retryable_error,
+        // Like `ssh_exec`: the command is arbitrary and a timeout does not
+        // prove it did not run. Replaying also replayed the password.
+        |e| is_retryable_error_for(e, false),
     )
     .await;
+    // The retry loop is done with the secret: wipe it now rather than at the
+    // end of the function, across `process_success` and the truncation awaits.
+    drop(elevated);
 
     let duration_ms = Some(elapsed_ms(&start));
 
@@ -751,6 +793,35 @@ mod tests {
             result.is_error, None,
             "le verdict n'est pas posé : {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_windows_host_fails_that_host_only() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        config.hosts.get_mut("server1").expect("server1").os_type = crate::config::OsType::Windows;
+        ctx.config = Arc::new(config);
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({
+                    "hosts": ["server1", "server2"],
+                    "command": "id",
+                    "sudo": true
+                })),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ToolContent::Text { text } => text.clone(),
+            other => panic!("contenu texte attendu, obtenu {other:?}"),
+        };
+        assert!(
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'cmd'."),
+            "{text}"
+        );
+        assert!(text.contains("\"failed\":1"), "{text}");
+        assert!(text.contains("\"succeeded\":1"), "{text}");
     }
 
     #[tokio::test]

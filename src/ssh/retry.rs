@@ -694,6 +694,18 @@ mod tests {
         }));
     }
 
+    /// The stdin refusal is a deterministic configuration error. Its wording
+    /// must not contain "channel" or "connection", which `is_retryable_error`
+    /// reads as transient.
+    #[test]
+    fn test_stdin_transport_refusal_is_not_retryable() {
+        let err = BridgeError::SshExec {
+            reason: crate::error::STDIN_NOT_SSH_REASON.to_string(),
+        };
+        assert!(!is_retryable_error(&err));
+        assert!(!is_retryable_error_for(&err, true));
+    }
+
     #[test]
     fn test_is_retryable_error_ssh_exec_other() {
         assert!(!is_retryable_error(&BridgeError::SshExec {

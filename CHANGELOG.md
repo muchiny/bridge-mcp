@@ -465,6 +465,47 @@ nothing in the text below would otherwise tell you which is which.
   derives no `Default`. `build_config_command` and `EquipmentType` are
   unchanged.
 
+- **`hosts.<name>.sudo_password` no longer appears in the remote `ps`.**
+  `ssh_exec` and `ssh_exec_multi` used to send
+  `printf '%s\n' '<pw>' | sudo -S ...` as the SSH exec request, which becomes
+  the argv of the remote shell for the whole call. The password now travels on
+  the SSH channel's stdin (`sudo -S` reads it there) and the command text no
+  longer contains it. `ssh_session_exec` still delivers the password in the line it
+  writes to a live shell, which remains its legitimate form (the pipe form was
+  never in an argv there); it now also detaches the child's stdin and treats an
+  empty password as absent.
+  - **Library API.** `domain::privilege::elevate_with_password` now returns the
+    new `pub struct Elevated { command, stdin }` instead of `String`
+    (`stdin: Option<RedactedSecret>`, password plus `\n`);
+    `elevate_with_password_via_pipe` is the old string form, kept for
+    `ssh_session_exec`. `ConnectionGuard`, the pool guard and `SshClient` gain
+    `exec_with_stdin`; `exec` is unchanged.
+  - **Behaviour.** A host whose `protocol` is `telnet`, `serial`, `k8s-exec`,
+    `ssm`, `azure` or `gcp`, with `os_type: linux` and a `sudo_password`, no
+    longer has the password used by `ssh_exec` / `ssh_exec_multi`: only SSH has
+    a channel stdin to carry it, so those hosts get `sudo -n` and a `warn!`
+    naming the host and protocol (never the password). The old pipe form put
+    the password in the pod exec argv, a cloud API invocation record, or the
+    bridge host's own `gcloud` argv. Configure `NOPASSWD` in sudoers for such a
+    host, or reach it over SSH. An empty `sudo_password` is treated as absent.
+  - **`sudo: true` on a non-POSIX host is now refused**, in `ssh_exec` and
+    `ssh_exec_multi`, with `'sudo' requires a POSIX shell; host '<host>' uses '<shell>'.`,
+    where `<shell>` is the host's effective shell (`cmd` or `powershell`), which
+    a `shell:` override can set on a Linux host too. In `ssh_exec_multi` the
+    refusal is per host: the others still run. `ssh_exec_multi` also no longer
+    replays a command that may have run, because the command it replayed was the one
+    carrying the password: three argv exposures for one call.
+  - **The `StandardTool` pipeline now uses `hosts.<name>.sudo_password` too: the
+    command it emits changes on a password host.** On any host that has a
+    `sudo_password` (SSH transport, `sudo: true`), the 398 pipeline tools that
+    accept elevation emit `sudo -S -p '' bash -c 'exec 0</dev/null; …'` instead
+    of `sudo -n bash -c '…'`. **A `security.blacklist` entry or SIEM rule keyed
+    on the literal `sudo -n` silently stops matching on those hosts**, so a rule
+    meant to forbid elevation no longer denies it. Re-key such rules on `sudo`.
+    Hosts without a `sudo_password`, and every non-SSH transport, still emit
+    `sudo -n`. Details in the "now reaches the 398 `StandardTool` tools" entry
+    under Known issues.
+
 ### Fixed
 
 - **A slow command no longer destroys its session.** Every `Err` from reading a
@@ -794,23 +835,32 @@ nothing in the text below would otherwise tell you which is which.
   looks like one and is not, because its non-zero answer depends on an argument
   the const cannot see.
 
-- **`sudo: true` reaches two different functions, and only one of them can use
-  a configured `sudo_password`.** `domain::privilege::elevate` (no password,
-  `sudo -n` only) is what the `StandardTool` pipeline calls, so it governs 399
-  tools; `elevate_with_password` is reached only by `ssh_exec`,
-  `ssh_exec_multi` and `ssh_session_exec`, the three handlers that build their
-  own `PrivilegeArgs`. On a host that carries a `sudo_password` *and* genuinely
-  demands one, `sudo: true` therefore works on those 3 and fails immediately on
-  the other 399, which need `NOPASSWD` on the remote host — and where
-  `NOPASSWD` is granted the configured password was never needed in the first
-  place, which is why the split has gone unnoticed. **This predates the
-  branch** — the
-  pipeline called the password-less `elevate` before it too — and it is left
-  alone deliberately: the remedy is one line (pass the host's `sudo_password`
-  to `elevate_with_password` at `src/mcp/standard_tool.rs`, step 5b), but it
-  changes the behaviour of 399 tools on every password host at once and only
-  the three have ever been exercised on one. It wants its own measurement, and
-  both functions' rustdoc now says so.
+- **`hosts.<name>.sudo_password` now reaches the 398 `StandardTool` tools that accept elevation.**
+  The pipeline's step 5b used to call the password-less
+  `domain::privilege::elevate`, so `sudo: true` on a host that demands a
+  password worked on `ssh_exec`, `ssh_exec_multi` and `ssh_session_exec` and
+  failed at once (`sudo -n`) on every other tool. Step 5b now calls
+  `elevate_with_password` and the password goes to `exec_with_stdin` — on the
+  SSH channel's stdin, never in the command line. `ALLOWS_ELEVATION = false`
+  tools are still refused before any elevation, so a password is not
+  reachable on them. On a non-SSH protocol the password is ignored with a
+  `warn!` and `sudo -n` is kept; an empty `sudo_password` counts as absent.
+  - **Operator-visible: the emitted command changes.** For a host that has a
+    `sudo_password`, the pipeline now emits `sudo -S -p '' …` instead of
+    `sudo -n …`. **A blacklist entry or SIEM rule keyed on the literal
+    `sudo -n` silently stops matching** — a rule meant to forbid elevation no
+    longer denies it. Re-key such rules on `sudo`.
+  - **Hardening: the elevated child's stdin is detached.** `sudo -S` reads
+    stdin only when it must authenticate; under `NOPASSWD` or a warm
+    credential cache it does not, and the unread `password\n` became fd 0 of
+    `bash -c '<cmd>'` (`printf 'pw\n' | sudo -S -p '' bash -c cat` prints
+    it). A caller-supplied command (`ssh_exec`, `ssh_exec_multi`,
+    `ssh_session_exec`) could read it back, e.g. through `base64`, which the
+    exact-match masker does not catch. Both `elevate_with_password` and
+    `elevate_with_password_via_pipe` now wrap the command as
+    `exec 0</dev/null` followed by the command; `sudo` still authenticates
+    from the channel. Nothing was written to a channel stdin before, so no
+    tool can depend on its content.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 

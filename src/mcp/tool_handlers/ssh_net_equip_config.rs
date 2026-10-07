@@ -93,7 +93,8 @@ impl StandardTool for NetEquipConfigTool {
     /// the first place; the reason it has to be *refused* is what `sudo` would
     /// do on a host that is not the device the operator believes it is. The
     /// pipeline elevates at step 5b by wrapping the built command in
-    /// `sudo -n bash -c '…'`, and for `EquipmentType::Generic` the built
+    /// `sudo -n bash -c '…'` (or `sudo -S -p '' bash -c 'exec 0</dev/null; …'`
+    /// on a password host), and for `EquipmentType::Generic` the built
     /// command is the request's `commands` text verbatim — so `sudo: true` here
     /// used to run that text as root, ahead of the blacklist, with the
     /// whitelist already skipped by `validate_builtin`.

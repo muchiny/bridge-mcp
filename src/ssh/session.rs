@@ -978,8 +978,8 @@ impl SessionManager {
                  `sh -c 'exit 7'`. A body that runs in a child shell cannot reach this \
                  session's own shell, so it is never refused: that is also the way past \
                  the here-document over-refusal, and `sudo: true` does it incidentally, \
-                 since elevation wraps the whole line in `sudo -n bash -c '…'` before \
-                 this rule sees it"
+                 since elevation wraps the whole line in `sudo -n bash -c '…'` (or `sudo -S \
+                 -p '' bash -c '…'` on a password host) before this rule sees it"
             }
             ShellType::Cmd => "run it in a child interpreter — `cmd /c \"exit 7\"`",
             ShellType::PowerShell => {

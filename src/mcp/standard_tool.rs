@@ -122,7 +122,9 @@ pub trait StandardTool: Send + Sync + 'static {
     /// Set it to `false` for a tool whose far end is not a POSIX shell, so
     /// there is no `sudo` there to run. That is not merely a no-op: elevation
     /// happens at step 5b, BEFORE the blacklist at step 6, and it wraps the
-    /// built command in `sudo -n bash -c '…'` — so on a tool that splices
+    /// built command in `sudo -n bash -c '…'` (or `sudo -S -p '' bash -c
+    /// 'exec 0</dev/null; …'` when the host has a `sudo_password` and the
+    /// transport is SSH) — so on a tool that splices
     /// caller text into its command, `sudo: true` turns that text into a root
     /// shell. Refusing the param is what keeps the elevation path from being
     /// an escalation path for such a tool.
@@ -145,6 +147,12 @@ pub trait StandardTool: Send + Sync + 'static {
     ///
     /// This is the only method that MUST be implemented per tool.
     /// Return `Ok(command_string)` for the command to execute via SSH.
+    ///
+    /// **No builder may read fd 0.** The SSH channel's stdin is reserved for
+    /// the sudo password (`exec_with_stdin`), which bypasses command
+    /// validation by construction. Today `detach_stdin` redirects the elevated
+    /// child's stdin from `/dev/null`, but that is a safety net, not a licence:
+    /// a command that reads stdin must not be built here.
     fn build_command(args: &Self::Args, host_config: &HostConfig) -> Result<String>;
 
     /// Optional extra validation before command execution.
@@ -527,15 +535,29 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 .log_denied(T::NAME, &host, &command, &reason);
             return Err(BridgeError::CommandDenied { reason });
         }
-        let command = if host_config.os_type == OsType::Windows {
+        //
+        // The host's `sudo_password`, if any, travels as `stdin` — the bytes
+        // `sudo -S` reads on the SSH channel — and never in the command line,
+        // where the remote `ps` would show it. It is borrowed at step 11, not
+        // moved: the retry closure may run more than once.
+        let (command, stdin) = if host_config.os_type == OsType::Windows {
             if privilege.is_elevated() {
                 return Ok(ToolCallResult::error(format!(
                     "'sudo' is not supported on Windows host '{host}'."
                 )));
             }
-            command
+            (command, None)
         } else {
-            crate::domain::privilege::elevate(&command, &privilege)
+            // Only asked when elevation is: the helper warns on a non-SSH host,
+            // and that must not fire on every call of every tool.
+            let password = if privilege.is_elevated() {
+                host_config.sudo_password_for_exec(&host)
+            } else {
+                None
+            };
+            let elevated =
+                crate::domain::privilege::elevate_with_password(&command, &privilege, password);
+            (elevated.command, elevated.stdin)
         };
 
         // Step 6: Validate against security policy
@@ -624,6 +646,8 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 && annotations.destructive_hint != Some(true));
 
         let cancel_token = ctx.cancel_token.clone();
+        // Borrowed by the `async ||` closure below, which retry may call again.
+        let stdin_bytes: Option<&[u8]> = stdin.as_ref().map(|s| s.as_bytes());
         let output = with_retry_if(
             &retry_config,
             T::NAME,
@@ -639,10 +663,10 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                         () = token.cancelled() => {
                             Err(BridgeError::Cancelled)
                         }
-                        r = conn.exec(&command, &limits) => r,
+                        r = conn.exec_with_stdin(&command, stdin_bytes, &limits) => r,
                     }
                 } else {
-                    conn.exec(&command, &limits).await
+                    conn.exec_with_stdin(&command, stdin_bytes, &limits).await
                 };
 
                 match result {
@@ -656,6 +680,10 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             |e| is_retryable_error_for(e, safe_to_replay),
         )
         .await;
+        // The retry loop is done with the secret: wipe it now rather than at
+        // the end of `execute`, across `process_success` and the truncation
+        // awaits.
+        drop(stdin);
 
         // Step 12: Log failure
         let output = output.inspect_err(|e| {
@@ -2594,6 +2622,146 @@ mod tests {
             result.is_ok(),
             "MockArgs declares neither param, yet the call must succeed: {result:?}"
         );
+    }
+
+    /// A host's `sudo_password` must reach a pipeline tool as stdin, and only
+    /// as stdin. Both halves are asserted: a pipeline that built the right
+    /// command but dropped the password would pass the first alone and fail
+    /// every `sudo -S` on a real host with no other symptom.
+    #[tokio::test]
+    async fn sudo_password_travels_on_stdin_and_not_in_the_command() {
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let (command, stdin) = &calls[0];
+        assert!(
+            command.contains("sudo -S"),
+            "must elevate with -S: {command}"
+        );
+        assert!(
+            !command.contains("hunter2-pw"),
+            "password leaked into the command: {command}"
+        );
+        assert_eq!(
+            stdin.as_deref(),
+            Some(b"hunter2-pw\n".as_slice()),
+            "password must arrive on stdin, newline-terminated"
+        );
+    }
+
+    /// Without `sudo`, a configured password must not be sent anywhere.
+    #[tokio::test]
+    async fn sudo_password_is_not_sent_when_no_elevation_is_asked() {
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None);
+        assert!(!calls[0].0.contains("hunter2-pw"));
+    }
+
+    /// A tool that opted out of elevation is refused before the password is
+    /// read: nothing reaches a connection at all.
+    #[tokio::test]
+    async fn sudo_password_is_unreachable_on_a_tool_that_opts_out() {
+        struct NoElevTool;
+        impl StandardTool for NoElevTool {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_no_elevation";
+            const DESCRIPTION: &'static str = "Mock tool opting out of elevation";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            const ALLOWS_ELEVATION: bool = false;
+
+            fn build_command(_args: &MockArgs, _host_config: &HostConfig) -> Result<String> {
+                Ok("echo hi".to_string())
+            }
+        }
+
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<NoElevTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            ctx.connection_pool.mock_calls(),
+            [] as [(String, Option<Vec<u8>>); 0],
+            "the ALLOWS_ELEVATION refusal must fire before any connection is made"
+        );
+    }
+
+    /// An empty `sudo_password` is no password: it must not switch the tool
+    /// to `sudo -S` and send a bare newline (a failed PAM auth per call).
+    #[tokio::test]
+    async fn an_empty_sudo_password_is_treated_as_absent() {
+        let mut hosts = server1_hosts();
+        hosts.get_mut("server1").unwrap().sudo_password =
+            Some(crate::config::RedactedSecret::from(""));
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None);
+        assert!(calls[0].0.contains("sudo -n "), "{}", calls[0].0);
+    }
+
+    /// Off SSH there is no channel stdin: keep `sudo -n`, send no password.
+    #[cfg(feature = "telnet")]
+    #[tokio::test]
+    async fn a_non_ssh_host_keeps_sudo_n_and_sends_no_password() {
+        let mut hosts = server1_hosts();
+        let h = hosts.get_mut("server1").unwrap();
+        h.sudo_password = Some(crate::config::RedactedSecret::from("hunter2-pw"));
+        h.protocol = crate::config::Protocol::Telnet;
+        let ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output("ok"));
+        let handler = StandardToolHandler::<MockTool>::new();
+
+        let result = handler
+            .execute(Some(json!({"host": "server1", "sudo": true})), &ctx)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1, None, "stdin must never be Some off SSH");
+        assert!(calls[0].0.contains("sudo -n "), "{}", calls[0].0);
+        assert!(!calls[0].0.contains("hunter2-pw"));
     }
 
     #[tokio::test]
