@@ -149,9 +149,11 @@ pub struct ToolCallResult {
     ///   simply does not report one. **This is what a successful call carries**,
     ///   and what most handlers outside the `StandardTool` pipeline still
     ///   carry — see the note on that pipeline's step 19. The exceptions are
-    ///   the handlers that now report a code of their own: `ssh_file_write`,
-    ///   `ssh_disk_usage` and `ssh_tail` under their documented conditions,
-    ///   and `ssh_exec` / single-host `ssh_exec_multi`.
+    ///   the handlers that call [`Self::with_remote_exit_code`] or
+    ///   [`Self::with_remote_exit_code_only`] themselves, under whatever
+    ///   conditions each documents; a handler that does neither is in this
+    ///   state. Which of the two constructors a handler uses depends on who
+    ///   chose the command, as set out on each of them.
     /// * `Some(0)` — a command ran on the target host and succeeded. A
     ///   coherent statement, and the CLI reads it as success, but nothing in
     ///   the tree emits it: the pipeline only records a code when it is
