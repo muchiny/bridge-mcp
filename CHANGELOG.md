@@ -17,7 +17,9 @@ handlers brought into line (`ssh_file_write`, `ssh_disk_usage`, `ssh_tail`,
 by unit test and mutation testing. The sixth, `ssh_awx_job_follow`, was
 established by unit test **only**: no `cargo mutants` run covers it, and the
 basis for it is the generated script executed under `bash` against stub `curl`
-and `sleep` binaries, plus `make ci`. **None of them was ever run against a
+and `sleep` binaries, plus `make ci`. The seventh, `ssh_session_exec`, is also
+recorded as unit test only, but that is the absence of proof of a mutation run,
+not a measurement that none exists. **None of them was ever run against a
 host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
@@ -42,6 +44,21 @@ nothing in the text below would otherwise tell you which is which.
   reduction params — `jq_fitler=…` returned the full unreduced output, which
   looks exactly like a working call. A close miss now names its fix
   ("Did you mean `jq_filter`?"). `--json-args` is unaffected.
+
+- **(lib API) `SessionExecResult::exit_code` is now `Option<u32>`, and the
+  `ssh_session_exec` JSON `exit_code` can be `null`.** `None`/`null` means the
+  bridge read no exit code representable as a `u32` (begin marker missing, or
+  the code line is not a decimal `u32` — which includes a negative PowerShell
+  `$LASTEXITCODE`, a reply that was read but does not fit the type). It used to be
+  a fabricated `1`, indistinguishable from a command that really exited 1, and
+  that `1` was written to the audit trail as the command's own code. An unread
+  code is now audited through `log_failure`: the **audit event** is an error
+  entry that carries no command exit code, while the **history entry** is
+  `HistoryEntry::failed`, whose fixed shape is `exit_code: u32::MAX` (a
+  sentinel in use since v1.0.0, not a code the command returned) and
+  `duration_ms: 0`. A real non-zero code that fits an `i32` reaches
+  `bridge-mcp tool` as exit 6 through `with_remote_exit_code_only`, without
+  setting `is_error`; a larger one is left unreported.
 
 - **A tool annotated `destructiveHint` is now gated in the CLI.** It prompts on
   a terminal and is refused with exit 4 when stdin is not one; scripts must pass
@@ -84,14 +101,14 @@ nothing in the text below would otherwise tell you which is which.
   `sudo_user` at all, so they were never probed) — they were the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
-  **Six of those 52 have since been brought into line**, in this same
+  **Seven of those 52 have since been brought into line**, in this same
   unreleased cycle: `ssh_file_write`, `ssh_disk_usage` (without `path`),
   `ssh_tail` (without `grep`), `ssh_exec`, `ssh_exec_multi` against a
-  single host, and `ssh_awx_job_follow`. The three entries below state what
+  single host, `ssh_awx_job_follow`, and `ssh_session_exec`. The three entries below state what
   each now does; the paragraph above is kept as written because it is the
   finding as it was measured, and the list it gives is the one the follow-up
   work is tracked against. What is
-  still open, therefore: `ssh_session_exec`, `ssh_find`, `ssh_metrics`,
+  still open, therefore: `ssh_find`, `ssh_metrics`,
   `ssh_metrics_multi`, `ssh_exec_multi` across 2+ hosts, `ssh_disk_usage` with
   a `path`, and `ssh_tail` with a `grep`. **The AWX family is now closed
   entirely**: the 42 by the fix to `parse_checked_response`, as the next
@@ -131,13 +148,13 @@ nothing in the text below would otherwise tell you which is which.
   this same unreleased cycle are counted: **four** now set `isError` themselves
   (`ssh_file_write`, `ssh_disk_usage` without a `path`, `ssh_tail` without a
   `grep`, and `ssh_awx_job_follow` — see the entries below, they use the same
-  `with_remote_exit_code` constructor the pipeline does); **two** report the
+  `with_remote_exit_code` constructor the pipeline does); **three** report the
   exit code and deliberately decline the verdict (`ssh_exec`, `ssh_exec_multi`
-  against a single host);
+  against a single host, `ssh_session_exec`);
   **42** — the AWX handlers on `parse_checked_response` — now return `Err` for a
   curl transport failure, which the server wraps as a result with `isError: true`
-  where it used to be an empty success. Only **four** are genuinely unchanged:
-  `ssh_session_exec`, `ssh_find`, `ssh_metrics` and `ssh_metrics_multi`. A client
+  where it used to be an empty success. Only **three** are genuinely unchanged:
+  `ssh_find`, `ssh_metrics` and `ssh_metrics_multi`. A client
   that treated every `tools/call` answer as a success, and read the outcome out
   of the text, will start seeing errors it did not see before, for calls that
   were already failing.
@@ -149,7 +166,9 @@ nothing in the text below would otherwise tell you which is which.
   stopped) and `ssh_k8s_diff` (`kubectl diff` exits **1** when there *are*
   differences). For those three a non-zero exit stays what it was before this
   chain: an ordinary success whose code is visible in the text as `[exit:N]` and
-  in the audit event, and the CLI exits 0.
+  in the audit event, and the CLI exits 0. **The exemption does not cost the
+  same on all three** — read the two cost paragraphs below before relying on
+  any of them; for `ssh_k8s_diff` it costs more than this entry first said.
 
   An earlier draft of this entry defended the opposite choice as "the intended
   trade-off". The live campaign then measured it: `ssh_service_status` on a
@@ -163,9 +182,23 @@ nothing in the text below would otherwise tell you which is which.
   **What opting out costs, stated rather than hidden:** a per-tool boolean
   cannot separate "here is your answer" from "I failed", and each of these three
   commands uses non-zero for both — `systemctl` also exits 4 for "no such unit",
-  `kubectl diff` >1 for a real kubectl failure. Those cases exit 0 again. That
-  is the narrower loss: it is the behaviour every one of these tools had before
-  the chain, whereas the false failure was new.
+  so an absent unit exits 0 again. That much is the narrower loss: it is the
+  behaviour those tools had before the chain, whereas the false failure was new.
+
+  **For `ssh_k8s_diff` the cost is worse than that, and this entry used to get
+  it wrong.** It said a real `kubectl` failure exits ">1", so opting out only
+  sent those back to 0. Measured, that is false on the **default** argument
+  path: `kubectl_bin` is optional and documented "auto-detect", and the repo's
+  own `kubectl_detect_prefix(None)` resolves the command word to `false` when
+  the host has no `kubectl`, `k3s` or `microk8s`. Under
+  `env -i PATH=/usr/bin:/bin` both commands the tool builds — the file form and
+  the inline-YAML pipe — exit **1** with nothing on stdout and
+  "kubectl/k3s/microk8s not installed on host" on stderr. So the commonest real
+  failure lands on exactly the code the opt-out reads as the answer: the loss is
+  not "a failure exits 0 again" but **"a failure reads as a positive diff"** — a
+  false affirmative, which is worse than a missing answer. The opt-out stays
+  (R32 still holds: without it the tool's own answer is a failed call), and the
+  code and that stderr line stay visible in the text and in the audit event.
 
   **`ssh_helm_diff` is deliberately NOT in the set, and that is a decision, not
   an omission.** It was, in a first cut of this wave; the ruling that removed it
@@ -258,8 +291,10 @@ nothing in the text below would otherwise tell you which is which.
   the result reports the fact (`remote_exit_code`) and declines the verdict
   (`is_error` stays absent), via a second constructor,
   `ToolCallResult::with_remote_exit_code_only`. An MCP client is not told that
-  its own `grep` failed; a shell caller still gets a non-zero `$?`. Every other
-  handler keeps welding the two, and `with_remote_exit_code` is untouched.
+  its own `grep` failed; a shell caller still gets a non-zero `$?`. When this
+  was written, every other handler kept welding the two; that stopped being
+  true later in this cycle (`ssh_session_exec` also uses the second
+  constructor, see below). `with_remote_exit_code` is untouched.
 
   **`ssh_exec_multi` reports a code only for a single host.** Across two or
   more it reports nothing. The per-host `failed` counter does not distinguish
@@ -274,6 +309,13 @@ nothing in the text below would otherwise tell you which is which.
   (`src/ssh/session.rs`, `parse_exec_output`), so propagating that code would
   announce a failure of your command where the truth is a bridge-side parse
   failure — the exact conflation this whole chain exists to remove.
+
+  **Superseded later in this cycle: the `ssh_session_exec` exclusion is lifted.**
+  The paragraph above is kept as the finding as it was measured. `parse_exec_output`
+  no longer fabricates: it returns no code (`None`, JSON `null`) when none
+  representable as a `u32` was read, so a non-zero code that *was* read is now
+  propagated (exit 6, `with_remote_exit_code_only`, no `is_error`) and an unread
+  one sets nothing. See the `SessionExecResult::exit_code` entry under BREAKING.
 
   **Superseded later in this cycle: the daemon asymmetry is closed.** This
   paragraph used to say that under `bridge-mcp daemon` these two exited 0 where
@@ -774,6 +816,10 @@ nothing in the text below would otherwise tell you which is which.
   `text(...)`), `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
   `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`.
 
+  **Superseded later in this cycle for `ssh_session_exec`:** it now propagates a
+  read non-zero exit code (see the BREAKING entry on `SessionExecResult`). The
+  list above is kept as measured.
+
   **The 43 `ssh_awx_*`, but narrower than the count suggests:** 42 route their
   response through `AwxCommandBuilder::parse_checked_response`
   (`AwxCommandBuilder::parse_checked_response`), which already raises
@@ -822,6 +868,19 @@ nothing in the text below would otherwise tell you which is which.
   the three files matches nothing. So the remainder is the 52 above, and that
   list is now closed rather than open-ended.
 
+  **Three of the nine now carry, in the code, the reason they report nothing** —
+  with no change to what they report. `ssh_metrics` and `ssh_metrics_multi` send
+  a `;`-joined list of metric sections, so the status describes only the last
+  one (four of five sections can fail while the code reads 0), and both already
+  carry a finer signal: the per-metric field stays `None` when its section did
+  not parse. `ssh_find` runs a `find` that exits non-zero as soon as one entry
+  is unreadable while printing all the rest, and its own `2>/dev/null` has
+  already dropped the diagnostic. The `ssh_find` comment also states that its
+  abstention holds **for want of a probe** rather than because it is proven, and
+  names the probe that would settle it. Behaviour is unchanged — all three still
+  exit 0 when their remote command fails — so the list of what is still open
+  above stands as written.
+
 - **20 of the 77 handlers that implement `ToolHandler` directly write no audit
   event at all.** This is the complement of the question asked about the audit
   on this branch: that one inventoried which *events* carry no `tool_name`, and
@@ -851,20 +910,75 @@ nothing in the text below would otherwise tell you which is which.
   `ssh_session_create host=pi` opens an SSH session to a host and leaves no line
   behind saying it did.
 
-- **The `NONZERO_EXIT_IS_ERROR` opt-out has three users out of 399, and 355 of
-  the 399 have never been measured.** The exit-code change flips the behaviour
-  of every `StandardTool` tool at once — 399 of them
+- **All 399 tools on the pipeline have now been read against the
+  `NONZERO_EXIT_IS_ERROR` criterion, and the opt-out still has three users.**
+  The exit-code change flips the behaviour of every `StandardTool` tool at once
+  — 399 of them
   (`grep -rho 'impl StandardTool for' src/mcp/tool_handlers/ | wc -l`; 399 plus
-  the 77 direct handlers is the whole 476-tool baseline). The judgment behind
-  flipping them all rests on the 44 the live campaign could probe. Of the three
-  opt-outs above, `ssh_service_status` is the one measured live on this branch
-  (case `H07`, `report-pass4-B.json`). Whether `ssh_timer_info` or
-  `ssh_k8s_diff` were among that 44 is not recorded in any artefact in this tree
-  — the sweep's own reports are gitignored and exist only in the main checkout —
-  so treat their non-zero semantics as read off their command
-  (`systemctl status`, `kubectl diff`) rather than as measured. Nothing here says
-  the 355 unprobed tools have no normal non-zero answer of their own; it says
-  only that nobody has looked. When one turns up, the fix is one const on that
+  the 77 direct handlers is the whole 476-tool baseline). An earlier version of
+  this entry said "355 of the 399 have never been measured", which was true of
+  the live campaign's 44 probes and is no longer the state of what is known: a
+  sweep has since passed all **399** tools and all **67** groups that have
+  `StandardTool` implementations. **No new opt-out is justified.** That is the
+  result, and it is the part worth keeping, because it says this work does not
+  need redoing.
+
+  **The honest numbers, not the flattering one.** 399 tools read, 67 groups
+  passed — but only **79 distinct tools**, about **20 %** of the pipeline, were
+  explicitly adjudicated one way or the other (that count comes from the sweep's own
+  reports, which are gitignored, so it cannot be reproduced from the tree; the 399, 77,
+  476 and 67 can). The remaining four fifths are
+  classed "a non-zero exit is a plain failure" **by default, not by
+  examination**. Of the three opt-outs, `ssh_service_status` was measured live
+  (case `H07`, `report-pass4-B.json`) and `ssh_timer_info` has since been
+  measured too, on the dev host (systemd 258): `systemctl show` on a
+  *nonexistent* unit exits **0** — which is what keeps its `&&` chain from
+  short-circuiting, so the chain returns `systemctl status`'s code — and on a
+  loaded-but-inactive timer the whole chain exits **3**, the code the comment
+  on that const had until now only read off the man page.
+  `ssh_k8s_diff` is measured in its own entry above.
+  The ten groups the sweep did not cover (`awx`, `core`, `recording`,
+  `monitoring`, `sessions`, `file_transfer`, `runbooks`, `tunnels`, `config`,
+  `directory`) have only **direct** handlers, for which this const does not
+  exist.
+
+  **44 candidates were proposed; 42 were refuted by the counter-proof, and the
+  last two were cancelled on measurement.** The two cancelled candidates were
+  `ssh_net_ping` and `ssh_win_process_by_name`, so 42 + 2 closes the 44. Two
+  structural reasons carry those cancellations, and they are the generalisable
+  part, so they are recorded rather than the 42. A reason is not a candidate
+  count: the first covers two tools — the cancelled `ssh_net_ping` and
+  `ssh_latency_test`, which the counter-proof had already refuted on the same
+  grounds — and the second a whole family excluded by construction, of which
+  four members were proposed (`ssh_win_net_ping`, `ssh_win_net_dns` and
+  `ssh_win_net_connections` were refuted individually; `ssh_win_process_by_name`
+  survived and was cancelled by the structural reason). So neither bullet below
+  is a count of candidates:
+
+  - **`ssh_net_ping` / `ssh_latency_test` fail because `ping`'s exit code has
+    three values, not two.** 0 is a reply, 1 is "no reply" — the verdict the
+    tool is asked for — and **2** is an unresolvable name, a socket error or a
+    permission failure, which is a real failure. A per-tool boolean cannot
+    separate 1 from 2, and the separation runs the wrong way: measured, exit 1
+    still prints its statistics block while exit **2 prints nothing at all on
+    stdout**. Opting out would therefore convert into successful calls
+    precisely the failures that return no output. The rule this establishes,
+    now written into the trait's own documentation: **an opt-out is justified
+    only if *every* non-zero code the command can produce is an answer** — not
+    merely the one the author had in mind.
+  - **Every Windows tool is excluded by construction, which is not a per-tool
+    judgement.** A PowerShell cmdlet has no exit code of its own, so the number
+    step 19 tests is not a command's code. `src/psrp/mod.rs` maps
+    `PipelineState` to 0 `Completed` / 2 `Stopped` / 1 for everything else, so a
+    non-terminating cmdlet error leaves 0; `src/winrm/mod.rs` does
+    `u32::try_from(output.exit_code).unwrap_or(1)` over a value `winrm-rs`
+    reports as `-1` when the server sends no `ExitCode`, so "no `ExitCode`"
+    arrives as 1, i.e. as a tool failure. Either way the number is a wrapper's
+    summary that conflates a DNS failure, a WMI access-denied and an
+    unreachable RPC endpoint, and a summary cannot be a verdict about a
+    command.
+
+  If a genuine case does turn up later, the fix is still one const on that one
   tool — and `ssh_helm_diff` above is the worked example of a candidate that
   looks like one and is not, because its non-zero answer depends on an argument
   the const cannot see.

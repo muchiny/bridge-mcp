@@ -149,9 +149,11 @@ pub struct ToolCallResult {
     ///   simply does not report one. **This is what a successful call carries**,
     ///   and what most handlers outside the `StandardTool` pipeline still
     ///   carry — see the note on that pipeline's step 19. The exceptions are
-    ///   the handlers that now report a code of their own: `ssh_file_write`,
-    ///   `ssh_disk_usage` and `ssh_tail` under their documented conditions,
-    ///   and `ssh_exec` / single-host `ssh_exec_multi`.
+    ///   the handlers that call [`Self::with_remote_exit_code`] or
+    ///   [`Self::with_remote_exit_code_only`] themselves, under whatever
+    ///   conditions each documents; a handler that does neither is in this
+    ///   state. Which of the two constructors a handler uses depends on who
+    ///   chose the command, as set out on each of them.
     /// * `Some(0)` — a command ran on the target host and succeeded. A
     ///   coherent statement, and the CLI reads it as success, but nothing in
     ///   the tree emits it: the pipeline only records a code when it is
@@ -159,9 +161,9 @@ pub struct ToolCallResult {
     ///   reachable state.
     /// * `Some(n)`, `n != 0` — a command ran on the target host and exited
     ///   `n`. `is_error` is `Some(true)` alongside it **only when the tool
-    ///   also calls that a failure**. A tool whose command the caller wrote —
-    ///   `ssh_exec`, `ssh_exec_multi` — reports the code with `is_error`
-    ///   absent, because `grep` matching nothing exits 1 without having
+    ///   also calls that a failure**. A tool whose command the caller wrote
+    ///   (for instance `ssh_exec`; the criterion, not this example, decides)
+    ///   reports the code with `is_error` absent, because `grep` matching nothing exits 1 without having
     ///   failed. The CLI still exits `EXIT_REMOTE_FAILURE` (6) either way,
     ///   since it reads this field before `is_error`.
     ///
@@ -338,8 +340,8 @@ impl ToolCallResult {
 
     /// Comme [`Self::with_remote_exit_code`], mais **sans** poser `is_error`.
     ///
-    /// Pour les outils dont l'appelant choisit la commande — `ssh_exec`,
-    /// `ssh_exec_multi`. Un code non nul y décrit un *fait* de la commande, pas
+    /// Pour les outils dont l'appelant choisit la commande (c'est ce critère, et
+    /// non une liste d'outils, qui décide). Un code non nul y décrit un *fait* de la commande, pas
     /// un *verdict* de l'appel : `grep` qui ne trouve rien sort 1, `diff` qui
     /// voit une différence sort 1, `test` sort 1 pour faux. Poser `is_error`
     /// dirait à un client MCP que son propre `grep` a échoué, sans recours.

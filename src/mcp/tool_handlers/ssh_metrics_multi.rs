@@ -259,6 +259,30 @@ impl ToolHandler for SshMetricsMultiHandler {
             }
         }
 
+        // A deliberate abstention, for the reason written in `ssh_metrics.rs`
+        // above its call to `parse_sections`: `Self::build_command` (above) is
+        // the same `;`-joined list, whose status describes only the last
+        // section, and `parse_sections` (below) already carries the per-field
+        // signal. What is specific to this handler is the fan-out.
+        //
+        // There is no badly-chosen remote code to propagate here: there is
+        // none at all. `RawHostOutput` (above) carries `host`, `stdout` and
+        // `duration_ms`, nothing else — `collect_from_host` drops the code
+        // when it builds its return value.
+        //
+        // And the `success: true` in the `Ok(raw)` arm below holds for every
+        // host whose SSH execution returned `Ok`, whatever the remote code
+        // was: the JSON's `succeeded` / `failed` counters describe whether the
+        // host was reached, not how the command ended. Aggregating them into a
+        // single code would rebuild the conflation `ssh_exec_multi` refuses —
+        // its fan-out comment says why that would make exit 6 mean "the bridge
+        // could not reach a host".
+        //
+        // One consequence left unfixed here, since this block changes no
+        // behaviour: the history entry written below for each reached host
+        // carries a literal `exit_code: 0`, which is not the code the command
+        // returned.
+
         // Parse results in parallel using rayon
         let metrics_types = args.metrics.clone();
         let results: Vec<HostMetricsResult> = raw_outputs

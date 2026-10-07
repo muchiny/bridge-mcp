@@ -109,6 +109,57 @@ pub trait StandardTool: Send + Sync + 'static {
     /// difference, a probe whose verdict *is* the code. Opting out means the
     /// tool call is reported as a success, and the exit code stays visible in
     /// the text (`format_for_llm`'s `[exit:N]`) and in the audit event.
+    ///
+    /// That paragraph is true and incomplete, and its incompleteness is what
+    /// produced 44 false candidates when every tool on this pipeline was read
+    /// against it — 399 tools, 67 groups — of which none survived. Three
+    /// things it leaves out:
+    ///
+    /// 1. **Two different situations produce a non-zero exit, and only one of
+    ///    them is grounds for opting out.** "The code *is* the verdict"
+    ///    (`grep` with no match: exit 1 and nothing on stdout) against
+    ///    "**partial** answer": the command printed its answer *and*
+    ///    signalled that a piece was missing. `du -sh readable unreadable/`
+    ///    is the measured example — exit **1**, both sizes on stdout, a
+    ///    `Permission denied` on stderr. The second is not grounds: there the
+    ///    code says "something was missing", not "here is my answer", and
+    ///    opting out is how a truncated answer comes to pass for a whole one.
+    /// 2. **A code with more than one non-zero value invalidates the opt-out
+    ///    even inside the first family.** The test is not "is the code I had
+    ///    in mind an answer" but "is **every** non-zero code this command can
+    ///    produce an answer". `ping` is the case that proves it: 1 is "no
+    ///    reply", which is the verdict, and 2 is an unresolvable name, a
+    ///    socket error or a permission failure, which is a real failure. One
+    ///    boolean cannot separate them, and measured (iputils 20250605) the
+    ///    separation runs the wrong way — exit 1 still prints its statistics
+    ///    block, exit 2 prints **nothing** on stdout. So opting out would
+    ///    turn into successful calls precisely the failures that return no
+    ///    output at all. That is why `ssh_net_ping` and `ssh_latency_test`
+    ///    are not in the set. `ssh_net_ping` always builds a bare `ping -c …`;
+    ///    `ssh_latency_test` builds `ping -c …` by default but
+    ///    `mtr --report -c …` under `method=mtr`, so it too depends on an
+    ///    argument the const cannot see (the `ssh_helm_diff` case). `mtr`'s
+    ///    codes are not `ping`'s three values, which adds positions the
+    ///    boolean cannot separate rather than removing any.
+    /// 3. **Windows tools are excluded by construction, not case by case.** A
+    ///    PowerShell cmdlet has no exit code of its own, so the number step 19
+    ///    tests is not a command's code: `src/psrp/mod.rs` maps `PipelineState`
+    ///    to 0 `Completed` / 2 `Stopped` / 1 for everything else, which leaves
+    ///    a non-terminating cmdlet error sitting at 0, and `src/winrm/mod.rs`
+    ///    does `u32::try_from(output.exit_code).unwrap_or(1)` over a value
+    ///    `winrm-rs` reports as `-1` when the server sends no `ExitCode`, so
+    ///    "no `ExitCode`" arrives as 1 — a tool failure. Either way the number
+    ///    is a wrapper's summary of a pipeline state, and a summary that
+    ///    conflates a DNS failure, a WMI access-denied and an unreachable RPC
+    ///    endpoint cannot be a verdict about a command.
+    ///
+    /// A limit that belongs to step 19 rather than to this const: it only ever
+    /// calls [`crate::ports::protocol::ToolCallResult::with_remote_exit_code`]
+    /// and never `with_remote_exit_code_only`, so a tool on this pipeline can
+    /// reach two of the three states that field documents. Opting out is
+    /// therefore the only way such a tool can report a code without also
+    /// calling it a failure. Widening that is plan task **T29**; it is not
+    /// done here because it touches all 399 tools at once.
     const NONZERO_EXIT_IS_ERROR: bool = true;
 
     /// Whether this tool accepts the pipeline's `sudo` / `sudo_user` params.
