@@ -37,10 +37,24 @@ impl StandardTool for K8sDiffTool {
     type Args = SshK8sDiffArgs;
     const NAME: &'static str = "ssh_k8s_diff";
     /// `kubectl diff` exits **1 when there are differences** — which is the
-    /// answer this read-only tool is asked for — and >1 on a real failure.
-    /// A per-tool boolean cannot tell those apart, so the answer wins and a
-    /// genuine kubectl error exits 0 again, as it did before the exit-code
-    /// chain (ruling R32).
+    /// answer this read-only tool is asked for — so a non-zero exit is a
+    /// normal result here, and stays one (ruling R32).
+    ///
+    /// **What that costs, measured.** An earlier version of this comment put
+    /// a real failure at ">1", so the only loss was that such a failure
+    /// exited 0 again. That is wrong on the default argument path.
+    /// `kubectl_bin` is optional and its schema documents it as "auto-detect",
+    /// and [`kubectl_detect_prefix`](crate::domain::use_cases::kubernetes::kubectl_detect_prefix)
+    /// resolves the command word to `false` when the host has no `kubectl`,
+    /// `k3s` or `microk8s`. Measured under `env -i PATH=/usr/bin:/bin`, both
+    /// commands this tool builds — the file form and the inline-YAML pipe —
+    /// exit **1**, print nothing on stdout, and put
+    /// "kubectl/k3s/microk8s not installed on host" on stderr. So the
+    /// commonest real failure lands on exactly the code the opt-out reads as
+    /// the answer, and the cost is not "a failure exits 0 again" but **"a
+    /// failure reads as a positive diff"** — a false affirmative answer,
+    /// which is worse than a missing one. The code and that stderr line both
+    /// stay visible in the text (`[exit:N]`) and in the audit event.
     const NONZERO_EXIT_IS_ERROR: bool = false;
     const DESCRIPTION: &'static str = "Preview the changes a manifest would make against the live cluster (kubectl diff -f). \
         manifest is a remote file path (starts with /, ./, ~) or inline YAML. \

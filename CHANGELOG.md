@@ -164,7 +164,9 @@ nothing in the text below would otherwise tell you which is which.
   stopped) and `ssh_k8s_diff` (`kubectl diff` exits **1** when there *are*
   differences). For those three a non-zero exit stays what it was before this
   chain: an ordinary success whose code is visible in the text as `[exit:N]` and
-  in the audit event, and the CLI exits 0.
+  in the audit event, and the CLI exits 0. **The exemption does not cost the
+  same on all three** — read the two cost paragraphs below before relying on
+  any of them; for `ssh_k8s_diff` it costs more than this entry first said.
 
   An earlier draft of this entry defended the opposite choice as "the intended
   trade-off". The live campaign then measured it: `ssh_service_status` on a
@@ -178,9 +180,23 @@ nothing in the text below would otherwise tell you which is which.
   **What opting out costs, stated rather than hidden:** a per-tool boolean
   cannot separate "here is your answer" from "I failed", and each of these three
   commands uses non-zero for both — `systemctl` also exits 4 for "no such unit",
-  `kubectl diff` >1 for a real kubectl failure. Those cases exit 0 again. That
-  is the narrower loss: it is the behaviour every one of these tools had before
-  the chain, whereas the false failure was new.
+  so an absent unit exits 0 again. That much is the narrower loss: it is the
+  behaviour those tools had before the chain, whereas the false failure was new.
+
+  **For `ssh_k8s_diff` the cost is worse than that, and this entry used to get
+  it wrong.** It said a real `kubectl` failure exits ">1", so opting out only
+  sent those back to 0. Measured, that is false on the **default** argument
+  path: `kubectl_bin` is optional and documented "auto-detect", and the repo's
+  own `kubectl_detect_prefix(None)` resolves the command word to `false` when
+  the host has no `kubectl`, `k3s` or `microk8s`. Under
+  `env -i PATH=/usr/bin:/bin` both commands the tool builds — the file form and
+  the inline-YAML pipe — exit **1** with nothing on stdout and
+  "kubectl/k3s/microk8s not installed on host" on stderr. So the commonest real
+  failure lands on exactly the code the opt-out reads as the answer: the loss is
+  not "a failure exits 0 again" but **"a failure reads as a positive diff"** — a
+  false affirmative, which is worse than a missing answer. The opt-out stays
+  (R32 still holds: without it the tool's own answer is a failed call), and the
+  code and that stderr line stay visible in the text and in the audit event.
 
   **`ssh_helm_diff` is deliberately NOT in the set, and that is a decision, not
   an omission.** It was, in a first cut of this wave; the ruling that removed it
@@ -877,20 +893,64 @@ nothing in the text below would otherwise tell you which is which.
   `ssh_session_create host=pi` opens an SSH session to a host and leaves no line
   behind saying it did.
 
-- **The `NONZERO_EXIT_IS_ERROR` opt-out has three users out of 399, and 355 of
-  the 399 have never been measured.** The exit-code change flips the behaviour
-  of every `StandardTool` tool at once — 399 of them
+- **All 399 tools on the pipeline have now been read against the
+  `NONZERO_EXIT_IS_ERROR` criterion, and the opt-out still has three users.**
+  The exit-code change flips the behaviour of every `StandardTool` tool at once
+  — 399 of them
   (`grep -rho 'impl StandardTool for' src/mcp/tool_handlers/ | wc -l`; 399 plus
-  the 77 direct handlers is the whole 476-tool baseline). The judgment behind
-  flipping them all rests on the 44 the live campaign could probe. Of the three
-  opt-outs above, `ssh_service_status` is the one measured live on this branch
-  (case `H07`, `report-pass4-B.json`). Whether `ssh_timer_info` or
-  `ssh_k8s_diff` were among that 44 is not recorded in any artefact in this tree
-  — the sweep's own reports are gitignored and exist only in the main checkout —
-  so treat their non-zero semantics as read off their command
-  (`systemctl status`, `kubectl diff`) rather than as measured. Nothing here says
-  the 355 unprobed tools have no normal non-zero answer of their own; it says
-  only that nobody has looked. When one turns up, the fix is one const on that
+  the 77 direct handlers is the whole 476-tool baseline). An earlier version of
+  this entry said "355 of the 399 have never been measured", which was true of
+  the live campaign's 44 probes and is no longer the state of what is known: a
+  sweep has since passed all **399** tools and all **67** groups that have
+  `StandardTool` implementations. **No new opt-out is justified.** That is the
+  result, and it is the part worth keeping, because it says this work does not
+  need redoing.
+
+  **The honest numbers, not the flattering one.** 399 tools read, 67 groups
+  passed — but only **79 distinct tools**, about **20 %** of the pipeline, were
+  explicitly adjudicated one way or the other. The remaining four fifths are
+  classed "a non-zero exit is a plain failure" **by default, not by
+  examination**. Of the three opt-outs, `ssh_service_status` was measured live
+  (case `H07`, `report-pass4-B.json`) and `ssh_timer_info` has since been
+  measured too, on the dev host (systemd 258): `systemctl show` on a
+  *nonexistent* unit exits **0** — which is what keeps its `&&` chain from
+  short-circuiting, so the chain returns `systemctl status`'s code — and on a
+  loaded-but-inactive timer the whole chain exits **3**, the code the comment
+  on that const had until now only read off the man page.
+  `ssh_k8s_diff` is measured in its own entry above.
+  The ten groups the sweep did not cover (`awx`, `core`, `recording`,
+  `monitoring`, `sessions`, `file_transfer`, `runbooks`, `tunnels`, `config`,
+  `directory`) have only **direct** handlers, for which this const does not
+  exist.
+
+  **44 candidates were proposed; 42 were refuted, and the last two were
+  cancelled on measurement.** Those two cancellations are the generalisable
+  part, so they are recorded rather than the 42:
+
+  - **`ssh_net_ping` / `ssh_latency_test` fail because `ping`'s exit code has
+    three values, not two.** 0 is a reply, 1 is "no reply" — the verdict the
+    tool is asked for — and **2** is an unresolvable name, a socket error or a
+    permission failure, which is a real failure. A per-tool boolean cannot
+    separate 1 from 2, and the separation runs the wrong way: measured, exit 1
+    still prints its statistics block while exit **2 prints nothing at all on
+    stdout**. Opting out would therefore convert into successful calls
+    precisely the failures that return no output. The rule this establishes,
+    now written into the trait's own documentation: **an opt-out is justified
+    only if *every* non-zero code the command can produce is an answer** — not
+    merely the one the author had in mind.
+  - **Every Windows tool is excluded by construction, which is not a per-tool
+    judgement.** A PowerShell cmdlet has no exit code of its own, so the number
+    step 19 tests is not a command's code. `src/psrp/mod.rs` maps
+    `PipelineState` to 0 `Completed` / 2 `Stopped` / 1 for everything else, so a
+    non-terminating cmdlet error leaves 0; `src/winrm/mod.rs` does
+    `u32::try_from(output.exit_code).unwrap_or(1)` over a value `winrm-rs`
+    reports as `-1` when the server sends no `ExitCode`, so "no `ExitCode`"
+    arrives as 1, i.e. as a tool failure. Either way the number is a wrapper's
+    summary that conflates a DNS failure, a WMI access-denied and an
+    unreachable RPC endpoint, and a summary cannot be a verdict about a
+    command.
+
+  If a genuine case does turn up later, the fix is still one const on that one
   tool — and `ssh_helm_diff` above is the worked example of a candidate that
   looks like one and is not, because its non-zero answer depends on an argument
   the const cannot see.
