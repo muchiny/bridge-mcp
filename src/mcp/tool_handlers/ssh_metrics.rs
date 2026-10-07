@@ -215,6 +215,41 @@ impl ToolHandler for SshMetricsHandler {
                 .log_failure(self.name(), &args.host, &command, &e.to_string());
         })?;
 
+        // No exit code is set on the result built below: a deliberate
+        // abstention. No expression in this handler reads `output.exit_code`;
+        // it travels into `process_success` below with the rest of `output`.
+        //
+        // `Self::build_command` (above) returns a LIST joined by
+        // `; echo <separator>; ` — one section per requested metric, and two
+        // of those sections are themselves lists (`head -1 /proc/stat; nproc`
+        // and `cat /proc/loadavg; cat /proc/uptime`). The status of a
+        // sequential list is the status of its LAST command: that is not
+        // measured here, it is the POSIX shell specification (XCU 2.9.3,
+        // "Lists"), and nothing in this handler pins the shell that will run
+        // the line. Direct consequence: five metrics requested, the first
+        // four failing, the last exiting 0 — and the code reads 0.
+        // Propagating it would turn an integer that only says "the last
+        // section succeeded" into the claim "the collection succeeded".
+        //
+        // This is the "**partial** answer" family as
+        // `StandardTool::NONZERO_EXIT_IS_ERROR` (`src/mcp/standard_tool.rs`)
+        // defines and measures it: the command printed its answer *and*
+        // signalled that a piece was missing. Not the "the code *is* the
+        // verdict" family, where the non-zero exit is the answer itself.
+        //
+        // The honest signal is already here, and finer than one integer:
+        // `parse_sections` (below) starts `cpu`, `memory`, `disk`, `network`
+        // and `load` at `None` and sets a field only when the matching
+        // `parse_metrics::parse_*` returned `Some`. A section that is empty or
+        // unreadable therefore leaves its field at `None` in the rendered JSON
+        // — PER METRIC, which an exit code could not express.
+        //
+        // What that `None` does not cover, written down because it is NOT
+        // measured: a section that prints only part of its own answer
+        // (`df -B1` listing the readable filesystems and failing on another)
+        // still parses, and its field holds `Some`, indistinguishable from a
+        // complete collection. An exit code would not close that gap either —
+        // it describes the last section, not the one that cut its answer short.
         let system_metrics = parse_sections(&output.stdout, &args.host, &args.metrics);
 
         // Log in history

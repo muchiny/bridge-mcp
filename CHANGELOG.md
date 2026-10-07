@@ -864,6 +864,19 @@ nothing in the text below would otherwise tell you which is which.
   the three files matches nothing. So the remainder is the 52 above, and that
   list is now closed rather than open-ended.
 
+  **Three of the nine now carry, in the code, the reason they report nothing** —
+  with no change to what they report. `ssh_metrics` and `ssh_metrics_multi` send
+  a `;`-joined list of metric sections, so the status describes only the last
+  one (four of five sections can fail while the code reads 0), and both already
+  carry a finer signal: the per-metric field stays `None` when its section did
+  not parse. `ssh_find` runs a `find` that exits non-zero as soon as one entry
+  is unreadable while printing all the rest, and its own `2>/dev/null` has
+  already dropped the diagnostic. The `ssh_find` comment also states that its
+  abstention holds **for want of a probe** rather than because it is proven, and
+  names the probe that would settle it. Behaviour is unchanged — all three still
+  exit 0 when their remote command fails — so the list of what is still open
+  above stands as written.
+
 - **20 of the 77 handlers that implement `ToolHandler` directly write no audit
   event at all.** This is the complement of the question asked about the audit
   on this branch: that one inventoried which *events* carry no `tool_name`, and

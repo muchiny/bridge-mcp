@@ -230,6 +230,46 @@ impl ToolHandler for SshFindHandler {
             &[],
         );
 
+        // A deliberate abstention: the result built below
+        // (`ToolCallResult::text`) carries no exit code. The
+        // `response.exit_code` read just underneath only feeds a `warn!`, and
+        // `format_for_llm` reprints it in the text — nowhere a caller could
+        // test it.
+        //
+        // `find` exits non-zero as soon as ONE entry is unreadable, while
+        // printing all the rest. The documentation states it that way (POSIX
+        // and GNU findutils: "greater than 0 if errors occur"); it is not
+        // something measured from this repository. The code then says "a piece
+        // was missing", not "I have no answer": this is the "**partial**
+        // answer" family as `StandardTool::NONZERO_EXIT_IS_ERROR`
+        // (`src/mcp/standard_tool.rs`) defines and measures it, distinct from
+        // "the code *is* the verdict", where the non-zero exit is the answer.
+        // Passing it to `with_remote_exit_code` would declare the call a
+        // failure although the list of paths was in fact returned.
+        //
+        // And `build_find_command` (above) ends the line with ` 2>/dev/null`:
+        // the diagnostic is thrown away before leaving the host, so even a
+        // caller who saw the code could not know WHAT was missing.
+        //
+        // This abstention holds FOR WANT OF THE PROBE, not because it is
+        // proven right. Nothing in the documentation cited above separates, by
+        // value, the partial answer above from a TOTAL failure — a start point
+        // that does not exist, a rejected option — where stdout is empty: it
+        // promises only "greater than 0". In that second case abstaining
+        // passes a failure off as a success with an empty list, which is the
+        // exact inverse of the error the abstention avoids. The probe that
+        // would settle it, run as a non-root user from the reference host
+        // (Raspberry Pi K3s, whose findutils version is UNKNOWN here):
+        //   find /nonexistent -maxdepth 1 >/dev/null 2>/dev/null; echo "absent=$?"
+        //   find / -maxdepth 2 -name x   >/dev/null 2>/dev/null; echo "partial=$?"
+        // Same value on both sides: no guard on the code alone separates the
+        // two cases, and the abstention stays the least wrong answer.
+        // Different values: a guard becomes possible, and this abstention must
+        // be reopened.
+        //
+        // The `warn!` below says "ssh_find failed" of a `find` that may have
+        // printed everything but one entry. Inaccurate, left as it is: this
+        // comment changes no behaviour.
         if response.exit_code != 0 {
             warn!(host = %args.host, exit_code = response.exit_code, "ssh_find failed");
         }
