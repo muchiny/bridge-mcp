@@ -1181,7 +1181,25 @@ const fn default_audit_enabled() -> bool {
     true
 }
 
+/// Under `#[cfg(test)]` this is a per-process directory under the temp dir,
+/// never `data_local_audit_path()`: a unit test that built a logger or a
+/// server from `AuditConfig::default()` / `Config::default()` created, opened
+/// and (through `AuditLogger::disabled`) rotated the developer's real audit
+/// log. The pid keeps concurrent test processes off each other's files.
+/// `cfg(test)` is not set when `tests/` or a spawned binary links the
+/// library, so their fixtures still have to turn audit off themselves.
 fn default_audit_path() -> PathBuf {
+    if cfg!(test) {
+        std::env::temp_dir()
+            .join(format!("bridge-mcp-test-{}", std::process::id()))
+            .join("audit.log")
+    } else {
+        data_local_audit_path()
+    }
+}
+
+/// The production default: `<data_local_dir>/bridge-mcp/audit.log`.
+fn data_local_audit_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("bridge-mcp")
@@ -1785,6 +1803,24 @@ hosts:
         assert_eq!(config.max_size_mb, 100);
         assert_eq!(config.retain_days, 30);
         assert!(config.path.to_string_lossy().contains("audit.log"));
+    }
+
+    /// A unit test that builds a logger or a server from the defaults must
+    /// never reach the developer's real audit log — see `default_audit_path`.
+    #[test]
+    fn test_audit_config_default_path_is_not_the_real_one() {
+        let path = AuditConfig::default().path;
+        assert_ne!(path, data_local_audit_path());
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "the test-build default must live under the temp dir, got {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn test_data_local_audit_path_is_the_production_default() {
+        assert!(data_local_audit_path().ends_with("bridge-mcp/audit.log"));
     }
 
     // ============== SessionConfig Tests ==============

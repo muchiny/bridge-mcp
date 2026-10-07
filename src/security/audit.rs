@@ -499,10 +499,11 @@ impl AuditLogger {
     #[must_use]
     pub fn disabled() -> Self {
         Self {
-            // Not `AuditConfig::default()`: that is `enabled: true` at the
-            // REAL ~/.local/share/bridge-mcp/audit.log, so `rotate()` on a
-            // disabled logger renamed a developer's live audit log. Off, and
-            // pointing at no file at all.
+            // Not `AuditConfig::default()`: that is `enabled: true`, and until
+            // `default_audit_path` got its test-build branch it was the REAL
+            // ~/.local/share/bridge-mcp/audit.log, so `rotate()` on a disabled
+            // logger renamed a developer's live audit log. Off, and pointing
+            // at no file at all.
             #[cfg(test)]
             config: AuditConfig {
                 enabled: false,
