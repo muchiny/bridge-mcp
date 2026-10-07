@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install lint-stable
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install lint-stable markdownlint
 
 # ---------------------------------------------------------------------------
 # Guards around optional tooling.
@@ -273,6 +273,19 @@ typos:
 	@$(call need,typos,cargo install typos-cli)
 	typos
 
+# Markdown lint, as CI's Markdownlint job runs it (same .markdownlint.yaml).
+# Tracked files only, on purpose: CI checks out nothing else, whereas a
+# `**/*.md` glob here would also lint target/doc vendored font licences and
+# gitignored plans, failing for reasons CI never sees. A Node tool in a Rust
+# gate is a real cost, but it is the same `markdownlint-cli` `make setup`
+# installs, and leaving it out let a duplicate `### Added` reach a red PR check
+# after three green `make ci` runs. Local markdownlint-cli may bundle a newer
+# rule set than CI's markdownlint-cli2 pin; if only one of them complains, the
+# rule-set difference is the first suspect.
+markdownlint:
+	@$(call need,markdownlint,npm install -g markdownlint-cli)
+	git ls-files -z '*.md' | xargs -0 markdownlint -c .markdownlint.yaml
+
 # Check for unused dependencies
 machete:
 	@$(call need,cargo-machete,cargo install cargo-machete)
@@ -291,8 +304,8 @@ quality: fmt-check lint typos machete
 
 # Full CI check (quick). Mirrors the REQUIRED branch-protection contexts
 # (Format, Clippy, Tests, Deny (advisories + licenses), Typos) and also runs
-# Docs and `audit`, which are not required. CI additionally runs coverage
-# (COVERAGE_MIN, 93%), feature-powerset and markdownlint.
+# Docs, `audit` and `markdownlint`, which are not required. CI additionally runs
+# coverage (COVERAGE_MIN, 93%) and feature-powerset.
 #
 # `lint-stable` is in this list because CI's Clippy runs real stable
 # (RUSTUP_TOOLCHAIN: stable at workflow level) while `lint` runs the 1.98.0
@@ -311,10 +324,10 @@ quality: fmt-check lint typos machete
 # stale local target/debug, so a `build.rs` regression that makes
 # BRIDGE_MCP_BUILD_REV fall back to `unknown` passes `make ci` and fails the
 # required Tests context on the PR. `make ci` is not the whole of CI.
-ci: fmt-check lint lint-stable test doc-check audit deny typos
+ci: fmt-check lint lint-stable test doc-check audit deny typos markdownlint
 
 # Full CI check (comprehensive - replaces GitHub Actions)
-ci-full: fmt-check lint lint-stable test audit typos hack geiger doc-check
+ci-full: fmt-check lint lint-stable test audit typos markdownlint hack geiger doc-check
 	@echo "Full CI complete."
 
 # Setup development environment
@@ -614,6 +627,7 @@ help:
 	@echo "  fmt              - Format code"
 	@echo "  fmt-check        - Check formatting"
 	@echo "  typos            - Check for typos"
+	@echo "  markdownlint     - Lint tracked markdown (as CI does)"
 	@echo "  doc-check        - Rustdoc lint (broken links, -D warnings)"
 	@echo "  hack             - Check all feature combinations"
 	@echo "  quality          - Full quality check (lint+typos+machete)"

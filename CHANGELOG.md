@@ -22,29 +22,6 @@ host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 
-### Added
-
-- **`tests/cli_exit_code.rs` — the first test that observes a real process's
-  exit code.** It runs the built binary with no network and no SSH host and
-  asserts 4 (destructive gate, no terminal), 3 (unknown host) and 5 (config that
-  fails to load). It does NOT observe a remote command
-  failing under the daemon (`ssh_exec host=X command=false`): that needs a
-  reachable SSH host and remains unmeasured by any test.
-- **`tools/call` results carry the remote command's exit code in `_meta`,
-  under `io.github.muchiny/remote-exit-code`** (a JSON integer, present only
-  when a command ran on the target host and reported a code). Public protocol
-  surface: the key is vendor-owned, derived from the registry name in
-  `server.json` like the existing `io.github.muchiny/build`, and not under the
-  spec's reserved `io.modelcontextprotocol/` prefix. The result body and every
-  `outputSchema` are unchanged (`remote_exit_code` stays `#[serde(skip)]`).
-  Effect: `bridge-mcp tool ssh_exec host=X command=false` now exits **6**
-  through the daemon, as it does on the direct path. Before, `ssh_exec` and
-  `ssh_exec_multi` — which report the code without setting `isError` — exited
-  **0** through the daemon, so a script that stopped on `&&` on the direct path
-  silently stopped stopping. The code also survives the MCP `summarize=true`
-  round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
-  built by the real serializer; no test spawns a daemon process.
-
 ### BREAKING
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
@@ -721,6 +698,27 @@ nothing in the text below would otherwise tell you which is which.
   existing-client pool instead of replaying the handshake.
 
 ### Added
+
+- **`tests/cli_exit_code.rs` — the first test that observes a real process's
+  exit code.** It runs the built binary with no network and no SSH host and
+  asserts 4 (destructive gate, no terminal), 3 (unknown host) and 5 (config that
+  fails to load). It does NOT observe a remote command
+  failing under the daemon (`ssh_exec host=X command=false`): that needs a
+  reachable SSH host and remains unmeasured by any test.
+- **`tools/call` results carry the remote command's exit code in `_meta`,
+  under `io.github.muchiny/remote-exit-code`** (a JSON integer, present only
+  when a command ran on the target host and reported a code). Public protocol
+  surface: the key is vendor-owned, derived from the registry name in
+  `server.json` like the existing `io.github.muchiny/build`, and not under the
+  spec's reserved `io.modelcontextprotocol/` prefix. The result body and every
+  `outputSchema` are unchanged (`remote_exit_code` stays `#[serde(skip)]`).
+  Effect: `bridge-mcp tool ssh_exec host=X command=false` now exits **6**
+  through the daemon, as it does on the direct path. Before, `ssh_exec` and
+  `ssh_exec_multi` — which report the code without setting `isError` — exited
+  **0** through the daemon, so a script that stopped on `&&` on the direct path
+  silently stopped stopping. The code also survives the MCP `summarize=true`
+  round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
+  built by the real serializer; no test spawns a daemon process.
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
   the other 473 did not, so on a host where the interesting state is root-owned
