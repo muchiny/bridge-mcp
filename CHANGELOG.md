@@ -96,15 +96,15 @@ nothing in the text below would otherwise tell you which is which.
   pipeline by construction.
 
   **What was not closed when this first landed** (the next paragraphs say what
-  changed since): 52 handlers implement `ToolHandler` directly, run their
-  remote command outside that pipeline, and **still exit 0 when it fails** —
+  changed since): 52 handlers implemented `ToolHandler` directly, ran their
+  remote command outside that pipeline, and **still exited 0 when it failed** —
   `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
   `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, plus
   the `ssh_awx_*` family as qualified below. So
-  `bridge-mcp tool ssh_exec host=x command=false` exits 0 while the same failure
-  through a `StandardTool` tool exits 6. **None of these 52 was ever in the
-  measured set** (`ssh_tail`, `ssh_metrics` and `ssh_find` declare no
-  `sudo_user` at all, so they were never probed) — they are the *unmeasured*
+  `bridge-mcp tool ssh_exec host=x command=false` exited 0 while the same failure
+  through a `StandardTool` tool exited 6. **None of these 52 was ever in the
+  measured set** (`ssh_tail`, `ssh_metrics` and `ssh_find` declared no
+  `sudo_user` at all, so they were never probed) — they were the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
   **Six of those 52 have since been brought into line**, in this same
