@@ -943,11 +943,17 @@ nothing in the text below would otherwise tell you which is which.
   exist.
 
   **44 candidates were proposed; 42 were refuted by the counter-proof, and the
-  last two were cancelled on measurement.** Two structural reasons carry those
-  cancellations, and they are the generalisable part, so they are recorded
-  rather than the 42. A reason is not a candidate count: the first covers two
-  tools, and the second a whole family excluded by construction, so neither
-  bullet below is a count of candidates:
+  last two were cancelled on measurement.** The two cancelled candidates were
+  `ssh_net_ping` and `ssh_win_process_by_name`, so 42 + 2 closes the 44. Two
+  structural reasons carry those cancellations, and they are the generalisable
+  part, so they are recorded rather than the 42. A reason is not a candidate
+  count: the first covers two tools — the cancelled `ssh_net_ping` and
+  `ssh_latency_test`, which the counter-proof had already refuted on the same
+  grounds — and the second a whole family excluded by construction, of which
+  four members were proposed (`ssh_win_net_ping`, `ssh_win_net_dns` and
+  `ssh_win_net_connections` were refuted individually; `ssh_win_process_by_name`
+  survived and was cancelled by the structural reason). So neither bullet below
+  is a count of candidates:
 
   - **`ssh_net_ping` / `ssh_latency_test` fail because `ping`'s exit code has
     three values, not two.** 0 is a reply, 1 is "no reply" — the verdict the
