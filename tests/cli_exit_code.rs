@@ -15,6 +15,10 @@ fn run(config: &std::path::Path, args: &[&str]) -> Output {
         .arg(config)
         .args(args)
         .env("HOME", config.parent().unwrap())
+        // The config has no `audit:` section, so the default audit path is
+        // `data_local_dir()`, which prefers XDG_DATA_HOME over HOME: left
+        // set, it is the developer's REAL ~/.local/share/bridge-mcp.
+        .env_remove("XDG_DATA_HOME")
         .output()
         .expect("spawn bridge-mcp")
 }

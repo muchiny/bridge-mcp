@@ -2056,8 +2056,13 @@ mod tests {
 
     #[test]
     fn test_create_context_wires_audit_sanitizer() {
-        let config = Arc::new(Config::default());
-        let ctx = create_context(config);
+        // AuditConfig::default() carries the REAL path
+        // (~/.local/share/bridge-mcp/audit.log), which `create_context`
+        // creates and opens.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.audit.path = dir.path().join("audit.log");
+        let ctx = create_context(Arc::new(config));
         assert!(
             ctx.audit_logger.has_sanitizer(),
             "CLI audit logger must sanitize event.command (audit 2026-07-05 finding 1)"

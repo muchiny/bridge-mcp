@@ -1205,7 +1205,13 @@ mod tests {
             hosts: std::collections::HashMap::new(),
             security: crate::config::SecurityConfig::default(),
             limits: crate::config::LimitsConfig::default(),
-            audit: crate::config::AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: crate::config::AuditConfig {
+                enabled: false,
+                ..crate::config::AuditConfig::default()
+            },
             sessions: crate::config::SessionConfig::default(),
             tool_groups: crate::config::ToolGroupsConfig::default(),
             ssh_config: crate::config::SshConfigDiscovery::default(),
@@ -1227,7 +1233,13 @@ mod tests {
             hosts: std::collections::HashMap::new(),
             security: crate::config::SecurityConfig::default(),
             limits: crate::config::LimitsConfig::default(),
-            audit: crate::config::AuditConfig::default(),
+            // AuditConfig::default() carries the REAL path
+            // (~/.local/share/bridge-mcp/audit.log). Test fixtures must not
+            // open a developer's actual audit file.
+            audit: crate::config::AuditConfig {
+                enabled: false,
+                ..crate::config::AuditConfig::default()
+            },
             sessions: crate::config::SessionConfig::default(),
             tool_groups: crate::config::ToolGroupsConfig::default(),
             ssh_config: crate::config::SshConfigDiscovery::default(),
@@ -2520,7 +2532,10 @@ mod tests {
             bind: "0.0.0.0:0".to_string(),
             ..Default::default()
         };
-        let cfg_main = crate::config::Config::default();
+        let mut cfg_main = crate::config::Config::default();
+        // Config::default() audits to the REAL path
+        // (~/.local/share/bridge-mcp/audit.log).
+        cfg_main.audit.enabled = false;
         let (server, _audit_task) = crate::mcp::McpServer::new(cfg_main);
         let server = std::sync::Arc::new(server);
         let r = serve(server, cfg, None).await;
@@ -2537,7 +2552,10 @@ mod tests {
         };
         // Spawn the server in a task and immediately drop after a tick — the
         // initial bind succeeded if no error was reported synchronously.
-        let cfg_main = crate::config::Config::default();
+        let mut cfg_main = crate::config::Config::default();
+        // Config::default() audits to the REAL path
+        // (~/.local/share/bridge-mcp/audit.log).
+        cfg_main.audit.enabled = false;
         let (server, _audit_task) = crate::mcp::McpServer::new(cfg_main);
         let server = std::sync::Arc::new(server);
         let handle = tokio::spawn(async move { serve(server, cfg, None).await });

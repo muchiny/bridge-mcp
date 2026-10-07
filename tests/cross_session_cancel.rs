@@ -20,9 +20,18 @@
 use bridge_mcp::config::Config;
 use bridge_mcp::mcp::McpServer;
 
+/// `Config::default()` audits to the REAL path
+/// (~/.local/share/bridge-mcp/audit.log), which `McpServer::new` creates and
+/// opens. Nothing here asserts on audit.
+fn test_config() -> Config {
+    let mut config = Config::default();
+    config.audit.enabled = false;
+    config
+}
+
 #[tokio::test]
 async fn active_requests_are_isolated_across_sessions() {
-    let config = Config::default();
+    let config = test_config();
     let (server, _audit_task) = McpServer::new(config);
     let server = std::sync::Arc::new(server);
 
@@ -67,7 +76,7 @@ async fn cross_session_cancel_with_collision_does_not_leak() {
     // Both sessions independently use the same JSON-RPC id (the spec
     // does not require global uniqueness — ids are scoped to the
     // connection). The fix must keep the two cancellations isolated.
-    let config = Config::default();
+    let config = test_config();
     let (server, _audit_task) = McpServer::new(config);
     let server = std::sync::Arc::new(server);
 
