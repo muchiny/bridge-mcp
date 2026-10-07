@@ -117,25 +117,43 @@ lint:
 # check as noise; it is the only thing that makes this target's green mean
 # "what CI will say".
 #   - always prints the compiler that linted;
+#   - stable toolchain not installed -> FAIL, saying so (`rustup toolchain
+#     install stable`), not a bogus "version mismatch";
 #   - network reachable, versions differ -> FAIL (run `rustup update stable`);
-#   - network unreachable -> loud WARNING, lint anyway (a local gate must work
-#     offline; this is about the dev machine, not the air-gapped hosts).
-# Test hooks: STABLE_CHANNEL_URL (point it somewhere unroutable) and
-# UPSTREAM_STABLE_VERSION (skip the fetch, e.g. "1.99.0 (b940084d7 2026-09-28)").
+#   - network unreachable, OR reachable but the response has no `[pkg.rust]
+#     version` line (upstream reformatted; the parser needs updating) -> loud
+#     WARNING saying which, then lint anyway. A local gate must work offline;
+#     this is about the dev machine, not the air-gapped hosts. On a networked
+#     machine a warning is a SIGNAL (the parser broke), not background noise.
+# Cost: `curl -m 10` can add up to 10 s to an offline `make ci`.
+# Test hooks, all echoed when in use because they disarm the check:
+#   TEST_STABLE_CHANNEL_URL       where to fetch (unroutable / file:// fixture)
+#   TEST_UPSTREAM_STABLE_VERSION  skip the fetch: "1.99.0 (b940084d7 2026-09-28)"
+#   TEST_STABLE_RUSTC             command replacing `rustc` (e.g. `false`)
 # `rustup update stable` is deliberately NOT run here: a lint target must not
 # mutate the developer's toolchain.
-STABLE_CHANNEL_URL ?= https://static.rust-lang.org/dist/channel-rust-stable.toml
-UPSTREAM_STABLE_VERSION ?=
+STABLE_CHANNEL_URL := $(or $(TEST_STABLE_CHANNEL_URL),https://static.rust-lang.org/dist/channel-rust-stable.toml)
+TEST_UPSTREAM_STABLE_VERSION ?=
+TEST_STABLE_RUSTC ?= rustc
 lint-stable:
-	@local=$$(RUSTUP_TOOLCHAIN=stable rustc --version | sed 's/^rustc //'); \
+	@if [ -n '$(TEST_UPSTREAM_STABLE_VERSION)' ]; then echo "NOTICE: lint-stable: TEST_UPSTREAM_STABLE_VERSION='$(TEST_UPSTREAM_STABLE_VERSION)' is set; the upstream check is replaced by this constant"; fi; \
+	if [ -n '$(TEST_STABLE_CHANNEL_URL)' ]; then echo "NOTICE: lint-stable: TEST_STABLE_CHANNEL_URL='$(TEST_STABLE_CHANNEL_URL)' is set; not fetching the real channel file"; fi; \
+	if [ '$(TEST_STABLE_RUSTC)' != rustc ]; then echo "NOTICE: lint-stable: TEST_STABLE_RUSTC='$(TEST_STABLE_RUSTC)' is set; not asking the real rustc"; fi; \
+	local=$$(RUSTUP_TOOLCHAIN=stable $(TEST_STABLE_RUSTC) --version 2>/dev/null | sed 's/^rustc //'); \
+	if [ -z "$$local" ]; then \
+		echo "ERROR: lint-stable: could not get a version from the stable toolchain; it is probably not installed. Run 'rustup toolchain install stable'."; \
+		exit 1; \
+	fi; \
 	echo "lint-stable: local stable compiler = $$local"; \
-	up='$(UPSTREAM_STABLE_VERSION)'; \
+	up='$(TEST_UPSTREAM_STABLE_VERSION)'; fetched=ok; \
 	if [ -z "$$up" ]; then \
-		toml=$$(curl -fsS -m 10 '$(STABLE_CHANNEL_URL)' 2>/dev/null) || toml=; \
+		toml=$$(curl -fsS -m 10 '$(STABLE_CHANNEL_URL)' 2>/dev/null) || fetched=failed; \
 		up=$$(printf '%s\n' "$$toml" | awk '/^\[pkg\.rust\]/{f=1;next} f&&/^version/{gsub(/^version = "|"$$/,"");print;exit}'); \
 	fi; \
-	if [ -z "$$up" ]; then \
+	if [ "$$fetched" = failed ]; then \
 		echo "WARNING: lint-stable: upstream stable unreachable ($(STABLE_CHANNEL_URL)); cannot tell whether $$local is current. A newer clippy may still fail CI."; \
+	elif [ -z "$$up" ]; then \
+		echo "WARNING: lint-stable: $(STABLE_CHANNEL_URL) answered but its response has no [pkg.rust] version line; the parser in this recipe needs updating. Cannot tell whether $$local is current."; \
 	elif [ "$$up" != "$$local" ]; then \
 		echo "ERROR: lint-stable: local stable is $$local but upstream stable is $$up. CI lints upstream stable; run 'rustup update stable'."; \
 		exit 1; \
