@@ -118,11 +118,17 @@ fn build_command(
 
 /// Record the outcome of a session command in the audit trail, and log it.
 ///
-/// `log_success` takes a bare `u32`, and no number may be written for a code
-/// that was never read (a `1` there would read as the command's own answer).
-/// So an unread code is recorded through `log_failure`: the command is still
-/// in the trail, with its text and tool name, and the entry says outright that
-/// the outcome is unknown.
+/// `log_success` takes a bare `u32`, and a command exit code that was never
+/// read must not be passed to it (a `1` there would read as the command's own
+/// answer). So an unread code goes through `log_failure` instead: the command
+/// stays in the trail, with its text and tool name.
+///
+/// What each sink then holds is not the same thing. The **audit event** is a
+/// `CommandResult::Error` with a message, and carries no command exit code.
+/// The **history entry** is `HistoryEntry::failed`, which has a fixed shape:
+/// `exit_code: u32::MAX` (a sentinel in use since v1.0.0 for every failed
+/// call, not a code the command returned) and `duration_ms: 0`. A reader of
+/// `ssh_history` must not take that `u32::MAX` for a code.
 fn audit_outcome(
     ctx: &ToolContext,
     tool: &str,
@@ -143,7 +149,8 @@ fn audit_outcome(
             tool,
             host,
             command,
-            "exit code not read: the shell's reply could not be parsed",
+            "no exit code representable as u32 was read (begin marker missing, or the \
+             code line is not a decimal u32, e.g. a negative PowerShell $LASTEXITCODE)",
         );
         warn!(
             session_id = %session_id,
@@ -153,12 +160,27 @@ fn audit_outcome(
     }
 }
 
-/// The remote exit code to propagate, if there is a fact to propagate: only a
-/// code that was read AND is non-zero. An unread code yields nothing.
+/// The remote exit code to propagate, if there is a fact to propagate: a code
+/// that was read, is non-zero, and fits an `i32` (the type the result carries).
+/// Anything else yields nothing — a code above `i32::MAX` is left unreported
+/// rather than reported as some other number.
 fn remote_fact(exit_code: Option<u32>) -> Option<i32> {
     exit_code
         .filter(|&c| c != 0)
-        .map(|c| i32::try_from(c).unwrap_or(1))
+        .and_then(|c| i32::try_from(c).ok())
+}
+
+/// Attach the remote exit code to the result as a **fact**, never a verdict.
+///
+/// `with_remote_exit_code_only`, not `with_remote_exit_code`: the caller wrote
+/// the command, so a non-zero code is an answer (`grep` matching nothing exits
+/// with status one) and `is_error` must stay unset. Nothing is attached when
+/// there is no fact to attach.
+fn attach_fact(result: ToolCallResult, exit_code: Option<u32>) -> ToolCallResult {
+    match remote_fact(exit_code) {
+        Some(code) => result.with_remote_exit_code_only(code),
+        None => result,
+    }
 }
 
 #[async_trait]
@@ -173,8 +195,9 @@ impl ToolHandler for SshSessionExecHandler {
          working directory and environment variables between calls — ideal for multi-step \
          workflows such as 'cd /app', then 'npm install', then 'npm run build'. Returns JSON \
          with fields: session_id, exit_code, cwd (updated after cd commands), output. exit_code \
-         is null when the shell's reply could not be read, which is not the same as the \
-         command having exited 1. Obtain session_id from ssh_session_create or \
+         is null when no exit code representable as an unsigned 32-bit integer was read \
+         (for example a negative PowerShell code), which is not the same as the command \
+         having exited 1. Obtain session_id from ssh_session_create or \
          ssh_session_list. Use ssh_session_close when \
          the workflow is complete."
     }
@@ -300,17 +323,8 @@ impl ToolHandler for SshSessionExecHandler {
             }
         }
 
-        let result = ToolCallResult::text(json);
-
-        // The fact, not the verdict — same reasoning as `ssh_exec`: the
-        // caller wrote the command, so a non-zero code is an answer, and
-        // `is_error` must stay unset. Nothing is set when the code was never
-        // read: the absence of the fact is the honest report.
-        if let Some(code) = remote_fact(exit_code) {
-            return Ok(result.with_remote_exit_code_only(code));
-        }
-
-        Ok(result)
+        // The fact, not the verdict — see `attach_fact`.
+        Ok(attach_fact(ToolCallResult::text(json), exit_code))
     }
 }
 
@@ -400,8 +414,66 @@ mod tests {
     fn only_a_read_nonzero_code_is_a_fact() {
         assert_eq!(remote_fact(Some(1)), Some(1));
         assert_eq!(remote_fact(Some(127)), Some(127));
+        assert_eq!(remote_fact(Some(i32::MAX as u32)), Some(i32::MAX));
         assert_eq!(remote_fact(Some(0)), None);
         assert_eq!(remote_fact(None), None, "an unread code must set nothing");
+        // Above i32::MAX the parser still accepts the value; the fact must be
+        // absent, not a fabricated 1.
+        assert_eq!(remote_fact(Some(i32::MAX as u32 + 1)), None);
+        assert_eq!(
+            remote_fact(Some(u32::MAX)),
+            None,
+            "u32::MAX must not become 1"
+        );
+    }
+
+    /// Swapping `with_remote_exit_code_only` for `with_remote_exit_code` would
+    /// make the CLI exit 6 AND mark the caller's own `grep` as an error.
+    #[test]
+    fn the_code_is_a_fact_and_never_a_verdict() {
+        let r = attach_fact(ToolCallResult::text("x".to_string()), Some(3));
+        assert_eq!(r.remote_exit_code, Some(3));
+        assert_eq!(
+            r.is_error, None,
+            "is_error is the bridge's verdict, not set here"
+        );
+
+        let r = attach_fact(ToolCallResult::text("x".to_string()), None);
+        assert_eq!(r.remote_exit_code, None);
+        assert_eq!(r.is_error, None);
+
+        let r = attach_fact(ToolCallResult::text("x".to_string()), Some(0));
+        assert_eq!(r.remote_exit_code, None);
+    }
+
+    #[test]
+    fn an_unread_code_is_audited_without_a_command_exit_code() {
+        use crate::security::CommandResult;
+        let ctx = create_test_context();
+        audit_outcome(&ctx, "ssh_session_exec", "h", "cmd", "s1", None, 5);
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_session_exec"));
+        assert!(
+            matches!(events[0].result, CommandResult::Error { .. }),
+            "an unread code must not be recorded as a Success carrying a number: {:?}",
+            events[0].result
+        );
+        let h = ctx.history.recent(10);
+        assert_eq!(h.len(), 1);
+        assert!(!h[0].success);
+    }
+
+    #[test]
+    fn a_read_code_is_audited_as_the_commands_own() {
+        use crate::security::CommandResult;
+        let ctx = create_test_context();
+        audit_outcome(&ctx, "ssh_session_exec", "h", "cmd", "s1", Some(1), 5);
+        let events = ctx.audit_logger.drain_for_test();
+        assert!(matches!(
+            events[0].result,
+            CommandResult::Success { exit_code: 1, .. }
+        ));
     }
 
     #[test]

@@ -80,9 +80,11 @@ pub struct SessionInfo {
 pub struct SessionExecResult {
     pub session_id: String,
     pub output: String,
-    /// The shell's own answer for the command. `None` means the bridge could
-    /// not read it (begin marker missing, or the code line did not parse as a
-    /// `u32`) — which is not the same as the command having exited 1.
+    /// The command's exit code, when one representable as a `u32` was read.
+    /// `None` means no such code was read: the begin marker was missing, or
+    /// the code line is not a decimal `u32`. The shell may well have answered
+    /// — a PowerShell `$LASTEXITCODE` is signed and routinely negative — so
+    /// `None` is "no usable code", not "unreadable reply", and never "exited 1".
     pub exit_code: Option<u32>,
     pub cwd: String,
 }
@@ -1114,8 +1116,10 @@ impl SessionManager {
     /// {end_marker}  (may or may not be present)
     /// ```
     ///
-    /// The exit code is `None` when it could not be read: begin marker absent,
-    /// or the code line missing / not a decimal `u32`. It is never invented —
+    /// The exit code is `None` when no code representable as a `u32` was read:
+    /// begin marker absent, or the code line missing / not a decimal `u32`
+    /// (which includes a negative PowerShell `$LASTEXITCODE`, a reply that was
+    /// read perfectly well but does not fit the type). It is never invented —
     /// a real `1` from the shell and "the parser understood nothing" must stay
     /// distinguishable for every consumer downstream.
     #[allow(clippy::option_if_let_else)]
@@ -1223,8 +1227,8 @@ mod tests {
         assert_eq!(real_code, Some(1));
         assert_eq!(garbled_code, None);
         assert_eq!(no_marker_code, None);
-        assert_ne!(real_code, garbled_code);
-        assert_ne!(real_code, no_marker_code);
+        // No `assert_ne!` here: after the three pins above they could not
+        // fail. The three `assert_eq!` carry the property by themselves.
     }
 
     #[test]

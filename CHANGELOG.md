@@ -45,12 +45,18 @@ nothing in the text below would otherwise tell you which is which.
 
 - **(lib API) `SessionExecResult::exit_code` is now `Option<u32>`, and the
   `ssh_session_exec` JSON `exit_code` can be `null`.** `None`/`null` means the
-  bridge could not read the shell's reply (begin marker missing, or the code line
-  is not a decimal `u32`). It used to be a fabricated `1`, indistinguishable from
-  a command that really exited 1, and that `1` was written to the audit trail as
-  the command's own code. An unread code is now audited as an outcome-unknown
-  entry (no number), and a real non-zero code reaches `bridge-mcp tool` as exit 6
-  through `with_remote_exit_code_only`, without setting `is_error`.
+  bridge read no exit code representable as a `u32` (begin marker missing, or
+  the code line is not a decimal `u32` — which includes a negative PowerShell
+  `$LASTEXITCODE`, a reply that was read but does not fit the type). It used to be
+  a fabricated `1`, indistinguishable from a command that really exited 1, and
+  that `1` was written to the audit trail as the command's own code. An unread
+  code is now audited through `log_failure`: the **audit event** is an error
+  entry that carries no command exit code, while the **history entry** is
+  `HistoryEntry::failed`, whose fixed shape is `exit_code: u32::MAX` (a
+  sentinel in use since v1.0.0, not a code the command returned) and
+  `duration_ms: 0`. A real non-zero code that fits an `i32` reaches
+  `bridge-mcp tool` as exit 6 through `with_remote_exit_code_only`, without
+  setting `is_error`; a larger one is left unreported.
 
 - **A tool annotated `destructiveHint` is now gated in the CLI.** It prompts on
   a terminal and is refused with exit 4 when stdin is not one; scripts must pass
@@ -93,14 +99,14 @@ nothing in the text below would otherwise tell you which is which.
   `sudo_user` at all, so they were never probed) — they were the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
-  **Six of those 52 have since been brought into line**, in this same
+  **Seven of those 52 have since been brought into line**, in this same
   unreleased cycle: `ssh_file_write`, `ssh_disk_usage` (without `path`),
   `ssh_tail` (without `grep`), `ssh_exec`, `ssh_exec_multi` against a
-  single host, and `ssh_awx_job_follow`. The three entries below state what
+  single host, `ssh_awx_job_follow`, and `ssh_session_exec`. The three entries below state what
   each now does; the paragraph above is kept as written because it is the
   finding as it was measured, and the list it gives is the one the follow-up
   work is tracked against. What is
-  still open, therefore: `ssh_session_exec`, `ssh_find`, `ssh_metrics`,
+  still open, therefore: `ssh_find`, `ssh_metrics`,
   `ssh_metrics_multi`, `ssh_exec_multi` across 2+ hosts, `ssh_disk_usage` with
   a `path`, and `ssh_tail` with a `grep`. **The AWX family is now closed
   entirely**: the 42 by the fix to `parse_checked_response`, as the next
@@ -140,13 +146,13 @@ nothing in the text below would otherwise tell you which is which.
   this same unreleased cycle are counted: **four** now set `isError` themselves
   (`ssh_file_write`, `ssh_disk_usage` without a `path`, `ssh_tail` without a
   `grep`, and `ssh_awx_job_follow` — see the entries below, they use the same
-  `with_remote_exit_code` constructor the pipeline does); **two** report the
+  `with_remote_exit_code` constructor the pipeline does); **three** report the
   exit code and deliberately decline the verdict (`ssh_exec`, `ssh_exec_multi`
-  against a single host);
+  against a single host, `ssh_session_exec`);
   **42** — the AWX handlers on `parse_checked_response` — now return `Err` for a
   curl transport failure, which the server wraps as a result with `isError: true`
-  where it used to be an empty success. Only **four** are genuinely unchanged:
-  `ssh_session_exec`, `ssh_find`, `ssh_metrics` and `ssh_metrics_multi`. A client
+  where it used to be an empty success. Only **three** are genuinely unchanged:
+  `ssh_find`, `ssh_metrics` and `ssh_metrics_multi`. A client
   that treated every `tools/call` answer as a success, and read the outcome out
   of the text, will start seeing errors it did not see before, for calls that
   were already failing.
@@ -283,6 +289,13 @@ nothing in the text below would otherwise tell you which is which.
   (`src/ssh/session.rs`, `parse_exec_output`), so propagating that code would
   announce a failure of your command where the truth is a bridge-side parse
   failure — the exact conflation this whole chain exists to remove.
+
+  **Superseded later in this cycle: the `ssh_session_exec` exclusion is lifted.**
+  The paragraph above is kept as the finding as it was measured. `parse_exec_output`
+  no longer fabricates: it returns no code (`None`, JSON `null`) when none
+  representable as a `u32` was read, so a non-zero code that *was* read is now
+  propagated (exit 6, `with_remote_exit_code_only`, no `is_error`) and an unread
+  one sets nothing. See the `SessionExecResult::exit_code` entry under BREAKING.
 
   **Superseded later in this cycle: the daemon asymmetry is closed.** This
   paragraph used to say that under `bridge-mcp daemon` these two exited 0 where
@@ -782,6 +795,10 @@ nothing in the text below would otherwise tell you which is which.
   (`src/mcp/tool_handlers/ssh_exec.rs:246-279` — warns, then `:279` returns
   `text(...)`), `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
   `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`.
+
+  **Superseded later in this cycle for `ssh_session_exec`:** it now propagates a
+  read non-zero exit code (see the BREAKING entry on `SessionExecResult`). The
+  list above is kept as measured.
 
   **The 43 `ssh_awx_*`, but narrower than the count suggests:** 42 route their
   response through `AwxCommandBuilder::parse_checked_response`

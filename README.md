@@ -793,9 +793,9 @@ which report the code without the verdict. See the next section.
 
 **Which tools emit 6 — read this before relying on it.** Code 6 comes from the
 shared `StandardTool` pipeline, which is most of the catalogue but not all of
-it. 52 handlers run their remote command outside that pipeline; five of them
+it. 52 handlers run their remote command outside that pipeline; six of them
 now report a code of their own, 42 of the `ssh_awx_*` family raise a **bridge
-error** instead (see below the tables), and the remaining five **still exit 0
+error** instead (see below the tables), and the remaining four **still exit 0
 when the remote command fails**:
 
 | Emits 6 outside the pipeline | When |
@@ -805,10 +805,10 @@ when the remote command fails**:
 | `ssh_file_write` | any non-zero exit **on the shell path** — content whose length reaches `sftp_write_threshold_bytes` (64 KiB by default; `0` means every write) goes over SFTP, which runs no remote process and so has no code to report |
 | `ssh_disk_usage` | only without `path` (with one, the command is `du … && df …`, which exits 1 from an unreadable subdirectory while still answering) |
 | `ssh_tail` | only without `grep` (with one, exit 1 means "no match", which is not a failure) |
+| `ssh_session_exec` | any non-zero exit **that the bridge read**. When no code representable as an unsigned 32-bit integer was read (begin marker missing, or a code line that is not a decimal `u32`, such as a negative PowerShell `$LASTEXITCODE`), the JSON `exit_code` is `null` and nothing is reported: exit 0, not a guess |
 
 | Still exits 0 on a remote failure | Count | When |
 |---|---|---|
-| `ssh_session_exec` | 1 | any non-zero exit. Deliberately excluded: its output parser *fabricates* exit code 1 for a missing or unparsable marker, so propagating it would announce a failure of your command where the truth is a bridge-side parse failure. |
 | `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` | 3 | any non-zero exit |
 | `ssh_exec_multi` across 2+ hosts | — | see below |
 | `ssh_awx_job_follow` | 1 | either an HTTP status >= 400 or a curl transport failure. It builds its requests with the unchecked `build_api_call`, parses no status at all, and returns the raw stdout whatever happened. |
@@ -834,15 +834,17 @@ so they have left the remainder without ever having been measured on one. Until
 it is closed, treat exit 6 as "this tool told me the remote command failed",
 never exit 0 as "the remote command succeeded".
 
-**`ssh_exec` and `ssh_exec_multi` emit 6 without marking the call an error.**
+**Tools whose command you wrote emit 6 without marking the call an error.**
 You wrote their command, and plenty of ordinary commands exit non-zero *as
 their answer*: `grep` matching nothing exits 1, `diff` finding a difference
 exits 1, `test` exits 1 for false, `systemctl is-active` exits 3 for a stopped
 unit. So the code reaches `$?` — your `&&` stops, which is what a shell caller
 expects — but the MCP result does **not** carry `"isError": true`, because
-nothing here can establish that your command failed. Every other tool in the
-first table sets both, since its command is one the bridge built and a non-zero
-exit really is a failure.
+nothing here can establish that your command failed. The criterion is who wrote the
+command, not the tool name: where it is the caller's (`ssh_exec`,
+`ssh_exec_multi`, `ssh_session_exec`) the code is a fact and no verdict is set;
+where the bridge built the command, a non-zero exit really is a failure and
+both are set.
 
 **`ssh_exec_multi` reports a code only for a single host.** Across two or more
 it reports nothing, deliberately: the per-host `failed` counter cannot tell
