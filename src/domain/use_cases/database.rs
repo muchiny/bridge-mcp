@@ -103,9 +103,11 @@ fn shell_escape(s: &str) -> String {
 /// **Known gap, not protected:** the command string itself is the remote
 /// shell's argv (`bash -c '<whole string>'`) for the duration of the call, so
 /// the password is readable with `ps` on the target. And because `db_password`
-/// arrives as a caller argument rather than from config, it is not in the
-/// config-derived masker's value set, so it also reaches the audit trail
-/// unmasked. Fixing this is a separate task; the `exec_with_stdin` seam is not
+/// arrives as a caller argument rather than from config, it is outside the
+/// masker's exact-match value set, so whether it is masked in the audit trail
+/// depends entirely on the entropy heuristic: masked when it is at least 16
+/// characters and above 4.5 bits per character, not masked at all below either
+/// threshold. Fixing this is a separate task; the `exec_with_stdin` seam is not
 /// directly reusable, since its one stdin is documented as carrying the sudo
 /// password and nothing else.
 ///

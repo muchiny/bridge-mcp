@@ -152,7 +152,8 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// about the real cause. `-n` turns that into an immediate, legible
 /// "a password is required".
 ///
-/// The password path has no `-n`, so its counterpart is the `eof()` that
+/// The password path (see [`elevate_with_password`]) has no `-n`; its
+/// counterpart protection is the `channel.eof()` that
 /// `SshClient::exec_with_stdin` sends right after writing the password:
 /// without it, `sudo -S` on a host that rejects the password blocks on its
 /// second read until the command timeout, which is exactly the hang `-n`
@@ -175,8 +176,9 @@ pub fn validate_sudo_user(user: &str) -> Result<()> {
 /// `sudo -n` succeeds only where sudoers grants `NOPASSWD`. The `StandardTool`
 /// pipeline (`src/mcp/standard_tool.rs`, step 5b) no longer calls this: it
 /// calls [`elevate_with_password`] with the host's `sudo_password`, and hands
-/// the returned `stdin` to `exec_with_stdin`, so all 399 pipeline tools honour
-/// a configured password without it ever entering the remote command line.
+/// the returned `stdin` to `exec_with_stdin`, so the 398 pipeline tools that
+/// accept elevation (one opts out via `ALLOWS_ELEVATION`) honour a configured
+/// password without it ever entering the remote command line.
 /// This function remains for callers that have no password to offer, and it is
 /// what every non-SSH transport falls back to: only SSH has a channel stdin to
 /// carry a password, so on telnet, serial, k8s-exec, ssm, azure and gcp the
@@ -244,6 +246,9 @@ fn detach_stdin(command: &str) -> String {
 /// caller must deliver it over the channel with `exec_with_stdin`. The command
 /// is `sudo -S -p '' [-u <user>] bash -c '<command>'`; `sudo -S` reads the
 /// password from the channel's stdin.
+///
+/// The hang protection `-n` gives the no-password form is, here, the
+/// `channel.eof()` sent right after the password is written (see [`elevate`]).
 ///
 /// For a caller that cannot give the process a stdin of its own (a line typed
 /// into an open shell), see [`elevate_with_password_via_pipe`].
