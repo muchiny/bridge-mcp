@@ -108,7 +108,40 @@ lint:
 # Its own CARGO_TARGET_DIR on purpose: sharing target/ with `make lint` makes
 # the two targets evict each other's artifacts and rebuild the world on every
 # alternation. Not under /tmp — that is a RAM-backed tmpfs on this box.
+#
+# The recipe also checks that the LOCAL stable is the UPSTREAM stable. The
+# installed toolchain is whatever `rustup update` last fetched, and nothing keeps
+# it current: it sat at 1.98.0 for six weeks while 1.99.0 shipped
+# `assert_is_empty`, so this target read green on a stale compiler while CI's
+# Clippy put 618 violations on every PR (#221, then #223). Do not delete the
+# check as noise; it is the only thing that makes this target's green mean
+# "what CI will say".
+#   - always prints the compiler that linted;
+#   - network reachable, versions differ -> FAIL (run `rustup update stable`);
+#   - network unreachable -> loud WARNING, lint anyway (a local gate must work
+#     offline; this is about the dev machine, not the air-gapped hosts).
+# Test hooks: STABLE_CHANNEL_URL (point it somewhere unroutable) and
+# UPSTREAM_STABLE_VERSION (skip the fetch, e.g. "1.99.0 (b940084d7 2026-09-28)").
+# `rustup update stable` is deliberately NOT run here: a lint target must not
+# mutate the developer's toolchain.
+STABLE_CHANNEL_URL ?= https://static.rust-lang.org/dist/channel-rust-stable.toml
+UPSTREAM_STABLE_VERSION ?=
 lint-stable:
+	@local=$$(RUSTUP_TOOLCHAIN=stable rustc --version | sed 's/^rustc //'); \
+	echo "lint-stable: local stable compiler = $$local"; \
+	up='$(UPSTREAM_STABLE_VERSION)'; \
+	if [ -z "$$up" ]; then \
+		toml=$$(curl -fsS -m 10 '$(STABLE_CHANNEL_URL)' 2>/dev/null) || toml=; \
+		up=$$(printf '%s\n' "$$toml" | awk '/^\[pkg\.rust\]/{f=1;next} f&&/^version/{gsub(/^version = "|"$$/,"");print;exit}'); \
+	fi; \
+	if [ -z "$$up" ]; then \
+		echo "WARNING: lint-stable: upstream stable unreachable ($(STABLE_CHANNEL_URL)); cannot tell whether $$local is current. A newer clippy may still fail CI."; \
+	elif [ "$$up" != "$$local" ]; then \
+		echo "ERROR: lint-stable: local stable is $$local but upstream stable is $$up. CI lints upstream stable; run 'rustup update stable'."; \
+		exit 1; \
+	else \
+		echo "lint-stable: local stable matches upstream stable"; \
+	fi
 	RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target-stable \
 		cargo clippy --all-targets --all-features -- -D warnings
 
@@ -467,10 +500,20 @@ e2e-mock:
 	cargo test --test e2e_mock -- --nocapture
 
 # Docker-based E2E tests (real SSH, requires docker)
-e2e-docker: e2e-docker-up
-	status=0; \
-	cargo test --test e2e_docker -- --ignored --test-threads=1 --nocapture || status=$$?; \
-	$(MAKE) e2e-docker-down; \
+# Not `e2e-docker: e2e-docker-up`: a failing prerequisite aborts before the
+# recipe body, so a timed-out `up --wait` would skip teardown and leave port
+# 2222 held. Up, test and down are one shell so down ALWAYS runs, and a failed
+# teardown turns a passing run red instead of leaking the container silently.
+e2e-docker:
+	@status=0; \
+	$(MAKE) e2e-docker-up || status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		cargo test --test e2e_docker -- --ignored --test-threads=1 --nocapture || status=$$?; \
+	fi; \
+	$(MAKE) e2e-docker-down || { \
+		echo "ERROR: e2e-docker-down failed; the container may still hold port 2222"; \
+		[ $$status -ne 0 ] || status=1; \
+	}; \
 	exit $$status
 
 # Start Docker SSH test server
