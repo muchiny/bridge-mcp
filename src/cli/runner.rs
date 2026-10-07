@@ -33,7 +33,7 @@ use crate::ssh::{
 /// Process exit code for **the remote command failed**, as opposed to the
 /// bridge failing to run it.
 ///
-/// `map_exit_code` in `src/main.rs` and the exit-code table in `README.md`
+/// [`map_exit_code`] and the exit-code table in `README.md`
 /// already own 1-5 for the bridge's *own* failures: 1 execution error,
 /// 2 CLI usage, 3 SSH connection, 4 security denial, 5 configuration. Reusing
 /// any of them for a remote failure would leave a caller unable to tell
@@ -41,6 +41,28 @@ use crate::ssh::{
 /// no" — the same conflation, one storey up, that this code exists to remove.
 /// So a remote failure gets a code of its own.
 pub const EXIT_REMOTE_FAILURE: i32 = 6;
+
+/// Map a `BridgeError` to the process exit code of `bridge-mcp tool`.
+///
+/// - 1: tool / command execution error (and every variant not listed)
+/// - 2: CLI usage error (unknown tool, bad args)
+/// - 3: connection / SSH error
+/// - 4: security denial
+/// - 5: configuration error
+///
+/// Pure on purpose: `src/main.rs` prints the error and calls
+/// `std::process::exit` on the value returned here. Never returns
+/// [`EXIT_REMOTE_FAILURE`], which is reserved for a command that ran remotely.
+#[must_use]
+pub fn map_exit_code(err: &BridgeError) -> i32 {
+    match err {
+        BridgeError::CommandDenied { .. } => 4,
+        BridgeError::UnknownHost { .. } | BridgeError::SshConnection { .. } => 3,
+        BridgeError::McpUnknownTool { .. } => 2,
+        BridgeError::Config(_) => 5,
+        _ => 1,
+    }
+}
 
 /// Derive the process exit code for `bridge-mcp tool` from a tool result.
 ///
@@ -4474,15 +4496,43 @@ mod tests {
         );
     }
 
-    /// Exit 6 is reserved: it must be distinct from every code the CLI
-    /// already uses for its own errors (1 execution, 2 usage, 3 SSH,
-    /// 4 security, 5 config — `map_exit_code` in `src/main.rs`).
+    /// Exit 6 is reserved: no code `map_exit_code` can return may equal it.
+    ///
+    /// Walks `map_exit_code` itself, over one value per class of error it
+    /// maps plus catch-all variants, so a new arm returning
+    /// `EXIT_REMOTE_FAILURE` fails here. The `_ => 1` arm cannot collide
+    /// unless its literal is edited, which the catch-all samples (`SshExec`,
+    /// `Cancelled`, `Io`) would catch; a variant added later falls into that
+    /// arm and is covered by it. A *new arm* for a new variant is the case
+    /// this cannot see until the variant is added to `samples` below.
     #[test]
     fn the_remote_failure_code_does_not_collide_with_the_cli_s_own_codes() {
+        let samples = [
+            BridgeError::CommandDenied { reason: "r".into() },
+            BridgeError::UnknownHost { host: "h".into() },
+            BridgeError::SshConnection {
+                host: "h".into(),
+                reason: "r".into(),
+            },
+            BridgeError::McpUnknownTool { tool: "t".into() },
+            BridgeError::Config("c".into()),
+            BridgeError::SshExec { reason: "r".into() },
+            BridgeError::Cancelled,
+            BridgeError::Io(std::io::Error::other("io")),
+        ];
+        let codes: std::collections::BTreeSet<i32> = samples.iter().map(map_exit_code).collect();
         assert!(
-            !(0..=5).contains(&EXIT_REMOTE_FAILURE),
-            "EXIT_REMOTE_FAILURE={EXIT_REMOTE_FAILURE} collides with a CLI error code"
+            codes.len() > 1,
+            "the samples must reach more than one arm, got {codes:?}"
         );
+        for err in &samples {
+            let code = map_exit_code(err);
+            assert_ne!(
+                code, EXIT_REMOTE_FAILURE,
+                "map_exit_code({err:?}) = {code} collides with EXIT_REMOTE_FAILURE"
+            );
+            assert_ne!(code, 0, "an error must not map to success: {err:?}");
+        }
     }
 
     /// The daemon path now reads the remote exit code from

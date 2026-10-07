@@ -10,13 +10,12 @@ use tracing::info;
 
 use bridge_mcp::McpServer;
 use bridge_mcp::cli::{
-    Cli, Commands, DaemonAction, DataReductionFlags, run_config_diff, run_describe_tool,
-    run_download, run_exec, run_history, run_list_tools, run_status, run_tool, run_upload,
-    run_validate,
+    Cli, Commands, DaemonAction, DataReductionFlags, map_exit_code, run_config_diff,
+    run_describe_tool, run_download, run_exec, run_history, run_list_tools, run_status, run_tool,
+    run_upload, run_validate,
 };
 use bridge_mcp::config::{default_config_path, load_config};
 use bridge_mcp::daemon;
-use bridge_mcp::error::BridgeError;
 use bridge_mcp::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};
 
 #[tokio::main]
@@ -163,7 +162,7 @@ async fn main() -> Result<()> {
                 #[cfg(feature = "jq")]
                 output_format: cli.output_format.clone(),
             };
-            let exit_code = run_tool(
+            let result = run_tool(
                 config,
                 &tool_name,
                 &args,
@@ -172,8 +171,16 @@ async fn main() -> Result<()> {
                 data_reduction,
                 cli.yes,
             )
-            .await
-            .map_err(map_exit_code)?;
+            .await;
+            // Printing stays here with `process::exit`: the mapping is a pure
+            // `BridgeError -> i32` in the lib so a test can walk its arms.
+            let exit_code = match result {
+                Ok(code) => code,
+                Err(err) => {
+                    eprintln!("Error: {err}");
+                    std::process::exit(map_exit_code(&err));
+                }
+            };
             // Propagate the code `run_tool` computed rather than flattening
             // everything to 1: it distinguishes a remote command that failed
             // (`bridge_mcp::cli::EXIT_REMOTE_FAILURE`) from the
@@ -293,24 +300,4 @@ async fn main() -> Result<()> {
 
     shutdown_telemetry();
     Ok(())
-}
-
-/// Map `BridgeError` variants to standardised exit codes.
-///
-/// - 1: tool / command execution error
-/// - 2: CLI usage error (unknown tool, bad args)
-/// - 3: connection / SSH error
-/// - 4: security denial
-/// - 5: configuration error
-#[expect(clippy::needless_pass_by_value)]
-fn map_exit_code(err: BridgeError) -> anyhow::Error {
-    let code = match &err {
-        BridgeError::CommandDenied { .. } => 4,
-        BridgeError::UnknownHost { .. } | BridgeError::SshConnection { .. } => 3,
-        BridgeError::McpUnknownTool { .. } => 2,
-        BridgeError::Config(_) => 5,
-        _ => 1,
-    };
-    eprintln!("Error: {err}");
-    std::process::exit(code);
 }

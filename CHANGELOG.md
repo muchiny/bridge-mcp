@@ -24,6 +24,12 @@ nothing in the text below would otherwise tell you which is which.
 
 ### Added
 
+- **`tests/cli_exit_code.rs` — the first test that observes a real process's
+  exit code.** It runs the built binary with no network and no SSH host and
+  asserts 4 (destructive gate, no terminal), 3 (unknown host) and 1 (unreadable
+  config, via `main`'s anyhow path). It does NOT observe a remote command
+  failing under the daemon (`ssh_exec host=X command=false`): that needs a
+  reachable SSH host and remains unmeasured by any test.
 - **`tools/call` results carry the remote command's exit code in `_meta`,
   under `io.github.muchiny/remote-exit-code`** (a JSON integer, present only
   when a command ran on the target host and reported a code). Public protocol
@@ -41,6 +47,12 @@ nothing in the text below would otherwise tell you which is which.
 
 ### BREAKING
 
+- **(lib API) `map_exit_code` moved from `src/main.rs` into
+  `bridge_mcp::cli` and is now `pub fn map_exit_code(&BridgeError) -> i32`.**
+  It used to declare `-> anyhow::Error` while never returning
+  (`std::process::exit`), and was untestable. `main` now prints the error and
+  exits on the returned code. The collision test now walks the function instead
+  of asserting `!(0..=5).contains(&6)`.
 - **`bridge-mcp tool <name>` rejects arguments the tool does not declare**,
   exiting 5. Any invocation passing an extra key stops working. They used to be
   parsed and dropped in silence, and the keys most likely to be mistyped are the
