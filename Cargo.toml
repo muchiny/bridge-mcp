@@ -204,7 +204,15 @@ panic = "abort"
 [profile.dev]
 # Faster dev builds
 opt-level = 0
-debug = true
+# Line tables only: backtraces keep file:line, but a debugger loses variable
+# and type information. Set `debug = true` locally to inspect variables in
+# rust-gdb / rust-lldb.
+debug = "line-tables-only"
+
+# Dependencies carry no debuginfo at all: their frames in a backtrace keep the
+# function name but lose file:line. Our own crates keep line tables.
+[profile.dev.package."*"]
+debug = false
 
 [profile.mutants]
 # Optimized for mutation testing
