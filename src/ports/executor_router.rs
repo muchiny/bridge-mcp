@@ -293,7 +293,7 @@ pub enum ConnectionGuard<'a> {
 fn reject_stdin(stdin: Option<&[u8]>) -> Result<()> {
     if stdin.is_some() {
         return Err(crate::error::BridgeError::SshExec {
-            reason: "stdin is only supported on the SSH transport".to_string(),
+            reason: crate::error::STDIN_NOT_SSH_REASON.to_string(),
         });
     }
     Ok(())

@@ -471,8 +471,10 @@ nothing in the text below would otherwise tell you which is which.
   `printf '%s\n' '<pw>' | sudo -S ...` as the SSH exec request, which becomes
   the argv of the remote shell for the whole call. The password now travels on
   the SSH channel's stdin (`sudo -S` reads it there) and the command text no
-  longer contains it. `ssh_session_exec` is unchanged: it writes a line into an
-  open shell, where the pipe form was never in an argv.
+  longer contains it. `ssh_session_exec` still delivers the password in the line it
+  writes to a live shell, which remains its legitimate form (the pipe form was
+  never in an argv there); it now also detaches the child's stdin and treats an
+  empty password as absent.
   - **Library API.** `domain::privilege::elevate_with_password` now returns the
     new `pub struct Elevated { command, stdin }` instead of `String`
     (`stdin: Option<RedactedSecret>`, password plus `\n`);

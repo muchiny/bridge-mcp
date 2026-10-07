@@ -540,11 +540,15 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             }
             (command, None)
         } else {
-            let elevated = crate::domain::privilege::elevate_with_password(
-                &command,
-                &privilege,
-                host_config.sudo_password_for_exec(&host),
-            );
+            // Only asked when elevation is: the helper warns on a non-SSH host,
+            // and that must not fire on every call of every tool.
+            let password = if privilege.is_elevated() {
+                host_config.sudo_password_for_exec(&host)
+            } else {
+                None
+            };
+            let elevated =
+                crate::domain::privilege::elevate_with_password(&command, &privilege, password);
             (elevated.command, elevated.stdin)
         };
 

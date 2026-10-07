@@ -531,9 +531,9 @@ mod tests {
             sudo_user: None,
         };
         let got = elevate_with_password_via_pipe("id", &args, Some("hunter2"));
-        assert!(
-            got.starts_with("printf '%s\\n' 'hunter2' | sudo -S -p '' bash -c '"),
-            "{got}"
+        assert_eq!(
+            got,
+            "printf '%s\\n' 'hunter2' | sudo -S -p '' bash -c 'exec 0</dev/null; id'"
         );
         assert_detached_before(&got, "id");
     }

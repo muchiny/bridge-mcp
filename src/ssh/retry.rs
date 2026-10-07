@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn test_stdin_transport_refusal_is_not_retryable() {
         let err = BridgeError::SshExec {
-            reason: "stdin is only supported on the SSH transport".to_string(),
+            reason: crate::error::STDIN_NOT_SSH_REASON.to_string(),
         };
         assert!(!is_retryable_error(&err));
         assert!(!is_retryable_error_for(&err, true));

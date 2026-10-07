@@ -169,11 +169,14 @@ impl ToolHandler for SshExecHandler {
                 sudo: args.sudo.unwrap_or(false),
                 sudo_user: args.sudo_user.clone(),
             };
-            crate::domain::privilege::elevate_with_password(
-                &args.command,
-                &privilege,
-                host_config.sudo_password_for_exec(&args.host),
-            )
+            // Only asked when elevation is: the helper warns on a non-SSH host,
+            // and that must not fire on calls that never wanted sudo.
+            let password = if privilege.sudo {
+                host_config.sudo_password_for_exec(&args.host)
+            } else {
+                None
+            };
+            crate::domain::privilege::elevate_with_password(&args.command, &privilege, password)
         } else {
             // `sudo` n'a pas de sens hors POSIX. Avant, la ligne POSIX
             // échouait bruyamment ; l'ignorer en silence ferait réussir une
