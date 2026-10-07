@@ -165,15 +165,17 @@ pub struct ToolCallResult {
     ///   failed. The CLI still exits `EXIT_REMOTE_FAILURE` (6) either way,
     ///   since it reads this field before `is_error`.
     ///
-    /// **Not part of the MCP wire format.** `#[serde(skip)]` keeps it out of
-    /// every serialized result and out of every `outputSchema`: it is an
-    /// in-process channel from the handler to the CLI, not a protocol
-    /// extension. One consequence, deliberate and documented: the
-    /// daemon-forwarding CLI path reads the response back off the wire and so
-    /// cannot see this field. It falls back to `is_error`, which means exit 1
-    /// when the tool set a verdict — and exit **0** when it did not, which is
-    /// the case for every free-form tool above. Both cases are pinned in
-    /// `crate::cli::runner`'s tests.
+    /// **Not part of the result body.** `#[serde(skip)]` keeps it out of
+    /// every serialized result and out of every `outputSchema`: serde cannot
+    /// carry it, and a field there would become a protocol extension of the
+    /// result shape. It reaches a client that reads the result off the wire —
+    /// the daemon-forwarding CLI path — through `_meta` instead:
+    /// `crate::mcp::protocol::tool_result_value` adds
+    /// `_meta["io.github.muchiny/remote-exit-code"]` (the constant
+    /// `REMOTE_EXIT_CODE_META_KEY`) at serialization time, and
+    /// `print_daemon_response` reads it back and applies the same rule as the
+    /// direct path. So `ssh_exec host=X command=false` exits 6 either way.
+    /// The `MCP summarize=true` round trip carries it through `SealedResult`.
     #[serde(skip)]
     pub remote_exit_code: Option<i32>,
 }
@@ -344,8 +346,9 @@ impl ToolCallResult {
     ///
     /// Le code atteint quand même le processus quand l'appel est servi en
     /// direct, parce que `tool_exit_code` (dans `crate::cli::runner`) lit
-    /// `remote_exit_code` avant `is_error`. Servi par un daemon, le champ ne
-    /// traverse pas le wire et le code vaut 0 (voir la doc du champ).
+    /// `remote_exit_code` avant `is_error`. Servi par un daemon, le code
+    /// voyage dans `_meta` (voir la doc du champ) et le chemin daemon le relit
+    /// de la même façon : 6 des deux côtés.
     #[must_use]
     pub const fn with_remote_exit_code_only(mut self, code: i32) -> Self {
         self.remote_exit_code = Some(code);
@@ -986,15 +989,13 @@ mod tests {
         );
     }
 
-    /// Le fait ne traverse PAS le fil MCP, et c'est ce qui bloque le chemin
-    /// daemon du CLI.
+    /// Le fait ne traverse PAS le corps du résultat sérialisé.
     ///
     /// Le `#[serde(skip)]` porté par `remote_exit_code` est délibéré — voir
-    /// la documentation du champ. Conséquence mesurée ici plutôt que supposée :
-    /// un `bridge-mcp daemon` qui sert l'appel ne peut relire que `isError`,
-    /// donc pour les outils à commande libre, qui ne le posent pas, il rend 0.
-    /// Le test existe pour que lever le `skip` — un changement de format de
-    /// réponse — ne puisse pas se faire sans le voir.
+    /// la documentation du champ. Le chemin daemon le reçoit par `_meta`
+    /// (`tool_result_value`), pas par ce corps : le test existe pour que lever
+    /// le `skip` — un changement de forme de tous les résultats et de tous les
+    /// `outputSchema` — ne puisse pas se faire sans le voir.
     #[test]
     fn the_fact_never_crosses_the_mcp_wire() {
         let json = serde_json::to_value(
