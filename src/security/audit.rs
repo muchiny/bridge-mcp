@@ -499,8 +499,17 @@ impl AuditLogger {
     #[must_use]
     pub fn disabled() -> Self {
         Self {
+            // Not `AuditConfig::default()`: that is `enabled: true`, and until
+            // `default_audit_path` got its test-build branch it was the REAL
+            // ~/.local/share/bridge-mcp/audit.log, so `rotate()` on a disabled
+            // logger renamed a developer's live audit log. Off, and pointing
+            // at no file at all.
             #[cfg(test)]
-            config: AuditConfig::default(),
+            config: AuditConfig {
+                enabled: false,
+                path: PathBuf::new(),
+                ..AuditConfig::default()
+            },
             sender: None,
             sanitizer: None,
             #[cfg(test)]
@@ -707,7 +716,14 @@ mod tests {
 
     #[test]
     fn test_has_sanitizer_reports_wiring() {
-        let config = AuditConfig::default();
+        // AuditConfig::default() carries the REAL path
+        // (~/.local/share/bridge-mcp/audit.log), which `new` creates and
+        // opens.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = AuditConfig {
+            path: temp_dir.path().join("audit.log"),
+            ..AuditConfig::default()
+        };
         let (plain, _task) = AuditLogger::new(&config).unwrap();
         assert!(
             !plain.has_sanitizer(),
@@ -971,11 +987,48 @@ mod tests {
         assert!(!logger.needs_rotation());
     }
 
+    /// `disabled()` used to hold `AuditConfig::default()` under
+    /// `#[cfg(test)]`: `enabled: true` and the REAL
+    /// `~/.local/share/bridge-mcp/audit.log`. `rotate()` is gated on that
+    /// flag alone, so the test that called it on a disabled logger renamed a
+    /// developer's live audit log and swept its directory on every
+    /// `cargo test` (184 archives, 175 of them empty, and a running `serve`
+    /// kept appending to the renamed inode). The path is pointed at a temp
+    /// file here so a regression fails an assertion instead of adding one
+    /// more archive to the real directory.
     #[test]
-    fn test_disabled_logger_rotate() {
-        let logger = AuditLogger::disabled();
-        // Should not panic
-        assert!(logger.rotate().is_ok());
+    fn test_disabled_logger_never_touches_its_audit_path() {
+        use std::time::{Duration, SystemTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+        std::fs::write(&audit_path, "live log").unwrap();
+        let expired = temp_dir.path().join("audit.log.20200101_000000");
+        std::fs::write(&expired, "expired archive").unwrap();
+        let old_time = SystemTime::now() - Duration::from_hours(2400);
+        filetime::set_file_mtime(&expired, filetime::FileTime::from_system_time(old_time)).unwrap();
+
+        let mut logger = AuditLogger::disabled();
+        logger.config.path = audit_path.clone();
+        logger.rotate().unwrap();
+
+        assert!(
+            audit_path.exists(),
+            "rotate() on a disabled logger renamed its live audit log"
+        );
+        assert!(
+            expired.exists(),
+            "rotate() on a disabled logger swept an archive out of its directory"
+        );
+        assert_eq!(
+            std::fs::read_dir(temp_dir.path()).unwrap().count(),
+            2,
+            "rotate() on a disabled logger must not create an archive"
+        );
+        assert!(
+            !logger.config.enabled,
+            "a disabled logger must not carry an enabled audit config"
+        );
     }
 
     #[test]

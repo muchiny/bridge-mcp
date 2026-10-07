@@ -27,7 +27,10 @@ use bridge_mcp::mcp::transport::http::{HttpTransportConfig, build_router};
 /// Build a working router pinned to localhost defaults. Reuses production
 /// `build_router` so we exercise the actual middleware stack.
 fn build_test_router_with_config(http_cfg: HttpTransportConfig) -> axum::Router {
-    let main_cfg = Config::default();
+    let mut main_cfg = Config::default();
+    // Config::default() audits to the REAL path
+    // (~/.local/share/bridge-mcp/audit.log), which `McpServer::new` opens.
+    main_cfg.audit.enabled = false;
     let (server, _audit_task) = McpServer::new(main_cfg);
     build_router(Arc::new(server), http_cfg)
 }

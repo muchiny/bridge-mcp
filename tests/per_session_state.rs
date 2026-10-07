@@ -27,6 +27,15 @@ use bridge_mcp::mcp::protocol::WriterMessage;
 use serde_json::json;
 use tokio::sync::{RwLock, mpsc};
 
+/// `Config::default()` audits to the REAL path
+/// (~/.local/share/bridge-mcp/audit.log), which `McpServer::new` creates and
+/// opens. Nothing here asserts on audit.
+fn test_config() -> Config {
+    let mut config = Config::default();
+    config.audit.enabled = false;
+    config
+}
+
 /// `FIND-033` — `runtime_max_output_chars` was a server-wide
 /// `Arc<RwLock<Option<usize>>>` written once per `initialize`.
 /// Two concurrent clients with different `client_overrides` saw the
@@ -35,7 +44,7 @@ use tokio::sync::{RwLock, mpsc};
 /// into B's slot.
 #[tokio::test]
 async fn runtime_max_output_chars_isolated_per_session() {
-    let config = Config::default();
+    let config = test_config();
     let (server, _audit_task) = McpServer::new(config);
     let server = Arc::new(server);
 
@@ -74,7 +83,7 @@ async fn runtime_max_output_chars_isolated_per_session() {
 /// notifications.
 #[tokio::test]
 async fn notification_tx_does_not_cross_sessions() {
-    let config = Config::default();
+    let config = test_config();
     let (server, _audit_task) = McpServer::new(config);
     let _server = Arc::new(server);
 
@@ -192,7 +201,7 @@ async fn subscriptions_are_removed_per_session_channel() {
 /// done before.
 #[tokio::test]
 async fn roots_never_come_from_the_session() {
-    let config = Config::default();
+    let config = test_config();
     let (server, _audit_task) = McpServer::new(config);
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);

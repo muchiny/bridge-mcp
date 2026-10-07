@@ -15,6 +15,10 @@ fn run(config: &std::path::Path, args: &[&str]) -> Output {
         .arg(config)
         .args(args)
         .env("HOME", config.parent().unwrap())
+        // The config has no `audit:` section, so the default audit path is
+        // `data_local_dir()`, which prefers XDG_DATA_HOME over HOME: left
+        // set, it is the developer's REAL ~/.local/share/bridge-mcp.
+        .env_remove("XDG_DATA_HOME")
         .output()
         .expect("spawn bridge-mcp")
 }
@@ -108,5 +112,30 @@ fn a_missing_ssh_key_file_exits_5_like_any_config_that_fails_to_load() {
     assert!(
         stderr.contains("no-such-key"),
         "stderr should name the key: {stderr}"
+    );
+}
+
+/// The production default audit path, end to end. Unit-test builds point
+/// `default_audit_path()` at a temp dir, so only a real binary can show that a
+/// release build still audits to `<data_local_dir>/bridge-mcp/audit.log` when
+/// the config has no `audit:` section. `history` reaches
+/// `create_context_with_audit` with no host and no network, and `run` points
+/// `data_local_dir` at the tempdir (`HOME` set, `XDG_DATA_HOME` removed).
+#[test]
+fn a_config_without_audit_writes_the_production_default_audit_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = empty_config(&dir);
+    let out = run(&cfg, &["history"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let audit = dir.path().join(".local/share/bridge-mcp/audit.log");
+    assert!(
+        audit.exists(),
+        "a release build must audit to the production default {}",
+        audit.display()
     );
 }

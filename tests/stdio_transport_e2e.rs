@@ -23,7 +23,9 @@ const BINARY: &str = env!("CARGO_BIN_EXE_bridge-mcp");
 
 /// Minimal config that exposes no hosts and uses default security so the
 /// server can boot without any SSH credentials. The config loader
-/// rejects files with group/other-readable bits, so we chmod 0600.
+/// rejects files with group/other-readable bits, so we chmod 0600. Audit is
+/// off: without an `audit:` section the spawned `serve` would open the REAL
+/// ~/.local/share/bridge-mcp/audit.log.
 fn write_test_config(dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("config.yaml");
@@ -31,7 +33,7 @@ fn write_test_config(dir: &std::path::Path) -> std::path::PathBuf {
         &path,
         "hosts:\n  stub:\n    hostname: 127.0.0.1\n    port: 22\n    user: nobody\n    \
          description: \"e2e test stub host (never dialed)\"\n    auth:\n      type: agent\n\
-         security:\n  mode: permissive\nlimits: {}\nsessions: {}\n",
+         security:\n  mode: permissive\nlimits: {}\nsessions: {}\naudit:\n  enabled: false\n",
     )
     .expect("write test config");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))

@@ -23,7 +23,11 @@ use bridge_mcp::mcp::McpServer;
 /// RESPONSE is now inert. It is dropped rather than routed, on any session.
 #[tokio::test]
 async fn an_inbound_client_response_is_inert() {
-    let (server, _audit_task) = McpServer::new(Config::default());
+    let mut config = Config::default();
+    // Config::default() audits to the REAL path
+    // (~/.local/share/bridge-mcp/audit.log), which `McpServer::new` opens.
+    config.audit.enabled = false;
+    let (server, _audit_task) = McpServer::new(config);
 
     // A response shape: an id, a result, and no method.
     let response = serde_json::json!({
