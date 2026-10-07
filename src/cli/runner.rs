@@ -19,8 +19,10 @@ use crate::mcp::CommandHistory;
 use crate::mcp::history::HistoryConfig;
 use crate::mcp::protocol::PROTOCOL_VERSION;
 use crate::mcp::request_meta::keys as meta_keys;
+use crate::mcp::tool_handlers::{SshDownloadHandler, SshUploadHandler};
 use crate::ports::ExecutorRouter;
 use crate::ports::ToolContext;
+use crate::ports::ToolHandler as _;
 use crate::security::{
     AuditEvent, AuditLogger, AuditWriterTask, CommandResult, CommandValidator, RateLimiter,
     Sanitizer,
@@ -1374,7 +1376,7 @@ async fn run_upload_in_context(
     match &result {
         Ok(transfer_result) => {
             ctx.audit_logger.log(
-                "ssh_upload",
+                SshUploadHandler.name(),
                 AuditEvent::new(
                     host,
                     &format!("SFTP_UPLOAD {} -> {}", local_path.display(), remote_path),
@@ -1387,7 +1389,7 @@ async fn run_upload_in_context(
         }
         Err(e) => {
             ctx.audit_logger.log(
-                "ssh_upload",
+                SshUploadHandler.name(),
                 AuditEvent::new(
                     host,
                     &format!("SFTP_UPLOAD {} -> {}", local_path.display(), remote_path),
@@ -1578,7 +1580,7 @@ async fn run_download_in_context(
     match &result {
         Ok(transfer_result) => {
             ctx.audit_logger.log(
-                "ssh_download",
+                SshDownloadHandler.name(),
                 AuditEvent::new(
                     host,
                     &format!("SFTP_DOWNLOAD {} -> {}", remote_path, local_path.display()),
@@ -1591,7 +1593,7 @@ async fn run_download_in_context(
         }
         Err(e) => {
             ctx.audit_logger.log(
-                "ssh_download",
+                SshDownloadHandler.name(),
                 AuditEvent::new(
                     host,
                     &format!("SFTP_DOWNLOAD {} -> {}", remote_path, local_path.display()),

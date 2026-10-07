@@ -129,10 +129,9 @@ impl ToolHandler for SshFileWriteHandler {
                     host: args.host.clone(),
                 })?;
 
-        if let Some(refusal) = crate::mcp::tool_handlers::utils::reject_posix_only_on_windows(
-            host_config,
-            "ssh_file_write",
-        ) {
+        if let Some(refusal) =
+            crate::mcp::tool_handlers::utils::reject_posix_only_on_windows(host_config, self.name())
+        {
             return Ok(refusal);
         }
 
@@ -252,7 +251,7 @@ impl SshFileWriteHandler {
         // Execute with retry
         let output = with_retry_if(
             &retry_config,
-            "ssh_file_write",
+            self.name(),
             async || {
                 let mut conn = ctx
                     .connection_pool
@@ -323,7 +322,7 @@ impl SshFileWriteHandler {
         match &result {
             Ok(transfer_result) => {
                 ctx.audit_logger.log(
-                    "ssh_file_write",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("SFTP_WRITE {}", args.path),
@@ -336,7 +335,7 @@ impl SshFileWriteHandler {
             }
             Err(e) => {
                 ctx.audit_logger.log(
-                    "ssh_file_write",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("SFTP_WRITE {}", args.path),

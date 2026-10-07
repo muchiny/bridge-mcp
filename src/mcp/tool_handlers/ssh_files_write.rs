@@ -254,7 +254,7 @@ impl ToolHandler for SshFilesWriteHandler {
             match result {
                 Ok(tr) => {
                     ctx.audit_logger.log(
-                        "ssh_files_write",
+                        self.name(),
                         AuditEvent::new(
                             &args.host,
                             &action,
@@ -278,7 +278,7 @@ impl ToolHandler for SshFilesWriteHandler {
                 }
                 Err(e) => {
                     ctx.audit_logger.log(
-                        "ssh_files_write",
+                        self.name(),
                         AuditEvent::new(
                             &args.host,
                             &action,

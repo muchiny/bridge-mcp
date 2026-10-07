@@ -181,7 +181,7 @@ impl ToolHandler for SshUploadHandler {
         match &result {
             Ok(transfer_result) => {
                 ctx.audit_logger.log(
-                    "ssh_upload",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("SFTP_UPLOAD {} -> {}", args.local_path, args.remote_path),
@@ -194,7 +194,7 @@ impl ToolHandler for SshUploadHandler {
             }
             Err(e) => {
                 ctx.audit_logger.log(
-                    "ssh_upload",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("SFTP_UPLOAD {} -> {}", args.local_path, args.remote_path),

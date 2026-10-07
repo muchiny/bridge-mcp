@@ -69,7 +69,10 @@ impl AuditEvent {
         }
     }
 
-    /// Set the tool name for this audit event.
+    /// Convenience constructor step, used by tests to build an already named
+    /// event. Production does not rely on it: `AuditLogger::log` takes the
+    /// tool as a parameter and overwrites `tool_name` with it, so the name
+    /// set here never reaches a sink.
     #[must_use]
     pub fn with_tool_name(mut self, name: &str) -> Self {
         self.tool_name = Some(name.to_string());
@@ -557,10 +560,11 @@ impl AuditLogger {
     /// Log an audit event (non-blocking), attributed to `tool`.
     ///
     /// `tool` is mandatory and OVERWRITES any `event.tool_name` the event
-    /// already carried: the sink is the single writer of that field, so two
-    /// values can never disagree silently. An audit line cannot be
-    /// anonymous through this entry point (`AuditEvent::new` itself still
-    /// builds a nameless event, which is why the name is taken here).
+    /// already carried: this is the single writer of that field, so two
+    /// values can never disagree silently. Both sinks (the `tracing` line
+    /// and the file/channel line) carry the name, so a line emitted through
+    /// this entry point is never anonymous. `AuditEvent::new` itself still
+    /// builds a nameless event, which is why the name is taken here.
     ///
     /// The event is sent to a background task for file writing.
     /// If a sanitizer is configured, `event.command` is masked BEFORE the
@@ -599,6 +603,7 @@ impl AuditLogger {
             } => {
                 info!(
                     event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
                     host = %event.host,
                     command = %event.command,
                     exit_code = exit_code,
@@ -609,6 +614,7 @@ impl AuditLogger {
             CommandResult::Error { message } => {
                 info!(
                     event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
                     host = %event.host,
                     command = %event.command,
                     error = %message,
@@ -618,6 +624,7 @@ impl AuditLogger {
             CommandResult::Denied { reason } => {
                 info!(
                     event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
                     host = %event.host,
                     command = %event.command,
                     reason = %reason,
@@ -771,6 +778,24 @@ mod tests {
             },
         );
         assert_eq!(event.tool_name, None);
+    }
+
+    #[test]
+    fn serialized_line_carries_the_tool_name() {
+        let ev = AuditEvent::new(
+            "h",
+            "c",
+            CommandResult::Success {
+                exit_code: 0,
+                duration_ms: 1,
+            },
+        );
+        let logger = AuditLogger::for_test();
+        logger.log("ssh_ls", ev);
+        let first = logger.drain_for_test().remove(0);
+        let line = serde_json::to_string(&first).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["tool_name"], "ssh_ls");
     }
 
     #[test]
@@ -2236,6 +2261,7 @@ mod tests {
         assert!(logs_contain("tracing-test-host"));
         assert!(logs_contain("tracing-test-command"));
         assert!(logs_contain("Audit: command executed"));
+        assert!(logs_contain("test_tool"));
     }
 
     #[test]
@@ -2249,6 +2275,7 @@ mod tests {
         assert!(logs_contain("denied-host"));
         assert!(logs_contain("Audit: command denied"));
         assert!(logs_contain("blacklisted pattern"));
+        assert!(logs_contain("test_tool"));
     }
 
     #[test]
@@ -2268,6 +2295,7 @@ mod tests {
         assert!(logs_contain("error-host"));
         assert!(logs_contain("Audit: command failed"));
         assert!(logs_contain("Connection refused"));
+        assert!(logs_contain("test_tool"));
     }
 
     // ============== Tests to catch previously-missed mutations ==============

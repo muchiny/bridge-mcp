@@ -180,7 +180,7 @@ impl ToolHandler for SshSyncHandler {
         match &result {
             Ok(transfer_result) => {
                 ctx.audit_logger.log(
-                    "ssh_sync",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("{direction_label} {} -> {}", args.source, args.destination),
@@ -193,7 +193,7 @@ impl ToolHandler for SshSyncHandler {
             }
             Err(e) => {
                 ctx.audit_logger.log(
-                    "ssh_sync",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("{direction_label} {} -> {}", args.source, args.destination),

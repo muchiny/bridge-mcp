@@ -24,6 +24,15 @@ host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 
+**The audit-integrity entry (`AuditLogger::log` taking `tool`) has a third
+basis.** The defect was measured live, against a real host through the MCP
+server: `ssh_session_exec` wrote a line
+`{"event_type":"ssh_exec","host":"raspberry",...}` with no `tool_name` field.
+But the binary queried was `~/.local/bin/bridge-mcp`, dated 2026-09-09, which
+predates this branch. The **fix** was not measured live; it rests on
+compilation (the 16 anonymous call sites were enumerated by the compiler), unit
+tests and a serialisation test.
+
 ### BREAKING
 
 - **(lib API) `AuditLogger::log(&self, event)` is now `log(&self, tool: &str, event)`,

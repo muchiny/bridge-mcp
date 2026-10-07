@@ -205,7 +205,7 @@ impl ToolHandler for SshLsHandler {
         match &result {
             Ok(entries) => {
                 ctx.audit_logger.log(
-                    "ssh_ls",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("SFTP_LS {}", args.path),
@@ -247,7 +247,7 @@ impl ToolHandler for SshLsHandler {
             }
             Err(e) => {
                 ctx.audit_logger.log(
-                    "ssh_ls",
+                    self.name(),
                     AuditEvent::new(
                         &args.host,
                         &format!("SFTP_LS {}", args.path),
