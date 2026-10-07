@@ -204,14 +204,17 @@ impl ToolHandler for SshLsHandler {
         // Log the result
         match &result {
             Ok(entries) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_LS {}", args.path),
-                    AuditCommandResult::Success {
-                        exit_code: 0,
-                        duration_ms,
-                    },
-                ));
+                ctx.audit_logger.log(
+                    "ssh_ls",
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_LS {}", args.path),
+                        AuditCommandResult::Success {
+                            exit_code: 0,
+                            duration_ms,
+                        },
+                    ),
+                );
 
                 let mut entries = entries.clone();
 
@@ -243,13 +246,16 @@ impl ToolHandler for SshLsHandler {
                 Ok(ToolCallResult::text(json_output))
             }
             Err(e) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_LS {}", args.path),
-                    AuditCommandResult::Error {
-                        message: e.to_string(),
-                    },
-                ));
+                ctx.audit_logger.log(
+                    "ssh_ls",
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_LS {}", args.path),
+                        AuditCommandResult::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                );
 
                 Err(BridgeError::Sftp {
                     reason: e.to_string(),

@@ -180,7 +180,7 @@ impl ExecuteCommandUseCase {
     /// not bothered.
     pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
         self.audit_logger
-            .log(AuditEvent::denied(host, command, reason).with_tool_name(tool));
+            .log(tool, AuditEvent::denied(host, command, reason));
     }
 
     /// Process a successful execution, recording which tool ran it.
@@ -290,10 +290,9 @@ impl ExecuteCommandUseCase {
                 exit_code,
                 duration_ms,
             },
-        )
-        .with_tool_name(tool);
+        );
         event.reduction = reduction.to_vec();
-        self.audit_logger.log(event);
+        self.audit_logger.log(tool, event);
         self.history
             .record_success(host, redacted, exit_code, duration_ms);
     }
@@ -306,14 +305,14 @@ impl ExecuteCommandUseCase {
         let redacted = self.sanitizer.sanitize(command);
 
         self.audit_logger.log(
+            tool,
             AuditEvent::new(
                 host,
                 &redacted,
                 CommandResult::Error {
                     message: error.to_string(),
                 },
-            )
-            .with_tool_name(tool),
+            ),
         );
 
         self.history.record_failure(host, &redacted);

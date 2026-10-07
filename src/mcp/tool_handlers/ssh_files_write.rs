@@ -253,14 +253,17 @@ impl ToolHandler for SshFilesWriteHandler {
 
             match result {
                 Ok(tr) => {
-                    ctx.audit_logger.log(AuditEvent::new(
-                        &args.host,
-                        &action,
-                        AuditCommandResult::Success {
-                            exit_code: 0,
-                            duration_ms: tr.duration_ms,
-                        },
-                    ));
+                    ctx.audit_logger.log(
+                        "ssh_files_write",
+                        AuditEvent::new(
+                            &args.host,
+                            &action,
+                            AuditCommandResult::Success {
+                                exit_code: 0,
+                                duration_ms: tr.duration_ms,
+                            },
+                        ),
+                    );
                     success_count += 1;
                     total_bytes += tr.bytes_transferred;
                     let _ = writeln!(
@@ -274,13 +277,16 @@ impl ToolHandler for SshFilesWriteHandler {
                     );
                 }
                 Err(e) => {
-                    ctx.audit_logger.log(AuditEvent::new(
-                        &args.host,
-                        &action,
-                        AuditCommandResult::Error {
-                            message: e.to_string(),
-                        },
-                    ));
+                    ctx.audit_logger.log(
+                        "ssh_files_write",
+                        AuditEvent::new(
+                            &args.host,
+                            &action,
+                            AuditCommandResult::Error {
+                                message: e.to_string(),
+                            },
+                        ),
+                    );
                     error_count += 1;
                     let _ = writeln!(
                         output,

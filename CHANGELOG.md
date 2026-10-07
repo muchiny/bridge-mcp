@@ -26,6 +26,21 @@ nothing in the text below would otherwise tell you which is which.
 
 ### BREAKING
 
+- **(lib API) `AuditLogger::log(&self, event)` is now `log(&self, tool: &str, event)`,
+  and `tool` overwrites `event.tool_name`.** `AuditLogger` is a non-hidden
+  re-export, so this breaks external callers. Migration: pass the name of the
+  tool that produced the event as the first argument, and drop any
+  `.with_tool_name(..)` you chained on the event (it is now ignored; the sink is
+  the only writer of the field). `AuditEvent::new` still builds a nameless event,
+  so the guarantee is "no call to `log` without a tool", not "no `AuditEvent`
+  without a `tool_name`". Why: `event_type` is the literal `ssh_exec` for
+  every command event, and `tool_name` is skipped from the JSON when absent, so
+  a line from a handler that bypassed the use-case read exactly like an ordinary
+  `ssh_exec`. Sixteen call sites were anonymous (`ssh_ls`, `ssh_download`,
+  `ssh_upload`, `ssh_sync`, `ssh_file_write`'s SFTP branch, `ssh_files_write`,
+  and four in `cli/runner.rs`); they now carry their own name. Their
+  `exit_code: 0` on SFTP transfers and empty `reduction` are unchanged.
+
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
   `main` classifies any `load_config` failure as 5 by call site

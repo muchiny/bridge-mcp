@@ -1373,23 +1373,29 @@ async fn run_upload_in_context(
     // Log the result
     match &result {
         Ok(transfer_result) => {
-            ctx.audit_logger.log(AuditEvent::new(
-                host,
-                &format!("SFTP_UPLOAD {} -> {}", local_path.display(), remote_path),
-                CommandResult::Success {
-                    exit_code: 0,
-                    duration_ms: transfer_result.duration_ms,
-                },
-            ));
+            ctx.audit_logger.log(
+                "ssh_upload",
+                AuditEvent::new(
+                    host,
+                    &format!("SFTP_UPLOAD {} -> {}", local_path.display(), remote_path),
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: transfer_result.duration_ms,
+                    },
+                ),
+            );
         }
         Err(e) => {
-            ctx.audit_logger.log(AuditEvent::new(
-                host,
-                &format!("SFTP_UPLOAD {} -> {}", local_path.display(), remote_path),
-                CommandResult::Error {
-                    message: e.to_string(),
-                },
-            ));
+            ctx.audit_logger.log(
+                "ssh_upload",
+                AuditEvent::new(
+                    host,
+                    &format!("SFTP_UPLOAD {} -> {}", local_path.display(), remote_path),
+                    CommandResult::Error {
+                        message: e.to_string(),
+                    },
+                ),
+            );
         }
     }
 
@@ -1571,23 +1577,29 @@ async fn run_download_in_context(
     // Log the result
     match &result {
         Ok(transfer_result) => {
-            ctx.audit_logger.log(AuditEvent::new(
-                host,
-                &format!("SFTP_DOWNLOAD {} -> {}", remote_path, local_path.display()),
-                CommandResult::Success {
-                    exit_code: 0,
-                    duration_ms: transfer_result.duration_ms,
-                },
-            ));
+            ctx.audit_logger.log(
+                "ssh_download",
+                AuditEvent::new(
+                    host,
+                    &format!("SFTP_DOWNLOAD {} -> {}", remote_path, local_path.display()),
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: transfer_result.duration_ms,
+                    },
+                ),
+            );
         }
         Err(e) => {
-            ctx.audit_logger.log(AuditEvent::new(
-                host,
-                &format!("SFTP_DOWNLOAD {} -> {}", remote_path, local_path.display()),
-                CommandResult::Error {
-                    message: e.to_string(),
-                },
-            ));
+            ctx.audit_logger.log(
+                "ssh_download",
+                AuditEvent::new(
+                    host,
+                    &format!("SFTP_DOWNLOAD {} -> {}", remote_path, local_path.display()),
+                    CommandResult::Error {
+                        message: e.to_string(),
+                    },
+                ),
+            );
         }
     }
 

@@ -322,23 +322,29 @@ impl SshFileWriteHandler {
         // Audit log
         match &result {
             Ok(transfer_result) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_WRITE {}", args.path),
-                    AuditCommandResult::Success {
-                        exit_code: 0,
-                        duration_ms: transfer_result.duration_ms,
-                    },
-                ));
+                ctx.audit_logger.log(
+                    "ssh_file_write",
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_WRITE {}", args.path),
+                        AuditCommandResult::Success {
+                            exit_code: 0,
+                            duration_ms: transfer_result.duration_ms,
+                        },
+                    ),
+                );
             }
             Err(e) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_WRITE {}", args.path),
-                    AuditCommandResult::Error {
-                        message: e.to_string(),
-                    },
-                ));
+                ctx.audit_logger.log(
+                    "ssh_file_write",
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_WRITE {}", args.path),
+                        AuditCommandResult::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                );
             }
         }
 

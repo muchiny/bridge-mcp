@@ -554,14 +554,21 @@ impl AuditLogger {
         self.now_fn = now_fn;
     }
 
-    /// Log an audit event (non-blocking)
+    /// Log an audit event (non-blocking), attributed to `tool`.
+    ///
+    /// `tool` is mandatory and OVERWRITES any `event.tool_name` the event
+    /// already carried: the sink is the single writer of that field, so two
+    /// values can never disagree silently. An audit line cannot be
+    /// anonymous through this entry point (`AuditEvent::new` itself still
+    /// builds a nameless event, which is why the name is taken here).
     ///
     /// The event is sent to a background task for file writing.
     /// If a sanitizer is configured, `event.command` is masked BEFORE the
     /// tracing emission and BEFORE the channel send (so neither sink ever
     /// sees the unredacted command).
-    pub fn log(&self, event: AuditEvent) {
+    pub fn log(&self, tool: &str, event: AuditEvent) {
         let mut event = event;
+        event.tool_name = Some(tool.to_string());
         if let Some(ref s) = self.sanitizer {
             event.command = s.sanitize(&event.command).into_owned();
         }
@@ -767,6 +774,26 @@ mod tests {
     }
 
     #[test]
+    fn log_stamps_tool_and_overwrites_a_conflicting_name() {
+        let logger = AuditLogger::for_test();
+        let ok = CommandResult::Success {
+            exit_code: 0,
+            duration_ms: 1,
+        };
+        // Anonymous event: the sink supplies the name.
+        logger.log("ssh_upload", AuditEvent::new("h", "c", ok.clone()));
+        // Event already named differently: the parameter wins (single writer).
+        logger.log(
+            "ssh_download",
+            AuditEvent::new("h", "c", ok).with_tool_name("ssh_exec"),
+        );
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_upload"));
+        assert_eq!(events[1].tool_name.as_deref(), Some("ssh_download"));
+    }
+
+    #[test]
     fn reduction_params_are_serialized_only_when_present() {
         let mut ev = AuditEvent::new(
             "h",
@@ -827,7 +854,7 @@ mod tests {
         );
 
         // Should not panic
-        logger.log(event);
+        logger.log("test_tool", event);
     }
 
     #[test]
@@ -1055,7 +1082,7 @@ mod tests {
                 duration_ms: 1,
             },
         );
-        logger.log(event);
+        logger.log("test_tool", event);
 
         // Check needs_rotation (should be false for small file)
         assert!(!logger.needs_rotation());
@@ -1075,7 +1102,7 @@ mod tests {
 
         // Log should not panic
         let event = AuditEvent::denied("test", "rm -rf /", "test");
-        logger.log(event);
+        logger.log("test_tool", event);
     }
 
     // ============== Full Event Serialization Tests ==============
@@ -1200,14 +1227,17 @@ mod tests {
         // 16th event, then ~0.5 MiB in the fresh file. Exactly one rotation.
         let big_command = "x".repeat(64 * 1024);
         for _ in 0..24 {
-            logger.log(AuditEvent::new(
-                "rotate-host",
-                &big_command,
-                CommandResult::Success {
-                    exit_code: 0,
-                    duration_ms: 1,
-                },
-            ));
+            logger.log(
+                "test_tool",
+                AuditEvent::new(
+                    "rotate-host",
+                    &big_command,
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
         }
 
         drop(logger); // closes the channel so run() returns
@@ -1272,14 +1302,17 @@ mod tests {
         let handle = tokio::spawn(task.expect("enabled audit must yield a writer task").run());
 
         // Exactly one small event: a few hundred bytes, nowhere near 1 MiB.
-        logger.log(AuditEvent::new(
-            "seed-host",
-            "echo hi",
-            CommandResult::Success {
-                exit_code: 0,
-                duration_ms: 1,
-            },
-        ));
+        logger.log(
+            "test_tool",
+            AuditEvent::new(
+                "seed-host",
+                "echo hi",
+                CommandResult::Success {
+                    exit_code: 0,
+                    duration_ms: 1,
+                },
+            ),
+        );
 
         drop(logger); // closes the channel so run() returns
         handle.await.unwrap();
@@ -1438,14 +1471,17 @@ mod tests {
         let handle = tokio::spawn(task.unwrap().run());
 
         for _ in 0..3 {
-            logger.log(AuditEvent::new(
-                "zero-host",
-                "echo hi",
-                CommandResult::Success {
-                    exit_code: 0,
-                    duration_ms: 1,
-                },
-            ));
+            logger.log(
+                "test_tool",
+                AuditEvent::new(
+                    "zero-host",
+                    "echo hi",
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
         }
 
         drop(logger);
@@ -1487,7 +1523,7 @@ mod tests {
                     duration_ms: u64::from(i) * 10,
                 },
             );
-            logger.log(event);
+            logger.log("test_tool", event);
         }
 
         // The sender should still be valid (not panic)
@@ -2143,7 +2179,7 @@ mod tests {
         );
 
         // Call log() - this should send the event to the channel
-        logger.log(event);
+        logger.log("test_tool", event);
 
         // Drop logger to close the channel
         drop(logger);
@@ -2193,7 +2229,7 @@ mod tests {
         );
 
         // Call log() which internally calls log_to_tracing
-        logger.log(event);
+        logger.log("test_tool", event);
 
         // Verify tracing output was captured
         // tracing_test::traced_test captures logs and we can assert on them
@@ -2208,7 +2244,7 @@ mod tests {
         let logger = AuditLogger::disabled();
         let event = AuditEvent::denied("denied-host", "rm -rf /", "blacklisted pattern");
 
-        logger.log(event);
+        logger.log("test_tool", event);
 
         assert!(logs_contain("denied-host"));
         assert!(logs_contain("Audit: command denied"));
@@ -2227,7 +2263,7 @@ mod tests {
             },
         );
 
-        logger.log(event);
+        logger.log("test_tool", event);
 
         assert!(logs_contain("error-host"));
         assert!(logs_contain("Audit: command failed"));

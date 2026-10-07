@@ -16,14 +16,17 @@ async fn audit_log_redacts_password_in_command() {
     let (logger, task) = AuditLogger::new_with_sanitizer(&config, sanitizer).unwrap();
     let writer = tokio::spawn(task.unwrap().run());
 
-    logger.log(AuditEvent::new(
-        "prod-db",
-        "MYSQL_PWD='hunter2-supersecret-do-not-leak' mysql -e 'SELECT 1'",
-        CommandResult::Success {
-            exit_code: 0,
-            duration_ms: 12,
-        },
-    ));
+    logger.log(
+        "test_tool",
+        AuditEvent::new(
+            "prod-db",
+            "MYSQL_PWD='hunter2-supersecret-do-not-leak' mysql -e 'SELECT 1'",
+            CommandResult::Success {
+                exit_code: 0,
+                duration_ms: 12,
+            },
+        ),
+    );
 
     drop(logger); // closes the channel so the writer task ends
     writer.await.unwrap();
@@ -48,14 +51,17 @@ async fn audit_log_redacts_bearer_token() {
     let (logger, task) = AuditLogger::new_with_sanitizer(&config, sanitizer).unwrap();
     let writer = tokio::spawn(task.unwrap().run());
 
-    logger.log(AuditEvent::new(
-        "awx",
-        "curl -H 'Authorization: Bearer abc123def456ghi789jkl012mno345' https://awx/api",
-        CommandResult::Success {
-            exit_code: 0,
-            duration_ms: 5,
-        },
-    ));
+    logger.log(
+        "test_tool",
+        AuditEvent::new(
+            "awx",
+            "curl -H 'Authorization: Bearer abc123def456ghi789jkl012mno345' https://awx/api",
+            CommandResult::Success {
+                exit_code: 0,
+                duration_ms: 5,
+            },
+        ),
+    );
     drop(logger);
     writer.await.unwrap();
 
