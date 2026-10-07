@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install
+.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install lint-stable markdownlint
 
 # ---------------------------------------------------------------------------
 # Guards around optional tooling.
@@ -20,8 +20,9 @@
 # There is deliberately no `want` macro. Make runs each recipe line in its OWN
 # shell, so a guard line ending in `exit 0` only ends THAT line — make then runs
 # the next line, tool absent or not. The guard and the command must share one
-# shell, so optional tooling uses the explicit `if/else` block below (the same
-# shape the `typos` target has always used).
+# shell, so genuinely optional tooling uses an explicit `if/else` block (see
+# `outdated`). Nothing in `ci` is optional: `typos` used to be, and `make ci`
+# went green on a machine without it having checked nothing.
 #
 # Neither form masks a failure: once the tool runs, its exit code is the recipe's.
 need = command -v $(1) >/dev/null 2>&1 || { echo "$(1) not installed. $(2)"; exit 1; }
@@ -59,9 +60,19 @@ check:
 # The second line is not redundant: nextest cannot run doctests, so on any
 # machine where the nextest path succeeds the compiled examples in src/ would
 # otherwise never be built or executed (they weren't, anywhere, until 2026-08).
+# Same command as the CI `Tests` job (--all-targets --all-features), so a green
+# local run covers the same code. The fallback fires ONLY when nextest is not
+# installed (`command -v`); a failing test fails the recipe, with nextest's
+# report visible. The old `nextest 2>/dev/null || cargo test` replayed the whole
+# suite under the slow harness on any test failure and threw the report away.
 test:
-	cargo nextest run 2>/dev/null || cargo test
-	cargo test --doc
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run --all-targets --all-features; \
+	else \
+		echo "cargo-nextest not installed, falling back to cargo test"; \
+		cargo test --all-targets --all-features; \
+	fi
+	cargo test --doc --all-features
 
 # Run tests with OpenTelemetry feature enabled
 # Validates the feature-gated telemetry module and OTLP plumbing compiles
@@ -98,7 +109,64 @@ lint:
 # Its own CARGO_TARGET_DIR on purpose: sharing target/ with `make lint` makes
 # the two targets evict each other's artifacts and rebuild the world on every
 # alternation. Not under /tmp — that is a RAM-backed tmpfs on this box.
+#
+# The recipe also checks that the LOCAL stable is the UPSTREAM stable. The
+# installed toolchain is whatever `rustup update` last fetched, and nothing keeps
+# it current: it sat at 1.98.0 for six weeks while 1.99.0 shipped
+# `assert_is_empty`, so this target read green on a stale compiler while CI's
+# Clippy put 618 violations on every PR (#221, then #223). Do not delete the
+# check as noise; it is the only thing that makes this target's green mean
+# "what CI will say".
+#   - always prints the compiler that linted;
+#   - stable toolchain not installed -> FAIL, saying so (`rustup toolchain
+#     install stable`), not a bogus "version mismatch";
+#   - network reachable, versions differ -> FAIL (run `rustup update stable`);
+#   - fetch failed (no network, or an HTTP status >= 400), OR it answered but the response has no `[pkg.rust]
+#     version` line (upstream reformatted; the parser needs updating) -> loud
+#     WARNING saying which, then lint anyway. A local gate must work offline;
+#     this is about the dev machine, not the air-gapped hosts. On a networked
+#     machine a warning is a SIGNAL (the parser broke), not background noise.
+# Cost: `curl -m 10` can add up to 10 s to an offline `make ci`.
+# Test hooks, all echoed when in use because they disarm the check. They are
+# honoured ONLY when passed on the make command line (`make TEST_X=... lint-stable`);
+# an exported environment variable is ignored, so a stray one cannot silently
+# disarm the check:
+#   TEST_STABLE_CHANNEL_URL       where to fetch (unroutable / file:// fixture)
+#   TEST_UPSTREAM_STABLE_VERSION  skip the fetch: "1.99.0 (b940084d7 2026-09-28)"
+#   TEST_STABLE_RUSTC             command replacing `rustc` (e.g. `false`)
+# `rustup update stable` is deliberately NOT run here: a lint target must not
+# mutate the developer's toolchain.
+cmdline = $(if $(filter command line,$(origin $(1))),$($(1)))
+STABLE_CHANNEL_URL := $(or $(call cmdline,TEST_STABLE_CHANNEL_URL),https://static.rust-lang.org/dist/channel-rust-stable.toml)
+UP_OVERRIDE := $(call cmdline,TEST_UPSTREAM_STABLE_VERSION)
+RUSTC_CMD := $(or $(call cmdline,TEST_STABLE_RUSTC),rustc)
 lint-stable:
+	@if [ -n '$(UP_OVERRIDE)' ]; then echo "NOTICE: lint-stable: TEST_UPSTREAM_STABLE_VERSION='$(UP_OVERRIDE)' is set; the upstream check is replaced by this constant"; fi; \
+	if [ '$(STABLE_CHANNEL_URL)' != 'https://static.rust-lang.org/dist/channel-rust-stable.toml' ]; then echo "NOTICE: lint-stable: TEST_STABLE_CHANNEL_URL='$(STABLE_CHANNEL_URL)' is set; not fetching the real channel file"; fi; \
+	if [ '$(RUSTC_CMD)' != rustc ]; then echo "NOTICE: lint-stable: TEST_STABLE_RUSTC='$(RUSTC_CMD)' is set; not asking the real rustc"; fi; \
+	raw=$$(RUSTUP_TOOLCHAIN=stable $(RUSTC_CMD) --version 2>&1); \
+	local=$$(printf '%s\n' "$$raw" | sed -n 's/^rustc //p'); \
+	if [ -z "$$local" ]; then \
+		echo "ERROR: lint-stable: could not get a version from the stable toolchain; it is probably not installed. Run 'rustup toolchain install stable'. Its output was:"; \
+		printf '%s\n' "$$raw"; \
+		exit 1; \
+	fi; \
+	echo "lint-stable: local stable compiler = $$local"; \
+	up='$(UP_OVERRIDE)'; fetched=ok; \
+	if [ -z "$$up" ]; then \
+		toml=$$(curl -fsS -m 10 '$(STABLE_CHANNEL_URL)' 2>/dev/null) || fetched=failed; \
+		up=$$(printf '%s\n' "$$toml" | awk '/^\[pkg\.rust\]/{f=1;next} f&&/^version/{gsub(/^version = "|"$$/,"");print;exit}'); \
+	fi; \
+	if [ "$$fetched" = failed ]; then \
+		echo "WARNING: lint-stable: could not fetch $(STABLE_CHANNEL_URL) (no network, or the server answered with an HTTP error, status >= 400); cannot tell whether $$local is current. A newer clippy may still fail CI."; \
+	elif [ -z "$$up" ]; then \
+		echo "WARNING: lint-stable: $(STABLE_CHANNEL_URL) answered but its response has no [pkg.rust] version line (upstream reformatted the file, in which case the parser in this recipe needs updating, or something else answered, such as a captive portal). Cannot tell whether $$local is current."; \
+	elif [ "$$up" != "$$local" ]; then \
+		echo "ERROR: lint-stable: local stable is $$local but upstream stable is $$up. CI lints upstream stable; run 'rustup update stable'."; \
+		exit 1; \
+	else \
+		echo "lint-stable: local stable matches upstream stable"; \
+	fi
 	RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target-stable \
 		cargo clippy --all-targets --all-features -- -D warnings
 
@@ -202,11 +270,21 @@ dev:
 
 # Check for typos in code
 typos:
-	@if command -v typos >/dev/null 2>&1; then \
-		typos; \
-	else \
-		echo "typos not installed, skipping"; \
-	fi
+	@$(call need,typos,cargo install typos-cli)
+	typos
+
+# Markdown lint with the same tool CI runs: markdownlint-cli2, which reads the
+# repo's .markdownlint.yaml itself and prints its own version line (and the
+# markdownlint rule set under it), so the log says which rulebook was applied.
+# Tracked files only, on purpose: CI checks out nothing else, whereas a
+# `**/*.md` glob here would also lint target/doc vendored font licences and
+# gitignored plans, failing for reasons CI never sees. A Node tool in a Rust
+# gate is a real cost; leaving it out let a duplicate `### Added` reach a red PR
+# check after three green `make ci` runs. Not `npx --yes`: that would put a
+# download inside a gate that has no honest way to degrade.
+markdownlint:
+	@$(call need,markdownlint-cli2,npm install -g markdownlint-cli2)
+	git ls-files -z '*.md' | xargs -0 markdownlint-cli2
 
 # Check for unused dependencies
 machete:
@@ -224,18 +302,32 @@ outdated:
 # Full quality check (all linters)
 quality: fmt-check lint typos machete
 
-# Full CI check (quick). Mirrors the required ci.yml checks
-# (Format/Clippy/Tests/Docs/Deny/Typos); CI additionally runs coverage (70%),
-# feature-powerset and markdownlint.
+# Full CI check (quick). Mirrors the REQUIRED branch-protection contexts
+# (Format, Clippy, Tests, Deny (advisories + licenses), Typos) and also runs
+# Docs, `audit` and `markdownlint`, which are not required. CI additionally runs
+# coverage (COVERAGE_MIN, 93%) and feature-powerset.
 #
-# `doc-check` is in this list because Docs is a REQUIRED check in ci.yml and
-# was not: `make ci` passed on a doc comment that linked a public item to a
-# private one, and the red arrived on the PR instead. A pre-commit gate that
-# omits a required check is the false green it exists to prevent.
-ci: fmt-check lint test doc-check audit deny typos
+# `lint-stable` is in this list because CI's Clippy runs real stable
+# (RUSTUP_TOOLCHAIN: stable at workflow level) while `lint` runs the 1.98.0
+# pinned by rust-toolchain.toml. `lint` alone went green three times on a PR
+# whose Clippy was red, and clippy 1.99's `assert_is_empty` put 618 violations
+# on every PR. `lint` stays: it is the MSRV check. `test` uses --all-features
+# for the same reason: CI's Tests job does.
+#
+# `doc-check` is in this list although Docs is NOT a required check: `make ci`
+# passed on a doc comment that linked a public item to a private one, and the
+# red arrived on the PR instead. Docs still fails the PR's CI run; it just
+# does not block the merge button.
+#
+# Not covered: CI's Tests job also runs `make verify-install
+# BIN=target/debug/bridge-mcp`. It is not here because it is noisy against a
+# stale local target/debug, so a `build.rs` regression that makes
+# BRIDGE_MCP_BUILD_REV fall back to `unknown` passes `make ci` and fails the
+# required Tests context on the PR. `make ci` is not the whole of CI.
+ci: fmt-check lint lint-stable test doc-check audit deny typos markdownlint
 
 # Full CI check (comprehensive - replaces GitHub Actions)
-ci-full: fmt-check lint lint-stable test audit typos hack geiger doc-check
+ci-full: fmt-check lint lint-stable test audit typos markdownlint hack geiger doc-check
 	@echo "Full CI complete."
 
 # Setup development environment
@@ -252,7 +344,7 @@ setup:
 	fi
 	@echo "Installing markdownlint (requires Node.js)..."
 	@if command -v npm >/dev/null 2>&1; then \
-		npm install -g markdownlint-cli; \
+		npm install -g markdownlint-cli2; \
 	else \
 		echo "npm not found, skipping markdownlint"; \
 	fi
@@ -449,9 +541,21 @@ e2e-mock:
 	cargo test --test e2e_mock -- --nocapture
 
 # Docker-based E2E tests (real SSH, requires docker)
-e2e-docker: e2e-docker-up
-	cargo test --test e2e_docker -- --ignored --test-threads=1 --nocapture
-	$(MAKE) e2e-docker-down
+# Not `e2e-docker: e2e-docker-up`: a failing prerequisite aborts before the
+# recipe body, so a timed-out `up --wait` would skip teardown and leave port
+# 2222 held. Up, test and down are one shell so down ALWAYS runs, and a failed
+# teardown turns a passing run red instead of leaking the container silently.
+e2e-docker:
+	@status=0; \
+	$(MAKE) e2e-docker-up || status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		cargo test --test e2e_docker -- --ignored --test-threads=1 --nocapture || status=$$?; \
+	fi; \
+	$(MAKE) e2e-docker-down || { \
+		echo "ERROR: e2e-docker-down failed; the container may still hold port 2222"; \
+		[ $$status -ne 0 ] || status=1; \
+	}; \
+	exit $$status
 
 # Start Docker SSH test server
 e2e-docker-up:
@@ -523,6 +627,7 @@ help:
 	@echo "  fmt              - Format code"
 	@echo "  fmt-check        - Check formatting"
 	@echo "  typos            - Check for typos"
+	@echo "  markdownlint     - Lint tracked markdown (as CI does)"
 	@echo "  doc-check        - Rustdoc lint (broken links, -D warnings)"
 	@echo "  hack             - Check all feature combinations"
 	@echo "  quality          - Full quality check (lint+typos+machete)"

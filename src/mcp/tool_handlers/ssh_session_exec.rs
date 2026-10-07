@@ -75,9 +75,10 @@ impl SshSessionExecHandler {
 
 /// Build the (possibly elevated) command to run in the session.
 ///
-/// L'élévation est une décision du domaine : `privilege::elevate*` enveloppe
-/// la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer ici n'élèverait
-/// que le premier processus — voir la documentation de
+/// Elevation is a domain decision: `privilege::elevate*` wraps the whole line
+/// (`sudo -n bash -c '<all>'`, or the `printf … | sudo -S -p '' bash -c
+/// 'exec 0</dev/null; <all>'` pipe form when the host has a `sudo_password`).
+/// Prefixing it here would only elevate the first process; see the docs of
 /// `domain::privilege::elevate`.
 fn build_command(
     args: &SshSessionExecArgs,
@@ -96,7 +97,9 @@ fn build_command(
     // `RedactedSecret` and this keeps its lifetime as narrow as the sudo
     // branch it's used in, not every Posix command on this session.
     let sudo_password = if privilege.sudo {
-        session_host_config.and_then(|h| h.sudo_password.clone())
+        session_host_config
+            .and_then(|h| h.sudo_password.clone())
+            .filter(|p| !p.is_empty())
     } else {
         None
     };
@@ -106,7 +109,7 @@ fn build_command(
              Consider configuring NOPASSWD in sudoers for better security."
         );
     }
-    crate::domain::privilege::elevate_with_password(
+    crate::domain::privilege::elevate_with_password_via_pipe(
         &args.command,
         &privilege,
         sudo_password.as_deref(),

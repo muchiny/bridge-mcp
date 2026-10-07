@@ -1747,6 +1747,63 @@ pub const BUILD_REV: &str = env!("BRIDGE_MCP_BUILD_REV");
 /// Vendor-namespaced `_meta` key carrying build provenance in `serverInfo`.
 /// Matches the reverse-DNS package name in `server.json`.
 pub const BUILD_META_KEY: &str = "io.github.muchiny/build";
+/// Vendor-namespaced `_meta` key carrying the **remote** command's exit code
+/// on a `tools/call` result.
+///
+/// Same owned prefix as [`BUILD_META_KEY`] (the reverse-DNS name in
+/// `server.json`), never `io.modelcontextprotocol/`, which the spec reserves
+/// (reserved prefixes are those whose second label is `modelcontextprotocol`
+/// or `mcp`). The value is a JSON integer.
+///
+/// It exists because `ToolCallResult::remote_exit_code` is `#[serde(skip)]`:
+/// the result body must not grow a field (it would enter every
+/// `outputSchema`), but a client reading the result off the wire — the
+/// daemon-forwarding CLI path — still needs the fact. `_meta` is the spec's
+/// extension point for exactly that. Producer
+/// ([`tool_result_value`]) and consumer (`crate::cli::runner`) both read this
+/// constant; do not repeat the literal.
+pub const REMOTE_EXIT_CODE_META_KEY: &str = "io.github.muchiny/remote-exit-code";
+
+/// Serialize a tool result for the wire, adding the one thing `serde` skips.
+///
+/// Identical to `serde_json::to_value(result)` except that a result carrying
+/// `remote_exit_code` also carries it as
+/// `_meta[`[`REMOTE_EXIT_CODE_META_KEY`]`]`. Every site that answers a
+/// `tools/call` with a finished result goes through here, so the fact cannot
+/// be dropped by one path that forgot.
+///
+/// # Errors
+/// Propagates the `serde_json` serialization failure.
+pub fn tool_result_value(result: &ToolCallResult) -> serde_json::Result<Value> {
+    let mut value = serde_json::to_value(result)?;
+    if let (Some(code), Value::Object(map)) = (result.remote_exit_code, &mut value) {
+        let meta = map
+            .entry("_meta")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(meta) = meta {
+            meta.insert(REMOTE_EXIT_CODE_META_KEY.to_string(), Value::from(code));
+        }
+    }
+    Ok(value)
+}
+
+impl JsonRpcResponse {
+    /// Answer a `tools/call` with a finished result, remote exit code
+    /// included (see [`tool_result_value`]).
+    #[must_use]
+    pub fn tool_result(id: Option<Value>, result: &ToolCallResult) -> Self {
+        match tool_result_value(result) {
+            Ok(v) => Self::success(id, v),
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to serialize response");
+                Self::error(
+                    id,
+                    JsonRpcError::internal_error(format!("Serialization error: {e}")),
+                )
+            }
+        }
+    }
+}
 /// URL of the server icon advertised in `ServerInfo` (SEP-973). Points at the
 /// committed `dxt/icon.svg`, served raw from GitHub `main`.
 ///
@@ -2981,6 +3038,31 @@ mod tests {
         String::from_utf8(out.stdout)
             .ok()
             .map(|s| s.trim().to_string())
+    }
+
+    #[test]
+    fn a_tool_result_carries_its_remote_exit_code_in_meta_and_nowhere_else() {
+        let result = ToolCallResult::text("[exit:7]\n").with_remote_exit_code_only(7);
+        let response = JsonRpcResponse::tool_result(Some(serde_json::json!(1)), &result);
+        let wire = response.result.expect("a success response");
+        assert_eq!(
+            wire["_meta"][REMOTE_EXIT_CODE_META_KEY],
+            serde_json::json!(7)
+        );
+        assert!(wire.get("remoteExitCode").is_none() && wire.get("remote_exit_code").is_none());
+        assert!(
+            wire.get("isError").is_none(),
+            "the fact must not invent a verdict: {wire}"
+        );
+        // The key is vendor-owned, never squatting the spec's namespace.
+        assert!(!REMOTE_EXIT_CODE_META_KEY.starts_with("io.modelcontextprotocol/"));
+        assert!(REMOTE_EXIT_CODE_META_KEY.starts_with("io.github.muchiny/"));
+    }
+
+    #[test]
+    fn a_tool_result_without_a_remote_exit_code_gets_no_meta() {
+        let wire = tool_result_value(&ToolCallResult::text("ok")).unwrap();
+        assert!(wire.get("_meta").is_none(), "{wire}");
     }
 
     #[test]

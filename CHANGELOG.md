@@ -24,6 +24,18 @@ nothing in the text below would otherwise tell you which is which.
 
 ### BREAKING
 
+- **A config that fails to load now exits 5, not 1** (README promised 5; it
+  failed inside `main` before `run_tool` and flattened through anyhow).
+  `main` classifies any `load_config` failure as 5 by call site
+  (`EXIT_CONFIG_ERROR`), not by variant, so a missing SSH key file or an
+  unreadable file is 5 too; `map_exit_code` also maps `ConfigNotFound`,
+  `ConfigInvalid` and `Yaml` to 5.
+- **(lib API) `map_exit_code` moved from `src/main.rs` into
+  `bridge_mcp::cli` and is now `pub fn map_exit_code(&BridgeError) -> i32`.**
+  It used to declare `-> anyhow::Error` while never returning
+  (`std::process::exit`), and was untestable. `main` now prints the error and
+  exits on the returned code. The collision test now walks the function instead
+  of asserting `!(0..=5).contains(&6)`.
 - **`bridge-mcp tool <name>` rejects arguments the tool does not declare**,
   exiting 5. Any invocation passing an extra key stops working. They used to be
   parsed and dropped in silence, and the keys most likely to be mistyped are the
@@ -60,15 +72,16 @@ nothing in the text below would otherwise tell you which is which.
   `src/mcp/standard_tool.rs:339`. A probed tool therefore went through the
   pipeline by construction.
 
-  **What is not closed:** 52 handlers implement `ToolHandler` directly, run their
-  remote command outside that pipeline, and **still exit 0 when it fails** —
+  **What was not closed when this first landed** (the next paragraphs say what
+  changed since): 52 handlers implemented `ToolHandler` directly, ran their
+  remote command outside that pipeline, and **still exited 0 when it failed** —
   `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec`, `ssh_find`, `ssh_tail`,
   `ssh_metrics`, `ssh_metrics_multi`, `ssh_disk_usage`, `ssh_file_write`, plus
   the `ssh_awx_*` family as qualified below. So
-  `bridge-mcp tool ssh_exec host=x command=false` exits 0 while the same failure
-  through a `StandardTool` tool exits 6. **None of these 52 was ever in the
-  measured set** (`ssh_tail`, `ssh_metrics` and `ssh_find` declare no
-  `sudo_user` at all, so they were never probed) — they are the *unmeasured*
+  `bridge-mcp tool ssh_exec host=x command=false` exited 0 while the same failure
+  through a `StandardTool` tool exited 6. **None of these 52 was ever in the
+  measured set** (`ssh_tail`, `ssh_metrics` and `ssh_find` declared no
+  `sudo_user` at all, so they were never probed) — they were the *unmeasured*
   remainder of the same defect class, not a gap in the fix.
 
   **Six of those 52 have since been brought into line**, in this same
@@ -108,11 +121,9 @@ nothing in the text below would otherwise tell you which is which.
   `build_api_call_checked`" — was not sufficient and, applied alone, would have
   broken the tool: that entry says why.
 
-  Two further boundaries: `bridge-mcp exec` still exits 1 (unchanged), and when
-  a `bridge-mcp daemon` serves the call the CLI reads the result back off the
-  MCP wire, which does not carry the remote/bridge distinction — a remote
-  failure then exits 1 rather than 6. Non-zero either way, so `&&` behaves the
-  same; a caller branching on `$? -eq 6` specifically is environment-dependent.
+  `bridge-mcp exec` still exits 1 (unchanged). The daemon boundary this
+  paragraph used to state (a remote failure exiting 1 rather than 6 through a
+  daemon) is superseded: the code now travels in `_meta`, see "Added".
 
 - **An MCP tool result now carries `isError: true` when its remote command
   failed** — again, for `StandardTool`-pipeline tools only. The 52 handlers
@@ -185,7 +196,8 @@ nothing in the text below would otherwise tell you which is which.
 - **`ToolCallResult` gains a public field `remote_exit_code: Option<i32>`.** Any
   struct-literal construction outside this crate must add it; `ToolCallResult::
   text` and `::error` set it `None`. It is `#[serde(skip)]`, so no serialized
-  result and no `outputSchema` changes.
+  result body and no `outputSchema` changes; the server separately copies the
+  code into `_meta` (see "Added").
 
 - **`ExecuteCommandUseCase::process_success_for_tool` takes a new
   `reduction: &[&'static str]` parameter.** Existing callers must pass the
@@ -263,19 +275,20 @@ nothing in the text below would otherwise tell you which is which.
   announce a failure of your command where the truth is a bridge-side parse
   failure — the exact conflation this whole chain exists to remove.
 
-  **Known asymmetry, not closed.** When a `bridge-mcp daemon` serves the call,
-  the CLI reads the result back off the MCP wire, and `remote_exit_code` is
-  `#[serde(skip)]` — it is an in-process channel, not a protocol extension. The
-  daemon path can only read `isError`, which these two deliberately do not set,
-  so **it exits 0** where the direct path exits 6. This is not a regression:
-  that path already exited 0 for these tools, since they set no `isError`
-  before either. What is new is that the two paths now disagree. For every
-  other tool the daemon path exits 1, so the usual advice — branch on
-  `$? -ne 0`, not `$? -eq 6` — holds there but **not** for these two. Closing
-  it means putting the remote code on the MCP wire, which is a response-format
-  change and was not taken here. Both halves are pinned by tests in
-  `src/cli/runner.rs`, and `ports::protocol::tests::the_fact_never_crosses_the_mcp_wire`
-  fails if the `skip` is ever lifted without revisiting this.
+  **Superseded later in this cycle: the daemon asymmetry is closed.** This
+  paragraph used to say that under `bridge-mcp daemon` these two exited 0 where
+  the direct path exits 6, because the CLI could only read `isError` off the
+  wire. The remote code now travels in `_meta` under
+  `io.github.muchiny/remote-exit-code` (see "Added" above), so both paths exit
+  6. `$? -eq 6` therefore holds for `ssh_exec`/`ssh_exec_multi` under a daemon
+  too, **provided the daemon is this build or later**: a daemon from before the
+  port answers without the key and the CLI falls back to `isError`, i.e. 0.
+  `remote_exit_code` itself is still `#[serde(skip)]`; the key is a separate
+  `_meta` entry added by the server. The tests this paragraph cited
+  (`the_daemon_path_cannot_distinguish…`, `the_daemon_path_reports_nothing_at_all…`)
+  were rewritten into
+  `the_daemon_path_distinguishes_a_remote_failure_from_a_bridge_refusal` and
+  `the_daemon_path_reports_a_free_form_tool_s_remote_failure`.
 
 - **`ssh_awx_job_follow` now exits 6 when the job it followed did not succeed,
   and marks the result `isError`.** It exited **0** for every outcome. The
@@ -289,8 +302,8 @@ nothing in the text below would otherwise tell you which is which.
   still running. Now only `successful` exits 0; the other four exit **6**.
 
   **No per-status code**, deliberately: the CLI flattens any remote failure to
-  one code and `remote_exit_code` is `#[serde(skip)]` on the MCP side, so a
-  distinct code per status would be observable nowhere. The exact status stays
+  one code, so a distinct code per status would be observable nowhere on the
+  CLI. The exact status stays
   where it always was, in the JSON result, and every arm still emits its full
   document — including the summary on a failed job. The handler uses
   `ToolCallResult::with_remote_exit_code`, which sets `isError` too, on the same
@@ -464,6 +477,47 @@ nothing in the text below would otherwise tell you which is which.
   files, since only one of them uses `..Default::default()` and `HostConfig`
   derives no `Default`. `build_config_command` and `EquipmentType` are
   unchanged.
+
+- **`hosts.<name>.sudo_password` no longer appears in the remote `ps`.**
+  `ssh_exec` and `ssh_exec_multi` used to send
+  `printf '%s\n' '<pw>' | sudo -S ...` as the SSH exec request, which becomes
+  the argv of the remote shell for the whole call. The password now travels on
+  the SSH channel's stdin (`sudo -S` reads it there) and the command text no
+  longer contains it. `ssh_session_exec` still delivers the password in the line it
+  writes to a live shell, which remains its legitimate form (the pipe form was
+  never in an argv there); it now also detaches the child's stdin and treats an
+  empty password as absent.
+  - **Library API.** `domain::privilege::elevate_with_password` now returns the
+    new `pub struct Elevated { command, stdin }` instead of `String`
+    (`stdin: Option<RedactedSecret>`, password plus `\n`);
+    `elevate_with_password_via_pipe` is the old string form, kept for
+    `ssh_session_exec`. `ConnectionGuard`, the pool guard and `SshClient` gain
+    `exec_with_stdin`; `exec` is unchanged.
+  - **Behaviour.** A host whose `protocol` is `telnet`, `serial`, `k8s-exec`,
+    `ssm`, `azure` or `gcp`, with `os_type: linux` and a `sudo_password`, no
+    longer has the password used by `ssh_exec` / `ssh_exec_multi`: only SSH has
+    a channel stdin to carry it, so those hosts get `sudo -n` and a `warn!`
+    naming the host and protocol (never the password). The old pipe form put
+    the password in the pod exec argv, a cloud API invocation record, or the
+    bridge host's own `gcloud` argv. Configure `NOPASSWD` in sudoers for such a
+    host, or reach it over SSH. An empty `sudo_password` is treated as absent.
+  - **`sudo: true` on a non-POSIX host is now refused**, in `ssh_exec` and
+    `ssh_exec_multi`, with `'sudo' requires a POSIX shell; host '<host>' uses '<shell>'.`,
+    where `<shell>` is the host's effective shell (`cmd` or `powershell`), which
+    a `shell:` override can set on a Linux host too. In `ssh_exec_multi` the
+    refusal is per host: the others still run. `ssh_exec_multi` also no longer
+    replays a command that may have run, because the command it replayed was the one
+    carrying the password: three argv exposures for one call.
+  - **The `StandardTool` pipeline now uses `hosts.<name>.sudo_password` too: the
+    command it emits changes on a password host.** On any host that has a
+    `sudo_password` (SSH transport, `sudo: true`), the 398 pipeline tools that
+    accept elevation emit `sudo -S -p '' bash -c 'exec 0</dev/null; …'` instead
+    of `sudo -n bash -c '…'`. **A `security.blacklist` entry or SIEM rule keyed
+    on the literal `sudo -n` silently stops matching on those hosts**, so a rule
+    meant to forbid elevation no longer denies it. Re-key such rules on `sudo`.
+    Hosts without a `sudo_password`, and every non-SSH transport, still emit
+    `sudo -n`. Details in the "now reaches the 398 `StandardTool` tools" entry
+    under Known issues.
 
 ### Fixed
 
@@ -645,6 +699,27 @@ nothing in the text below would otherwise tell you which is which.
 
 ### Added
 
+- **`tests/cli_exit_code.rs` — the first test that observes a real process's
+  exit code.** It runs the built binary with no network and no SSH host and
+  asserts 4 (destructive gate, no terminal), 3 (unknown host) and 5 (config that
+  fails to load). It does NOT observe a remote command
+  failing under the daemon (`ssh_exec host=X command=false`): that needs a
+  reachable SSH host and remains unmeasured by any test.
+- **`tools/call` results carry the remote command's exit code in `_meta`,
+  under `io.github.muchiny/remote-exit-code`** (a JSON integer, present only
+  when a command ran on the target host and reported a code). Public protocol
+  surface: the key is vendor-owned, derived from the registry name in
+  `server.json` like the existing `io.github.muchiny/build`, and not under the
+  spec's reserved `io.modelcontextprotocol/` prefix. The result body and every
+  `outputSchema` are unchanged (`remote_exit_code` stays `#[serde(skip)]`).
+  Effect: `bridge-mcp tool ssh_exec host=X command=false` now exits **6**
+  through the daemon, as it does on the direct path. Before, `ssh_exec` and
+  `ssh_exec_multi` — which report the code without setting `isError` — exited
+  **0** through the daemon, so a script that stopped on `&&` on the direct path
+  silently stopped stopping. The code also survives the MCP `summarize=true`
+  round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
+  built by the real serializer; no test spawns a daemon process.
+
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
   the other 473 did not, so on a host where the interesting state is root-owned
   every specialised tool failed and the only way through was `ssh_exec` — which
@@ -794,23 +869,32 @@ nothing in the text below would otherwise tell you which is which.
   looks like one and is not, because its non-zero answer depends on an argument
   the const cannot see.
 
-- **`sudo: true` reaches two different functions, and only one of them can use
-  a configured `sudo_password`.** `domain::privilege::elevate` (no password,
-  `sudo -n` only) is what the `StandardTool` pipeline calls, so it governs 399
-  tools; `elevate_with_password` is reached only by `ssh_exec`,
-  `ssh_exec_multi` and `ssh_session_exec`, the three handlers that build their
-  own `PrivilegeArgs`. On a host that carries a `sudo_password` *and* genuinely
-  demands one, `sudo: true` therefore works on those 3 and fails immediately on
-  the other 399, which need `NOPASSWD` on the remote host — and where
-  `NOPASSWD` is granted the configured password was never needed in the first
-  place, which is why the split has gone unnoticed. **This predates the
-  branch** — the
-  pipeline called the password-less `elevate` before it too — and it is left
-  alone deliberately: the remedy is one line (pass the host's `sudo_password`
-  to `elevate_with_password` at `src/mcp/standard_tool.rs`, step 5b), but it
-  changes the behaviour of 399 tools on every password host at once and only
-  the three have ever been exercised on one. It wants its own measurement, and
-  both functions' rustdoc now says so.
+- **`hosts.<name>.sudo_password` now reaches the 398 `StandardTool` tools that accept elevation.**
+  The pipeline's step 5b used to call the password-less
+  `domain::privilege::elevate`, so `sudo: true` on a host that demands a
+  password worked on `ssh_exec`, `ssh_exec_multi` and `ssh_session_exec` and
+  failed at once (`sudo -n`) on every other tool. Step 5b now calls
+  `elevate_with_password` and the password goes to `exec_with_stdin` — on the
+  SSH channel's stdin, never in the command line. `ALLOWS_ELEVATION = false`
+  tools are still refused before any elevation, so a password is not
+  reachable on them. On a non-SSH protocol the password is ignored with a
+  `warn!` and `sudo -n` is kept; an empty `sudo_password` counts as absent.
+  - **Operator-visible: the emitted command changes.** For a host that has a
+    `sudo_password`, the pipeline now emits `sudo -S -p '' …` instead of
+    `sudo -n …`. **A blacklist entry or SIEM rule keyed on the literal
+    `sudo -n` silently stops matching** — a rule meant to forbid elevation no
+    longer denies it. Re-key such rules on `sudo`.
+  - **Hardening: the elevated child's stdin is detached.** `sudo -S` reads
+    stdin only when it must authenticate; under `NOPASSWD` or a warm
+    credential cache it does not, and the unread `password\n` became fd 0 of
+    `bash -c '<cmd>'` (`printf 'pw\n' | sudo -S -p '' bash -c cat` prints
+    it). A caller-supplied command (`ssh_exec`, `ssh_exec_multi`,
+    `ssh_session_exec`) could read it back, e.g. through `base64`, which the
+    exact-match masker does not catch. Both `elevate_with_password` and
+    `elevate_with_password_via_pipe` now wrap the command as
+    `exec 0</dev/null` followed by the command; `sudo` still authenticates
+    from the channel. Nothing was written to a channel stdin before, so no
+    tool can depend on its content.
 
 ### Fuzz lot D2 — the twenty builder oracles (2026-09-04)
 

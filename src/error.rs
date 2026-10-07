@@ -1,5 +1,12 @@
 use thiserror::Error;
 
+/// The `SshExec` reason for a stdin handed to a non-SSH transport.
+///
+/// Shared with the retry test so a reword cannot silently make this
+/// deterministic refusal retryable: `is_retryable_error` reads "channel" or
+/// "connection" in an `SshExec` reason as transient.
+pub const STDIN_NOT_SSH_REASON: &str = "stdin is only supported on the SSH transport";
+
 /// Every error this crate produces.
 ///
 /// F5 (re-review of the 2026-08-19 audit corrections): this enum is

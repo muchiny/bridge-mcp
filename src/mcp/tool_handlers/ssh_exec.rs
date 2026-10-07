@@ -160,28 +160,56 @@ impl ToolHandler for SshExecHandler {
         // Derive effective shell for this host
         let effective_shell = host_config.effective_shell();
 
-        // L'élévation est une décision du domaine : `privilege::elevate*`
-        // enveloppe la ligne entière (`sudo -n bash -c '<tout>'`). La préfixer
-        // ici n'élèverait que le premier processus — voir la documentation de
-        // `domain::privilege::elevate`.
-        let command = if effective_shell == ShellType::Posix {
+        // Elevation is a domain decision: `privilege::elevate*` wraps the
+        // whole line (`sudo -n bash -c '<all>'`, or `sudo -S -p '' bash -c
+        // 'exec 0</dev/null; <all>'` when the host has a `sudo_password` and the
+        // transport is SSH). Prefixing it here would only elevate the first
+        // process; see the docs of `domain::privilege::elevate`.
+        let elevated = if effective_shell == ShellType::Posix {
             let privilege = crate::domain::privilege::PrivilegeArgs {
                 sudo: args.sudo.unwrap_or(false),
                 sudo_user: args.sudo_user.clone(),
             };
-            crate::domain::privilege::elevate_with_password(
-                &args.command,
-                &privilege,
-                host_config.sudo_password.as_deref(),
-            )
+            // Only asked when elevation is: the helper warns on a non-SSH host,
+            // and that must not fire on calls that never wanted sudo.
+            let password = if privilege.sudo {
+                host_config.sudo_password_for_exec(&args.host)
+            } else {
+                None
+            };
+            crate::domain::privilege::elevate_with_password(&args.command, &privilege, password)
         } else {
-            args.command.clone()
+            // `sudo` makes no sense off POSIX. The POSIX line used to fail
+            // loudly there; ignoring it silently would let an unelevated
+            // command report success. Same intent as step 5b of
+            // `standard_tool.rs`, but neither the condition nor the wording is
+            // its own: 5b tests the OS (`os_type == Windows`), this tests the
+            // effective shell, which a `shell:` override can make non-POSIX on
+            // a Linux host.
+            if args.sudo.unwrap_or(false) {
+                // The effective shell, not the OS: a Linux host with a
+                // non-POSIX `shell:` reaches this branch too.
+                return Ok(ToolCallResult::error(format!(
+                    "'sudo' requires a POSIX shell; host '{}' uses '{}'.",
+                    args.host,
+                    format!("{effective_shell:?}").to_lowercase()
+                )));
+            }
+            crate::domain::privilege::Elevated {
+                command: args.command.clone(),
+                stdin: None,
+            }
         };
+        // The sudo password travels on the SSH channel's stdin, not in the
+        // command line (which becomes the remote shell's argv, readable with
+        // `ps`). Borrowed, never cloned: `RedactedSecret` wipes it on drop.
+        let stdin_bytes: Option<&[u8]> = elevated.stdin.as_ref().map(|s| s.as_bytes());
+        let command = &elevated.command;
 
         // Build the actual command (with optional cd, shell-aware)
         let full_command = args.working_dir.as_ref().map_or_else(
             || command.clone(),
-            |dir| shell::cd_and_run(dir, &command, effective_shell),
+            |dir| shell::cd_and_run(dir, command, effective_shell),
         );
 
         // Get retry config
@@ -205,7 +233,10 @@ impl ToolHandler for SshExecHandler {
                     .get_connection_with_jump(&args.host, host_config, &limits, jump_host)
                     .await?;
 
-                match conn.exec(&full_command, &limits).await {
+                match conn
+                    .exec_with_stdin(&full_command, stdin_bytes, &limits)
+                    .await
+                {
                     Ok(output) => Ok(output),
                     Err(e) => {
                         // Mark connection as failed so it won't be returned to pool
@@ -224,6 +255,10 @@ impl ToolHandler for SshExecHandler {
             |e| is_retryable_error_for(e, false),
         )
         .await;
+        // The retry loop is done with the secret: wipe it now rather than at
+        // the end of `handle`, across `process_success` and the truncation
+        // awaits.
+        drop(elevated);
 
         let output = output.inspect_err(|e| {
             ctx.execute_use_case.log_failure(
@@ -352,6 +387,54 @@ mod tests {
         assert_eq!(
             result.is_error, None,
             "le verdict n'est pas posé : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_windows_host_is_refused_not_silently_dropped() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        config.hosts.get_mut("server1").expect("server1").os_type = crate::config::OsType::Windows;
+        ctx.config = std::sync::Arc::new(config);
+        let result = SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "dir", "sudo": true})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.is_error, Some(true), "refus attendu : {result:?}");
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'cmd'."),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_linux_host_with_a_powershell_override_names_the_shell_not_the_os() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        let host = config.hosts.get_mut("server1").expect("server1");
+        host.os_type = crate::config::OsType::Linux;
+        host.shell = Some(ShellType::PowerShell);
+        ctx.config = std::sync::Arc::new(config);
+        let result = SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "id", "sudo": true})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.is_error, Some(true), "refus attendu : {result:?}");
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("'sudo' requires a POSIX shell; host 'server1' uses 'powershell'."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Windows"),
+            "un hôte Linux n'est pas un hôte Windows : {text}"
         );
     }
 
