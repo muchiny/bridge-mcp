@@ -273,18 +273,18 @@ typos:
 	@$(call need,typos,cargo install typos-cli)
 	typos
 
-# Markdown lint, as CI's Markdownlint job runs it (same .markdownlint.yaml).
+# Markdown lint with the same tool CI runs: markdownlint-cli2, which reads the
+# repo's .markdownlint.yaml itself and prints its own version line (and the
+# markdownlint rule set under it), so the log says which rulebook was applied.
 # Tracked files only, on purpose: CI checks out nothing else, whereas a
 # `**/*.md` glob here would also lint target/doc vendored font licences and
 # gitignored plans, failing for reasons CI never sees. A Node tool in a Rust
-# gate is a real cost, but it is the same `markdownlint-cli` `make setup`
-# installs, and leaving it out let a duplicate `### Added` reach a red PR check
-# after three green `make ci` runs. Local markdownlint-cli may bundle a newer
-# rule set than CI's markdownlint-cli2 pin; if only one of them complains, the
-# rule-set difference is the first suspect.
+# gate is a real cost; leaving it out let a duplicate `### Added` reach a red PR
+# check after three green `make ci` runs. Not `npx --yes`: that would put a
+# download inside a gate that has no honest way to degrade.
 markdownlint:
-	@$(call need,markdownlint,npm install -g markdownlint-cli)
-	git ls-files -z '*.md' | xargs -0 markdownlint -c .markdownlint.yaml
+	@$(call need,markdownlint-cli2,npm install -g markdownlint-cli2)
+	git ls-files -z '*.md' | xargs -0 markdownlint-cli2
 
 # Check for unused dependencies
 machete:
@@ -344,7 +344,7 @@ setup:
 	fi
 	@echo "Installing markdownlint (requires Node.js)..."
 	@if command -v npm >/dev/null 2>&1; then \
-		npm install -g markdownlint-cli; \
+		npm install -g markdownlint-cli2; \
 	else \
 		echo "npm not found, skipping markdownlint"; \
 	fi
