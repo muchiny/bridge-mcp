@@ -175,6 +175,15 @@ impl ToolHandler for SshExecHandler {
                 host_config.sudo_password.as_deref(),
             )
         } else {
+            // `sudo` n'a pas de sens hors POSIX. Avant, la ligne POSIX
+            // échouait bruyamment ; l'ignorer en silence ferait réussir une
+            // commande non élevée. Même refus que `standard_tool.rs` (5b).
+            if args.sudo.unwrap_or(false) {
+                return Ok(ToolCallResult::error(format!(
+                    "'sudo' is not supported on Windows host '{}'.",
+                    args.host
+                )));
+            }
             crate::domain::privilege::Elevated {
                 command: args.command.clone(),
                 stdin: None,
@@ -363,6 +372,27 @@ mod tests {
         assert_eq!(
             result.is_error, None,
             "le verdict n'est pas posé : {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_windows_host_is_refused_not_silently_dropped() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        config.hosts.get_mut("server1").expect("server1").os_type = crate::config::OsType::Windows;
+        ctx.config = std::sync::Arc::new(config);
+        let result = SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "dir", "sudo": true})),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        assert_eq!(result.is_error, Some(true), "refus attendu : {result:?}");
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("'sudo' is not supported on Windows host 'server1'."),
+            "{text}"
         );
     }
 

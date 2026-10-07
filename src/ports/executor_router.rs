@@ -323,6 +323,13 @@ impl ConnectionGuard<'_> {
     /// Execute a command, feeding `stdin` to the remote process over the
     /// channel rather than through the command text.
     ///
+    /// **`stdin` carries the sudo password and nothing else.** It must never
+    /// be reached by caller-supplied bytes: command validation (whitelist and
+    /// blacklist) inspects only the command text, so anything delivered here
+    /// bypasses it by construction. A tool that exposed stdin to callers would
+    /// let `bash` read a script from it and defeat the blacklist. Do not
+    /// generalize this parameter without validating what it carries.
+    ///
     /// Only SSH has a channel to write to. With `stdin: None` every protocol
     /// behaves exactly like [`Self::exec`]; with `Some`, every non-SSH
     /// protocol returns an error rather than silently dropping the bytes

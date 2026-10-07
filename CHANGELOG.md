@@ -465,6 +465,36 @@ nothing in the text below would otherwise tell you which is which.
   derives no `Default`. `build_config_command` and `EquipmentType` are
   unchanged.
 
+
+- **`hosts.<name>.sudo_password` no longer appears in the remote `ps`.**
+  `ssh_exec` and `ssh_exec_multi` used to send
+  `printf '%s\n' '<pw>' | sudo -S ...` as the SSH exec request, which becomes
+  the argv of the remote shell for the whole call. The password now travels on
+  the SSH channel's stdin (`sudo -S` reads it there) and the command text no
+  longer contains it. `ssh_session_exec` is unchanged: it writes a line into an
+  open shell, where the pipe form was never in an argv.
+  - **Library API.** `domain::privilege::elevate_with_password` now returns the
+    new `pub struct Elevated { command, stdin }` instead of `String`
+    (`stdin: Option<RedactedSecret>`, password plus `\n`);
+    `elevate_with_password_via_pipe` is the old string form, kept for
+    `ssh_session_exec`. `ConnectionGuard`, the pool guard and `SshClient` gain
+    `exec_with_stdin`; `exec` is unchanged.
+  - **Behaviour.** A host whose `protocol` is `telnet`, `serial`, `k8s-exec`,
+    `ssm`, `azure` or `gcp`, with `os_type: linux` and a `sudo_password`, now
+    gets `stdin is only supported on SSH connections` from `ssh_exec` and
+    `ssh_exec_multi`; the pipe form used to work there. It fails closed on
+    purpose: on k8s-exec, SSM, Azure and GCP the command text (and so the
+    password) reached the pod exec argv, a cloud API invocation record, or the
+    bridge host's own `gcloud` argv; on telnet and serial it was written to a
+    shell, but both transports log the full command at `debug`. An operator
+    with such a host should configure `NOPASSWD` in sudoers and omit
+    `sudo_password`, or reach the host over SSH.
+  - **`sudo: true` on a non-POSIX host is now refused**, in `ssh_exec` and
+    `ssh_exec_multi`, with `'sudo' is not supported on Windows host '<host>'.`
+    (same wording as the pipeline's step 5b). In `ssh_exec_multi` the refusal
+    is per host: the others still run. `ssh_exec_multi` also no longer replays
+    a timed-out command.
+
 ### Fixed
 
 - **A slow command no longer destroys its session.** Every `Err` from reading a

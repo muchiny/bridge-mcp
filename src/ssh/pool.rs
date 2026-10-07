@@ -398,6 +398,9 @@ impl PooledConnectionGuard<'_> {
     /// Like [`Self::exec`], but feeds `stdin` to the remote command's stdin
     /// over the SSH channel (then EOF) instead of through the command text.
     ///
+    /// `stdin` is for the sudo password only and bypasses command validation;
+    /// see `ConnectionGuard::exec_with_stdin` before widening its use.
+    ///
     /// # Errors
     ///
     /// Same as [`Self::exec`].

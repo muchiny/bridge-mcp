@@ -208,9 +208,11 @@ pub fn elevate(command: &str, args: &PrivilegeArgs) -> String {
 pub struct Elevated {
     /// The command line to send. Never contains the password.
     pub command: String,
-    /// The password plus a trailing newline, zeroized on drop. `None` when no
+    /// The password plus a trailing newline. A `RedactedSecret`: zeroized on
+    /// drop and rendered `[REDACTED]` by `Debug`, `Display` and `Serialize`,
+    /// so a stray `{:?}` or `tracing` field cannot leak it. `None` when no
     /// password was supplied or no elevation was requested.
-    pub stdin: Option<zeroize::Zeroizing<String>>,
+    pub stdin: Option<crate::config::RedactedSecret>,
 }
 
 /// Like [`elevate`], but for a host whose configuration carries a `sudo`
@@ -252,9 +254,15 @@ pub fn elevate_with_password(
             format!("sudo -S -p '' -u {user} bash -c {quoted}")
         },
     );
+    // Built in one allocation: `format!("{password}\n")` starts at capacity 0
+    // and the newline push would reallocate, freeing the block that held the
+    // plaintext without wiping it.
+    let mut line = String::with_capacity(password.len() + 1);
+    line.push_str(password);
+    line.push('\n');
     Elevated {
         command,
-        stdin: Some(zeroize::Zeroizing::new(format!("{password}\n"))),
+        stdin: Some(crate::config::RedactedSecret::new(line)),
     }
 }
 
@@ -497,7 +505,7 @@ mod tests {
         // Sans cette seconde assertion, une fonction qui jette le mot de passe
         // en silence passerait aussi.
         assert_eq!(
-            got.stdin.as_deref().map(String::as_str),
+            got.stdin.as_ref().map(|s| s.as_str()),
             Some("hunter2\n"),
             "le mot de passe doit voyager sur stdin"
         );

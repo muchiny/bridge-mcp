@@ -831,6 +831,9 @@ impl SshClient {
     /// is left open, exactly as before: closing it unasked would make
     /// `read_command_output` see a channel closed without an exit status.
     ///
+    /// `stdin` is for the sudo password only and bypasses command validation;
+    /// see `ConnectionGuard::exec_with_stdin` before widening its use.
+    ///
     /// # Errors
     ///
     /// Same as [`Self::exec`], plus a failure to write to the channel.

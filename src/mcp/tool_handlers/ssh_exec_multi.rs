@@ -467,7 +467,25 @@ async fn execute_on_host(
     // Comme `ssh_exec` : l'enveloppe sudo POSIX ne vaut que pour un hôte POSIX.
     // Sur un hôte Windows elle échouait, et le mot de passe passait quand même
     // dans la ligne de commande de cet hôte.
-    let elevated = if use_sudo && host_config.effective_shell() == ShellType::Posix {
+    if use_sudo && host_config.effective_shell() != ShellType::Posix {
+        // Refus par hôte : les autres hôtes de l'appel tournent. Ignorer
+        // `sudo` en silence ferait rendre `success` à une commande non élevée.
+        // Même message que `standard_tool.rs` (5b).
+        if fail_fast {
+            cancel_token.cancel();
+        }
+        return HostResult {
+            host: host_name.clone(),
+            success: false,
+            exit_code: None,
+            output: None,
+            error: Some(format!(
+                "'sudo' is not supported on Windows host '{host_name}'."
+            )),
+            duration_ms: Some(elapsed_ms(&start)),
+        };
+    }
+    let elevated = if use_sudo {
         let privilege = crate::domain::privilege::PrivilegeArgs {
             sudo: use_sudo,
             sudo_user: Some(sudo_user.to_string()),
@@ -766,6 +784,35 @@ mod tests {
             result.is_error, None,
             "le verdict n'est pas posé : {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sudo_on_a_windows_host_fails_that_host_only() {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        config.hosts.get_mut("server1").expect("server1").os_type = crate::config::OsType::Windows;
+        ctx.config = Arc::new(config);
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({
+                    "hosts": ["server1", "server2"],
+                    "command": "id",
+                    "sudo": true
+                })),
+                &ctx,
+            )
+            .await
+            .expect("le handler doit rendre un résultat");
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ToolContent::Text { text } => text.clone(),
+            other => panic!("contenu texte attendu, obtenu {other:?}"),
+        };
+        assert!(
+            text.contains("'sudo' is not supported on Windows host 'server1'."),
+            "{text}"
+        );
+        assert!(text.contains("\"failed\":1"), "{text}");
+        assert!(text.contains("\"succeeded\":1"), "{text}");
     }
 
     #[tokio::test]
