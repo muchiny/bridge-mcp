@@ -134,8 +134,13 @@ pub trait StandardTool: Send + Sync + 'static {
     ///    separation runs the wrong way — exit 1 still prints its statistics
     ///    block, exit 2 prints **nothing** on stdout. So opting out would
     ///    turn into successful calls precisely the failures that return no
-    ///    output at all. That is why `ssh_net_ping` and `ssh_latency_test`,
-    ///    which both build a bare `ping -c …`, are not in the set.
+    ///    output at all. That is why `ssh_net_ping` and `ssh_latency_test`
+    ///    are not in the set. `ssh_net_ping` always builds a bare `ping -c …`;
+    ///    `ssh_latency_test` builds `ping -c …` by default but
+    ///    `mtr --report -c …` under `method=mtr`, so it too depends on an
+    ///    argument the const cannot see (the `ssh_helm_diff` case). `mtr`'s
+    ///    codes are not `ping`'s three values, which adds positions the
+    ///    boolean cannot separate rather than removing any.
     /// 3. **Windows tools are excluded by construction, not case by case.** A
     ///    PowerShell cmdlet has no exit code of its own, so the number step 19
     ///    tests is not a command's code: `src/psrp/mod.rs` maps `PipelineState`

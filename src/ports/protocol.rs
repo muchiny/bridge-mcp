@@ -161,9 +161,9 @@ pub struct ToolCallResult {
     ///   reachable state.
     /// * `Some(n)`, `n != 0` — a command ran on the target host and exited
     ///   `n`. `is_error` is `Some(true)` alongside it **only when the tool
-    ///   also calls that a failure**. A tool whose command the caller wrote —
-    ///   `ssh_exec`, `ssh_exec_multi` — reports the code with `is_error`
-    ///   absent, because `grep` matching nothing exits 1 without having
+    ///   also calls that a failure**. A tool whose command the caller wrote
+    ///   (for instance `ssh_exec`; the criterion, not this example, decides)
+    ///   reports the code with `is_error` absent, because `grep` matching nothing exits 1 without having
     ///   failed. The CLI still exits `EXIT_REMOTE_FAILURE` (6) either way,
     ///   since it reads this field before `is_error`.
     ///
@@ -340,8 +340,8 @@ impl ToolCallResult {
 
     /// Comme [`Self::with_remote_exit_code`], mais **sans** poser `is_error`.
     ///
-    /// Pour les outils dont l'appelant choisit la commande — `ssh_exec`,
-    /// `ssh_exec_multi`. Un code non nul y décrit un *fait* de la commande, pas
+    /// Pour les outils dont l'appelant choisit la commande (c'est ce critère, et
+    /// non une liste d'outils, qui décide). Un code non nul y décrit un *fait* de la commande, pas
     /// un *verdict* de l'appel : `grep` qui ne trouve rien sort 1, `diff` qui
     /// voit une différence sort 1, `test` sort 1 pour faux. Poser `is_error`
     /// dirait à un client MCP que son propre `grep` a échoué, sans recours.

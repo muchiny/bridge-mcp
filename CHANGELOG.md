@@ -17,7 +17,9 @@ handlers brought into line (`ssh_file_write`, `ssh_disk_usage`, `ssh_tail`,
 by unit test and mutation testing. The sixth, `ssh_awx_job_follow`, was
 established by unit test **only**: no `cargo mutants` run covers it, and the
 basis for it is the generated script executed under `bash` against stub `curl`
-and `sleep` binaries, plus `make ci`. **None of them was ever run against a
+and `sleep` binaries, plus `make ci`. The seventh, `ssh_session_exec`, is also
+recorded as unit test only, but that is the absence of proof of a mutation run,
+not a measurement that none exists. **None of them was ever run against a
 host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
@@ -289,8 +291,10 @@ nothing in the text below would otherwise tell you which is which.
   the result reports the fact (`remote_exit_code`) and declines the verdict
   (`is_error` stays absent), via a second constructor,
   `ToolCallResult::with_remote_exit_code_only`. An MCP client is not told that
-  its own `grep` failed; a shell caller still gets a non-zero `$?`. Every other
-  handler keeps welding the two, and `with_remote_exit_code` is untouched.
+  its own `grep` failed; a shell caller still gets a non-zero `$?`. When this
+  was written, every other handler kept welding the two; that stopped being
+  true later in this cycle (`ssh_session_exec` also uses the second
+  constructor, see below). `with_remote_exit_code` is untouched.
 
   **`ssh_exec_multi` reports a code only for a single host.** Across two or
   more it reports nothing. The per-host `failed` counter does not distinguish
@@ -938,9 +942,12 @@ nothing in the text below would otherwise tell you which is which.
   `directory`) have only **direct** handlers, for which this const does not
   exist.
 
-  **44 candidates were proposed; 42 were refuted, and the last two were
-  cancelled on measurement.** Those two cancellations are the generalisable
-  part, so they are recorded rather than the 42:
+  **44 candidates were proposed; 42 were refuted by the counter-proof, and the
+  last two were cancelled on measurement.** Two structural reasons carry those
+  cancellations, and they are the generalisable part, so they are recorded
+  rather than the 42. A reason is not a candidate count: the first covers two
+  tools, and the second a whole family excluded by construction, so neither
+  bullet below is a count of candidates:
 
   - **`ssh_net_ping` / `ssh_latency_test` fail because `ping`'s exit code has
     three values, not two.** 0 is a reply, 1 is "no reply" — the verdict the
