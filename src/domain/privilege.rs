@@ -223,7 +223,7 @@ pub struct Elevated {
 /// Safe for every tool: before the password was sent on the channel's stdin
 /// nothing was ever written there, so no command can depend on its content.
 fn detach_stdin(command: &str) -> String {
-    format!("exec 0</dev/null\n{command}")
+    format!("exec 0</dev/null; {command}")
 }
 
 /// Like [`elevate`], but for a host whose configuration carries a `sudo`
@@ -451,7 +451,7 @@ mod tests {
             "the injected `;` must not escape the quoting around sudo_user: {got}"
         );
         assert!(
-            got.contains("-u 'root; touch /tmp/pwned' bash -c 'exec 0</dev/null\nid'"),
+            got.contains("-u 'root; touch /tmp/pwned' bash -c 'exec 0</dev/null; id'"),
             "sudo_user must be single-quoted exactly like command: {got}"
         );
     }
