@@ -110,6 +110,63 @@ tests and a serialisation test.
   no percent-decoding, so `history://recent?host=<no-host>` matches
   literally while the correctly-encoded `host=%3Cno-host%3E` does not.
 
+- **(lib API + wire) `CommandResult` has a fifth variant,
+  `Confirmed { by }`, and `"command_confirmed"` is a new `event_type` in
+  `audit.log`.** Same migration as the fourth: add an arm to any exhaustive
+  `match`. The variant carries **neither an exit code nor a duration** — it
+  is written the moment the CLI's destructive gate decides, before the call
+  is dispatched and before it is even settled whether a daemon or the
+  in-process path will serve it, so nothing has run to time or to exit. `by`
+  names what answered: `"--yes"` or `"terminal prompt"`.
+
+  Why: **the CLI's destructive gate left no trace in `audit.log` at all**,
+  while `--yes`'s own help text said "the choice is recorded in the audit
+  log". The decision went to a `tracing::warn!`, which reaches stderr and
+  never `audit.path` — and an operator reading that sentence believes the
+  two are the same file. Both refusal arms (stdin is not a terminal; the
+  operator declined) returned `CommandDenied` with no audit call either.
+  Structural, not a missing line: the gate ran 28 lines before the
+  `ToolContext` was built, so at the moment of the decision no `AuditLogger`
+  existed. `run_tool` now creates **one** logger and **one** writer task per
+  invocation *above* the gate, and every path — the gate's two refusals, the
+  daemon fast path, the in-process path — drains it through `finish_audit`
+  before returning. The gate itself did **not** move down to the context:
+  the daemon branch ends in a `return`, so a gate placed after it would
+  never be reached by a call a live daemon serves, which is exactly the
+  2026-08-31 regression this release fixed.
+
+  Two accepted costs of that ordering: `bridge-mcp tool` now opens the audit
+  file even when a daemon serves the call (so the CLI process and the daemon
+  can both append to it, one line each, as they already could), and a
+  refusal waits for the writer to drain — bounded by `finish_audit`'s
+  existing 2 s timeout.
+
+  One reading consequence, from a limitation that is unchanged: the gate runs
+  **before** the blacklist, so a blacklisted destructive command is confirmed
+  and then refused anyway (it fails closed). That pair now shows in the trail
+  as a `command_confirmed` line followed by a `command_denied` one for the
+  same tool. A `command_confirmed` line therefore means "the gate let it
+  past", not "it ran".
+
+  **The allow path is audited, not only the refusals**, through the new
+  `ExecuteCommandUseCase::log_confirmed(tool, host, command, by)` — a
+  sixth entry point beside the five that take a mandatory `tool`, built on
+  `AuditEvent::tagged` like `log_state_change` rather than as a third
+  mechanism. A trail of refusals alone cannot distinguish a destructive call
+  that ran *after* the gate from one that ran without ever meeting it, and
+  the second is precisely what the CLI did before 2026-08-31 on the default
+  configuration; with this line, its absence is the signal. Like
+  `log_denied`, it writes **no history entry**: nothing ran, and
+  `HistoryEntry::exit_code` is a non-optional `u32`. `host` is the call's
+  `host` argument when it has one and `NO_HOST` otherwise — at the gate the
+  host is an unresolved JSON argument, and some destructive tools take none.
+
+  **Not covered by a test:** the arm where an operator types something other
+  than `y` at the prompt. It needs a TTY on stdin, which no test in this
+  repo has; the three branches that decide without asking — `--yes`, no
+  terminal, policy off — are pinned, in `cli::runner`'s unit tests on the
+  channel and in `tests/cli_exit_code.rs` on the file a real process wrote.
+
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
   `main` classifies any `load_config` failure as 5 by call site
@@ -146,7 +203,11 @@ tests and a serialisation test.
 
 - **A tool annotated `destructiveHint` is now gated in the CLI.** It prompts on
   a terminal and is refused with exit 4 when stdin is not one; scripts must pass
-  `--yes`, which is logged. Previously the direct path ran destructive tools
+  `--yes`. Every decision the gate takes is written to `audit.path` — see the
+  `CommandResult::Confirmed` entry above for what the line says, and for the
+  fact that until it the decision reached `tracing` on stderr only, which the
+  `--yes` help text described as the audit log.
+  Previously the direct path ran destructive tools
   unchallenged while the daemon path refused them, so the outcome depended on
   whether a daemon happened to be running — and the default, no daemon, was the
   unguarded one. The gate follows

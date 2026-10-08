@@ -174,13 +174,15 @@ impl ExecuteCommandUseCase {
     /// `AuditEvent::denied`, which this one uses, hard-codes
     /// `"command_denied"`; `AuditEvent::new`, which the others use,
     /// hard-codes `"ssh_exec"`; and the one constructor that takes the value,
-    /// `AuditEvent::tagged`, is reached only through a facade here that passes
-    /// a kind of its own (`"state_change"`). The criterion holds for every
+    /// `AuditEvent::tagged`, is reached only through facades here that each
+    /// pass a kind of their own (`"state_change"` from
+    /// [`Self::log_state_change`], `"command_confirmed"` from
+    /// [`Self::log_confirmed`]). The criterion holds for every
     /// entry point present and for any entry point added, as long as that
     /// stays true — which is its bound, and the only thing a later reader has
     /// to re-check.
     ///
-    /// **One of those three values is also a tool name, and that is the
+    /// **One of those four values is also a tool name, and that is the
     /// point, not an exception to it.** `"ssh_exec"` is a kind of outcome
     /// here — "a command ran on a host" — but it is spelled exactly like the
     /// tool `ssh_exec`, so for that one tool `event_type == tool_name`
@@ -199,6 +201,47 @@ impl ExecuteCommandUseCase {
     pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
         self.audit_logger
             .log(tool, AuditEvent::denied(host, command, reason));
+    }
+
+    /// Log a confirmation gate letting a destructive call through, recording
+    /// which tool was about to run.
+    ///
+    /// The counterpart of [`Self::log_denied`], and `tool` is mandatory for
+    /// the reason spelled out there. `by` names what answered — the CLI's
+    /// `--yes` flag, or the terminal prompt — and `command` is the call the
+    /// gate was asked about, since at this point nothing has run.
+    ///
+    /// **Why the allow path is audited at all, when only the refusals were
+    /// asked for**: a trail of refusals alone cannot distinguish a
+    /// destructive call that ran *after* a confirmation from one that ran
+    /// without ever meeting the gate, and the second is exactly what the CLI
+    /// did until 2026-08-31 under the default configuration. Recording the
+    /// decision makes its absence on a destructive call the signal, and it is
+    /// what `--yes`'s own help text promises ("the choice is recorded in the
+    /// audit log").
+    ///
+    /// **No history entry**, for the reason given at length on
+    /// [`Self::log_state_change`]: `HistoryEntry::exit_code` is a
+    /// non-optional `u32` whose `0` means success, and nothing ran here
+    /// either. [`Self::log_denied`] writes no history entry for the same
+    /// reason, so both halves of a gate decision are audit-only and
+    /// `ssh_history` shows neither.
+    pub fn log_confirmed(&self, tool: &str, host: &str, command: &str, by: &str) {
+        // Same redaction as `process_success` — see its comment. The string
+        // is built from the call's own arguments, and those can carry a
+        // password (`sudo_password`, a `--password` value in a free-form
+        // command).
+        let redacted = self.sanitizer.sanitize(command);
+
+        self.audit_logger.log(
+            tool,
+            AuditEvent::tagged(
+                "command_confirmed",
+                host,
+                &redacted,
+                CommandResult::Confirmed { by: by.to_string() },
+            ),
+        );
     }
 
     /// Process a successful execution, recording which tool ran it.

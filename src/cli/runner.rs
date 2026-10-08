@@ -1724,6 +1724,42 @@ pub async fn run_tool(
         ))
     };
 
+    // One audit logger and one writer task per invocation, created here —
+    // ABOVE the destructive gate, and therefore above the daemon branch. The
+    // gate records the decision it takes (`--yes`, a prompt, a refusal), and
+    // it had no logger to record it with: it ran 28 lines before the context
+    // was built, so `--yes`'s promise that "the choice is recorded in the
+    // audit log" was kept by a `tracing::warn!` on stderr, which is not
+    // `audit.path`.
+    //
+    // Hoisting the logger rather than lowering the gate is the whole point:
+    // see the gate's own comment below for what moving it would reopen. The
+    // cost is accepted — the CLI now opens the audit file even when a daemon
+    // serves the call, and a refusal waits for the writer to drain.
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome =
+        gate_then_run_tool(&registry, tool_name, args, assume_yes, &ctx, json_output).await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
+}
+
+/// The gate and both execution paths, split out of `run_tool` so that every
+/// early return — a refusal by the gate, a response served by the daemon —
+/// passes through `finish_audit` and the gate's audit line survives the
+/// process exit.
+///
+/// Without this split the refusal arms would `?` straight out of `run_tool`,
+/// and `AuditLogger::log` ends in `let _ = sender.send(event)`: the writer
+/// task dies with the process and the event is lost.
+async fn gate_then_run_tool(
+    registry: &crate::mcp::registry::ToolRegistry,
+    tool_name: &str,
+    args: Option<serde_json::Value>,
+    assume_yes: bool,
+    ctx: &ToolContext,
+    json_output: bool,
+) -> Result<i32> {
     // The destructive gate. This runs before either execution path, because
     // which one serves a call is an accident of whether a daemon happens to be
     // up — and that decided whether a destructive tool was refused or ran
@@ -1731,7 +1767,20 @@ pub async fn run_tool(
     // `clientCapabilities: {}`, and the check is fail-closed); the direct path
     // called the registry and never met the gate at all. Same config, same
     // command, opposite outcome, with the default being the unguarded one.
-    confirm_destructive(tool_name, args.as_ref(), assume_yes, &config)?;
+    //
+    // So the gate does NOT move down to where the context is built: the
+    // daemon branch a few lines below ends in a `return`, and a gate placed
+    // after it would never be reached by a call a live daemon serves — the
+    // 2026-08-31 regression, restored. The logger comes up to the gate
+    // instead; `run_tool` creates it and `ctx.execute_use_case` carries it
+    // here.
+    confirm_destructive(
+        tool_name,
+        args.as_ref(),
+        assume_yes,
+        &ctx.config,
+        &ctx.execute_use_case,
+    )?;
 
     // Fast path: if the local daemon is running, forward this tool call
     // to it over the Unix socket. This reuses the daemon's shared SSH
@@ -1759,11 +1808,7 @@ pub async fn run_tool(
     }
 
     // Slow path: stateless in-process execution.
-    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
-    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
-    let outcome = run_tool_in_context(&registry, tool_name, args, &ctx, json_output).await;
-    finish_audit(ctx, audit_writer).await;
-    outcome
+    run_tool_in_context(registry, tool_name, args, ctx, json_output).await
 }
 
 /// The in-process execution `run_tool` used to inline, split out so every
@@ -1809,7 +1854,6 @@ async fn run_tool_in_context(
     Ok(exit_code)
 }
 
-/// Coerce a string value to the appropriate JSON type based on the tool's input schema.
 /// Ask before running a tool annotated `destructiveHint`.
 ///
 /// `security.require_elicitation_on_destructive` is enforced by the MCP server
@@ -1823,6 +1867,24 @@ async fn run_tool_in_context(
 /// advance that it is intended. Refusing by default matches the server's
 /// fail-closed posture; `--yes` keeps the scripted case possible and explicit.
 ///
+/// **Every decision this function takes is written to `audit.path`**, through
+/// `audit` — `command_confirmed` when it lets the call through, naming what
+/// answered, and `command_denied` when it refuses, with the same reason the
+/// caller is about to read on stderr. That is what `--yes`'s help text
+/// promises, and until this had a logger the promise was kept by a
+/// `tracing::warn!` that reaches stderr and never the audit file. The two
+/// early returns above the first decision — the policy switched off, a tool
+/// that is not destructive — write nothing, on purpose: the gate took no
+/// decision, and a destructive call with no `command_confirmed` line is how a
+/// reader sees that it never met the gate.
+///
+/// `audit` is created by `run_tool` **before** this is called, which is also
+/// why the gate itself does not move: see the comment at the call site.
+///
+/// `host` on the event is the call's `host` argument when it has one, and
+/// [`crate::security::NO_HOST`] otherwise — at this point the host is only a
+/// JSON argument, unresolved, and some destructive tools take none at all.
+///
 /// # Errors
 ///
 /// Returns [`BridgeError::CommandDenied`] when the operator declines, or when
@@ -1832,6 +1894,7 @@ fn confirm_destructive(
     args: Option<&serde_json::Value>,
     assume_yes: bool,
     config: &Config,
+    audit: &ExecuteCommandUseCase,
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
 
@@ -1847,27 +1910,33 @@ fn confirm_destructive(
     let rendered = args
         .and_then(|a| serde_json::to_string(a).ok())
         .unwrap_or_else(|| "{}".to_string());
+    // The operation the gate was asked about. No command has been built yet —
+    // the handler does that — so the audit line carries the tool and the
+    // arguments, in the shape `AuditEvent::tagged` documents for an event
+    // that ran nothing. The logger sanitizes it before either sink.
+    let operation = format!("{tool_name} {rendered}");
+    // Unresolved: at the gate the host is a JSON argument and nothing more.
+    let host = args
+        .and_then(|a| a.get("host"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(crate::security::NO_HOST);
 
     if assume_yes {
         // Recorded, not merely allowed: `--yes` is the point at which a human
-        // delegated the decision, and that belongs in the trail.
-        tracing::warn!(
-            tool = tool_name,
-            args = %rendered,
-            "destructive tool confirmed by --yes"
-        );
+        // delegated the decision, and the trail now carries it.
+        audit.log_confirmed(tool_name, host, &operation, "--yes");
         return Ok(());
     }
 
     if !std::io::stdin().is_terminal() {
-        return Err(BridgeError::CommandDenied {
-            reason: format!(
-                "`{tool_name}` is annotated destructive and stdin is not a terminal, \
-                 so there is nobody to confirm with. Pass --yes to confirm in advance, \
-                 or set security.require_elicitation_on_destructive: false to disable \
-                 this gate entirely."
-            ),
-        });
+        let reason = format!(
+            "`{tool_name}` is annotated destructive and stdin is not a terminal, \
+             so there is nobody to confirm with. Pass --yes to confirm in advance, \
+             or set security.require_elicitation_on_destructive: false to disable \
+             this gate entirely."
+        );
+        audit.log_denied(tool_name, host, &operation, &reason);
+        return Err(BridgeError::CommandDenied { reason });
     }
 
     eprintln!("\n  DESTRUCTIVE: {tool_name}");
@@ -1881,14 +1950,16 @@ fn confirm_destructive(
         .map_err(BridgeError::Io)?;
 
     if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+        audit.log_confirmed(tool_name, host, &operation, "terminal prompt");
         Ok(())
     } else {
-        Err(BridgeError::CommandDenied {
-            reason: format!("`{tool_name}` was not confirmed"),
-        })
+        let reason = format!("`{tool_name}` was not confirmed");
+        audit.log_denied(tool_name, host, &operation, &reason);
+        Err(BridgeError::CommandDenied { reason })
     }
 }
 
+/// Coerce a string value to the appropriate JSON type based on the tool's input schema.
 fn coerce_value(value: &str, key: &str, schema_json: Option<&str>) -> serde_json::Value {
     // Try to extract the expected type from the JSON schema
     if let Some(prop_type) = schema_json
@@ -2144,8 +2215,17 @@ mod tests {
         // exercises a failed connection, not a blacklist denial.
         //
         // That literal is no longer the only `event_type` in the log —
-        // `log_state_change` writes `"state_change"` — but it is still the
-        // one every command event carries, including this one.
+        // `log_state_change` writes `"state_change"` and the destructive gate
+        // writes `"command_confirmed"` — but it is still the one every
+        // command event carries, including this one.
+        //
+        // `ssh_exec` IS annotated destructive, so the `--yes` below also
+        // makes the gate write a `command_confirmed` line to this same file,
+        // naming the same tool and the same host. That is why the assertions
+        // below select the line by `event_type` rather than searching the
+        // whole file for `ssh_exec` or for the host: either of those would
+        // now be satisfied by the gate's line alone, even if the run's own
+        // event were never written.
         let _ = run_tool(
             Arc::new(config),
             "ssh_exec",
@@ -2157,17 +2237,15 @@ mod tests {
         )
         .await;
         let log = std::fs::read_to_string(&audit_path).expect("audit.log exists");
+        let run_line = log
+            .lines()
+            .find(|l| l.contains(r#""event_type":"ssh_exec""#))
+            .unwrap_or_else(|| panic!("the CLI run must persist its audit event, got {log:?}"));
+        // Pin that line to the host this test configured: the `event_type`
+        // literal alone would match any command event from any tool.
         assert!(
-            log.contains("ssh_exec"),
-            "the CLI run must persist its audit event, got {log:?}"
-        );
-        // `event_type` is the literal "ssh_exec" for every command event (see
-        // the comment above), so that assertion alone would pass even if this
-        // run's event were never written and some other line happened to
-        // match. Pin it to the host this test configured.
-        assert!(
-            log.contains(r#""host":"h""#),
-            "the audit event must record this run's host, got {log:?}"
+            run_line.contains(r#""host":"h""#),
+            "the audit event must record this run's host, got {run_line:?}"
         );
     }
 
@@ -3869,7 +3947,8 @@ mod tests {
     // The prompt branch needs a terminal on stdin, which a test harness does
     // not have. Under `cargo test` stdin is never a TTY, so these exercise the
     // three branches that decide without asking — which are also the three
-    // that decide what a script gets.
+    // that decide what a script gets. The fourth, an operator typing `n`, is
+    // stated as untested rather than faked: nothing here can reach it.
 
     fn gate_config(require: bool) -> Config {
         let mut config = Config::default();
@@ -3877,13 +3956,31 @@ mod tests {
         config
     }
 
+    /// A use case whose audit logger keeps every event it is handed, so these
+    /// tests read the line the gate actually wrote — `event_type`,
+    /// `tool_name`, `host`, the result variant — instead of asserting that
+    /// some logging function was called.
+    fn gate_audit(config: &Config) -> (Arc<AuditLogger>, ExecuteCommandUseCase) {
+        let logger = Arc::new(AuditLogger::for_test());
+        let use_case = ExecuteCommandUseCase::new(
+            Arc::new(CommandValidator::new(&config.security)),
+            Arc::new(Sanitizer::from_config(&config.security.sanitize)),
+            Arc::clone(&logger),
+            Arc::new(CommandHistory::new(&HistoryConfig::default())),
+        );
+        (logger, use_case)
+    }
+
     #[test]
     fn destructive_gate_refuses_without_a_terminal() {
+        let config = gate_config(true);
+        let (_logger, audit) = gate_audit(&config);
         let err = confirm_destructive(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi", "command": "echo hi"})),
             false,
-            &gate_config(true),
+            &config,
+            &audit,
         )
         .expect_err("a destructive tool must not run unconfirmed off a terminal");
 
@@ -3894,15 +3991,102 @@ mod tests {
         );
     }
 
+    /// The acceptance criterion of T14: a refused destructive call leaves an
+    /// audit line. Read off the logger's own record of what it was handed,
+    /// not off a counter.
+    #[test]
+    fn a_refusal_without_a_terminal_is_written_to_the_audit_trail() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let err = confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi", "command": "rm -rf /tmp/x"})),
+            false,
+            &config,
+            &audit,
+        )
+        .expect_err("the gate must refuse");
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        let e = &events[0];
+        assert_eq!(e.event_type, "command_denied");
+        assert_eq!(e.tool_name.as_deref(), Some("ssh_exec"));
+        assert_eq!(e.host, "pi");
+        assert!(
+            e.command.contains("ssh_exec") && e.command.contains("rm -rf /tmp/x"),
+            "the line must say what was refused, got {:?}",
+            e.command
+        );
+        match &e.result {
+            CommandResult::Denied { reason } => assert!(
+                err.to_string().contains(reason.as_str()),
+                "the audited reason must be the one the caller is shown: \
+                 audit {reason:?} vs error {err}"
+            ),
+            r => panic!("a refusal must audit as Denied, got {r:?}"),
+        }
+    }
+
     #[test]
     fn destructive_gate_lets_yes_through() {
+        let config = gate_config(true);
+        let (_logger, audit) = gate_audit(&config);
         confirm_destructive(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi"})),
             true,
-            &gate_config(true),
+            &config,
+            &audit,
         )
         .expect("--yes is the scripted confirmation");
+    }
+
+    /// `--yes`'s help text says "the choice is recorded in the audit log", and
+    /// the choice includes the one that lets the call run. Without this line a
+    /// reader cannot tell a destructive call that passed the gate from one
+    /// that never met it — the 2026-08-31 regression's signature.
+    #[test]
+    fn yes_writes_a_confirmation_naming_the_flag() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        confirm_destructive(
+            "ssh_exec",
+            Some(&serde_json::json!({"host": "pi", "command": "echo hi"})),
+            true,
+            &config,
+            &audit,
+        )
+        .expect("--yes is the scripted confirmation");
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        let e = &events[0];
+        assert_eq!(e.event_type, "command_confirmed");
+        assert_eq!(e.tool_name.as_deref(), Some("ssh_exec"));
+        assert_eq!(e.host, "pi");
+        match &e.result {
+            CommandResult::Confirmed { by } => assert_eq!(
+                by, "--yes",
+                "the line must name what answered, so a script flag is not read \
+                 as a human at a prompt"
+            ),
+            r => panic!("a confirmation must audit as Confirmed, got {r:?}"),
+        }
+    }
+
+    /// The host is only a JSON argument at the gate — unresolved, and absent
+    /// for the destructive tools that take none. It falls back to the one
+    /// crate-wide sentinel rather than to an empty string.
+    #[test]
+    fn a_call_with_no_host_argument_audits_the_no_host_sentinel() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let _ = confirm_destructive("ssh_exec", None, false, &config, &audit);
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert_eq!(events[0].host, crate::security::NO_HOST);
     }
 
     /// The gate is the CLI's half of `require_elicitation_on_destructive`, so
@@ -3910,24 +4094,41 @@ mod tests {
     /// setting means one thing over MCP and another here.
     #[test]
     fn destructive_gate_honours_the_policy_switch() {
+        let config = gate_config(false);
+        let (logger, audit) = gate_audit(&config);
         confirm_destructive(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi"})),
             false,
-            &gate_config(false),
+            &config,
+            &audit,
         )
         .expect("with the policy off, nothing should be gated");
+        // The negative half of the two assertions above: a gate that wrote a
+        // line unconditionally would satisfy them both. No decision was
+        // taken here, so there is nothing to record.
+        assert!(
+            logger.drain_for_test().is_empty(),
+            "a gate that took no decision must write no line"
+        );
     }
 
     #[test]
     fn destructive_gate_ignores_non_destructive_tools() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
         confirm_destructive(
             "ssh_metrics",
             Some(&serde_json::json!({"host": "pi"})),
             false,
-            &gate_config(true),
+            &config,
+            &audit,
         )
         .expect("a read-only tool must never be gated");
+        assert!(
+            logger.drain_for_test().is_empty(),
+            "an ungated tool must write no gate line"
+        );
     }
 
     // ============== coerce_value Tests ==============

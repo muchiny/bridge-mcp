@@ -73,6 +73,29 @@ pub enum CommandResult {
     /// *operation* rather than a shell command, in the form
     /// `<tool> <identifying-arg>=<value>`.
     StateChanged { duration_ms: u64 },
+    /// A confirmation gate let a destructive call through, and **nothing has
+    /// run yet** when this line is written.
+    ///
+    /// Written by the CLI's destructive gate (`confirm_destructive`,
+    /// `src/cli/runner.rs`) through
+    /// `ExecuteCommandUseCase::log_confirmed`, at the moment the decision is
+    /// taken — before the call is dispatched, and before it is even settled
+    /// which path (a running daemon, or in-process) will serve it. Whatever
+    /// the call then does writes its own, later event; this one records only
+    /// the decision.
+    ///
+    /// **It carries neither an exit code nor a duration, for the reason
+    /// [`Self::StateChanged`] carries no code: nothing ran.** `by` names what
+    /// answered — the `--yes` flag, or the terminal prompt — which is the one
+    /// thing a reader cannot reconstruct from the rest of the line.
+    ///
+    /// **The allow path is audited, not only the refusals, and that is the
+    /// point of the variant.** A trail that recorded refusals alone could not
+    /// tell a destructive call that ran *after* the gate from one that ran
+    /// without ever meeting it — which is precisely what the CLI did until
+    /// 2026-08-31, on the default configuration. With this line present, its
+    /// absence on a destructive call is itself the signal.
+    Confirmed { by: String },
 }
 
 /// Audit event for logging
@@ -87,16 +110,19 @@ pub struct AuditEvent {
     /// `"command_denied"` from [`AuditEvent::denied`] for one that was
     /// refused. [`AuditEvent::tagged`] now takes it as a parameter, so the
     /// set is open; `"state_change"` (from
-    /// `ExecuteCommandUseCase::log_state_change`) is the third value in the
-    /// log today. A consumer must therefore treat an unknown value as data,
+    /// `ExecuteCommandUseCase::log_state_change`) and `"command_confirmed"`
+    /// (from `ExecuteCommandUseCase::log_confirmed`) are the third and fourth
+    /// values in the log today. A consumer must therefore treat an unknown value as data,
     /// not as a parse error — and a caller must keep passing a kind of
     /// outcome, which is the contract the field's name carries and the only
     /// thing stopping it from drifting into a second, unreliable `tool_name`.
     pub event_type: String,
     /// Target host alias, or [`NO_HOST`] when the operation had no target.
     pub host: String,
-    /// The command that ran — or, for a [`CommandResult::StateChanged`]
-    /// event, the operation that changed state, since no command ran.
+    /// The command that ran — or, when no command ran, the operation the
+    /// event is about: the state change for a [`CommandResult::StateChanged`]
+    /// event, and the call the gate was asked about for a
+    /// [`CommandResult::Confirmed`] one.
     pub command: String,
     /// Name of the tool that generated this event (e.g., `ssh_redis_cli`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,9 +130,10 @@ pub struct AuditEvent {
     pub result: CommandResult,
     /// Reduction params supplied on this call (`jq_filter`, `columns`, …),
     /// so adoption can be measured from the log with a grep. Populated only
-    /// for tools on the `StandardTool` pipeline (`process_success_for_tool`);
-    /// the custom handlers still log through `process_success` and leave
-    /// this empty.
+    /// for tools on the `StandardTool` pipeline, which is the one caller that
+    /// passes `process_success` a non-empty list (`&dr.used_params()`); the
+    /// custom handlers log through that same `process_success` with `&[]` and
+    /// leave this empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reduction: Vec<&'static str>,
 }
@@ -162,8 +189,10 @@ impl AuditEvent {
     /// Callers do not reach this directly. Each goes through the named,
     /// typed facade for its kind of event — today
     /// `ExecuteCommandUseCase::log_state_change`, which passes
-    /// `"state_change"` with [`CommandResult::StateChanged`] — because `tool`
-    /// is mandatory on those facades and consultative nowhere.
+    /// `"state_change"` with [`CommandResult::StateChanged`], and
+    /// `ExecuteCommandUseCase::log_confirmed`, which passes
+    /// `"command_confirmed"` with [`CommandResult::Confirmed`] — because
+    /// `tool` is mandatory on those facades and consultative nowhere.
     ///
     /// `command` receives whatever identifies the thing audited: a shell
     /// command for an event that ran one, or the **operation** (the tool and
@@ -760,6 +789,19 @@ impl AuditLogger {
                     command = %event.command,
                     duration_ms = duration_ms,
                     "Audit: state changed"
+                );
+            }
+            // Neither `exit_code` nor `duration_ms`: the decision is logged at
+            // the moment it is taken, so there is nothing yet to time and
+            // nothing yet to have exited.
+            CommandResult::Confirmed { by } => {
+                info!(
+                    event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
+                    host = %event.host,
+                    command = %event.command,
+                    confirmed_by = %by,
+                    "Audit: destructive call confirmed"
                 );
             }
         }

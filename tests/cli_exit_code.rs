@@ -50,6 +50,74 @@ fn a_destructive_tool_without_a_terminal_exits_4() {
     );
 }
 
+/// `--yes`'s help text promises that the gate's choice "is recorded in the
+/// audit log". The unit tests in `cli::runner` observe the channel the logger
+/// sends on; this one observes the file, because the decision used to go to
+/// `tracing::warn!` — which reaches stderr and never `audit.path`, and no
+/// in-process assertion on the channel can tell those two apart.
+#[test]
+fn a_refused_destructive_tool_writes_its_denial_to_the_audit_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = empty_config(&dir);
+    let out = run(&cfg, &["tool", "ssh_exec", "host=real", "command=false"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `run` points HOME at the config's own directory and clears
+    // XDG_DATA_HOME, and the config declares no `audit:` section, so the
+    // default path resolves inside this tempdir.
+    let audit = dir.path().join(".local/share/bridge-mcp/audit.log");
+    let log = std::fs::read_to_string(&audit)
+        .unwrap_or_else(|e| panic!("no audit log at {}: {e}", audit.display()));
+    assert!(
+        log.contains(r#""event_type":"command_denied""#),
+        "the refusal must be audited as a denial, got {log:?}"
+    );
+    // Pin the line to this call: without the name a denial reads like any
+    // other, and without the host it could be some earlier line.
+    assert!(
+        log.contains(r#""tool_name":"ssh_exec""#) && log.contains(r#""host":"real""#),
+        "the denial must name the tool and the host, got {log:?}"
+    );
+}
+
+/// The other half: a destructive call the gate LETS THROUGH writes a line
+/// too, so the absence of one on a destructive call means it never met the
+/// gate. Exit 3 (unknown host) is incidental — the gate runs before the host
+/// lookup, which is the order `an_unknown_host_exits_3…` already depends on.
+#[test]
+fn a_confirmed_destructive_tool_writes_its_confirmation_to_the_audit_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = empty_config(&dir);
+    let out = run(
+        &cfg,
+        &["--yes", "tool", "ssh_exec", "host=nope", "command=false"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let audit = dir.path().join(".local/share/bridge-mcp/audit.log");
+    let log = std::fs::read_to_string(&audit)
+        .unwrap_or_else(|e| panic!("no audit log at {}: {e}", audit.display()));
+    assert!(
+        log.contains(r#""event_type":"command_confirmed""#)
+            && log.contains(r#""Confirmed":{"by":"--yes"}"#),
+        "the gate's confirmation must name what answered, got {log:?}"
+    );
+    assert!(
+        log.contains(r#""tool_name":"ssh_exec""#),
+        "the confirmation must name the tool, got {log:?}"
+    );
+}
+
 #[test]
 fn an_unknown_host_exits_3_not_1_and_not_the_remote_failure_code() {
     let dir = tempfile::tempdir().unwrap();
