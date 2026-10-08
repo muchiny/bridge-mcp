@@ -387,32 +387,47 @@ tests and a serialisation test.
   being printed and read at all.
 
 - **(lib API + wire) `CommandResult` has a sixth variant,
-  `Interrupted { reason }`; `"command_interrupted"` is a new `event_type` in
-  `audit.log`; and `"<shutdown>"` is a new, reserved `tool_name`.** Same
+  `Interrupted { reason, events_recorded }`; `"command_interrupted"` is a new
+  `event_type` in `audit.log`; and `"<shutdown>"` is a new, reserved
+  `tool_name`.** Same
   migration as the fourth and fifth: **add an arm to any exhaustive `match`**.
   `CommandResult` is a `#[doc(hidden)]` re-export (`src/lib.rs`) and
   `AuditEvent.result` serializes it, so both the Rust API and the JSONL shape
-  change. In-tree the compile cost is **one arm**: counted after the change,
-  `src/` holds 15 `CommandResult::<Variant> =>` arms, **6** of which are the
-  arms of the only production `match` on it, `AuditLogger::log_to_tracing`.
-  The other 9 sit in `#[cfg(test)]` modules behind catch-all arms that panic
-  — which the build proves rather than the grep: the crate compiles with the
-  sixth variant and no warnings, so no other exhaustive `match` existed.
+  change. In-tree the compile cost is **one arm**: counted after the change
+  with a multi-line-aware probe, `src/` holds **17** `CommandResult::<V> =>`
+  arms, **6** of which are the arms of the only production `match` on it,
+  `AuditLogger::log_to_tracing`. The other 11 sit in `#[cfg(test)]` modules
+  behind catch-all arms that panic — which the build proves rather than the
+  grep: the crate compiles with the sixth variant and no warnings, so no
+  other exhaustive `match` existed. (A single-line regex returns 14 and is
+  wrong: `Interrupted`'s two-member pattern wraps onto three lines, so the
+  `=>` is not on the same line as the variant. The count did not change
+  between rounds; the probe did.)
 
   The line, as written by
   `a_call_still_in_flight_at_shutdown_leaves_one_line_with_no_exit_code` and
   read back off disk:
 
   ```json
-  {"timestamp":"2026-10-08T16:36:08.848617637Z","event_type":"command_interrupted","host":"raspberry","command":"ssh_session_exec {\"command\":\"sleep 45\",\"host\":\"raspberry\",\"session_id\":\"t45-0\"}","tool_name":"<shutdown>","result":{"Interrupted":{"reason":"the server stopped before the command finished"}}}
+  {"timestamp":"2026-10-08T20:51:00.712312715Z","event_type":"command_interrupted","host":"raspberry","command":"ssh_session_exec {command,host,session_id}","tool_name":"<shutdown>","result":{"Interrupted":{"reason":"the server stopped before this call returned","events_recorded":0}}}
   ```
 
   **No `exit_code` key and no `duration_ms` key**, and both absences are
-  asserted on the raw text, not on a parsed field. Select these with
-  `jq 'select(.event_type == "command_interrupted")'`. The equivalent
-  `select(.tool_name == "<shutdown>")` works today and is the weaker of the
-  two: `event_type` is a kind of outcome by contract, `tool_name` happens to
-  be the sentinel because the shutdown is the writer.
+  asserted on the raw text, not on a parsed field. `command` is the tool and
+  the NAMES of its arguments — no values; `reason` is one stable phrase with
+  no number in it; `events_recorded` is how many audit lines this call had
+  already written when the shutdown found it, as a **field**, so nothing has
+  to be parsed out of prose.
+
+  Select them with `jq 'select(.event_type == "command_interrupted")'`, and
+  read how far each got with
+  `jq 'select(.event_type == "command_interrupted") | {host, command, n: .result.Interrupted.events_recorded}'`:
+  `n == 0` means nothing of that call was recorded, `n > 0` means n lines
+  were and the call still had not returned, so those n lines are elsewhere in
+  the file. The equivalent `select(.tool_name == "<shutdown>")` works too and
+  is the weaker of the two: `event_type` is a kind of outcome by contract,
+  `tool_name` happens to be the sentinel because the shutdown is the
+  writer.
 
   **Why: a bounded shutdown had started dropping the fact that a command was
   running.** Bounding the teardown earlier in this cycle was measured in the
@@ -533,18 +548,20 @@ tests and a serialisation test.
   — `log_denied`, `log_confirmed`, `log_state_change`, `log_failure` and,
   through `record_success_redacted`, `process_success` and `log_success`. Six,
   not seven: `log_interrupted` is the shutdown's own write. The snapshot then
-  reports **every** remaining entry, with the reason the counter selects:
-  `"the server stopped before any result of this call was recorded"` at 0, or
-  `"the server stopped after N result(s) of this call were recorded, before
-  the call returned"` above it. Both are true, including for a call that had
-  written everything and not yet left `execute` — and the reader has those
-  success lines beside this one.
+  reports **every** remaining entry, carrying the count in
+  `events_recorded`: `0` reads "nothing of this call was recorded", `N`
+  reads "N were, and the call still had not returned". Both are true,
+  including for a call that had written everything and not yet left
+  `execute` — and the reader has those success lines beside this one. The
+  count is a **field** and the `reason` is one fixed phrase; an intermediate
+  revision interpolated the number into the sentence, which would have made a
+  `jq` consumer pull an integer out of prose the next commit could reword.
 
   The claim reaches the facades through a **per-call
   `ExecuteCommandUseCase`** placed in `ToolContext::execute_use_case`, not
   through a `tokio::task_local` as an earlier revision had it. `ToolContext`
   is built per request and already carries per-call state of this kind
-  (`mrtr`), and all **98** call sites of those six facades reach them
+  (`mrtr`), and all **100** call sites of those six facades reach them
   *through* `ctx.execute_use_case`, so the claim arrives with zero call-site
   edits, sits in a visible struct field rather than a hidden channel, and —
   unlike a task-local — **crosses `tokio::spawn`**, which is what brings
@@ -580,17 +597,42 @@ tests and a serialisation test.
     exemption**: if the key matches, the value goes whatever its type.
     Census, over the 476 schema-bearing files in `src/mcp/tool_handlers/`:
     **450** distinct property names, **11** matching a keyword — 3 real
-    secrets (`password`, `db_password`, `docker_password`) against **8**
-    over-redactions, two of which are information an auditor wants:
-    `kubeconfig` (a *path*, on **10** schemas) and `secret_type` (a fixed
-    enum). `vault_password_file` and `author` cost a reader little;
-    `credential`, `credential_type`, `pass_credentials` and
-    `summary_max_tokens` are the numbers and booleans the removed exemption
-    used to spare. An incomplete key list over-redacts, which is the safe
-    direction to be wrong in — but exempting those eight by name is a
-    decision, not a detail, and it is open. **Not fixed here, and it goes to
-    the plan:** the sanitizer's own pattern family is narrower than its
-    documentation implies for every JSON it is handed, not only this line.
+    secrets (`password`, `db_password`, `docker_password`), 1 exemption and
+    **7** over-redactions. **The exemption's criterion is structural, not
+    a name family**: a key whose schema declares an `enum` cannot hide a
+    secret, plus `kubeconfig` named explicitly because it is a *path*, on
+    **10** schemas, and because on a K3s host it is what distinguishes
+    "talked to the right cluster" from "talked to another one". A test
+    re-derives the `enum` criterion from the 476 schemas on every run, so the
+    list cannot drift away from it, and pins `kubeconfig` as the only
+    name-based entry.
+
+    Measured, and it refutes what that criterion was expected to cover:
+    **45** property names in the tree declare an `enum` and **none** of them
+    matches a secret keyword — including `secret_type`, whose four values live
+    in its *description* (`"Secret type: 'Opaque'/'generic' (default), 'tls',
+    or 'docker-registry'"`) and not in an `enum`. So `secret_type`,
+    `vault_password_file`, `author`, `credential`, `credential_type`,
+    `pass_credentials` and `summary_max_tokens` stay redacted on gate lines.
+    Parsing a description would be a rule that rots; the remedy for
+    `secret_type` is one line in `ssh_k8s_create_secret`'s schema — declare
+    the `enum` it already describes, and the list picks it up. An incomplete
+    exemption over-redacts, which is the safe direction to be wrong in.
+    **Not fixed here, and it goes to the plan:** the sanitizer's own pattern
+    family is narrower than its documentation implies for every JSON it is
+    handed, not only this line.
+  - **An annotation change can no longer put a secret on disk silently.** The
+    gate renders values, the key-name rule is what keeps a secret off those
+    lines, and that rule cannot see `ssh_k8s_create_secret`'s
+    `from_literal: [{"key": …, "value": …}]` — described "values are secret,
+    never logged", with neither member name matching a keyword. It was
+    harmless only because the tool is annotated `mutating`, so the gate never
+    arms for it, and **nothing pinned that**. A test now derives the set of
+    arguments described `never logged` from the schemas — exactly **2**, both
+    on that tool, and one of them (`docker_password`) is caught by the name
+    rule anyway — and fails if such a tool is annotated `destructive`, with a
+    message naming both remedies. It covers tools added later with the same
+    shape without anybody remembering to come back.
   - **Forged fields in the `tracing` sink, and the rule is now mechanical.**
     `host=raspberry exit_code=0 duration_ms=12 event_type=command_executed`
     — 62 characters, under every cap — made a logfmt consumer read an

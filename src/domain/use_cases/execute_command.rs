@@ -11,8 +11,8 @@ use crate::domain::CommandHistory;
 use crate::error::Result;
 use crate::ports::CommandOutput;
 use crate::security::{
-    AuditEvent, AuditLogger, CommandResult, CommandValidator, INTERRUPTED_BEFORE_ANY_RESULT,
-    SHUTDOWN_TOOL, Sanitizer, interrupted_after_results,
+    AuditEvent, AuditLogger, CommandResult, CommandValidator, INTERRUPTED_BY_SHUTDOWN,
+    SHUTDOWN_TOOL, Sanitizer,
 };
 
 /// Request for executing a command
@@ -153,6 +153,11 @@ pub struct ExecuteCommandUseCase {
     ///
     /// `None` off the MCP request path: the CLI builds its own use case and
     /// has no shutdown registry to report to.
+    ///
+    /// The 98 above was 98 when it was counted and is **100** today — two of
+    /// this wave's own tests call the facades. The figure moving is the
+    /// point: a claim parameter would have to be threaded through every one
+    /// of them, tests included, and the count grows with the suite.
     in_flight: Option<Arc<crate::security::InFlightClaim>>,
 }
 
@@ -540,7 +545,10 @@ impl ExecuteCommandUseCase {
     /// value that must never be passed — the name of the tool whose call this
     /// is about, which would make the line indistinguishable from one that
     /// tool wrote itself. The tool is still on the line: `operation` begins
-    /// with it, in the form `crate::security::audited_operation` builds.
+    /// with it, in the form `crate::security::audited_argument_names`
+    /// builds. (This named `audited_operation` until round 3; that is the
+    /// renderer the CLI gate kept, and it carries argument VALUES, which this
+    /// line no longer does.)
     ///
     /// **No history entry**, for the reason [`Self::log_state_change`]
     /// states and that applies here word for word: `HistoryEntry::exit_code`
@@ -560,11 +568,6 @@ impl ExecuteCommandUseCase {
         // less for a sanitizer to find — but it is still caller-chosen text
         // and the redaction stays.
         let redacted = self.sanitizer.sanitize(operation);
-        let reason = if events_recorded == 0 {
-            INTERRUPTED_BEFORE_ANY_RESULT.to_string()
-        } else {
-            interrupted_after_results(events_recorded)
-        };
 
         self.audit_logger.log(
             SHUTDOWN_TOOL,
@@ -572,7 +575,10 @@ impl ExecuteCommandUseCase {
                 "command_interrupted",
                 host,
                 &redacted,
-                CommandResult::Interrupted { reason },
+                CommandResult::Interrupted {
+                    reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+                    events_recorded,
+                },
             ),
         );
     }

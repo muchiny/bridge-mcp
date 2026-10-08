@@ -99,40 +99,28 @@ pub const NO_HOST: &str = "<no-host>";
 /// nothing can collide with this value, and
 /// `grep '"tool_name":"<shutdown>"'` over `audit.log` enumerates exactly the
 /// calls whose outcome was never read. The `command` field carries the tool
-/// that was running, in the form [`audited_operation`] builds.
+/// that was running, in the form `audited_argument_names` builds — the tool
+/// and the NAMES of its arguments. (This sentence said `audited_operation`
+/// until round 3 of the review; that is the renderer the CLI gate kept, and
+/// the shutdown's moved off it when the line stopped carrying values.)
 pub(crate) const SHUTDOWN_TOOL: &str = "<shutdown>";
 
-/// [`CommandResult::Interrupted`]'s reason when the call had recorded
-/// **nothing** yet.
+/// The one `reason` [`CommandResult::Interrupted`] carries.
 ///
-/// A fixed phrase, not caller data, and that is a constraint rather than a
-/// convenience: [`AuditLogger::log`] sanitizes `event.command` and nothing
-/// else, so a `CommandResult`'s own strings reach both sinks unredacted. A
-/// reason built from arguments could therefore put a secret on the line.
-pub(crate) const INTERRUPTED_BEFORE_ANY_RESULT: &str =
-    "the server stopped before any result of this call was recorded";
-
-/// [`CommandResult::Interrupted`]'s reason when the call had already recorded
-/// `n` results and had not returned.
+/// **A stable sentence with no number in it, and round 3 is why.** For one
+/// revision there were two phrases and the count was interpolated into one of
+/// them, so a `jq` consumer that wanted to know how far a call had got had to
+/// pull an integer out of prose with a regular expression — against a
+/// sentence the next commit could reword. That is the coupling this whole
+/// release exists to remove, in miniature. The count is a field now
+/// (`CommandResult::Interrupted::events_recorded`), and this phrase is true
+/// whatever its value: the process stopped, and the call had not returned.
 ///
-/// **The second statement exists because the first one alone made a line
-/// disappear.** While a handler's own write REMOVED the registry entry, a
-/// shutdown between host 1 and host 2 of a multi-host call found nothing and
-/// said nothing, and hosts 2..N wrote into a channel `close_audit()` had
-/// closed — a MISSING line, which is this task's original defect reintroduced
-/// by its own fix. Both statements are true, including for a call that had
-/// written every line but not yet left `registry.execute`: the process did
-/// stop before the call returned, and the reader has the success lines beside
-/// this one.
-///
-/// Still not caller data: the only interpolation is a `u64` this crate
-/// counted.
-pub(crate) fn interrupted_after_results(n: u64) -> String {
-    format!(
-        "the server stopped after {n} result(s) of this call were recorded, \
-         before the call returned"
-    )
-}
+/// Not caller data, and that is a constraint rather than a convenience:
+/// [`AuditLogger::log`] sanitizes `event.command` and nothing else, so a
+/// `CommandResult`'s own strings reach both sinks unredacted. A reason built
+/// from arguments could therefore put a secret on the line.
+pub(crate) const INTERRUPTED_BY_SHUTDOWN: &str = "the server stopped before this call returned";
 
 /// Result of a command execution for audit purposes
 #[derive(Debug, Clone, Serialize)]
@@ -258,18 +246,32 @@ pub enum CommandResult {
     /// and in a field that everywhere else means "how long the command took"
     /// it would read as the latter.
     ///
-    /// **`reason` says HOW FAR the call had got**, and carrying that in a
-    /// field rather than in the `event_type` is what lets it: there are two
-    /// values, `INTERRUPTED_BEFORE_ANY_RESULT` when the call had recorded
-    /// nothing and `interrupted_after_results(n)` when it had recorded `n`
-    /// and not returned. Both are true statements, and having only the first
-    /// is what made an earlier revision drop a line entirely — see
-    /// `InFlightCall::events_recorded`. A field also leaves room for a second
-    /// kind of abandonment: the cleanup loops are `abort()`ed unbounded in
-    /// `McpServer::serve`, and a handler running inside one is lost the same
-    /// way, which could be named here without minting a second `event_type`
-    /// every consumer would have to learn.
-    Interrupted { reason: String },
+    /// **`reason` says WHAT happened and `events_recorded` says how far the
+    /// call had got**, which is the split round 3 settled: one stable phrase,
+    /// `INTERRUPTED_BY_SHUTDOWN`, plus a machine-readable count. A `reason`
+    /// is still a field rather than part of the `event_type`, which leaves
+    /// room for a second kind of abandonment — the cleanup loops are
+    /// `abort()`ed unbounded in `McpServer::serve`, and a handler running
+    /// inside one is lost the same way — to be named here without minting a
+    /// second `event_type` every consumer would have to learn.
+    Interrupted {
+        reason: String,
+        /// How many audit events this call had already written when the
+        /// shutdown found it.
+        ///
+        /// **A field and not a number inside `reason`.** `0` means the
+        /// process stopped before any result of this call was recorded;
+        /// `N > 0` means N were recorded and the call had still not returned
+        /// — which is exactly what a reader of a call that wrote every line
+        /// but never left `registry.execute` needs to see beside those lines.
+        /// Both readings are true statements, which is why one phrase plus a
+        /// count replaced the two phrases an earlier revision used.
+        ///
+        /// It is **not** a duration and not an exit code: it counts lines
+        /// this process wrote, which is a fact about the trail rather than a
+        /// claim about the command.
+        events_recorded: u64,
+    },
 }
 
 /// Audit event for logging
@@ -436,11 +438,15 @@ impl AuditEvent {
 // Everything in this block was private to `src/cli/runner.rs`, where the
 // CLI's destructive gate was its only caller. It is here because a second
 // caller appeared — the MCP shutdown emitter,
-// `McpServer::audit_interrupted_in_flight` — and both write the same two
-// fields from the same kind of input: a tool's RAW arguments, unresolved and
-// unbounded. The caps are the audit line's own contract, so they belong
-// beside the rest of it; `src/mcp/` cannot see `src/cli/`, and duplicating a
-// six-line host renderer across two sinks is how two sinks start disagreeing.
+// `McpServer::audit_interrupted_in_flight`. Both build their `host` from the
+// same kind of input, a tool's RAW arguments, unresolved and unbounded; they
+// NO LONGER share the `command` renderer, and that split is round 2's, not an
+// oversight — the gate renders values (`audited_operation`) because its line
+// is read before the call runs, and the shutdown renders argument names
+// (`audited_argument_names`) because a keyword list cannot be made complete.
+// The caps are the audit line's own contract, so they belong beside the rest
+// of it; `src/mcp/` cannot see `src/cli/`, and duplicating a six-line host
+// renderer across two sinks is how two sinks start disagreeing.
 //
 // The two constants keep their `GATE_` prefix. Renaming them would have
 // rewritten every reference in `runner.rs` for nothing, and the prefix is not
@@ -688,32 +694,37 @@ const fn reorders_or_hides(c: char) -> bool {
 ///
 /// - Real secrets, redacted correctly: `password` (1 schema), `db_password`
 ///   (3), `docker_password` (1).
-/// - Over-redacted, and two of these are information an auditor wants:
-///   `kubeconfig` (string, **10** schemas) is a *path* and is what
-///   distinguishes "talked to the right cluster" from "talked to another one"
-///   on a K3s host; `secret_type` (string, 1) is a fixed enum
-///   (`Opaque`/`generic`/`tls`/`docker-registry`) and says what KIND of
-///   secret was created. `vault_password_file` (string, 4) is also a path,
-///   and `author` (string, 1) costs a reader one name.
-/// - Over-redacted since the type exemption went: `credential` (integer, 2),
-///   `credential_type` (integer, 1), `pass_credentials` (boolean, 1),
-///   `summary_max_tokens` (integer, 5).
+/// - **Exempt**: `kubeconfig` (string, **10** schemas) — see
+///   [`REDACTION_EXEMPT_KEYS`], which carries the justification and the
+///   criterion.
+/// - Over-redacted, and the list is short on purpose:
+///   `secret_type` (string, 1), `vault_password_file` (string, 4) and
+///   `author` (string, 1), plus the four the removed type exemption used to
+///   spare — `credential` (integer, 2), `credential_type` (integer, 1),
+///   `pass_credentials` (boolean, 1), `summary_max_tokens` (integer, 5).
 ///
-/// So **8 over-redactions against 3 correct ones**, on the gate's lines. The
-/// earlier version of this list said 9 keys and 2 over-redactions, and had
-/// `kubeconfig` under "correct" and `docker_password` missing altogether; it
-/// was produced by a regex that required `"type"` on the line after the key.
-/// A key list that is incomplete over-redacts, which is the safe direction to
-/// be wrong in — but "safe" is not "free", and whether these eight should be
-/// exempted by name is a decision, not a detail.
+/// So **7 over-redactions against 3 correct ones and 1 exemption**, on the
+/// gate's lines. `secret_type` is the one that costs a reader something real:
+/// it says what KIND of secret was created, and its four values are listed in
+/// its *description* — `"Secret type: 'Opaque'/'generic' (default), 'tls', or
+/// 'docker-registry'"` — and **not** in an `enum`, which is why the
+/// structural criterion does not take it. The remedy is one line in
+/// `ssh_k8s_create_secret`'s schema; parsing a description would be a rule
+/// that rots. Two earlier versions of this list were wrong and the record is
+/// worth keeping: the first said 9 keys and 2 over-redactions, had
+/// `kubeconfig` under "correct" and omitted `docker_password` — it came from a
+/// regex requiring `"type"` on the line after the key.
 ///
 /// **It is still not a complete defence, by construction.** A keyword list
 /// cannot be: `ssh_k8s_create_secret` takes
 /// `from_literal: [{"key": …, "value": …}]`, and neither `key` nor `value`
-/// matches a keyword, so a short secret in that array reaches the gate's line
-/// verbatim. That is the measurement that moved the shutdown sink to key
+/// matches a keyword, so a short secret in that array would reach the gate's
+/// line verbatim. That is the measurement that moved the shutdown sink to key
 /// names only; the gate keeps the hole, knowingly, because its line exists to
-/// be read before the call runs.
+/// be read before the call runs. What is no longer unguarded is the
+/// **coupling**: the gate only arms for destructive tools and that one is
+/// `mutating`, which
+/// `no_tool_with_a_never_logged_argument_may_become_destructive` now pins.
 ///
 /// Recursive, because a secret one level down (`{"creds":{"password":"…"}}`)
 /// is reached by no top-level key. Depth is bounded by `serde_json`'s own
@@ -741,25 +752,67 @@ fn redact_secret_values(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Keys the name rule matches but whose value cannot be a secret.
+///
+/// **An exemption list, not a redaction list, and the asymmetry is the whole
+/// argument for having one.** An incomplete redaction list leaks; an
+/// incomplete exemption list over-redacts, which is the safe direction to be
+/// wrong in. So this may be short and may be wrong without anybody losing a
+/// password.
+///
+/// Two criteria, one structural and one named:
+///
+/// 1. **A key whose schema declares an `enum`.** A finite, known value set
+///    cannot hide a secret, and the structure decides that, not a judgement.
+///    `the_exemption_list_still_matches_its_structural_criterion` re-derives
+///    this from the 476 schemas on every run, so a key that gains an `enum`
+///    reddens until it is added here.
+///
+///    **Measured, and it is worth stating because round 3 expected
+///    otherwise: this criterion takes NONE of the eleven keys today.** 45
+///    distinct property names in the tree declare an `enum`; not one of them
+///    matches a secret keyword. In particular it does **not** take
+///    `secret_type`, whose four values live in its *description* —
+///    `"Secret type: 'Opaque'/'generic' (default), 'tls', or
+///    'docker-registry'"` — and not in an `enum`. Parsing a description is
+///    exactly the kind of rule that rots, so the criterion stays as it is and
+///    `secret_type` stays redacted. The remedy is one line in
+///    `ssh_k8s_create_secret`'s schema: declare the `enum` it already
+///    describes, and this list picks it up.
+///
+/// 2. **`kubeconfig`, by name**, because it is a **path** and not a content,
+///    on **10** of the 476 schemas (the most of any matching key), and
+///    because it is what an auditor comes for: on a K3s host
+///    `kubeconfig=/etc/rancher/k3s/k3s.yaml` is what distinguishes "talked to
+///    the right cluster" from "talked to another one". One named entry with
+///    its measurement beside it, not a `*_file` family nobody could bound.
+const REDACTION_EXEMPT_KEYS: &[&str] = &["kubeconfig"];
+
 /// Whether an argument's key name contains one of the sanitizer's secret
-/// keywords, case-insensitively.
+/// keywords, case-insensitively — and is not on [`REDACTION_EXEMPT_KEYS`].
 fn key_names_a_secret(key: &str) -> bool {
     let lowered = key.to_ascii_lowercase();
+    if REDACTION_EXEMPT_KEYS.contains(&lowered.as_str()) {
+        return false;
+    }
     crate::security::Sanitizer::secret_keywords()
         .iter()
         .any(|keyword| lowered.contains(&keyword.to_ascii_lowercase()))
 }
 
-/// The `command` field for an event about a CALL rather than a command: the
-/// tool and its arguments, bounded.
+/// The `command` field for a CLI gate event: the tool and its arguments,
+/// **values included**, bounded.
 ///
-/// No command string is available — the handler builds it, and it either has
-/// not run yet (the gate) or never came back (the shutdown emitter) — so the
-/// line carries the *operation*, in the shape [`AuditEvent::tagged`]
-/// documents for an event that ran nothing. For the shutdown emitter that
-/// shape is a slight stretch, and worth stating rather than glossing: a
-/// command DID run there. What did not happen is anyone reading its outcome. The bounds are
-/// [`GATE_AUDIT_MAX_VALUE_CHARS`] per value and
+/// **One caller since round 2: the CLI's destructive gate.** The shutdown
+/// emitter used to share this and now uses `audited_argument_names`, because
+/// a keyword list cannot be made complete — see there. The gate keeps the
+/// values deliberately: its line exists to show an operator what is about to
+/// run, so a rendering without values would defeat its purpose.
+///
+/// No command string is available at the gate — the handler builds it and it
+/// has not run yet — so the line carries the *operation*, in the shape
+/// [`AuditEvent::tagged`] documents for an event that ran nothing. The bounds
+/// are [`GATE_AUDIT_MAX_VALUE_CHARS`] per value and
 /// [`GATE_AUDIT_MAX_OPERATION_CHARS`] overall, both marked where they bite.
 ///
 /// The SIZE rule is a size rule on purpose, not a list of content-bearing
@@ -948,8 +1001,10 @@ pub(crate) struct InFlightCall {
     ///
     /// So the entry is not taken away by a write; it is **transitioned**.
     /// Incremented before each write, so the claim is still taken first, and
-    /// read at the snapshot to choose between two statements that are both
-    /// true:
+    /// copied onto the shutdown's line as
+    /// `CommandResult::Interrupted::events_recorded` — **a field, since round
+    /// 3, not a number inside the `reason` sentence**. One stable phrase plus
+    /// a count, read two ways:
     ///
     /// - `0` — the process stopped before any result of this call was
     ///   recorded;
@@ -1905,13 +1960,17 @@ impl AuditLogger {
             }
             // Neither field again, and for a third reason: something DID run
             // and we stopped without learning how it ended. See the variant.
-            CommandResult::Interrupted { reason } => {
+            CommandResult::Interrupted {
+                reason,
+                events_recorded,
+            } => {
                 info!(
                     event_type = ?event.event_type,
                     tool_name = event.tool_name.as_deref(),
                     host = ?event.host,
                     command = ?event.command,
                     reason = ?reason,
+                    events_recorded = events_recorded,
                     "Audit: command interrupted by shutdown"
                 );
             }
@@ -3938,6 +3997,40 @@ mod tests {
         assert!(line.contains(r#""user":"pi""#), "{line}");
     }
 
+    /// `kubeconfig` survives the name rule, and `secret_type` does not.
+    ///
+    /// The two halves of round 3's exemption, as behaviour rather than as a
+    /// list: the named entry works, and the key the structural criterion does
+    /// NOT take is still redacted. The second assertion is the one that would
+    /// quietly reverse if somebody "finished" the exemption by adding a
+    /// `*_type` family — `secret_type` stays redacted until its schema
+    /// declares the `enum` its description already spells out.
+    #[test]
+    fn the_exemption_spares_a_path_and_not_a_prose_enumeration() {
+        let line = audited_operation(
+            "ssh_k8s_create_secret",
+            Some(&serde_json::json!({
+                "kubeconfig": "/etc/rancher/k3s/k3s.yaml",
+                "secret_type": "docker-registry",
+                "docker_password": "S3cr3t",
+            })),
+        );
+
+        assert!(
+            line.contains(r#""kubeconfig":"/etc/rancher/k3s/k3s.yaml""#),
+            "a path is what an auditor comes for, and a path cannot hide a secret: {line}"
+        );
+        assert!(
+            line.contains(r#""secret_type":"[REDACTED]""#),
+            "its value set is in the description, not in an `enum`, so the structural \
+             criterion does not see it: {line}"
+        );
+        assert!(
+            !line.contains("S3cr3t"),
+            "and the real secret beside them still goes: {line}"
+        );
+    }
+
     /// **A matching key is redacted whatever the value's type.**
     ///
     /// The first version spared `Number | Bool | Null` to keep readable
@@ -3969,6 +4062,203 @@ mod tests {
         assert!(
             line.contains(r#""limit":50"#),
             "a key that names no secret keeps its value whatever the type: {line}"
+        );
+    }
+
+    /// Every tool schema in the tree, as source text, for the two guards
+    /// below.
+    ///
+    /// Reads `src/mcp/tool_handlers/` from `CARGO_MANIFEST_DIR` rather than
+    /// `include_str!`ing 476 files. Same technique the repository already
+    /// uses for its source-text guards; it touches nothing outside the
+    /// checkout.
+    fn tool_handler_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tool_handlers");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the tool_handlers directory must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).expect("readable handler");
+                if text.contains("const SCHEMA") || text.contains("fn schema") {
+                    out.push((
+                        path.file_name()
+                            .expect("a file name")
+                            .to_string_lossy()
+                            .into_owned(),
+                        text,
+                    ));
+                }
+            }
+        }
+        assert!(
+            out.len() > 400,
+            "expected the ~476 schema-bearing handlers, found {} — this guard has lost its \
+             corpus and would pass vacuously",
+            out.len()
+        );
+        out
+    }
+
+    /// The balanced `{ … }` object a schema property opens, for each
+    /// `"name": {` in `text`.
+    fn schema_properties(text: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while let Some(found) = text[i..].find("\": {") {
+            let at = i + found;
+            let name_end = at;
+            let Some(name_start) = text[..name_end].rfind('"') else {
+                i = at + 4;
+                continue;
+            };
+            let name = &text[name_start + 1..name_end];
+            let open = at + 3;
+            let mut depth = 0usize;
+            let mut j = open;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && !name.is_empty()
+                && !matches!(name, "properties" | "items" | "schema" | "type")
+            {
+                out.push((
+                    name.to_string(),
+                    text[open..=j.min(bytes.len() - 1)].to_string(),
+                ));
+            }
+            i = open;
+        }
+        out
+    }
+
+    /// **The exemption list is a cache of a criterion, and this re-derives
+    /// the criterion.**
+    ///
+    /// Criterion 1: a key whose schema declares an `enum` cannot hide a
+    /// secret. If one ever both matches a secret keyword and declares an
+    /// `enum`, this reddens until it is added to `REDACTION_EXEMPT_KEYS` —
+    /// which is how the list stays structural instead of becoming a name
+    /// family. Measured today: **zero** such keys, so the whole list is the
+    /// one named entry.
+    ///
+    /// Criterion 2: `kubeconfig` is named, and this pins that it is the ONLY
+    /// name-based entry, so a future "while we are here" addition has to
+    /// argue for itself in a failing test rather than slip in.
+    #[test]
+    fn the_exemption_list_still_matches_its_structural_criterion() {
+        let keywords: Vec<String> = crate::security::Sanitizer::secret_keywords()
+            .iter()
+            .map(|k| k.to_ascii_lowercase())
+            .collect();
+        let names_a_secret = |key: &str| {
+            keywords
+                .iter()
+                .any(|k| key.to_ascii_lowercase().contains(k))
+        };
+
+        let mut enum_declaring_secret_keys: Vec<String> = Vec::new();
+        for (_file, text) in tool_handler_sources() {
+            for (name, body) in schema_properties(&text) {
+                if body.contains("\"enum\"") && names_a_secret(&name) {
+                    enum_declaring_secret_keys.push(name);
+                }
+            }
+        }
+        enum_declaring_secret_keys.sort();
+        enum_declaring_secret_keys.dedup();
+
+        for key in &enum_declaring_secret_keys {
+            assert!(
+                REDACTION_EXEMPT_KEYS.contains(&key.as_str()),
+                "`{key}` matches a secret keyword AND declares an `enum`, so its value set is \
+                 finite and known and it cannot hide a secret. Add it to \
+                 REDACTION_EXEMPT_KEYS: redacting it costs a reader information for nothing."
+            );
+        }
+
+        let named_only: Vec<&&str> = REDACTION_EXEMPT_KEYS
+            .iter()
+            .filter(|k| !enum_declaring_secret_keys.iter().any(|e| e == **k))
+            .collect();
+        assert_eq!(
+            named_only,
+            vec![&"kubeconfig"],
+            "`kubeconfig` is the only entry justified by name rather than by structure, and \
+             its justification is on REDACTION_EXEMPT_KEYS. A new name-based entry must come \
+             with one too — change this assertion deliberately, not in passing"
+        );
+    }
+
+    /// **The coupling nothing guarded: an annotation change would put a
+    /// secret on disk.**
+    ///
+    /// The CLI's destructive gate renders argument VALUES, on purpose — its
+    /// line exists to show an operator what is about to run. The key-name
+    /// redaction is what keeps a secret off it, and a keyword list cannot be
+    /// complete: `ssh_k8s_create_secret`'s `from_literal` is
+    /// `[{"key": …, "value": …}]`, described "values are secret, never
+    /// logged", and neither member name matches any keyword. Today that is
+    /// harmless only because the tool is annotated `mutating`, so the gate
+    /// never arms for it — and **nothing was pinning that**.
+    ///
+    /// Measured corpus, so the guard is not one hand-picked tool: exactly
+    /// **2** schema properties in the tree carry the phrase `never logged`,
+    /// both on `ssh_k8s_create_secret` (`from_literal` and
+    /// `docker_password`), and `docker_password` is caught by the key-name
+    /// rule anyway. Widening the probe to any description mentioning a
+    /// secret-ish word returns 28 non-destructive tools, nearly all of them
+    /// false positives (`summary_max_tokens` matches `token`, the
+    /// `ssh_k8s_secret_*` family matches on its own name), which is why the
+    /// probe is the phrase an author writes when the ARGUMENT is the secret.
+    ///
+    /// This derives the set rather than naming it, so a tool added later with
+    /// the same shape is covered without anybody remembering to come back.
+    #[test]
+    fn no_tool_with_a_never_logged_argument_may_become_destructive() {
+        let mut found = 0usize;
+        for (file, text) in tool_handler_sources() {
+            let destructive = text.contains(r#"annotation = "destructive""#);
+            for (name, body) in schema_properties(&text) {
+                if !body.contains("never logged") {
+                    continue;
+                }
+                found += 1;
+                if key_names_a_secret(&name) {
+                    // The gate would replace this value with `[REDACTED]`
+                    // whatever the annotation says, so it is safe either way.
+                    continue;
+                }
+                assert!(
+                    !destructive,
+                    "{file}: `{name}` is described \"never logged\" and its NAME matches no \
+                     secret keyword, so the key-name redaction cannot see it — and this tool \
+                     is annotated `destructive`, which arms the CLI gate and makes the gate \
+                     render argument values. That puts the secret in audit.log. Remedy, \
+                     either one: rename the argument so the key names the secret (then \
+                     `redact_secret_values` catches it), or teach the gate to render names \
+                     only for this tool. Do not simply delete this assertion."
+                );
+            }
+        }
+        assert_eq!(
+            found, 2,
+            "the corpus this guard polices is 2 properties carrying `never logged`, both on \
+             ssh_k8s_create_secret; {found} means the probe has drifted and the guard may be \
+             passing vacuously"
         );
     }
 
@@ -4146,6 +4436,7 @@ mod tests {
                 "reason",
                 CommandResult::Interrupted {
                     reason: PAYLOAD.to_string(),
+                    events_recorded: 0,
                 },
             ),
         ];
@@ -4212,7 +4503,8 @@ mod tests {
             "raspberry exit_code=0 duration_ms=12",
             "ssh_exec {}",
             CommandResult::Interrupted {
-                reason: INTERRUPTED_BEFORE_ANY_RESULT.to_string(),
+                reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+                events_recorded: 0,
             },
         );
 

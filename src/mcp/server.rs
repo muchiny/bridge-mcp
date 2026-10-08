@@ -1537,9 +1537,12 @@ impl McpServer {
     /// nothing, while hosts 2..N wrote into a channel `close_audit()` had
     /// closed. Nothing false, a line **missing** — this task's own defect,
     /// reintroduced by its own fix. A write now only increments
-    /// `InFlightCall::events_recorded`, and this method reads it to choose
-    /// between two statements that are both true: nothing was recorded, or N
-    /// were recorded and the call had not returned.
+    /// `InFlightCall::events_recorded`, and this method copies it onto the
+    /// line as a FIELD — one stable `reason` plus a count, which reads two
+    /// ways: nothing was recorded, or N were recorded and the call had not
+    /// returned. Both are true statements; a count inside the sentence (which
+    /// is what an earlier revision wrote) made a `jq` consumer regex an
+    /// integer out of prose.
     ///
     /// **One new availability risk, in kind and not in degree.**
     /// `AuditWriterTask` calls `rotate_if_needed()` after EVERY event it
@@ -7305,17 +7308,21 @@ rbac:
         assert_eq!(calls.len(), 1);
     }
 
-    /// **A call that has already written is still reported, with a different
-    /// reason.**
+    /// **A call that has already written is still reported, and its line
+    /// carries HOW MANY lines it had written.**
     ///
-    /// This is the hole round 2 found in round 1: releasing on the first
+    /// Two findings in one test. Round 2's: releasing the claim on the first
     /// write made a multi-event call unreportable from its first event on, so
     /// a shutdown between host 1 and host 2 of an `ssh_metrics_multi` wrote
-    /// **zero** lines where `4dd213d` wrote one. Nothing false, a line
-    /// missing — this task's original defect. Both reasons are asserted,
-    /// because a single one of them is what made the other case wrong.
+    /// **zero** lines where the first revision wrote one — nothing false, a
+    /// line missing, which is this task's original defect. Round 3's: the
+    /// count belongs in a FIELD. It was briefly interpolated into the
+    /// `reason` sentence, which made a `jq` consumer regex an integer out of
+    /// prose the next commit could reword, so both assertions below are on
+    /// `events_recorded` and the `reason` is asserted to be the same stable
+    /// phrase on both lines.
     #[tokio::test]
-    async fn a_call_that_already_wrote_is_reported_with_the_other_reason() {
+    async fn a_call_that_already_wrote_is_reported_with_its_event_count() {
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.log");
         let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
@@ -7366,8 +7373,8 @@ rbac:
             .find(|e| e["command"].as_str().unwrap_or("").starts_with("ssh_exec "))
             .expect("the untouched call must have a line");
         assert_eq!(
-            before["result"]["Interrupted"]["reason"],
-            crate::security::INTERRUPTED_BEFORE_ANY_RESULT
+            before["result"]["Interrupted"]["events_recorded"], 0,
+            "a call that recorded nothing says so IN A FIELD, not inside a sentence"
         );
 
         let after = interrupted
@@ -7380,9 +7387,18 @@ rbac:
             })
             .expect("the half-written call must have a line too");
         assert_eq!(
+            after["result"]["Interrupted"]["events_recorded"], 2,
+            "and the half-written call must carry its COUNT, not a different sentence: a \
+             consumer that wants N must not have to regex it out of prose"
+        );
+        assert_eq!(
             after["result"]["Interrupted"]["reason"],
-            crate::security::interrupted_after_results(2),
-            "and it must say how many results it had recorded, not that none had been"
+            crate::security::INTERRUPTED_BY_SHUTDOWN,
+            "the reason is one stable phrase on both, with no number in it"
+        );
+        assert_eq!(
+            before["result"]["Interrupted"]["reason"],
+            crate::security::INTERRUPTED_BY_SHUTDOWN
         );
     }
 
