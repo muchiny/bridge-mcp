@@ -491,21 +491,39 @@ tests and a serialisation test.
     abort, which runs its claim's `Drop` before the snapshot, so it gets no
     line by this mechanism either. Bounding that abort would reopen the
     unbounded wait the teardown bound exists to close.
+  - *Two fragile anchors remain, both in the feed guard*: a prose sentence
+    (`/// Whether THIS request declared the tasks extension.`) as a slice
+    terminator in a file this release rewrote four times, and a long
+    `.execute(&call_params.name, call_params.arguments, &ctx)` literal that
+    `rustfmt` would fold if the line grew. Both fail noisily and both fail
+    with a misleading message.
   - *The remaining double-write window.* If the snapshot reports a call and
     the handler then finishes, the handler's own lines still go out — which
     is correct now that the shutdown's line says how many results had been
     recorded, and is in any case bounded by `close_audit()`, the next
     statement. What is gone is the version where that second line claimed
     nothing had been recorded.
-  - *The second abandonment path, which is the better outcome and still a
-    hole in the inference.* `session_manager.close_all()` runs **before** the
-    snapshot and closes the SSH session under a live handler; that handler's
-    `exec` then fails and it writes its own `Error` line, releasing the claim
-    first, so no `<shutdown>` line follows. A true line about a failure beats
-    a line saying the outcome is unknown — but it means the nominal case
-    (`daemon stop` with an `ssh_exec` in flight) probably writes **zero** of
-    these lines, not one. **Zero `<shutdown>` lines does not prove zero
-    abandoned calls.**
+  - *The second abandonment path.* `session_manager.close_all()` runs
+    **before** the snapshot and closes the SSH session under a live handler;
+    that handler's `exec` then fails and it writes its own `Error` line, which
+    **counts** the write and leaves the entry in place. So that call gets a
+    `<shutdown>` line too, with `events_recorded: 1` beside its `Error` line,
+    and a reader sees both what failed and that the process stopped before the
+    call returned. (An earlier revision had the facade REMOVE the entry, so
+    this path wrote no `<shutdown>` line and this bullet said the nominal
+    `daemon stop` probably wrote zero of them. That mechanism is gone.) What
+    remains true: the five background loops are `abort()`ed before the
+    snapshot and a handler inside one is dropped without counting anything, so
+    **zero `<shutdown>` lines still does not prove zero abandoned calls.**
+  - *The tasks worker has no explicit `finish()`.* `handle_tools_call` calls
+    one after `execute` so a handler that parked a `ToolContext` clone in a
+    detached task cannot keep the entry alive; the
+    `io.modelcontextprotocol/tasks` worker relies on its claim being dropped
+    instead, so a clone it leaked would hold the entry to the end of the
+    process. No tool does that today.
+  - *`host` is the only path by which an argument VALUE still reaches the
+    line*, rendered but not sanitized — deliberately, so a real alias stays
+    greppable.
   - *The wiring in both teardowns is pinned as source text*, not at runtime:
     driving a real in-flight command through either needs a remote host. No
     test crosses `serve` or `serve_with_shutdown` end to end.
@@ -596,24 +614,27 @@ tests and a serialisation test.
   - **Redaction by key name stays, for the gate, and loses its type
     exemption**: if the key matches, the value goes whatever its type.
     Census, over the 476 schema-bearing files in `src/mcp/tool_handlers/`:
-    **450** distinct property names, **11** matching a keyword — 3 real
-    secrets (`password`, `db_password`, `docker_password`), 1 exemption and
-    **7** over-redactions. **The exemption's criterion is structural, not
+    **448** distinct property names, **11** matching a keyword — 3 real
+    secrets (`password`, `db_password`, `docker_password`), **2** exemptions
+    and **6** over-redactions. **The exemption's criterion is structural, not
     a name family**: a key whose schema declares an `enum` cannot hide a
-    secret, plus `kubeconfig` named explicitly because it is a *path*, on
-    **10** schemas, and because on a K3s host it is what distinguishes
-    "talked to the right cluster" from "talked to another one". A test
+    secret, plus two keys named explicitly because they are **paths** rather
+    than contents — `kubeconfig` (on **10** schemas; on a K3s host it is what
+    distinguishes "talked to the right cluster" from "talked to another one")
+    and `vault_password_file` (on **4**, the identical argument). A test
     re-derives the `enum` criterion from the 476 schemas on every run, so the
-    list cannot drift away from it, and pins `kubeconfig` as the only
-    name-based entry.
+    list cannot drift away from it, and pins that there are exactly two
+    name-based entries.
 
     Measured, and it refutes what that criterion was expected to cover:
     **45** property names in the tree declare an `enum` and **none** of them
     matches a secret keyword — including `secret_type`, whose four values live
     in its *description* (`"Secret type: 'Opaque'/'generic' (default), 'tls',
     or 'docker-registry'"`) and not in an `enum`. So `secret_type`,
-    `vault_password_file`, `author`, `credential`, `credential_type`,
-    `pass_credentials` and `summary_max_tokens` stay redacted on gate lines.
+    `author`, `credential`, `credential_type`, `pass_credentials` and
+    `summary_max_tokens` stay redacted on gate lines — a documented loss of
+    **six** values, three of which (`secret_type`, `credential`,
+    `pass_credentials`) an auditor plausibly wants.
     Parsing a description would be a rule that rots; the remedy for
     `secret_type` is one line in `ssh_k8s_create_secret`'s schema — declare
     the `enum` it already describes, and the list picks it up. An incomplete

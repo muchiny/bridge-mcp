@@ -1515,12 +1515,15 @@ impl McpServer {
     ///    close, so it stays as it is.
     /// 2. `session_manager.close_all()` closes the SSH session **under a live
     ///    handler**. That handler's `exec` then fails, it writes its own
-    ///    `Error` line through `log_failure` — which releases the claim
-    ///    first — and no `<shutdown>` line follows. This one is the *better*
-    ///    outcome: a true line about a failure beats a line saying the
-    ///    outcome is unknown. But it means the nominal case — `daemon stop`
-    ///    with an `ssh_exec` in flight — probably writes **zero** of these
-    ///    lines, not one.
+    ///    `Error` line through `log_failure`, which COUNTS the write and
+    ///    leaves the entry in place. So this call still gets a
+    ///    `<shutdown>` line, now with `events_recorded: 1` beside its own
+    ///    `Error` line — a reader sees both what failed and that the process
+    ///    stopped before the call returned. (Until round 2 the facade
+    ///    REMOVED the entry, so this path wrote no `<shutdown>` line at all
+    ///    and this paragraph said the nominal `daemon stop` probably wrote
+    ///    zero of them. That mechanism is gone; the sentence is not what it
+    ///    was.)
     ///
     /// So the population this line enumerates is "calls still registered at
     /// the moment of the snapshot", which is narrower than "calls abandoned
@@ -7400,6 +7403,62 @@ rbac:
             before["result"]["Interrupted"]["reason"],
             crate::security::INTERRUPTED_BY_SHUTDOWN
         );
+    }
+
+    /// **The case `in_flight.finish()` exists for, and it was coverable all
+    /// along.**
+    ///
+    /// The claim lives in an `Arc` so it can travel into a handler's spawned
+    /// sub-task; the price is that `Drop` only removes the entry once the
+    /// LAST clone is gone, and a handler that parked a `ToolContext` clone in
+    /// a detached task holds one. `handle_tools_call` therefore calls
+    /// `finish()` explicitly after `execute`, which bounds the entry's life
+    /// to the call whatever the handler did with its context.
+    ///
+    /// Round 3's report said this case was untested and implied it needed a
+    /// remote host. It did not: a parked `tokio::spawn` holding the `Arc` is
+    /// the whole scenario, and it is fifteen lines.
+    ///
+    /// **What this proves, exactly, because the division matters.** It proves
+    /// the MECHANISM — `finish()` removes the entry while another `Arc` is
+    /// alive — and not the WIRING. Measured: deleting
+    /// `in_flight.finish();` from `handle_tools_call` leaves this test green,
+    /// because it calls `finish()` itself. The wiring is covered by
+    /// `both_dispatch_paths_register_the_call_they_are_about_to_run`, whose
+    /// index quadruple counts that literal exactly once and which does redden
+    /// on that deletion (measured). Saying so here rather than letting the
+    /// name imply otherwise: a test whose docstring claims what its
+    /// assertions cannot see is the defect this task produced three times.
+    #[tokio::test]
+    async fn finish_bounds_the_entry_even_when_a_detached_task_still_holds_the_claim() {
+        let calls = InFlightCalls::default();
+        let claim = Arc::new(calls.register("ssh_exec", Some(&json!({"host": "raspberry"}))));
+        assert_eq!(calls.len(), 1);
+
+        // A handler that moved its context — and so the claim — into a task
+        // that outlives the call. Parked for ever; nothing joins it.
+        let parked = Arc::clone(&claim);
+        let detached = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(parked);
+        });
+
+        // The call returns. `drop(claim)` alone would NOT remove the entry:
+        // the detached task still holds an `Arc`.
+        claim.finish();
+        drop(claim);
+
+        assert_eq!(
+            calls.len(),
+            0,
+            "the entry must be gone when the CALL ends, not when the last Arc does: \
+             otherwise the shutdown reports a finished call as interrupted"
+        );
+        assert!(
+            !detached.is_finished(),
+            "the detached task must still be holding its clone, or this test proves nothing"
+        );
+        detached.abort();
     }
 
     /// The registry primitive on its own: `remove` returns the entry, so of

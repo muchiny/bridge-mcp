@@ -517,13 +517,20 @@ pub(crate) const GATE_AUDIT_MAX_OPERATION_CHARS: usize = 2048;
 ///
 /// **The two callers see different populations, and the sentence here used to
 /// describe only the gate's.** The gate is armed for the tools whose
-/// `#[mcp_tool]` attribute declares the destructive annotation —
-/// `grep -rhoE 'annotation = .destructive.' src/mcp/tool_handlers/ | wc -l`
-/// returns **45**. The path matters and the earlier version of this citation
-/// got it wrong: run over `src/` the same grep returns **46**, because it
-/// counts the literal one line above it in this very file. A number whose
-/// cited command contradicts it is the same defect as an unmeasured number,
-/// seen from the other end. Within those 45, three
+/// `#[mcp_tool]` attribute declares the destructive annotation — **45** of
+/// them, counted through the registry rather than by grepping for a literal:
+/// `create_all_enabled_registry().list_tools()` filtered on
+/// `tool_annotations(..).destructive_hint == Some(true)`.
+///
+/// **The citation is shaped that way on purpose, and it took two goes.** The
+/// first version grepped `annotation = "destructive"` over `src/` and
+/// returned 46, counting the literal in its own docstring; the second
+/// restricted the path to `src/mcp/tool_handlers/`, which was right until
+/// round 3 added a *second* literal to this file and the discarded
+/// `src/`-wide form went to 47. **A citation that counts literals in the
+/// file containing it is fragile by construction**, however the path is
+/// narrowed — so this one counts registry entries, which no docstring can
+/// add to. Within those 45, three
 /// (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`, `ssh_awx_workflow_cancel`)
 /// declare no `host` at all and none declares a plural `hosts`. The shutdown
 /// emitter is armed for **every** tool, and in that population the plural
@@ -607,7 +614,20 @@ pub(crate) fn audited_host(raw: &str) -> String {
 ///    a caller comes out `\\u{3c}`.
 /// 2. `<` and `>`, because the angle brackets are the writer's namespace
 ///    ([`NO_HOST`], `SHUTDOWN_TOOL`, `<elided: N chars>`).
-/// 3. The **logfmt separators** ` ` and `=`. `AuditLogger::log_to_tracing`
+/// 3. **Every character this crate uses as a SEPARATOR**, which is a rule and
+///    not a list: ` ` and `=` for logfmt, and `,` `{` `}` for the
+///    argument-name rendering `audited_argument_names` builds.
+///
+///    **The rule, because this task created the same forgery twice before
+///    writing it down.** Round 1 picked the space as a separator and a
+///    caller-supplied space wrote its own logfmt field; round 3 picked the
+///    comma and `{"host,password,sudo_password": 1}` rendered **one**
+///    argument as **three**. A separator is a privileged character: the
+///    moment this crate gives one a meaning, it belongs in this set **by
+///    construction**, before anybody looks for an exploit. If a later change
+///    introduces a new separator, add it here in the same commit.
+///
+///    `AuditLogger::log_to_tracing`
 ///    now passes `host` and `command` as `Debug`, which quotes them, so this
 ///    is defence in depth rather than the fix — but the measured attack was
 ///    `host=raspberry exit_code=0 duration_ms=12
@@ -629,7 +649,8 @@ fn audited_text(raw: &str) -> String {
     for ch in raw.chars() {
         match ch {
             '\\' => escaped.push_str("\\\\"),
-            '<' | '>' | ' ' | '=' => {
+            // See family 3 above: every separator this crate uses.
+            '<' | '>' | ' ' | '=' | ',' | '{' | '}' => {
                 let _ = write!(escaped, "\\u{{{:x}}}", u32::from(ch));
             }
             c if c.is_control() || reorders_or_hides(c) => {
@@ -689,21 +710,23 @@ const fn reorders_or_hides(c: char) -> bool {
 /// The cost is readability on the **gate's** lines only — the shutdown sink
 /// no longer renders values at all (see [`audited_argument_names`]) — and it
 /// is real. Census, over the 476 schema-bearing files in
-/// `src/mcp/tool_handlers/`: **450** distinct property names, **11** of which
-/// contain one of the keywords.
+/// `src/mcp/tool_handlers/`, using the same `": {"` + balanced-brace walk the
+/// guards below use so a reader re-derives the same figures: **448** distinct
+/// property names, **11** of which contain one of the keywords. (An earlier
+/// version of this paragraph said 450, from a looser regex; the in-tree
+/// helper is the reproducible one.)
 ///
 /// - Real secrets, redacted correctly: `password` (1 schema), `db_password`
 ///   (3), `docker_password` (1).
-/// - **Exempt**: `kubeconfig` (string, **10** schemas) — see
-///   [`REDACTION_EXEMPT_KEYS`], which carries the justification and the
-///   criterion.
-/// - Over-redacted, and the list is short on purpose:
-///   `secret_type` (string, 1), `vault_password_file` (string, 4) and
-///   `author` (string, 1), plus the four the removed type exemption used to
-///   spare — `credential` (integer, 2), `credential_type` (integer, 1),
-///   `pass_credentials` (boolean, 1), `summary_max_tokens` (integer, 5).
+/// - **Exempt, both paths**: `kubeconfig` (string, **10** schemas) and
+///   `vault_password_file` (string, **4**) — see [`REDACTION_EXEMPT_KEYS`],
+///   which carries the justification and the criterion.
+/// - Over-redacted, and the list is short on purpose: `secret_type`
+///   (string, 1), `author` (string, 1), `credential` (integer, 2),
+///   `credential_type` (integer, 1), `pass_credentials` (boolean, 1),
+///   `summary_max_tokens` (integer, 5).
 ///
-/// So **7 over-redactions against 3 correct ones and 1 exemption**, on the
+/// So **6 over-redactions against 3 correct ones and 2 exemptions**, on the
 /// gate's lines. `secret_type` is the one that costs a reader something real:
 /// it says what KIND of secret was created, and its four values are listed in
 /// its *description* — `"Secret type: 'Opaque'/'generic' (default), 'tls', or
@@ -780,13 +803,26 @@ fn redact_secret_values(value: &serde_json::Value) -> serde_json::Value {
 ///    `ssh_k8s_create_secret`'s schema: declare the `enum` it already
 ///    describes, and this list picks it up.
 ///
-/// 2. **`kubeconfig`, by name**, because it is a **path** and not a content,
-///    on **10** of the 476 schemas (the most of any matching key), and
-///    because it is what an auditor comes for: on a K3s host
-///    `kubeconfig=/etc/rancher/k3s/k3s.yaml` is what distinguishes "talked to
-///    the right cluster" from "talked to another one". One named entry with
-///    its measurement beside it, not a `*_file` family nobody could bound.
-const REDACTION_EXEMPT_KEYS: &[&str] = &["kubeconfig"];
+/// 2. **Two keys by name, both for the same reason: they are PATHS and not
+///    contents.** A path cannot hold a secret — it names where one lives, and
+///    that is precisely what an auditor comes for.
+///
+///    - `kubeconfig`, on **10** of the 476 schemas (the most of any matching
+///      key): on a K3s host `kubeconfig=/etc/rancher/k3s/k3s.yaml` is what
+///      distinguishes "talked to the right cluster" from "talked to another
+///      one".
+///    - `vault_password_file`, on **4**: the same argument, and round 4
+///      overruled the judgement that had excluded it. Round 3 kept it
+///      redacted because it "does not distinguish anything important" — which
+///      is exactly the kind of per-name judgement the structural criterion
+///      exists to replace. Two entries justified identically, not one plus an
+///      opinion.
+///
+///    Named entries with their measurements beside them, and the test below
+///    pins that there are exactly **two**, so a third has to argue for itself
+///    in a failing assertion. Not a `*_file` family: `vault_password_file` is
+///    in because it is a path, not because of its suffix.
+const REDACTION_EXEMPT_KEYS: &[&str] = &["kubeconfig", "vault_password_file"];
 
 /// Whether an argument's key name contains one of the sanitizer's secret
 /// keywords, case-insensitively — and is not on [`REDACTION_EXEMPT_KEYS`].
@@ -891,7 +927,21 @@ pub(crate) fn audited_argument_names(tool_name: &str, args: Option<&serde_json::
     let rendered = match args {
         None => "{}".to_string(),
         Some(serde_json::Value::Object(map)) => {
-            let mut names: Vec<String> = map.keys().map(|k| audited_text(k)).collect();
+            let mut names: Vec<String> = map
+                .keys()
+                .map(|k| {
+                    if k.is_empty() {
+                        // `{"": "x"}` rendered `ssh_exec {}` — byte for byte
+                        // what a call with NO arguments renders. That is the
+                        // same class of defect as the forgeable `<no-host>`
+                        // this release closed: a line that reads as something
+                        // it is not. An argument exists, so the line says so.
+                        "<empty-name>".to_string()
+                    } else {
+                        audited_text(k)
+                    }
+                })
+                .collect();
             names.sort();
             format!("{{{}}}", names.join(","))
         }
@@ -943,8 +993,11 @@ pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
 ///
 /// Rendered at registration rather than kept raw, which is a deliberate
 /// departure from "the entry carries the tool name and the raw arguments":
-/// [`audited_operation`] bounds its result, so a registry of these is
-/// bounded by construction. Keeping an `Option<Value>` instead would have
+/// `audited_argument_names` bounds its result, so a registry of these is
+/// bounded by construction. (This said `audited_operation` until round 4 —
+/// the fifth member of that family, and it was contradicted twelve lines
+/// below inside this same docstring. `audited_operation` is the renderer the
+/// CLI gate kept.) Keeping an `Option<Value>` instead would have
 /// held a clone of the whole argument object for the life of the command,
 /// which for `ssh_file_write content=<a file>` is the file.
 ///
@@ -3999,11 +4052,11 @@ mod tests {
 
     /// `kubeconfig` survives the name rule, and `secret_type` does not.
     ///
-    /// The two halves of round 3's exemption, as behaviour rather than as a
-    /// list: the named entry works, and the key the structural criterion does
-    /// NOT take is still redacted. The second assertion is the one that would
-    /// quietly reverse if somebody "finished" the exemption by adding a
-    /// `*_type` family — `secret_type` stays redacted until its schema
+    /// The halves of the exemption, as behaviour rather than as a list: both
+    /// named entries work — they are paths — and the key the structural
+    /// criterion does NOT take is still redacted. That last assertion is the
+    /// one that would quietly reverse if somebody "finished" the exemption
+    /// with a `*_type` family; `secret_type` stays redacted until its schema
     /// declares the `enum` its description already spells out.
     #[test]
     fn the_exemption_spares_a_path_and_not_a_prose_enumeration() {
@@ -4011,6 +4064,7 @@ mod tests {
             "ssh_k8s_create_secret",
             Some(&serde_json::json!({
                 "kubeconfig": "/etc/rancher/k3s/k3s.yaml",
+                "vault_password_file": "/etc/ansible/vault.txt",
                 "secret_type": "docker-registry",
                 "docker_password": "S3cr3t",
             })),
@@ -4019,6 +4073,11 @@ mod tests {
         assert!(
             line.contains(r#""kubeconfig":"/etc/rancher/k3s/k3s.yaml""#),
             "a path is what an auditor comes for, and a path cannot hide a secret: {line}"
+        );
+        assert!(
+            line.contains(r#""vault_password_file":"/etc/ansible/vault.txt""#),
+            "and the second exemption is in for the identical reason — round 4 overruled \
+             the judgement that had kept it redacted: {line}"
         );
         assert!(
             line.contains(r#""secret_type":"[REDACTED]""#),
@@ -4190,16 +4249,18 @@ mod tests {
             );
         }
 
-        let named_only: Vec<&&str> = REDACTION_EXEMPT_KEYS
+        let mut named_only: Vec<&&str> = REDACTION_EXEMPT_KEYS
             .iter()
             .filter(|k| !enum_declaring_secret_keys.iter().any(|e| e == **k))
             .collect();
+        named_only.sort_unstable();
         assert_eq!(
             named_only,
-            vec![&"kubeconfig"],
-            "`kubeconfig` is the only entry justified by name rather than by structure, and \
-             its justification is on REDACTION_EXEMPT_KEYS. A new name-based entry must come \
-             with one too — change this assertion deliberately, not in passing"
+            vec![&"kubeconfig", &"vault_password_file"],
+            "exactly two entries are justified by name rather than by structure, and both \
+             on the same ground — they are PATHS, not contents. Their justifications are on \
+             REDACTION_EXEMPT_KEYS. A third must come with one too: change this assertion \
+             deliberately, not in passing"
         );
     }
 
@@ -4262,6 +4323,24 @@ mod tests {
         );
     }
 
+    /// The same coupling, asserted directly — belt beside the braces.
+    ///
+    /// The derived guard above generalises to a tool added later with the
+    /// same shape, and it depends on the phrase `never logged` surviving a
+    /// reword. This one depends on no prose at all, and cannot. Three lines
+    /// for the one tool that is measurably at risk today; keep both.
+    #[test]
+    fn ssh_k8s_create_secret_is_not_destructive() {
+        assert_ne!(
+            crate::mcp::registry::tool_annotations("ssh_k8s_create_secret").destructive_hint,
+            Some(true),
+            "`destructive` arms the CLI gate, the gate renders argument VALUES, and this \
+             tool's `from_literal: [{{\"key\": …, \"value\": …}}]` carries secrets under \
+             names no keyword matches. Remedy: rename the argument so its key names the \
+             secret, or render names only for this tool at the gate."
+        );
+    }
+
     /// **The shutdown's line carries argument NAMES and no values.**
     ///
     /// Round 2's ruling, and the measurement behind it: redaction by keyword
@@ -4288,6 +4367,50 @@ mod tests {
             !line.contains("raspberry"),
             "not even an innocent value: {line}"
         );
+    }
+
+    /// **Two ways a caller could make the shutdown's line read as something
+    /// else**, both of the class this release closed for `<no-host>`.
+    ///
+    /// Neither leaked a value and neither forged a logfmt field; both made a
+    /// line say the wrong thing about the call, which is the fault the whole
+    /// wave exists to remove.
+    ///
+    /// The comma case carries the rule worth more than the fix: **every time
+    /// this task chose a separator it created a forgery** — the space in
+    /// round 1, the comma in round 3 — so a separator belongs to
+    /// `audited_text`'s escape set by construction. See family 3 there.
+    #[test]
+    fn a_caller_cannot_make_the_argument_list_read_as_a_different_call() {
+        // One argument named "", which used to render byte for byte like a
+        // call with no arguments at all.
+        let empty_name = audited_argument_names("ssh_exec", Some(&serde_json::json!({"": "x"})));
+        assert_ne!(
+            empty_name,
+            audited_argument_names("ssh_exec", None),
+            "an argument with an empty name must not render as NO arguments"
+        );
+        assert_eq!(empty_name, "ssh_exec {<empty-name>}");
+
+        // One argument whose name contains the writer's separator, which used
+        // to render as three arguments.
+        let forged = audited_argument_names(
+            "ssh_exec",
+            Some(&serde_json::json!({"host,password,sudo_password": 1})),
+        );
+        assert!(
+            !forged.contains(','),
+            "the comma is the writer's separator: one argument must not render as three: \
+             {forged}"
+        );
+        assert_eq!(
+            forged, "ssh_exec {host\\u{2c}password\\u{2c}sudo_password}",
+            "escaped and visibly so, not dropped"
+        );
+
+        // And the braces, for the same reason.
+        let braced = audited_argument_names("ssh_exec", Some(&serde_json::json!({"a} {b": 1})));
+        assert_eq!(braced, "ssh_exec {a\\u{7d}\\u{20}\\u{7b}b}");
     }
 
     /// A key name is caller-chosen JSON, so it is rendered like any other
@@ -4391,8 +4514,7 @@ mod tests {
         );
     }
 
-    /// **The attack replayed on every arm, through the field that carries
-    /// caller text on that arm.**
+    /// **The attack replayed on every arm, with a DISTINCT payload per arm.**
     ///
     /// The first fix quoted `host` and `command` and left the rest `Display`
     /// because they were "writer-chosen". Two of them are not: `reason`
@@ -4402,89 +4524,91 @@ mod tests {
     /// `Display`. So the same 62-character input forged the same four fields
     /// again, on a `command_denied` record.
     ///
-    /// This asserts the field is followed by `="`, which is what `Debug`
-    /// gives and `Display` cannot. One case per arm, so no arm can be left
-    /// behind the way `reason` was.
+    /// **The payload is per case, and that is the whole correctness of this
+    /// test.** `tracing_test` collects every record of the test into ONE
+    /// buffer, so a shared payload let the `Denied` record satisfy the
+    /// `reason="…"` assertion written for `Interrupted`: the final re-review
+    /// reverted the `Interrupted` arm alone to `%reason` and the whole `--lib`
+    /// suite stayed green. That was the **third** time in this task that a
+    /// test asserted a property its assertion could not see, and the third
+    /// time inside the test written to fix the previous one. A distinct
+    /// payload per case makes each assertion unsatisfiable by any other arm.
     #[test]
     #[tracing_test::traced_test]
     fn no_field_on_this_sink_can_carry_caller_text_unquoted() {
-        const PAYLOAD: &str = "raspberry exit_code=0 duration_ms=12 event_type=command_executed";
+        // Each payload carries its own marker, so no arm's record can satisfy
+        // another arm's assertion out of the shared buffer.
+        fn payload(marker: &str) -> String {
+            format!("raspberry-{marker} exit_code=0 duration_ms=12 event_type=command_executed")
+        }
+
         let logger = AuditLogger::disabled();
 
-        // (field name on the record, the result variant that carries the
-        // payload in that field)
-        let cases: Vec<(&str, CommandResult)> = vec![
+        // (field name on the record, marker, the result carrying the payload)
+        let cases: Vec<(&str, &str, CommandResult)> = vec![
             (
                 "error",
+                "err",
                 CommandResult::Error {
-                    message: PAYLOAD.to_string(),
+                    message: payload("err"),
                 },
             ),
             (
                 "reason",
+                "den",
                 CommandResult::Denied {
-                    reason: PAYLOAD.to_string(),
+                    reason: payload("den"),
                 },
             ),
             (
                 "confirmed_by",
-                CommandResult::Confirmed {
-                    by: PAYLOAD.to_string(),
-                },
+                "cnf",
+                CommandResult::Confirmed { by: payload("cnf") },
             ),
             (
                 "reason",
+                "int",
                 CommandResult::Interrupted {
-                    reason: PAYLOAD.to_string(),
+                    reason: payload("int"),
                     events_recorded: 0,
                 },
             ),
-        ];
-
-        for (field, result) in cases {
-            logger.log(
-                "ssh_exec",
-                AuditEvent::tagged(PAYLOAD, PAYLOAD, PAYLOAD, result),
-            );
-            assert!(
-                logs_contain(&format!("{field}=\"{PAYLOAD}\"")),
-                "{field} must be quoted, or a caller writes its own logfmt fields"
-            );
-        }
-
-        // The two arms whose own payload fields are numeric still have the
-        // three string fields every arm shares.
-        logger.log(
-            "ssh_exec",
-            AuditEvent::tagged(
-                PAYLOAD,
-                PAYLOAD,
-                PAYLOAD,
+            (
+                "command",
+                "suc",
                 CommandResult::Success {
                     exit_code: 0,
                     duration_ms: 12,
                 },
             ),
-        );
-        logger.log(
-            "ssh_exec",
-            AuditEvent::tagged(
-                PAYLOAD,
-                PAYLOAD,
-                PAYLOAD,
+            (
+                "command",
+                "chg",
                 CommandResult::StateChanged { duration_ms: 12 },
             ),
-        );
-        for field in ["event_type", "host", "command"] {
+        ];
+
+        for (field, marker, result) in cases {
+            let p = payload(marker);
+            logger.log("ssh_exec", AuditEvent::tagged(&p, &p, &p, result));
             assert!(
-                logs_contain(&format!("{field}=\"{PAYLOAD}\"")),
-                "{field} must be quoted on every arm"
+                logs_contain(&format!("{field}=\"{p}\"")),
+                "{field} must be quoted on the {marker} arm, or a caller writes its own \
+                 logfmt fields. The payload is unique to this arm, so no other record can \
+                 satisfy this assertion."
+            );
+            // The three fields every arm shares, on this arm's own payload.
+            for shared in ["event_type", "host", "command"] {
+                assert!(
+                    logs_contain(&format!("{shared}=\"{p}\"")),
+                    "{shared} must be quoted on the {marker} arm"
+                );
+            }
+            assert!(
+                !logs_contain(&format!("host={p}")),
+                "the unquoted form is what let the value write its own fields ({marker})"
             );
         }
-        assert!(
-            !logs_contain(&format!("host={PAYLOAD}")),
-            "the unquoted form is what let the value write its own fields"
-        );
     }
 
     /// The sink half of the logfmt fix, and the only test that can tell the
