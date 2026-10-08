@@ -102,7 +102,7 @@ where
 /// Reject a reduction param the tool's `OutputKind` does not support.
 ///
 /// `DataReductionArgs::extract` removes these keys from the request object
-/// unconditionally, before `deny_unknown_fields` could ever see them — so on a
+/// (`limit` only when it is an integer), before `deny_unknown_fields` could ever see them — so on a
 /// `RawText` tool they were stripped and silently forgotten.
 /// `ssh_firewall_status limit=3` is the case that exposed it: the caller asked
 /// for three lines and got 66,443 characters, with nothing to say that `limit`

@@ -49,9 +49,12 @@ impl DataReductionArgs {
     /// so they don't interfere with tool-specific argument parsing.
     ///
     /// `limit` is removed only when it is an integer, i.e. a row limit. Any
-    /// other value stays in the object: four AWX tools declare `limit` as an
+    /// other value stays in the object: seven tools declare `limit` as an
     /// Ansible host pattern, and a tool that declares nothing of that name
-    /// refuses it through `reject_unknown_args` / `deny_unknown_fields`.
+    /// refuses it through `deny_unknown_fields`. Known gap: an integer is
+    /// always taken as a row limit, so a purely numeric host pattern cannot
+    /// reach those seven from the CLI (which converts `limit=5` to an integer)
+    /// or as a JSON number; a JSON string `"5"` reaches them intact.
     ///
     /// # Errors
     ///

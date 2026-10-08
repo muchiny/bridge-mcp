@@ -24,24 +24,29 @@ host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 
-**`limit` is no longer swallowed when it is not a row count — and four AWX tools
-run on the hosts they were told to.** `DataReductionArgs::extract` removed the
+**`limit` is no longer swallowed when it is not a row count, so seven tools run
+on the hosts they were told to.** `DataReductionArgs::extract` removed the
 `limit` key from the arguments whatever its value, before the tool read its own.
-`ssh_awx_job_launch`, `ssh_awx_workflow_launch`, `ssh_awx_adhoc_launch` and
-`ssh_awx_job_follow` declare `limit` as an Ansible host pattern
+`ssh_awx_job_launch`, `ssh_awx_workflow_launch`, `ssh_awx_adhoc_launch`,
+`ssh_awx_job_follow`, `ssh_ansible_playbook`, `ssh_ansible_recap` and
+`ssh_ansible_run_background` declare `limit` as an Ansible host pattern
 (`webservers`, `host1:host2`), so `ssh_awx_job_launch template_id=42
 limit=webservers` reached AWX with no `limit` and ran on the whole inventory,
-without a word. `ssh_ansible_playbook`, `ssh_ansible_recap` and
-`ssh_ansible_run_background` declare the same `limit` and were hit the same way
-(`ssh_ansible_playbook` is pinned by a test; the other two share the
-code path and are not). `extract` now takes `limit` only when it is an integer; anything
-else stays in the arguments. **Behaviour change:** on a tool that does not
-declare `limit`, a non-integer value (`limit=abc`) used to be dropped and the
-call returned its full output with exit 0; it is now refused as an unknown
-argument (CLI `reject_unknown_args`, MCP `deny_unknown_fields`). A script that
-relied on that silence will fail. Not fixed: an integer `limit` is still taken
-as a row limit on the AWX tools, so a purely numeric host pattern cannot be
-passed to them.
+without a word. `extract` now takes `limit` only when it is an integer; anything
+else stays in the arguments. All seven are pinned by a test that reads the
+command that was run. **Scope:** this fixes the call, not the published schema:
+`describe-tool` and MCP `tools/list` still advertise `limit` as an integer on
+five of the seven, so a client reading the schema will not discover the host
+pattern.
+
+**Breaking:** on a tool that does not declare `limit`, a non-integer value
+(`limit=abc`) used to be dropped and the call returned its full output with
+exit 0; it is now refused with `unknown field 'limit'` plus a sentence saying
+`limit` must be an integer of at least 1 (serde's `deny_unknown_fields`). A
+script that relied on that silence will fail: remove the argument, or pass an
+integer if a row limit was meant. Not fixed: an integer `limit` is still taken
+as a row limit, so a purely numeric host pattern cannot be passed to these
+tools from the CLI or as a JSON number (a JSON string `"5"` reaches them).
 
 **Audit: the direct handlers now record the reduction params they were given.**
 Until now only the `StandardTool` pipeline filled the `reduction` field of an
