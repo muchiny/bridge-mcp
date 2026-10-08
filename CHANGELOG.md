@@ -168,6 +168,23 @@ tests and a serialisation test.
   `event_type: "ssh_exec"`, so a prefix selector hands back every session
   command as if it were a state change.
 
+  **Amended later in this same cycle: that `IN(...)` list is no longer
+  exhaustive, and the reason is the sixth `CommandResult` variant below.**
+  When one of the seven is still running at shutdown, the line written about
+  it carries `tool_name: "<shutdown>"` — the shutdown is the writer, and
+  `AuditLogger::log` is the single writer of that field — so the seven-name
+  selector misses it. The tool is still on the line, as the first token of
+  `command`. To get everything one of the seven did, including the calls
+  whose outcome was never read, add the sentinel:
+  `jq 'select((.tool_name | IN("ssh_session_create","ssh_session_close",
+  "ssh_tunnel_create","ssh_tunnel_close","ssh_config_set",
+  "ssh_recording_start","ssh_recording_stop")) or (.tool_name == "<shutdown>"
+  and (.command | startswith("ssh_session_") or startswith("ssh_tunnel_")
+  or startswith("ssh_config_set") or startswith("ssh_recording_"))))'`.
+  The prefix warning above applies to that second clause too, and more
+  sharply: matched on `command` it also catches an interrupted
+  `ssh_session_exec`.
+
   Anything refused *before* that call writes nothing to either sink:
   bad arguments, an unknown host, a rate-limit refusal, a disabled recorder,
   and in `ssh_tunnel_create` a failed bind or a failed SSH connection
@@ -182,7 +199,10 @@ tests and a serialisation test.
   process and has no host parameter at all — the failure paths of
   `ssh_session_close`, `ssh_tunnel_close` and `ssh_recording_stop`, where the
   id handed in matched nothing so no host was ever resolved, and the CLI's
-  destructive gate (`cli::runner::gate_host`). The gate's case is the broad
+  destructive gate (`audited_host_from_args` in `src/security/audit.rs`,
+  which was
+  `cli::runner::gate_host` when this entry was written — see the sixth
+  `CommandResult` variant below for why it moved). The gate's case is the broad
   one and it is not the `*_close` case: it runs before schema validation, so
   **any** destructive call that simply omits `host` lands on the sentinel,
   not only the three AWX tools whose schema has none. Pinned by test: a call
@@ -199,7 +219,8 @@ tests and a serialisation test.
   'host=<no-host>' …` produced a line indistinguishable from a genuinely
   hostless one and `grep '<no-host>'` stopped enumerating what it claims to.
   A caller's `<` and `>` are now escaped to `\u{3c}` / `\u{3e}`
-  (`cli::runner::audited_host`); so are control characters, because `host`
+  (`audited_host` in `src/security/audit.rs`; `cli::runner::audited_host` when this
+  entry was written); so are control characters, because `host`
   reached the `tracing` sink as `Display` with no rendering, and a newline
   inside it added a complete, well-formed `Audit: command denied …` record to
   the journal journald and syslog capture while `audit.log` stayed one line.
@@ -364,6 +385,114 @@ tests and a serialisation test.
   tested for both answers, so the human-confirmation line is pinned without a
   TTY; what no test exercises is `IsTerminal` returning true, i.e. the prompt
   being printed and read at all.
+
+- **(lib API + wire) `CommandResult` has a sixth variant,
+  `Interrupted { reason }`; `"command_interrupted"` is a new `event_type` in
+  `audit.log`; and `"<shutdown>"` is a new, reserved `tool_name`.** Same
+  migration as the fourth and fifth: **add an arm to any exhaustive `match`**.
+  `CommandResult` is a `#[doc(hidden)]` re-export (`src/lib.rs`) and
+  `AuditEvent.result` serializes it, so both the Rust API and the JSONL shape
+  change. In-tree the compile cost is **one arm**: counted after the change,
+  `src/` holds 15 `CommandResult::<Variant> =>` arms, **6** of which are the
+  arms of the only production `match` on it, `AuditLogger::log_to_tracing`.
+  The other 9 sit in `#[cfg(test)]` modules behind catch-all arms that panic
+  — which the build proves rather than the grep: the crate compiles with the
+  sixth variant and no warnings, so no other exhaustive `match` existed.
+
+  The line, as written by
+  `a_call_still_in_flight_at_shutdown_leaves_one_line_with_no_exit_code` and
+  read back off disk:
+
+  ```json
+  {"timestamp":"2026-10-08T16:36:08.848617637Z","event_type":"command_interrupted","host":"raspberry","command":"ssh_session_exec {\"command\":\"sleep 45\",\"host\":\"raspberry\",\"session_id\":\"t45-0\"}","tool_name":"<shutdown>","result":{"Interrupted":{"reason":"the server stopped before the command finished"}}}
+  ```
+
+  **No `exit_code` key and no `duration_ms` key**, and both absences are
+  asserted on the raw text, not on a parsed field. Select these with
+  `jq 'select(.event_type == "command_interrupted")'`. The equivalent
+  `select(.tool_name == "<shutdown>")` works today and is the weaker of the
+  two: `event_type` is a kind of outcome by contract, `tool_name` happens to
+  be the sentinel because the shutdown is the writer.
+
+  **Why: a bounded shutdown had started dropping the fact that a command was
+  running.** Bounding the teardown earlier in this cycle was measured in the
+  audit file as **two lines before and one after** — the lost one being
+  `ssh_session_exec` with `duration_ms: 45003`, which had landed only because
+  the daemon stayed alive 44 s for it. And the loss is not the one it looks
+  like: a tool call's audit event is **built after the command returns**
+  (step 12/13 of the `standard_tool` pipeline; step 8, "Log intent", is a
+  bare `info!` and constructs nothing), so an abandoned call never had an
+  event to lose. Holding the audit channel open longer would have recovered
+  exactly nothing. The server therefore keeps a registry of dispatched calls
+  and, immediately before closing the channel, writes one line per call still
+  in it. "A command started and nobody will ever know how it ended" is a
+  fact; a trail that omits it says instead that nothing happened.
+
+  **Why not reuse `Error { message }`**, whose own doc already covers "an
+  unread exit code" and which would have cost no migration at all: an auditor
+  selecting `.result.Error` is asking which commands FAILED, and answering
+  that with "and these, about which nothing is known" conflates a verdict
+  with the absence of one — the exact confusion this cycle's audit work
+  exists to remove.
+
+  **`tool_name` is no longer always a tool**, and that is the one reading
+  habit this breaks. `AuditLogger::log` is the single writer of the field and
+  the writer here is the shutdown, so a line *about* an `ssh_exec` call
+  carries `"tool_name":"<shutdown>"`. The tool is the first token of
+  `command`. Any rule that groups by `tool_name`, including the seven-name
+  `IN(...)` selector for the state-changing tools above, silently stops
+  seeing the interrupted calls; that entry now carries the amended selector.
+  The angle brackets are the same convention as `NO_HOST`: of the 503
+  `name()` / `const NAME` literals under `src/` (tools, prompts and resources
+  together), **0** contain `<` or `>`, so nothing can collide with it.
+
+  Three additions come with it, none of them published API. `ExecuteCommandUseCase::
+  log_interrupted(host, operation)` — a **seventh** entry point beside the six
+  that take a mandatory `tool`, and the only one that does **not**: the sole
+  honest value is the sentinel, and a parameter would invite the one value
+  that must never be passed. Like `log_state_change` and `log_confirmed` it
+  writes **no history entry**: `HistoryEntry::exit_code` is a non-optional
+  `u32` whose `0` means success, so the history could only record "it
+  succeeded". `McpServer::audit_interrupted_in_flight()` is `pub(crate)`.
+  `security::SHUTDOWN_TOOL` and `security::INTERRUPTED_BY_SHUTDOWN` are
+  `pub(crate)` too — the sentinel is pinned by test, not exported.
+  **Migration: none** for any of the three.
+
+  **Not covered, measured and left open rather than papered over:**
+
+  - *The emission is conditional on a non-empty registry*, so an ordinary
+    shutdown still writes nothing. That is a contract, not an optimisation:
+    four assertions count the lines in `audit.log` exactly after a teardown —
+    `tests/daemon_integration.rs` twice (`DRAIN_TEST_CALLS`, then exactly 1),
+    `src/mcp/transport/http.rs` once, and `src/cli/runner.rs` once (the gate
+    line plus the run line, exactly 2).
+  - *The HTTP transport has no `close_all` and no `spawn_global_tasks` at
+    all* (`grep -n "close_all" src/mcp/transport/http.rs` → nothing). The
+    emission is wired into its teardown too, so commands in flight are
+    covered there — but a session or tunnel opened over HTTP is still
+    destroyed only by process exit, with no line of any kind.
+  - *The five background loops are `abort()`ed unbounded and wordlessly* by
+    `McpServer::serve`. A handler running inside one is dropped by that
+    abort, which runs its claim's `Drop` before the snapshot, so it gets no
+    line by this mechanism either. Bounding that abort would reopen the
+    unbounded wait the teardown bound exists to close.
+  - *The double-write window is narrowed, not closed.* The claim is taken the
+    instant `registry.execute` returns, and a handler writes its own event
+    **inside** that call, so a handler finishing in the few instructions
+    between its own write and its claim could still be described twice.
+    Closing it entirely means gating all seven `ExecuteCommandUseCase` log
+    facades on the claim.
+  - *The wiring in both teardowns is pinned as source text*, not at runtime:
+    driving a real in-flight command through either needs a remote host.
+
+  **(internal, no API change) Six items moved from `src/cli/runner.rs` to
+  `src/security/audit.rs`**: `GATE_AUDIT_MAX_VALUE_CHARS`,
+  `GATE_AUDIT_MAX_OPERATION_CHARS`, `elide_oversized`, `audited_host`,
+  `audited_operation`, and `gate_host` — renamed `audited_host_from_args`,
+  since the gate is no longer its only caller. All were private items with no
+  re-export and are `pub(crate)` now, so nothing published changed and there
+  is nothing to migrate. Listed because two entries above cite two of them by
+  their old path, and those citations are corrected in place.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).

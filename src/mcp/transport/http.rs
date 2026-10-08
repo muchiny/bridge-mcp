@@ -464,6 +464,17 @@ where
     }
     .await;
 
+    // Three steps now, and the new one is first: one audit line per tool
+    // call still in flight. Before `close_audit()`, because after it
+    // `AuditLogger::log` reaches `tracing` and not the file.
+    //
+    // **The HTTP teardown is NOT `McpServer::serve`'s**, and the difference
+    // is wider than this line: `grep -n "close_all" src/mcp/transport/http.rs`
+    // returns nothing, and this function calls neither `close_all` nor
+    // `spawn_global_tasks`. So a session or tunnel opened over HTTP is
+    // destroyed only by process exit, with no line at all. This emission
+    // covers the commands that were running; it does not cover that.
+    audit_owner.audit_interrupted_in_flight();
     // Both steps run whatever `outcome` says: an error after the writer was
     // spawned is exactly when the queued events matter most.
     audit_owner.close_audit();

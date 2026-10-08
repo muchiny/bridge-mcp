@@ -23,9 +23,14 @@ use crate::mcp::tool_handlers::{SshDownloadHandler, SshUploadHandler};
 use crate::ports::ExecutorRouter;
 use crate::ports::ToolContext;
 use crate::ports::ToolHandler as _;
+// `audited_host`, `audited_host_from_args`, `audited_operation`,
+// `elide_oversized` and the two `GATE_AUDIT_MAX_*` caps used to be private
+// items of THIS file. They moved to `src/security/audit.rs` when the MCP
+// shutdown emitter became a second caller — see the block comment there. One
+// `use` line, so every reference below keeps its bare name.
 use crate::security::{
     AuditEvent, AuditLogger, AuditWriterTask, CommandResult, CommandValidator, RateLimiter,
-    Sanitizer, drain_audit_writer,
+    Sanitizer, audited_host_from_args, audited_operation, drain_audit_writer,
 };
 use crate::ssh::{
     SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error_for,
@@ -1956,7 +1961,7 @@ async fn run_gated_tool(
         decision,
         &wiring.use_case,
         tool_name,
-        &gate_host(args.as_ref()),
+        &audited_host_from_args(args.as_ref()),
         &audited_operation(tool_name, args.as_ref()),
     )?;
 
@@ -2049,50 +2054,6 @@ const CONFIRMED_BY_FLAG: &str = "--yes";
 /// See [`CONFIRMED_BY_FLAG`].
 const CONFIRMED_BY_PROMPT: &str = "terminal prompt";
 
-/// Longest a single argument value may be before [`audited_operation`]
-/// replaces it with its length.
-///
-/// **This exists because the gate's audit line would otherwise persist the
-/// call's arguments in full.** `--yes tool ssh_file_write … content=<a file>`
-/// wrote a `command_confirmed` line carrying that whole file.
-///
-/// How large, exactly, because the obvious figure is wrong: through `argv` the
-/// ceiling is `MAX_ARG_STRLEN`, 32 pages — **128 KB per argument** — and
-/// `ARG_MAX` for the whole command line; past that `execve` fails with `E2BIG`
-/// and the binary never starts.
-///
-/// **Where that comes from, since the attribution here used to be wrong:**
-/// `fork` + `execv("/bin/true", [prog, "A" × n])`, run directly, *succeeds*
-/// for n = 131071 and fails with `E2BIG` (errno 7) for n = 131072, with
-/// `getconf PAGESIZE` = 4096 — 32 pages, terminating NUL included. No test in
-/// this repository measures it: `tests/cli_exit_code.rs` *asserts* it in a
-/// docstring, to justify passing the 100 KB that succeeds, and the 400 KB
-/// figure lives in an in-memory unit test that calls no `execve` at all. The
-/// number is right; the citation was not.
-///
-/// A daemon-forwarded or MCP-served call carries its arguments as JSON over a
-/// socket and has no such limit. So the bound matters for volume — 128 KB a
-/// line fills a 100 MB archive in 800 calls, and breaks any JSONL consumer
-/// with a line-length bound — and it matters for content at any size: it
-/// defeated a deliberate exclusion, since the handler's own audit event for
-/// that write is `SFTP_WRITE <path>` and carries no content at all, precisely
-/// so the trail does not become a copy of the files it records.
-///
-/// 256 characters leaves every host alias, path, id, unit name and ordinary
-/// shell command intact — the values that make a line worth reading — while no
-/// file body survives it. A value over the bound is replaced by
-/// `<elided: N chars>`, which states what was dropped: a silent truncation
-/// would be another half-true line, which is the fault this whole change
-/// exists to remove.
-const GATE_AUDIT_MAX_VALUE_CHARS: usize = 256;
-
-/// Hard ceiling on the whole operation string, after per-value elision.
-///
-/// Per-value elision alone does not bound the line: a call with hundreds of
-/// short arguments stays under [`GATE_AUDIT_MAX_VALUE_CHARS`] on every one of
-/// them. What goes past this is cut and marked `<truncated: N chars total>`.
-const GATE_AUDIT_MAX_OPERATION_CHARS: usize = 2048;
-
 /// What the destructive gate decided. **A value, not an effect** — see
 /// [`decide_destructive`] for why that matters.
 ///
@@ -2122,143 +2083,6 @@ enum GateDecision {
         reason: String,
         error: std::io::Error,
     },
-}
-
-/// The host to put on a gate event: the call's `host` argument, rendered by
-/// [`audited_host`], or [`crate::security::NO_HOST`] when the call carries no
-/// `host` string at all.
-///
-/// At the gate the host is an unresolved JSON argument and nothing more — the
-/// alias is not looked up until the handler runs, which is why the gate can
-/// refuse a call naming a host that does not exist. **So the sentinel is not
-/// reserved for the tools whose schema has no `host`**: the gate runs before
-/// any schema validation, so *any* destructive call that simply omits the
-/// argument lands on it too — pinned for `ssh_service_stop`, which requires
-/// one, in `a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event`.
-/// Three of the 45 destructive tools
-/// (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`, `ssh_awx_workflow_cancel`)
-/// declare no `host` at all and none declares a plural `hosts`, so for those
-/// three it is the only possible answer; for the other 42 it is also what an
-/// incomplete call produces.
-///
-/// Returns an owned `String` because the value is *rendered*, not borrowed —
-/// see [`audited_host`] for what that rendering is for.
-fn gate_host(args: Option<&serde_json::Value>) -> String {
-    match args
-        .and_then(|a| a.get("host"))
-        .and_then(serde_json::Value::as_str)
-    {
-        Some(raw) => audited_host(raw),
-        None => crate::security::NO_HOST.to_string(),
-    }
-}
-
-/// Render a caller-supplied `host` for a gate event: bounded, and unable to
-/// write anything the *writer* reserves for itself.
-///
-/// The gate is the only audit sink in the crate whose `host` is not an alias
-/// the config already resolved — everywhere else resolution precedes the
-/// write. Three consequences of handing that string through verbatim, each
-/// re-measured by removing this function's body and watching the matching
-/// test go red:
-///
-/// - **The bound beside it was decorative.** `elide_oversized` caps
-///   `command` and nothing capped `host`, so a 100 000-character `host`
-///   reached the line whole while the `command` field on the same line was
-///   elided to its length. A cap on one field of a line is not a cap on the
-///   line.
-/// - **The sentinel was forgeable.** `NO_HOST`'s own doc justifies the angle
-///   brackets with "`grep '<no-host>'` over `audit.log` enumerates exactly
-///   the hostless events"; `host=<no-host>` produced a `host` field equal to
-///   the sentinel, character for character. The angle brackets are now the
-///   **writer's** namespace: a caller's `<` and `>` are escaped, so no caller
-///   value can render as `<no-host>`, as `<elided: N chars>`, or as any
-///   marker added later.
-/// - **The `tracing` sink took a forged record.** `command` is JSON, so serde
-///   escapes it; `host` goes to `AuditLogger::log_to_tracing` as `host =
-///   %event.host`, i.e. `Display`, with no rendering at all — so a newline
-///   inside it put a second, well-formed `Audit: …` line into the journal
-///   journald and syslog capture. Control characters are escaped here for
-///   that reason, not for `audit.log`, whose JSON was never at risk.
-///
-/// The escape is `\u{..}` with the backslash doubled first, so the rendering
-/// is unambiguous: a literal `\u{3c}` typed by a caller comes out
-/// `\\u{3c}`. Everything else — letters, digits, dots, dashes, colons,
-/// non-ASCII — passes through untouched, because a real alias must stay
-/// greppable and the sanitizer is deliberately **not** applied to this field
-/// (`the_operation_is_redacted_and_the_host_is_passed_through_verbatim`).
-///
-/// The cap is [`GATE_AUDIT_MAX_VALUE_CHARS`], the same one `elide_oversized`
-/// applies, and it reports the length of what the **caller** supplied rather
-/// than of the escaped form: that is the number a reader wants.
-fn audited_host(raw: &str) -> String {
-    let mut escaped = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '<' | '>' => {
-                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(ch));
-            }
-            c if c.is_control() => {
-                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(c));
-            }
-            c => escaped.push(c),
-        }
-    }
-    if escaped.chars().count() > GATE_AUDIT_MAX_VALUE_CHARS {
-        return format!("<elided: {} chars>", raw.chars().count());
-    }
-    escaped
-}
-
-/// The `command` field for a gate event: the tool and its arguments, bounded.
-///
-/// No command has been built yet — the handler does that — so the line
-/// carries the *operation*, in the shape `AuditEvent::tagged` documents for an
-/// event that ran nothing. The bounds are
-/// [`GATE_AUDIT_MAX_VALUE_CHARS`] per value and
-/// [`GATE_AUDIT_MAX_OPERATION_CHARS`] overall, both marked where they bite.
-///
-/// The rule is a size rule on purpose, not a list of content-bearing field
-/// names: the gate sees an opaque JSON object for any of 476 tools, so a name
-/// list (`content`, `body`, `script`, `playbook`, …) would have to be kept in
-/// step with every tool added and would leak in silence the first time a
-/// payload was called something else. A size rule cannot rot that way.
-fn audited_operation(tool_name: &str, args: Option<&serde_json::Value>) -> String {
-    let bounded = match args {
-        None => serde_json::Value::Object(serde_json::Map::new()),
-        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), elide_oversized(v)))
-                .collect(),
-        ),
-        Some(other) => elide_oversized(other),
-    };
-    let rendered = serde_json::to_string(&bounded).unwrap_or_else(|_| "{}".to_string());
-    let operation = format!("{tool_name} {rendered}");
-    let total = operation.chars().count();
-    if total <= GATE_AUDIT_MAX_OPERATION_CHARS {
-        return operation;
-    }
-    let kept: String = operation
-        .chars()
-        .take(GATE_AUDIT_MAX_OPERATION_CHARS)
-        .collect();
-    format!("{kept} <truncated: {total} chars total>")
-}
-
-/// Replace one argument value with its length when it is over
-/// [`GATE_AUDIT_MAX_VALUE_CHARS`]. Applies to arrays and objects too, by their
-/// serialized length, so a nested payload is bounded like a flat one.
-fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
-    let len = match value {
-        serde_json::Value::String(s) => s.chars().count(),
-        other => serde_json::to_string(other).map_or(0, |s| s.chars().count()),
-    };
-    if len <= GATE_AUDIT_MAX_VALUE_CHARS {
-        return value.clone();
-    }
-    serde_json::Value::String(format!("<elided: {len} chars>"))
 }
 
 /// Ask before running a tool annotated `destructiveHint`.
@@ -2412,9 +2236,10 @@ fn decision_from_prompt_answer(tool_name: &str, answer: &str) -> GateDecision {
 /// whose gate decision was not written must not look like one that was.
 ///
 /// `host` is the bounded rendering of the call's `host` argument when it has
-/// one and [`crate::security::NO_HOST`] otherwise — see [`gate_host`] and
-/// [`audited_host`], never the raw argument. `operation` is the bounded
-/// rendering from [`audited_operation`], never the raw arguments either.
+/// one and [`crate::security::NO_HOST`] otherwise — see
+/// [`audited_host_from_args`] and `crate::security::audited_host`, never the
+/// raw argument. `operation` is the bounded rendering from
+/// [`audited_operation`], never the raw arguments either.
 ///
 /// # Errors
 ///
@@ -2622,7 +2447,13 @@ mod tests {
         LimitsConfig, OsType, RedactedSecret, SecurityConfig, SessionConfig, SshConfigDiscovery,
         ToolGroupsConfig,
     };
+    // The two caps the gate's line is bounded by. Imported HERE and not
+    // beside the production imports: since they moved to
+    // `src/security/audit.rs` the only references left in this file are in
+    // these tests, and a top-level `use` of them is an unused import in a
+    // non-test build.
     use crate::mcp::tool_handlers::utils::shell_escape;
+    use crate::security::{GATE_AUDIT_MAX_OPERATION_CHARS, GATE_AUDIT_MAX_VALUE_CHARS};
     use std::collections::HashMap;
 
     // ============== create_context Tests ==============
@@ -4533,7 +4364,7 @@ mod tests {
             decision,
             audit,
             tool_name,
-            &gate_host(args),
+            &audited_host_from_args(args),
             &audited_operation(tool_name, args),
         )
     }
@@ -5166,7 +4997,7 @@ mod tests {
                 decision,
                 &audit,
                 "ssh_exec",
-                &gate_host(Some(&args)),
+                &audited_host_from_args(Some(&args)),
                 &audited_operation("ssh_exec", Some(&args)),
             );
             let events = logger.drain_for_test();

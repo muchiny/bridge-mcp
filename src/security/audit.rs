@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,19 +13,21 @@ use crate::config::AuditConfig;
 
 /// Host value for an audited operation that has no target host at all.
 ///
-/// **Five production callers**, counted in the tree; an earlier version of
-/// this sentence said "exactly one" and was out of date the day a second one
-/// was added without reopening it:
+/// **Six production callers**, counted in the tree; an earlier version of
+/// this sentence said "exactly one", then "five", and each was out of date
+/// the day another one was added without reopening it:
 ///
 /// - `ssh_config_set`, which changes a limit of the bridge process itself
 ///   ("not a remote host (there is no host param)", its own description);
 /// - the failure paths of `ssh_session_close`, `ssh_tunnel_close` and
 ///   `ssh_recording_stop`, where the id handed in matched nothing, so no host
 ///   was ever resolved to name;
-/// - and `cli::runner::gate_host`, the CLI's destructive gate, which is
-///   neither of those: it fires for **any** destructive call that carries no
-///   `host` argument. The gate runs before schema validation, so this is not
-///   limited to the three tools whose schema has no `host`: a call to
+/// - and the two callers of `audited_host_from_args`, which are neither of
+///   those: they read an UNRESOLVED `host` argument, so they land here for
+///   **any** call that carries no `host` string at all. Those two are the
+///   CLI's destructive gate and `McpServer::audit_interrupted_in_flight`,
+///   the shutdown emitter. The gate runs before schema validation, so this is
+///   not limited to the three tools whose schema has no `host`: a call to
 ///   `ssh_service_stop`, which requires one, writes
 ///   `{"host":"<no-host>","event_type":"command_denied", …}` when the
 ///   argument is simply left out
@@ -38,12 +41,12 @@ use crate::config::AuditConfig;
 /// alternative was the empty string, which reads like a bug in the writer.
 ///
 /// **That enumeration holds because the brackets are the writer's, not the
-/// caller's.** The gate is the one sink whose `host` is an unresolved
-/// argument rather than a resolved alias, and it used to pass it through
-/// verbatim: `--yes tool ssh_file_write 'host=<no-host>' …` produced a line
-/// no reader could tell from a genuinely hostless one. `cli::runner::
-/// audited_host` now escapes a caller's `<` and `>`, so the grep means again
-/// what this paragraph says it means.
+/// caller's.** The two callers named above are the sinks whose `host` is an
+/// unresolved argument rather than a resolved alias, and the gate used to
+/// pass it through verbatim: `--yes tool ssh_file_write 'host=<no-host>' …`
+/// produced a line no reader could tell from a genuinely hostless one.
+/// `audited_host` now escapes a caller's `<` and `>`, so the grep means
+/// again what this paragraph says it means.
 ///
 /// **It reaches the command history too, not only `audit.log`.** The failure
 /// paths named above go through `ExecuteCommandUseCase::log_failure`, which
@@ -57,6 +60,36 @@ use crate::config::AuditConfig;
 /// matches **literally** and the correctly-encoded `host=%3Cno-host%3E` does
 /// not.
 pub const NO_HOST: &str = "<no-host>";
+
+/// `tool_name` for a line the SHUTDOWN wrote about somebody else's call.
+///
+/// [`AuditLogger::log`] takes the tool as a mandatory parameter and is the
+/// single writer of `tool_name`, so a line written by the shutdown path has
+/// to name *something* there. It cannot name the tool whose call it is about:
+/// that line would then be indistinguishable, on the one field a reader
+/// selects a tool by, from a line the tool itself wrote — and the whole point
+/// of [`CommandResult::Interrupted`] is that nobody knows how that call
+/// ended.
+///
+/// Same convention and the same reason as [`NO_HOST`]: the angle brackets are
+/// the writer's namespace. A tool name is a key of the registry built in
+/// `crate::mcp::registry`, and no name in the tree contains an angle bracket
+/// — every `fn name(&self) -> &'static str` body and every `const NAME`
+/// literal under `src/`, collected and deduplicated, is **503 names** (tools,
+/// prompts and resources together) of which **0** contain `<` or `>`. So
+/// nothing can collide with this value, and
+/// `grep '"tool_name":"<shutdown>"'` over `audit.log` enumerates exactly the
+/// calls whose outcome was never read. The `command` field carries the tool
+/// that was running, in the form [`audited_operation`] builds.
+pub(crate) const SHUTDOWN_TOOL: &str = "<shutdown>";
+
+/// The one `reason` [`CommandResult::Interrupted`] carries today.
+///
+/// A fixed phrase, not caller data, and that is a constraint rather than a
+/// convenience: [`AuditLogger::log`] sanitizes `event.command` and nothing
+/// else, so a `CommandResult`'s own strings reach both sinks unredacted. A
+/// reason built from arguments could therefore put a secret on the line.
+pub(crate) const INTERRUPTED_BY_SHUTDOWN: &str = "the server stopped before the command finished";
 
 /// Result of a command execution for audit purposes
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +184,44 @@ pub enum CommandResult {
     /// population the rule applies to. Fully usable on a trail only the CLI
     /// writes to.
     Confirmed { by: String },
+    /// A command had been handed to a handler and the process stopped before
+    /// it finished: **neither an exit code nor a duration**, because nobody
+    /// read either.
+    ///
+    /// Written at shutdown, once per tool call still in flight, by
+    /// `ExecuteCommandUseCase::log_interrupted` — whose only caller is
+    /// `McpServer::audit_interrupted_in_flight`. `tool_name` is
+    /// `SHUTDOWN_TOOL`, not the tool's own name, because this line is the
+    /// shutdown's statement about that call and not the call's own.
+    ///
+    /// **It is deliberately NOT [`Self::Error`]**, whose doc already covers
+    /// "an unread exit code" and which would have cost nothing to reuse. An
+    /// auditor selecting `.result.Error` is asking "which commands failed";
+    /// answering that with "and these, about which nothing is known"
+    /// conflates a verdict with the absence of one — the exact fault this
+    /// variant exists to avoid, so reusing the variant that embodies it in
+    /// the very event meant to remove it would have been self-defeating.
+    /// [`Self::StateChanged`]'s doc states the doctrine the two share: the
+    /// absence of a code is the honest information, and a fabricated one
+    /// would be a verdict posted on a fact that never happened. What differs
+    /// is the direction of the ignorance — `StateChanged` has no code because
+    /// nothing ran, `Interrupted` has none because something ran and was
+    /// abandoned.
+    ///
+    /// **And no duration either**, which is where it parts from
+    /// `StateChanged`. An elapsed time *could* be put on the line, and it
+    /// would answer a question nobody asked: "how long had it been running
+    /// when we gave up" is a fact about the shutdown, not about the command,
+    /// and in a field that everywhere else means "how long the command took"
+    /// it would read as the latter.
+    ///
+    /// `reason` names what interrupted it; today the only value is
+    /// `INTERRUPTED_BY_SHUTDOWN`. It is a field rather than part of the
+    /// `event_type` so a second kind of abandonment — the cleanup loops are
+    /// `abort()`ed unbounded in `McpServer::serve`, and a handler running
+    /// inside one is lost the same way — can be named here without minting a
+    /// second `event_type` every consumer would have to learn.
+    Interrupted { reason: String },
 }
 
 /// Audit event for logging
@@ -164,10 +235,16 @@ pub struct AuditEvent {
     /// `"ssh_exec"` from [`AuditEvent::new`] for a command that ran,
     /// `"command_denied"` from [`AuditEvent::denied`] for one that was
     /// refused. [`AuditEvent::tagged`] now takes it as a parameter, so the
-    /// set is open; `"state_change"` (from
-    /// `ExecuteCommandUseCase::log_state_change`) and `"command_confirmed"`
-    /// (from `ExecuteCommandUseCase::log_confirmed`) are the third and fourth
-    /// values in the log today. A consumer must therefore treat an unknown value as data,
+    /// set is open. **Five values in the log today**, and this sentence is
+    /// the one an implementer copies instead of reopening, so it is written
+    /// as a list rather than as a count in prose: `"ssh_exec"`,
+    /// `"command_denied"`, `"state_change"` (from
+    /// `ExecuteCommandUseCase::log_state_change`), `"command_confirmed"`
+    /// (from `ExecuteCommandUseCase::log_confirmed`) and
+    /// `"command_interrupted"` (from
+    /// `ExecuteCommandUseCase::log_interrupted`, the shutdown's line for a
+    /// call still in flight — see [`CommandResult::Interrupted`]).
+    /// A consumer must therefore treat an unknown value as data,
     /// not as a parse error — and a caller must keep passing a kind of
     /// outcome, which is the contract the field's name carries and the only
     /// thing stopping it from drifting into a second, unreliable `tool_name`.
@@ -303,6 +380,214 @@ impl AuditEvent {
         self.tool_name = Some(name.to_string());
         self
     }
+}
+
+// ===========================================================================
+// Rendering caller-supplied values into an audit line
+//
+// Everything in this block was private to `src/cli/runner.rs`, where the
+// CLI's destructive gate was its only caller. It is here because a second
+// caller appeared — the MCP shutdown emitter,
+// `McpServer::audit_interrupted_in_flight` — and both write the same two
+// fields from the same kind of input: a tool's RAW arguments, unresolved and
+// unbounded. The caps are the audit line's own contract, so they belong
+// beside the rest of it; `src/mcp/` cannot see `src/cli/`, and duplicating a
+// six-line host renderer across two sinks is how two sinks start disagreeing.
+//
+// The two constants keep their `GATE_` prefix. Renaming them would have
+// rewritten every reference in `runner.rs` for nothing, and the prefix is not
+// false so much as no longer exhaustive: it names the caller the bound was
+// measured against, which is also the only one that can be handed a 128 KB
+// argument — a socket-borne call has no such ceiling, and no such floor.
+// ===========================================================================
+
+/// Longest a single argument value may be before [`audited_operation`]
+/// replaces it with its length.
+///
+/// **This exists because the gate's audit line would otherwise persist the
+/// call's arguments in full.** `--yes tool ssh_file_write … content=<a file>`
+/// wrote a `command_confirmed` line carrying that whole file.
+///
+/// How large, exactly, because the obvious figure is wrong: through `argv` the
+/// ceiling is `MAX_ARG_STRLEN`, 32 pages — **128 KB per argument** — and
+/// `ARG_MAX` for the whole command line; past that `execve` fails with `E2BIG`
+/// and the binary never starts.
+///
+/// **Where that comes from, since the attribution here used to be wrong:**
+/// `fork` + `execv("/bin/true", [prog, "A" × n])`, run directly, *succeeds*
+/// for n = 131071 and fails with `E2BIG` (errno 7) for n = 131072, with
+/// `getconf PAGESIZE` = 4096 — 32 pages, terminating NUL included. No test in
+/// this repository measures it: `tests/cli_exit_code.rs` *asserts* it in a
+/// docstring, to justify passing the 100 KB that succeeds, and the 400 KB
+/// figure lives in an in-memory unit test that calls no `execve` at all. The
+/// number is right; the citation was not.
+///
+/// A daemon-forwarded or MCP-served call carries its arguments as JSON over a
+/// socket and has no such limit. So the bound matters for volume — 128 KB a
+/// line fills a 100 MB archive in 800 calls, and breaks any JSONL consumer
+/// with a line-length bound — and it matters for content at any size: it
+/// defeated a deliberate exclusion, since the handler's own audit event for
+/// that write is `SFTP_WRITE <path>` and carries no content at all, precisely
+/// so the trail does not become a copy of the files it records.
+///
+/// 256 characters leaves every host alias, path, id, unit name and ordinary
+/// shell command intact — the values that make a line worth reading — while no
+/// file body survives it. A value over the bound is replaced by
+/// `<elided: N chars>`, which states what was dropped: a silent truncation
+/// would be another half-true line, which is the fault this whole change
+/// exists to remove.
+pub(crate) const GATE_AUDIT_MAX_VALUE_CHARS: usize = 256;
+
+/// Hard ceiling on the whole operation string, after per-value elision.
+///
+/// Per-value elision alone does not bound the line: a call with hundreds of
+/// short arguments stays under [`GATE_AUDIT_MAX_VALUE_CHARS`] on every one of
+/// them. What goes past this is cut and marked `<truncated: N chars total>`.
+pub(crate) const GATE_AUDIT_MAX_OPERATION_CHARS: usize = 2048;
+
+/// The host to put on an event built from a call's raw arguments: the call's
+/// `host` argument, rendered by [`audited_host`], or [`NO_HOST`] when the
+/// call carries no `host` string at all.
+///
+/// **Two callers, and in both the host is an unresolved JSON argument and
+/// nothing more**: the CLI's destructive gate, and the MCP shutdown emitter
+/// `McpServer::audit_interrupted_in_flight`. The gate writes before the alias
+/// is looked up at all — which is why it can refuse a call naming a host that
+/// does not exist — and the emitter only ever saw the arguments, because the
+/// handler that would have resolved the alias never came back. **So the
+/// sentinel is not reserved for the tools whose schema has no `host`**: the
+/// gate runs before any schema validation, so *any* destructive call that
+/// simply omits the argument lands on it too — pinned for
+/// `ssh_service_stop`, which requires one, in
+/// `a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event`.
+/// Three of the 45 destructive tools
+/// (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`, `ssh_awx_workflow_cancel`)
+/// declare no `host` at all and none declares a plural `hosts`, so for those
+/// three it is the only possible answer; for the other 42 it is also what an
+/// incomplete call produces.
+///
+/// Returns an owned `String` because the value is *rendered*, not borrowed —
+/// see [`audited_host`] for what that rendering is for.
+pub(crate) fn audited_host_from_args(args: Option<&serde_json::Value>) -> String {
+    match args
+        .and_then(|a| a.get("host"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(raw) => audited_host(raw),
+        None => NO_HOST.to_string(),
+    }
+}
+
+/// Render a caller-supplied `host` for an audit event: bounded, and unable to
+/// write anything the *writer* reserves for itself.
+///
+/// Its callers are the only audit sinks in the crate whose `host` is not an
+/// alias the config already resolved — everywhere else resolution precedes
+/// the write. Three consequences of handing that string through verbatim, each
+/// re-measured by removing this function's body and watching the matching
+/// test go red:
+///
+/// - **The bound beside it was decorative.** `elide_oversized` caps
+///   `command` and nothing capped `host`, so a 100 000-character `host`
+///   reached the line whole while the `command` field on the same line was
+///   elided to its length. A cap on one field of a line is not a cap on the
+///   line.
+/// - **The sentinel was forgeable.** `NO_HOST`'s own doc justifies the angle
+///   brackets with "`grep '<no-host>'` over `audit.log` enumerates exactly
+///   the hostless events"; `host=<no-host>` produced a `host` field equal to
+///   the sentinel, character for character. The angle brackets are now the
+///   **writer's** namespace: a caller's `<` and `>` are escaped, so no caller
+///   value can render as `<no-host>`, as `<elided: N chars>`, or as any
+///   marker added later.
+/// - **The `tracing` sink took a forged record.** `command` is JSON, so serde
+///   escapes it; `host` goes to `AuditLogger::log_to_tracing` as `host =
+///   %event.host`, i.e. `Display`, with no rendering at all — so a newline
+///   inside it put a second, well-formed `Audit: …` line into the journal
+///   journald and syslog capture. Control characters are escaped here for
+///   that reason, not for `audit.log`, whose JSON was never at risk.
+///
+/// The escape is `\u{..}` with the backslash doubled first, so the rendering
+/// is unambiguous: a literal `\u{3c}` typed by a caller comes out
+/// `\\u{3c}`. Everything else — letters, digits, dots, dashes, colons,
+/// non-ASCII — passes through untouched, because a real alias must stay
+/// greppable and the sanitizer is deliberately **not** applied to this field
+/// (`the_operation_is_redacted_and_the_host_is_passed_through_verbatim`).
+///
+/// The cap is [`GATE_AUDIT_MAX_VALUE_CHARS`], the same one `elide_oversized`
+/// applies, and it reports the length of what the **caller** supplied rather
+/// than of the escaped form: that is the number a reader wants.
+pub(crate) fn audited_host(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '<' | '>' => {
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(ch));
+            }
+            c if c.is_control() => {
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => escaped.push(c),
+        }
+    }
+    if escaped.chars().count() > GATE_AUDIT_MAX_VALUE_CHARS {
+        return format!("<elided: {} chars>", raw.chars().count());
+    }
+    escaped
+}
+
+/// The `command` field for an event about a CALL rather than a command: the
+/// tool and its arguments, bounded.
+///
+/// No command string is available — the handler builds it, and it either has
+/// not run yet (the gate) or never came back (the shutdown emitter) — so the
+/// line carries the *operation*, in the shape [`AuditEvent::tagged`]
+/// documents for an event that ran nothing. For the shutdown emitter that
+/// shape is a slight stretch, and worth stating rather than glossing: a
+/// command DID run there. What did not happen is anyone reading its outcome. The bounds are
+/// [`GATE_AUDIT_MAX_VALUE_CHARS`] per value and
+/// [`GATE_AUDIT_MAX_OPERATION_CHARS`] overall, both marked where they bite.
+///
+/// The rule is a size rule on purpose, not a list of content-bearing field
+/// names: both callers see an opaque JSON object for any of 476 tools, so a
+/// name list (`content`, `body`, `script`, `playbook`, …) would have to be kept in
+/// step with every tool added and would leak in silence the first time a
+/// payload was called something else. A size rule cannot rot that way.
+pub(crate) fn audited_operation(tool_name: &str, args: Option<&serde_json::Value>) -> String {
+    let bounded = match args {
+        None => serde_json::Value::Object(serde_json::Map::new()),
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), elide_oversized(v)))
+                .collect(),
+        ),
+        Some(other) => elide_oversized(other),
+    };
+    let rendered = serde_json::to_string(&bounded).unwrap_or_else(|_| "{}".to_string());
+    let operation = format!("{tool_name} {rendered}");
+    let total = operation.chars().count();
+    if total <= GATE_AUDIT_MAX_OPERATION_CHARS {
+        return operation;
+    }
+    let kept: String = operation
+        .chars()
+        .take(GATE_AUDIT_MAX_OPERATION_CHARS)
+        .collect();
+    format!("{kept} <truncated: {total} chars total>")
+}
+
+/// Replace one argument value with its length when it is over
+/// [`GATE_AUDIT_MAX_VALUE_CHARS`]. Applies to arrays and objects too, by their
+/// serialized length, so a nested payload is bounded like a flat one.
+pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
+    let len = match value {
+        serde_json::Value::String(s) => s.chars().count(),
+        other => serde_json::to_string(other).map_or(0, |s| s.chars().count()),
+    };
+    if len <= GATE_AUDIT_MAX_VALUE_CHARS {
+        return value.clone();
+    }
+    serde_json::Value::String(format!("<elided: {len} chars>"))
 }
 
 /// Audit logger that writes events to a file and/or tracing
@@ -976,6 +1261,18 @@ impl AuditLogger {
                     command = %event.command,
                     confirmed_by = %by,
                     "Audit: destructive call confirmed"
+                );
+            }
+            // Neither field again, and for a third reason: something DID run
+            // and we stopped without learning how it ended. See the variant.
+            CommandResult::Interrupted { reason } => {
+                info!(
+                    event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
+                    host = %event.host,
+                    command = %event.command,
+                    reason = %reason,
+                    "Audit: command interrupted by shutdown"
                 );
             }
         }

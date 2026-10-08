@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -365,6 +365,14 @@ pub struct McpServer {
     /// none: *"it allows servers to request additional information without
     /// maintaining any server-side state."*
     request_state: RequestStateSigner,
+    /// Tool calls dispatched and not yet finished, so the shutdown can say so.
+    ///
+    /// On the server and not on `SessionContext`, because the shutdown is the
+    /// reader and it has only `self: Arc<Self>`: `serve_session_with_context`
+    /// has dropped every `SessionContext` before [`Self::serve`] reaches the
+    /// close steps, and the tasks worker outlives its session anyway. See
+    /// [`InFlightCalls`].
+    in_flight: InFlightCalls,
 }
 
 /// Per-session map of in-flight JSON-RPC request ids to their
@@ -456,6 +464,168 @@ impl ActiveRequests {
     #[cfg(test)]
     fn contains(&self, id: &str) -> bool {
         self.0.lock().is_ok_and(|m| m.contains_key(id))
+    }
+}
+
+/// One tool call handed to a handler, as much of it as a shutdown line needs.
+///
+/// Rendered at registration rather than kept raw, which is a deliberate
+/// departure from "the entry carries the tool name and the raw arguments":
+/// `crate::security::audited_operation` bounds its result to
+/// `GATE_AUDIT_MAX_OPERATION_CHARS`, so a registry of these is bounded by
+/// construction — at most that many characters per in-flight call, whatever
+/// the call carried. Keeping an `Option<Value>` instead would have held a
+/// clone of the whole argument object for the life of the command, which for
+/// `ssh_file_write content=<a file>` is the file.
+///
+/// Neither a start instant nor a duration, and that is the variant's
+/// contract: see [`crate::security::CommandResult::Interrupted`].
+#[derive(Clone, Debug)]
+struct InFlightCall {
+    /// The event's `host`: the call's unresolved `host` argument, rendered.
+    host: String,
+    /// The event's `command`: the tool name and its bounded arguments.
+    operation: String,
+}
+
+impl InFlightCall {
+    /// Render a call's two audited fields, bounded, without keeping the
+    /// arguments.
+    fn render(tool_name: &str, args: Option<&Value>) -> Self {
+        Self {
+            host: crate::security::audited_host_from_args(args),
+            operation: crate::security::audited_operation(tool_name, args),
+        }
+    }
+}
+
+/// The tool calls this server has dispatched and not yet seen finish.
+///
+/// **Why a new registry and not one of the four that already exist**, each
+/// measured before this was written:
+///
+/// - [`ActiveRequests`] is the closest skeleton and the wrong one twice over.
+///   It maps a request id to a `CancellationToken` and carries no tool name,
+///   no host and no arguments; and it is **per session** by a deliberate
+///   security fix (FIND-038, see its own doc), so it is unreachable from
+///   [`McpServer::serve`] and must not be promoted to a singleton to make it
+///   reachable.
+/// - `TaskStore` is global and reachable, but covers only the calls promoted
+///   to `io.modelcontextprotocol/tasks`, and `create_task` takes no arguments
+///   at all, so it stores neither a tool nor a host.
+/// - `concurrent_limit` counts and cannot name.
+/// - `SessionManager::sessions` is the trap the wave-4 notes pointed at: it
+///   holds hosts and ids, but reading it needs `lock().await` on the very
+///   `tokio::sync::Mutex` that `SessionManager::exec` holds for the whole of a
+///   remote command — so a shutdown snapshot taken from it would park behind
+///   the command it is trying to report, reopening through another door the
+///   unbounded wait `Self::close_bounded("sessions", ..)` just closed.
+///
+/// `std::sync::Mutex`, not tokio's, for that last reason stated positively:
+/// the lock is held for a hashmap insert, remove or drain and nothing else, no
+/// `.await` is taken inside the critical section, and therefore the shutdown
+/// snapshot **cannot park**. Same choice and same justification as
+/// [`ActiveRequests`].
+#[derive(Clone, Default)]
+pub(crate) struct InFlightCalls {
+    calls: Arc<std::sync::Mutex<HashMap<u64, InFlightCall>>>,
+    /// Source of the keys. A counter and not the JSON-RPC `id`, which is
+    /// caller-chosen, not unique across sessions (`ActiveRequests`' doc says
+    /// so) and absent entirely from the tasks worker.
+    next_id: Arc<AtomicU64>,
+}
+
+impl InFlightCalls {
+    /// Record a dispatched call and return the claim that removes it again.
+    ///
+    /// The claim is what must be held for the duration of the call; dropping
+    /// it is how the call is reported finished.
+    #[must_use]
+    fn register(&self, tool_name: &str, args: Option<&Value>) -> InFlightClaim {
+        self.register_rendered(InFlightCall::render(tool_name, args))
+    }
+
+    /// [`Self::register`] for a call whose fields were rendered earlier.
+    ///
+    /// The tasks worker needs this split: its arguments are moved into the
+    /// spawned future, but it must not be registered until it holds a
+    /// concurrency permit — otherwise a task still queued on the semaphore at
+    /// shutdown is described as a command that was abandoned mid-flight,
+    /// when it had not started.
+    #[must_use]
+    fn register_rendered(&self, call: InFlightCall) -> InFlightClaim {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.lock().insert(id, call);
+        InFlightClaim {
+            calls: self.clone(),
+            id,
+        }
+    }
+
+    /// Take one call out of the map, returning it to whoever got there first.
+    ///
+    /// This **is** the claim: `HashMap::remove` returns the entry, so of the
+    /// two racers — the handler finishing and the shutdown snapshot — exactly
+    /// one can be handed it, and the other gets `None`. The pattern is
+    /// `ActiveRequests::cancel`'s, whose doc states the same property ("the
+    /// map entry is removed atomically with the cancel signal").
+    fn take(&self, id: u64) -> Option<InFlightCall> {
+        self.lock().remove(&id)
+    }
+
+    /// Take every call out of the map, for the shutdown snapshot.
+    ///
+    /// **Removes first and logs afterwards**, never the reverse, and the
+    /// order is not cosmetic. Logging first would leave a window as wide as
+    /// the write in which a handler can also finish and write its own line —
+    /// two lines for one call, one of them claiming an outcome was never read
+    /// when it was. Removing first inverts the exposure: a handler whose
+    /// `take` succeeded and whose own audit write is then cut off by process
+    /// exit loses its line, and that window is the few instructions between
+    /// `remove` and `send` rather than the duration of a write. It fails
+    /// closed — a line short, never a line wrong — which is this wave's
+    /// doctrine.
+    fn take_all(&self) -> Vec<InFlightCall> {
+        self.lock().drain().map(|(_, call)| call).collect()
+    }
+
+    /// The map, with a poisoned lock recovered rather than tolerated.
+    ///
+    /// [`ActiveRequests`] answers a poisoned lock with `if let Ok(..)`, which
+    /// silently does nothing. That is right for a cancellation — losing one
+    /// is not worth a panic — and wrong here: a `PoisonError` would retire
+    /// this registry permanently, and a registry that is permanently empty
+    /// writes no shutdown lines and reports success by writing nothing. So
+    /// the guard is taken back out of the poison, which is also what
+    /// `AuditLogger`'s own sender lock does.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, InFlightCall>> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// How many calls are registered. Test helper, like `ActiveRequests::len`.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+}
+
+/// A registered call's entry, removed when this is dropped.
+///
+/// RAII and not a paired `unregister` call, because the paths out of a tool
+/// call are not all returns: the handler can panic, and the task it runs in
+/// can be dropped at an await point when the runtime goes away. A `Drop` impl
+/// covers all three; an explicit call at the end of the happy path covers
+/// one.
+struct InFlightClaim {
+    calls: InFlightCalls,
+    id: u64,
+}
+
+impl Drop for InFlightClaim {
+    fn drop(&mut self) {
+        drop(self.calls.take(self.id));
     }
 }
 
@@ -611,6 +781,7 @@ impl McpServer {
                 }
                 signer
             },
+            in_flight: InFlightCalls::default(),
         };
 
         (server, audit_task)
@@ -1238,14 +1409,23 @@ impl McpServer {
     /// session waits on); the tasks worker is not waited on at all.
     ///
     /// Which leaves an asymmetry worth stating rather than discovering:
-    /// **`ssh_exec command='sleep 20'` is abandoned after a few seconds and
-    /// its audit event is lost, while `ssh_session_exec command='sleep 600'`
-    /// used to hold the whole shutdown for ten minutes** — because the
-    /// latter's handler holds `SessionManager`'s lock and `close_all` queued
-    /// behind it. The bound on `close_all` makes the two behave alike: both
-    /// are abandoned, and the in-flight event of either is lost. That is a
+    /// **`ssh_exec command='sleep 20'` is abandoned after a few seconds,
+    /// while `ssh_session_exec command='sleep 600'` used to hold the whole
+    /// shutdown for ten minutes** — because the latter's handler holds
+    /// `SessionManager`'s lock and `close_all` queued behind it. The bound on
+    /// `close_all` makes the two behave alike: both are abandoned. That is a
     /// deliberate choice of a bounded shutdown over a complete trail; see
     /// `RESOURCE_CLOSE_GRACE`.
+    ///
+    /// **What an abandoned call leaves behind is no longer nothing.** Its own
+    /// event is still lost, and that loss is not the one it looks like: the
+    /// event is built after the command returns, so an abandoned call never
+    /// constructed one. In its place this teardown writes a line of its own —
+    /// `event_type: "command_interrupted"`, `tool_name: "<shutdown>"`, no
+    /// exit code and no duration — one per call still registered, from
+    /// `Self::audit_interrupted_in_flight`, immediately before the channel is
+    /// closed. "A command started and we will never know how it finished" is
+    /// a fact, and a trail that drops it says instead that nothing happened.
     ///
     /// # Errors
     ///
@@ -1351,6 +1531,10 @@ impl McpServer {
         // followed by `rotate_if_needed`, so an abort loses the event in
         // flight and the rotation it was about to trigger. That is why this
         // handle is not in `cleanup_handles`.
+        // Last thing written before the channel closes: one line per tool
+        // call this teardown abandoned. It MUST be here and not one statement
+        // later — see `audit_interrupted_in_flight`.
+        self.audit_interrupted_in_flight();
         self.close_audit();
         crate::security::drain_audit_writer(audit_writer).await;
 
@@ -1448,6 +1632,57 @@ impl McpServer {
     /// a request handler may call.
     pub(crate) fn close_audit(&self) {
         self.audit_logger.close();
+    }
+
+    /// Write one audit line for every tool call still in flight, saying the
+    /// process stopped before it finished — no exit code, no duration.
+    ///
+    /// **This has to build the event, not merely flush one**, and that is the
+    /// measurement the obvious fix fails on. A tool call's audit event is
+    /// constructed at step 12 or 13 of the `standard_tool` pipeline, i.e.
+    /// strictly AFTER the remote command returns (step 8, "Log intent", is a
+    /// bare `info!` and no `AuditEvent` exists at that point). So a command
+    /// abandoned by the bounded teardown does not lose a queued event: it
+    /// never had one. Holding the audit channel open longer would recover
+    /// nothing at all.
+    ///
+    /// **Called immediately before `close_audit()`, on both of the teardowns
+    /// that have one**, and nowhere else: after the channel is closed
+    /// `AuditLogger::log` still writes its `tracing` line and the file sink
+    /// is gone, so a line emitted later is silently not in `audit.log` —
+    /// which is the exact failure mode this method exists to remove.
+    ///
+    /// **Conditional on there being something, and that is a contract rather
+    /// than an optimisation.** Four assertions elsewhere count the lines in
+    /// `audit.log` exactly after `serve` returns — two in
+    /// `tests/daemon_integration.rs` (`DRAIN_TEST_CALLS`, then exactly 1),
+    /// one in `crate::mcp::transport::http`, one in `crate::cli::runner` —
+    /// and an unconditional line would redden all four while proving
+    /// nothing. An empty registry is also the normal case: the ordinary
+    /// shutdown has nothing in flight and must stay silent.
+    ///
+    /// What it does NOT cover, measured and left open rather than papered
+    /// over: `serve` aborts the five background loops with
+    /// `for h in cleanup_handles { h.abort(); }`, unbounded and without a
+    /// word, so a handler running inside one of them is dropped by that
+    /// abort — and its claim's `Drop` removes its entry *before* this
+    /// snapshot runs, so it gets no line by this mechanism either. Bounding
+    /// that abort would reopen the unbounded wait the wave-4 teardown bound
+    /// exists to close, so it stays as it is.
+    pub(crate) fn audit_interrupted_in_flight(&self) {
+        let stranded = self.in_flight.take_all();
+        if stranded.is_empty() {
+            return;
+        }
+
+        warn!(
+            count = stranded.len(),
+            "Stopping with tool calls still in flight; auditing each as interrupted"
+        );
+        for call in stranded {
+            self.execute_use_case
+                .log_interrupted(&call.host, &call.operation);
+        }
     }
 
     /// Assemble every process-global background task: the cleanup loops
@@ -1876,8 +2111,12 @@ impl McpServer {
         // an `Arc`, and `SessionContext` derives `Clone` — so EVERY clone of
         // the bundle mints another sender. Per-request scoping
         // (`with_request_meta`), each dispatched request's
-        // `session_ctx_for_task`, each batch task, `spawn_fetch_roots`, and
-        // the detached task worker in `handle_tools_call_async` all hold one.
+        // `session_ctx_for_task`, each batch task, each request's
+        // `ProgressReporter` and `McpLogger`, and the detached task worker in
+        // `handle_tools_call_async` all hold one. (This list named
+        // `spawn_fetch_roots` until the audit-honesty wave; that function was
+        // deleted with the MRTR cut and `grep -rn spawn_fetch_roots src/`
+        // returned this comment and nothing else.)
         // The last of those is the longest-lived by far — it parks on
         // `concurrent_limit.acquire_owned()` BEFORE running the tool, so it
         // can outlive the client by the length of the queue ahead of it. It
@@ -2949,11 +3188,37 @@ impl McpServer {
             "name": call_params.name,
             "arguments": call_params.arguments,
         }));
-        match self
+
+        // Registered HERE and not at the dispatch `tokio::spawn`, for two
+        // measured reasons: that spawn has neither a tool name nor arguments
+        // to put on a line, and a request that dies before reaching this
+        // point writes no audit line in normal operation either — so a trail
+        // that says nothing about it stays consistent with itself.
+        //
+        // The host is derived again rather than reusing `host_for_metrics`
+        // above: that one falls back to `"local"`, which is the metrics
+        // convention, and the audit convention for "no host was named" is
+        // `NO_HOST`. Two derivations of one value is a drift risk, so it is
+        // worth being explicit that they answer different questions.
+        let in_flight = self
+            .in_flight
+            .register(&tool_name, call_params.arguments.as_ref());
+
+        let outcome = self
             .registry
             .execute(&call_params.name, call_params.arguments, &ctx)
-            .await
-        {
+            .await;
+
+        // Claimed the instant `execute` returns, which is the earliest point
+        // reachable from here. The handler's OWN audit event is written
+        // inside that call, so the double-write window is not closed
+        // entirely — it is the tail of `execute` after its own write, rather
+        // than the whole duration of the command. Closing it completely would
+        // mean threading this registry through `ExecuteCommandUseCase` and
+        // gating all six of its log facades on the claim.
+        drop(in_flight);
+
+        match outcome {
             Ok(result) => {
                 let elapsed_ms = start.elapsed().as_millis();
 
@@ -3171,6 +3436,13 @@ impl McpServer {
             .create_tool_context(Some(cancel_token.clone()), None, session)
             .await;
 
+        // Rendered out here, where `arguments` is still readable, and
+        // REGISTERED inside the worker only once it holds a permit — see
+        // `InFlightCalls::register_rendered`. Two bounded strings cross into
+        // the future, not a clone of the arguments.
+        let in_flight = self.in_flight.clone();
+        let in_flight_call = InFlightCall::render(&tool_name, arguments.as_ref());
+
         // Spawn the background worker
         tokio::spawn(async move {
             // Wait for a concurrency slot before doing any remote work. A
@@ -3186,6 +3458,11 @@ impl McpServer {
                 },
                 () = cancel_token.cancelled() => return,
             };
+
+            // Now it is really in flight. Dropped by every path out of this
+            // future, including the `return` in the cancellation arm below
+            // and the runtime dropping the whole task.
+            let _in_flight = in_flight.register_rendered(in_flight_call);
 
             let result = tokio::select! {
                 res = handler.execute(arguments, &ctx) => res,
@@ -6909,6 +7186,291 @@ rbac:
                  the un-killable daemon through this door"
             );
         }
+    }
+
+    // ====================================================================
+    // T45 (audit-honesty wave) — the shutdown's line for a call in flight
+    // ====================================================================
+
+    /// A config whose audit writer really writes, into a tempdir.
+    ///
+    /// `test_config()` above has `enabled: false`, so it produces no writer
+    /// task at all and these tests would read an empty string whatever the
+    /// code did. Rotation and retention are off because these tests read the
+    /// live file — same choice, same reason, as the HTTP drain test's
+    /// `audited_config`.
+    fn audited_shutdown_config(path: std::path::PathBuf) -> Config {
+        Config {
+            audit: AuditConfig {
+                enabled: true,
+                path,
+                max_size_mb: 0,
+                retain_days: 0,
+            },
+            ..test_config()
+        }
+    }
+
+    /// Read `audit.log` back, as a consumer would.
+    ///
+    /// `unwrap_or_default` and not `expect`: a disabled logger never creates
+    /// the file, and "no file" and "empty file" are the same answer to the
+    /// question these tests ask.
+    fn audit_lines(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// **The defect this wave closes, read off the file rather than asserted
+    /// about a return value.**
+    ///
+    /// Wave 4 bounded the MCP teardown and measured the price: two audit
+    /// lines before the bound, one after, the lost one being
+    /// `ssh_session_exec` with `duration_ms: 45003`. The cause is not a
+    /// closed writer — the event is built after the command returns, so an
+    /// abandoned call never had one — which is why the fix has to BUILD a
+    /// line from a registry rather than keep the channel open longer.
+    ///
+    /// So this asserts on the JSONL: one line, `command_interrupted`, the
+    /// shutdown sentinel in `tool_name`, the call's host, the tool and its
+    /// arguments in `command`, and **neither `exit_code` nor `duration_ms`
+    /// anywhere in the raw text**. The last two are the point of the
+    /// variant: a `0` there would be a verdict on a fact nobody established.
+    ///
+    /// What it does not cover, said rather than implied: the wiring inside
+    /// `serve` and `serve_with_shutdown`. Driving a real in-flight command
+    /// through either needs a remote host; the ordering of the two
+    /// statements is pinned as source text by
+    /// `the_shutdown_emission_precedes_the_audit_close_on_both_teardowns`.
+    #[tokio::test]
+    async fn a_call_still_in_flight_at_shutdown_leaves_one_line_with_no_exit_code() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        // A call that was handed to a handler and has not come back: the
+        // claim is still held when the shutdown snapshot runs.
+        let claim = server.in_flight.register(
+            "ssh_session_exec",
+            Some(&json!({
+                "host": "raspberry",
+                "session_id": "t45-0",
+                "command": "sleep 45",
+            })),
+        );
+        assert_eq!(
+            server.in_flight.len(),
+            1,
+            "the call must be registered before the snapshot, or this test proves nothing"
+        );
+
+        server.audit_interrupted_in_flight();
+        assert_eq!(
+            server.in_flight.len(),
+            0,
+            "the snapshot must TAKE the entry, so a handler finishing afterwards cannot \
+             write a second line for the same call"
+        );
+        drop(claim);
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one abandoned call must leave exactly one line; got {lines:?}"
+        );
+        let event: Value = serde_json::from_str(&lines[0])
+            .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {:?}", lines[0]));
+
+        assert_eq!(event["event_type"], "command_interrupted");
+        assert_eq!(event["tool_name"], crate::security::SHUTDOWN_TOOL);
+        assert_eq!(
+            event["host"], "raspberry",
+            "the host is captured before `registry.execute` consumes the arguments"
+        );
+        assert_eq!(
+            event["command"]
+                .as_str()
+                .expect("command must be a string")
+                .split_once(' ')
+                .map(|(tool, _)| tool),
+            Some("ssh_session_exec"),
+            "`tool_name` is the shutdown, so `command` is the only field naming the tool"
+        );
+        assert!(
+            event["result"]["Interrupted"]["reason"].is_string(),
+            "the result must be the Interrupted variant, not Error: an auditor filtering \
+             `.result.Error` is asking which commands FAILED"
+        );
+        assert!(
+            !lines[0].contains("exit_code"),
+            "no exit code was read, so none may appear: {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("duration_ms"),
+            "how long we waited before giving up is a fact about the shutdown, not about \
+             the command: {:?}",
+            lines[0]
+        );
+    }
+
+    /// The atomic claim: a handler that finishes while the snapshot runs
+    /// leaves **one** line, not two.
+    ///
+    /// `HashMap::remove` returns the entry, so of the two racers exactly one
+    /// is handed it. Here the handler wins — its claim is dropped before the
+    /// snapshot — and the file must then hold its own `ssh_exec` line and no
+    /// `command_interrupted` beside it. Two lines would be worse than none:
+    /// the second one says an outcome was never read, about a call whose
+    /// outcome is on the line above it.
+    #[tokio::test]
+    async fn a_handler_that_wins_the_claim_leaves_one_line_not_two() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        let claim = server.in_flight.register(
+            "ssh_exec",
+            Some(&json!({"host": "raspberry", "command": "uptime"})),
+        );
+
+        // The handler finishes: it claims its entry, and then writes the
+        // event it always wrote. `remove` BEFORE `log`, which is the order
+        // the whole scheme rests on.
+        drop(claim);
+        server
+            .execute_use_case
+            .log_success("ssh_exec", "raspberry", "uptime", 0, 12);
+
+        // The shutdown arrives a moment later and finds nothing to say.
+        server.audit_interrupted_in_flight();
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one call that finished must leave one line, not its own plus a shutdown's; \
+             got {lines:?}"
+        );
+        assert!(
+            !lines[0].contains("command_interrupted"),
+            "the line must be the handler's own: {:?}",
+            lines[0]
+        );
+        let event: Value = serde_json::from_str(&lines[0]).expect("audit line must be JSONL");
+        assert_eq!(event["tool_name"], "ssh_exec");
+    }
+
+    /// An empty registry writes **nothing**, and that is a contract.
+    ///
+    /// Four assertions elsewhere count the lines in `audit.log` exactly
+    /// after a teardown — `tests/daemon_integration.rs` twice,
+    /// `crate::mcp::transport::http` and `crate::cli::runner` once each —
+    /// and every ordinary shutdown has an empty registry. An unconditional
+    /// line would redden all four and tell an operator that something was
+    /// abandoned on every clean stop.
+    #[tokio::test]
+    async fn an_empty_registry_writes_no_line_at_shutdown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        assert_eq!(server.in_flight.len(), 0, "nothing was registered");
+        server.audit_interrupted_in_flight();
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        assert!(
+            audit_lines(&audit_path).is_empty(),
+            "a clean shutdown must say nothing: {:?}",
+            audit_lines(&audit_path)
+        );
+    }
+
+    /// The wiring, as source text, because nothing else here can see it.
+    ///
+    /// There are two teardowns with an audit channel to close, they are
+    /// different code, and the emission is worthless one statement too late:
+    /// after `close_audit()` the logger still writes its `tracing` line and
+    /// the file sink is gone, so the test above would stay green while
+    /// `audit.log` got nothing. Neither call can be driven from a unit test
+    /// — one needs a transport and a live remote command, the other a bound
+    /// socket and the same — so the order is pinned where it is written.
+    ///
+    /// A source-text guard is the weakest kind of test. It is still stronger
+    /// than the runtime test that cannot be written here.
+    #[test]
+    fn the_shutdown_emission_precedes_the_audit_close_on_both_teardowns() {
+        // `include_str!` pulls in this test too, whose own assertion
+        // arguments are the literals searched for below; scanning the whole
+        // file would make the guard match itself.
+        let src = include_str!("server.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+        let from_fn = production
+            .find("pub async fn serve<T: Transport>(")
+            .expect("serve must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    /// Join every in-flight session task")
+            .expect("the drain helpers must follow serve");
+        let body = &body[..to_next_fn];
+
+        let emit = body
+            .find("self.audit_interrupted_in_flight();")
+            .expect("serve must audit the calls its teardown abandoned");
+        let close = body
+            .find("self.close_audit();")
+            .expect("serve must close the audit channel");
+        assert!(
+            emit < close,
+            "serve must emit the interrupted lines BEFORE closing the audit channel: after \
+             it, `AuditLogger::log` reaches `tracing` and never the file"
+        );
+
+        // The HTTP transport does not run `serve` at all: it has its own,
+        // three-step teardown.
+        let http = include_str!("transport/http.rs");
+        let (http_production, _) = http
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("http.rs must have the same test boundary");
+        let http_emit = http_production
+            .find("audit_owner.audit_interrupted_in_flight();")
+            .expect("the HTTP teardown must audit the calls it abandoned too");
+        let http_close = http_production
+            .find("audit_owner.close_audit();")
+            .expect("the HTTP teardown must close the audit channel");
+        assert!(
+            http_emit < http_close,
+            "the HTTP teardown must emit before closing the channel, for the same reason"
+        );
     }
 
     /// D8: the destructive-op elicitation gate MUST resolve BEFORE a task

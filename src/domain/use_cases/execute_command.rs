@@ -10,7 +10,10 @@ use std::time::Duration;
 use crate::domain::CommandHistory;
 use crate::error::Result;
 use crate::ports::CommandOutput;
-use crate::security::{AuditEvent, AuditLogger, CommandResult, CommandValidator, Sanitizer};
+use crate::security::{
+    AuditEvent, AuditLogger, CommandResult, CommandValidator, INTERRUPTED_BY_SHUTDOWN,
+    SHUTDOWN_TOOL, Sanitizer,
+};
 
 /// Request for executing a command
 #[derive(Debug, Clone)]
@@ -450,6 +453,50 @@ impl ExecuteCommandUseCase {
                 host,
                 &redacted,
                 CommandResult::StateChanged { duration_ms },
+            ),
+        );
+    }
+
+    /// Log a tool call that was still running when the process stopped: the
+    /// shutdown's line about somebody else's call.
+    ///
+    /// **The one facade here that does NOT take a `tool`**, and the asymmetry
+    /// is the point. The other six take it because `AuditLogger::log`
+    /// overwrites `tool_name` with it and the caller is the tool, so a
+    /// mandatory parameter is what stops a line from being anonymous. Here
+    /// the caller is the shutdown, the only honest value is
+    /// `crate::security::SHUTDOWN_TOOL`, and a parameter would invite the one
+    /// value that must never be passed — the name of the tool whose call this
+    /// is about, which would make the line indistinguishable from one that
+    /// tool wrote itself. The tool is still on the line: `operation` begins
+    /// with it, in the form `crate::security::audited_operation` builds.
+    ///
+    /// **No history entry**, for the reason [`Self::log_state_change`]
+    /// states and that applies here word for word: `HistoryEntry::exit_code`
+    /// is a non-optional `u32` whose `0` means success, so the history cannot
+    /// express "no code was ever read" — it could only express "it
+    /// succeeded", which is precisely the false claim this line exists to
+    /// avoid. `audit.log` is therefore the only record of an interrupted
+    /// call, and `ssh_history` will not show it.
+    ///
+    /// `reason` is not a parameter either: `AuditLogger::log` sanitizes
+    /// `event.command` and nothing else, so a `CommandResult`'s own strings
+    /// reach both sinks unredacted. One fixed phrase, in the crate's own
+    /// constant.
+    pub fn log_interrupted(&self, host: &str, operation: &str) {
+        // Same redaction as `log_state_change` — the operation string is
+        // built from a call's arguments, which can carry a secret.
+        let redacted = self.sanitizer.sanitize(operation);
+
+        self.audit_logger.log(
+            SHUTDOWN_TOOL,
+            AuditEvent::tagged(
+                "command_interrupted",
+                host,
+                &redacted,
+                CommandResult::Interrupted {
+                    reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+                },
             ),
         );
     }
