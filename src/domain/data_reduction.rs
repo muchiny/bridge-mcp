@@ -100,14 +100,16 @@ impl DataReductionArgs {
             })
         });
 
-        // `limit` is looked at before it is taken. Four AWX tools declare their
+        // `limit` is looked at before it is taken. Seven tools declare their
         // own `limit: Option<String>` (an Ansible host pattern, not a row
-        // count); removing the key whatever its value stripped `limit=webservers`
-        // from the object before the tool could read it, and the job ran on the
-        // whole inventory. Only a value this reduction can use as a row limit
-        // is consumed; anything else stays in the object, where the tool that
-        // declares it reads it and `reject_unknown_args` / `deny_unknown_fields`
-        // refuse it everywhere else.
+        // count) — four AWX plus three ansible; removing the key whatever its
+        // value stripped `limit=webservers` from the object before the tool
+        // could read it, and the job ran on the whole inventory. Only a value
+        // this reduction can use as a row limit is consumed; anything else
+        // stays in the object, where the tool that declares it reads it. On a
+        // tool that declares no `limit` of its own, what refuses it depends on
+        // the output kind: `deny_unknown_fields` for a tool the reduction
+        // schema applies to, `reject_unknown_args` for a `RawText` one.
         let limit = match obj.get("limit").and_then(serde_json::Value::as_u64) {
             Some(0) => {
                 return Err(BridgeError::McpInvalidRequest(
@@ -296,7 +298,7 @@ mod tests {
             crate::domain::output_kind::OutputKind::RawText,
         )
         .expect("a host pattern is not a reduction param");
-        assert!(args.used_params().is_empty());
+        assert_eq!(args.used_params(), [] as [&str; 0]);
         assert_eq!(v["limit"], "webservers");
     }
 

@@ -41,12 +41,18 @@ pattern.
 
 **Breaking:** on a tool that does not declare `limit`, a non-integer value
 (`limit=abc`) used to be dropped and the call returned its full output with
-exit 0; it is now refused with `unknown field 'limit'` plus a sentence saying
-`limit` must be an integer of at least 1 (serde's `deny_unknown_fields`). A
-script that relied on that silence will fail: remove the argument, or pass an
-integer if a row limit was meant. Not fixed: an integer `limit` is still taken
-as a row limit, so a purely numeric host pattern cannot be passed to these
-tools from the CLI or as a JSON number (a JSON string `"5"` reaches them).
+exit 0; it is now refused with ``unknown field `limit` `` plus a sentence
+saying `limit` must be an integer of at least 1 (serde's
+`deny_unknown_fields`). A script that relied on that silence will fail: remove
+the argument, or pass an integer if a row limit was meant. That added sentence
+is emitted by the `StandardTool` pipeline only: the direct handlers — about 42
+of them, the read-only AWX family among them — still return serde's bare
+message, which names `limit` as unknown on a tool whose published schema
+advertises it. Not fixed either: on the five of seven whose output kind lets
+the reduction schema apply, an integer `limit` is still taken as a row limit,
+and on the two `RawText` ones it is refused by their output-kind guard — so
+either way a purely numeric host pattern cannot be passed from the CLI or as a
+JSON number (a JSON string `"5"` reaches them).
 
 **Audit: the direct handlers now record the reduction params they were given.**
 Until now only the `StandardTool` pipeline filled the `reduction` field of an

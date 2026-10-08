@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(event.reduction, vec!["limit"]);
         assert_eq!(event.command, "SFTP_LS /var/log");
         let none = crate::domain::data_reduction::DataReductionArgs::default();
-        assert!(success_event("h", "/", 1, &none).reduction.is_empty());
+        assert_eq!(success_event("h", "/", 1, &none).reduction, [] as [&str; 0]);
     }
 
     use super::*;

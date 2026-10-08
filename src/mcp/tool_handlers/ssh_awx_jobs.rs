@@ -254,7 +254,7 @@ mod tests {
             .execute(Some(json!({})), &ctx)
             .await
             .expect("the handler must return a result");
-        assert!(the_event(&ctx).reduction.is_empty());
+        assert_eq!(the_event(&ctx).reduction, [] as [&str; 0]);
     }
 
     use super::*;
