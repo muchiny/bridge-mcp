@@ -50,6 +50,43 @@ tests and a serialisation test.
   and four in `cli/runner.rs`); they now carry their own name. Their
   `exit_code: 0` on SFTP transfers and empty `reduction` are unchanged.
 
+  **(lib API, same entry) `CommandResult` has a fourth variant,
+  `StateChanged { duration_ms }`, so an exhaustive `match` on it stops
+  compiling, and a new `event_type` appears in `audit.log`.** `CommandResult`
+  is a `#[doc(hidden)]` re-export (`src/lib.rs`) and `AuditEvent.result`
+  serializes it, so both the Rust API and the JSONL shape change. Migration:
+  add an arm; the variant carries a duration and **no exit code**. Why: the
+  seven tools that change server state without running any process
+  (`ssh_session_create`, `ssh_session_close`, `ssh_tunnel_create`,
+  `ssh_tunnel_close`, `ssh_config_set`, `ssh_recording_start`,
+  `ssh_recording_stop`) wrote no event at all, and the only two ways to give
+  them one were a fabricated `exit_code: 0` — a success claimed for something
+  that never ran, the `ssh_file_write`/`SessionExecResult` trap — or a variant
+  that does not carry a code. The absence is the information, which is the
+  doctrine `ToolCallResult::remote_exit_code` already states for its `None`.
+  Two more additions come with it: `AuditEvent::state_change(event_type, host,
+  operation, duration_ms)`, the first constructor that lets code outside
+  `src/security/audit.rs` choose the `event_type` (`new` hard-codes
+  `"ssh_exec"`, `denied` hard-codes `"command_denied"`), and
+  `ExecuteCommandUseCase::log_state_change(tool, host, operation,
+  duration_ms)`, a fifth entry point beside the four that take a mandatory
+  `tool`. Those seven lines read `{"event_type":"state_change",
+  "host":"raspberry","command":"ssh_session_close session_id=…",
+  "tool_name":"ssh_session_close","result":{"StateChanged":{"duration_ms":2}}}`
+  — no `exit_code` key anywhere. They write **no history entry**:
+  `HistoryEntry::exit_code` is a non-optional `u32` whose `0` means success,
+  so the history cannot express "no code", and it is a history of commands.
+
+- **(wire) `"host":"<no-host>"` is a new, reserved host value in
+  `audit.log`.** The constant `bridge_mcp::security::NO_HOST`, used by
+  `ssh_config_set` — which changes a limit of the bridge process and has no
+  host parameter at all — and by the failure paths of the `*_close` /
+  `*_stop` state tools, where the id handed in matched nothing so no host was
+  ever resolved. Any consumer that assumes `host` is a `config.yaml` alias
+  must tolerate it. The angle brackets are what make it impossible to
+  confuse with a real alias and trivial to grep; no such convention existed
+  before (checked: every non-test caller passed a real alias).
+
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
   `main` classifies any `load_config` failure as 5 by call site
@@ -905,34 +942,79 @@ tests and a serialisation test.
   exit 0 when their remote command fails — so the list of what is still open
   above stands as written.
 
-- **20 of the 77 handlers that implement `ToolHandler` directly write no audit
-  event at all.** This is the complement of the question asked about the audit
-  on this branch: that one inventoried which *events* carry no `tool_name`, and
-  nobody asked which *operations* produce no event to name. Making the name
-  mandatory on the four entry points cannot reach these, by construction — they
-  call none of them.
+- **The seven handlers that changed server state without writing an audit
+  event now write one. Thirteen local reads still write none.** This was the
+  complement of the question asked about the audit on this branch: that one
+  inventoried which *events* carry no `tool_name`, and nobody asked which
+  *operations* produce no event to name. Making the name mandatory on the four
+  entry points could not reach these, by construction — they called none of
+  them. They now call a fifth one, `log_state_change` (see the BREAKING entry
+  on `CommandResult::StateChanged` above for its shape and for why it carries
+  no exit code).
 
-  Counted, not estimated: of the 77 files under `src/mcp/tool_handlers/` with an
-  `impl ToolHandler for`, 20 mention none of `log_success`, `log_failure`,
-  `log_denied`, `process_success`, `AuditEvent` or `audit_logger` outside their
-  `#[cfg(test)]` module. **Seven of the 20 open a connection or change server
-  state, and those are the ones that matter:** `ssh_session_create`,
-  `ssh_session_close`, `ssh_tunnel_create`, `ssh_tunnel_close`,
-  `ssh_config_set`, `ssh_recording_start`, `ssh_recording_stop`. The other 13
-  are local reads: `ssh_status`, `ssh_health`, `ssh_history`, `ssh_config_get`,
+  Counted, not estimated, when the defect was written up: of the 77 files
+  under `src/mcp/tool_handlers/` with an `impl ToolHandler for`, 20 mentioned
+  none of `log_success`, `log_failure`, `log_denied`, `process_success`,
+  `AuditEvent` or `audit_logger` outside their `#[cfg(test)]` module.
+  **Seven of the 20 open a connection or change server state, and those are
+  the ones that mattered:** `ssh_session_create`, `ssh_session_close`,
+  `ssh_tunnel_create`, `ssh_tunnel_close`, `ssh_config_set`,
+  `ssh_recording_start`, `ssh_recording_stop` — all seven fixed here, so the
+  count that still holds is **13 of 77**. The remaining 13 are local reads:
+  `ssh_status`, `ssh_health`, `ssh_history`, `ssh_config_get`,
   `ssh_output_fetch`, `ssh_session_list`, `ssh_tunnel_list`,
   `ssh_runbook_execute`, `ssh_runbook_list`, `ssh_runbook_validate`,
-  `ssh_recording_list`, `ssh_recording_replay`, `ssh_recording_verify`.
+  `ssh_recording_list`, `ssh_recording_replay`, `ssh_recording_verify`. They
+  are deliberately left alone, and `ssh_runbook_execute` is the one to check
+  before trusting that classification: its name suggests an execution, and
+  the entry above establishes only that it runs no remote command.
 
-  **Nothing central covers them.** Neither the MCP dispatcher nor the CLI's
-  tool path writes an audit event per tool call. Outside the handlers themselves,
-  the only code that constructs an `AuditEvent` is
-  `src/domain/use_cases/execute_command.rs` — the four entry points, which a
-  caller has to invoke by name, as the `bridge-mcp exec` subcommand does — and
-  the four SFTP sites of `bridge-mcp upload` / `download` in `src/cli/runner.rs`
-  (`grep -rn 'AuditEvent::new\|AuditEvent::denied' src/`). So
-  `ssh_session_create host=pi` opens an SSH session to a host and leaves no line
-  behind saying it did.
+  **Measured live, before the fix**: `ssh_session_create` then
+  `ssh_session_close` against a real Raspberry Pi host, through the MCP
+  server, wrote **zero** lines — a persistent remote shell created and
+  destroyed, invisible in the trail. The two recording tools were the worst
+  in kind: the control plane of compliance recording left nothing in the
+  compliance journal. The **fix** was not measured live; it rests on
+  compilation, unit tests over the handlers (`ssh_config_set`,
+  `ssh_session_close`, `ssh_tunnel_close` both ways, `ssh_recording_start`,
+  `ssh_recording_stop` both ways) and a serialised-line test. The success
+  paths of `ssh_session_create` and `ssh_tunnel_create` need a live SSH
+  connection and are covered by compilation only.
+
+  **Nothing central covers them, which is still true.** Neither the MCP
+  dispatcher nor the CLI's tool path writes an audit event per tool call.
+  Outside the handlers themselves, the only code that constructs an
+  `AuditEvent` is `src/domain/use_cases/execute_command.rs` — now five entry
+  points, which a caller has to invoke by name, as the `bridge-mcp exec`
+  subcommand does — and the four SFTP sites of `bridge-mcp upload` /
+  `download` in `src/cli/runner.rs`
+  (`grep -rn 'AuditEvent::new\|AuditEvent::denied\|AuditEvent::state_change' src/`).
+
+- **`ssh_metrics_multi` audited a fabricated `exit_code: 0` for every host it
+  reached, and nothing at all for the hosts it did not.** The worse of the two
+  is the `0`: a **success** claimed for a command that may have failed, which
+  is the direction PR #218 and #219 spent two PRs removing elsewhere. The loop
+  handed `process_success` a hand-built `CommandOutput { exit_code: 0, .. }`,
+  and `process_success` writes the audit event **and** the history entry, so
+  the fabricated code went into `audit.log` too — the in-code comment claimed
+  only the history entry was affected, and that understatement is corrected in
+  the source. The second half: the loop was guarded by `if result.success`, so
+  an SSH failure, a rate-limit refusal or a `fail_fast` cancellation produced
+  no event and no history entry whatsoever.
+
+  The real code was never lost, only dropped: `collect_from_host` deconstructed
+  the `CommandOutput` and kept `stdout` alone. `RawHostOutput` now carries it,
+  `HostMetricsResult` carries it under `#[serde(skip)]` — so the tool's own
+  JSON answer is unchanged, no new key in `results[]` — and unreached hosts go
+  through `log_failure`, which is what the single-host `ssh_metrics` has always
+  done. **What the tool reports is unchanged**; only what it records is.
+
+  **The limit of the remedy, written into the code so it is not overstated:**
+  the real code is no more informative than the `0` was — it is only *true*.
+  It is the status of a `;`-joined list, i.e. of the last metric section
+  alone, so four of five sections can fail while the recorded code reads 0.
+  The audit line does not describe the five metrics; the per-metric `None` in
+  the JSON does.
 
 - **All 399 tools on the pipeline have now been read against the
   `NONZERO_EXIT_IS_ERROR` criterion, and the opt-out still has three users.**
