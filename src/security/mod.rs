@@ -27,7 +27,8 @@ pub(crate) use audit::{GATE_AUDIT_MAX_OPERATION_CHARS, GATE_AUDIT_MAX_VALUE_CHAR
 /// public: the bounds are this crate's own line-format policy, not a
 /// contract an embedder gets to depend on.
 pub(crate) use audit::{
-    INTERRUPTED_BY_SHUTDOWN, SHUTDOWN_TOOL, audited_host_from_args, audited_operation,
+    IN_FLIGHT_CLAIM, INTERRUPTED_BY_SHUTDOWN, InFlightCall, InFlightCalls, SHUTDOWN_TOOL,
+    audited_host_from_args, audited_operation, release_in_flight_claim,
 };
 pub use entropy::EntropyDetector;
 pub use rate_limiter::{RateLimitExceeded, RateLimiter};

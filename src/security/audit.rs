@@ -35,18 +35,38 @@ use crate::config::AuditConfig;
 ///
 /// The angle brackets are the point: no host alias in a `config.yaml` can
 /// contain them, so `"host":"<no-host>"` can never be confused with a real
-/// target, and `grep '<no-host>'` over `audit.log` enumerates exactly the
-/// hostless events. It is the single convention for the whole crate — before
-/// it there was none, every non-test caller passed a real alias, and the
-/// alternative was the empty string, which reads like a bug in the writer.
+/// target. It is the single convention for the whole crate — before it there
+/// was none, every non-test caller passed a real alias, and the alternative
+/// was the empty string, which reads like a bug in the writer.
 ///
-/// **That enumeration holds because the brackets are the writer's, not the
-/// caller's.** The two callers named above are the sinks whose `host` is an
-/// unresolved argument rather than a resolved alias, and the gate used to
-/// pass it through verbatim: `--yes tool ssh_file_write 'host=<no-host>' …`
-/// produced a line no reader could tell from a genuinely hostless one.
-/// `audited_host` now escapes a caller's `<` and `>`, so the grep means
-/// again what this paragraph says it means.
+/// **The brackets are the writer's, not the caller's, in the `host` FIELD.**
+/// The two callers named above are the sinks whose `host` is an unresolved
+/// argument rather than a resolved alias, and the gate used to pass it
+/// through verbatim: `--yes tool ssh_file_write 'host=<no-host>' …` produced
+/// a line no reader could tell from a genuinely hostless one. `audited_host`
+/// escapes a caller's `<` and `>`, pinned by
+/// `a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event` and, on the
+/// shutdown sink, by
+/// `a_forged_sentinel_in_the_host_argument_cannot_pass_for_a_hostless_call`.
+///
+/// **But `grep '<no-host>'` over `audit.log` does NOT enumerate exactly the
+/// hostless events, and an earlier version of this paragraph said it did.**
+/// The field is safe; the LINE is not. `audited_operation` leaves `<` and
+/// `>` alone inside argument VALUES — `elide_oversized` returns
+/// `value.clone()` under the cap and serde does not escape the brackets — so
+/// any call carrying the literal in an argument puts it on a line whose
+/// `host` is a real alias: `ssh_db_query query="select '<no-host>'"` is
+/// enough, and so is `<elided: N chars>` or `<truncated: N chars total>`.
+/// The exact selector, and it is the one to key a rule on:
+/// `jq 'select(.host == "<no-host>")'`. Values are not escaped on purpose —
+/// a real query must stay readable — so the line-level grep is the thing
+/// that cannot be trusted, not the field.
+///
+/// The sibling sentinel does NOT have this hole, which is worth stating
+/// because the two are documented as one convention: `SHUTDOWN_TOOL`'s
+/// `grep '"tool_name":"<shutdown>"'` includes the quotes, and serde escapes
+/// a `"` inside an argument value to `\"`, so the quoted form cannot be
+/// reconstructed from caller data.
 ///
 /// **It reaches the command history too, not only `audit.log`.** The failure
 /// paths named above go through `ExecuteCommandUseCase::log_failure`, which
@@ -460,11 +480,21 @@ pub(crate) const GATE_AUDIT_MAX_OPERATION_CHARS: usize = 2048;
 /// simply omits the argument lands on it too — pinned for
 /// `ssh_service_stop`, which requires one, in
 /// `a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event`.
-/// Three of the 45 destructive tools
+///
+/// **The two callers see different populations, and the sentence here used to
+/// describe only the gate's.** The gate is armed for the tools that declare
+/// `annotation = "destructive"` — `grep -rhoE 'annotation\s*=\s*"destructive"'
+/// src/ | wc -l` returns **45** — and within those 45, three
 /// (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`, `ssh_awx_workflow_cancel`)
-/// declare no `host` at all and none declares a plural `hosts`, so for those
-/// three it is the only possible answer; for the other 42 it is also what an
-/// incomplete call produces.
+/// declare no `host` at all and none declares a plural `hosts`. The shutdown
+/// emitter is armed for **every** tool, and in that population the plural
+/// exists: `ssh_exec_multi` and `ssh_metrics_multi` declare a REQUIRED
+/// `hosts` array and no `host` property at all (`grep -c '"host":'` returns
+/// 0 on both; `'"hosts"'` returns 17 and 11). **So an interrupted
+/// `ssh_exec_multi` writes `"host":"<no-host>"` for a call that named several
+/// machines.** The machines are still on the line, inside `command`; the
+/// `host` field is simply the wrong field to look for them in, and widening
+/// it to a list would change the type of a field every consumer reads.
 ///
 /// Returns an owned `String` because the value is *rendered*, not borrowed —
 /// see [`audited_host`] for what that rendering is for.
@@ -517,23 +547,160 @@ pub(crate) fn audited_host_from_args(args: Option<&serde_json::Value>) -> String
 /// applies, and it reports the length of what the **caller** supplied rather
 /// than of the escaped form: that is the number a reader wants.
 pub(crate) fn audited_host(raw: &str) -> String {
+    let escaped = audited_text(raw);
+    if escaped.chars().count() > GATE_AUDIT_MAX_VALUE_CHARS {
+        return format!("<elided: {} chars>", raw.chars().count());
+    }
+    escaped
+}
+
+/// Escape a caller-supplied string so it cannot write anything the **writer**
+/// of an audit line reserves for itself, in either sink.
+///
+/// Split out of [`audited_host`] because the round-1 security review found the
+/// asymmetry: `host` was rendered, and the `tool_name` interpolated into the
+/// same line by [`audited_operation`] was not. One escaper, both fields.
+///
+/// Four families, each for a different reason — the reasons are not
+/// interchangeable and "non-printable" names none of them:
+///
+/// 1. `\` first, so the rendering is unambiguous: a literal `\u{3c}` typed by
+///    a caller comes out `\\u{3c}`.
+/// 2. `<` and `>`, because the angle brackets are the writer's namespace
+///    ([`NO_HOST`], `SHUTDOWN_TOOL`, `<elided: N chars>`).
+/// 3. The **logfmt separators** ` ` and `=`. `AuditLogger::log_to_tracing`
+///    now passes `host` and `command` as `Debug`, which quotes them, so this
+///    is defence in depth rather than the fix — but the measured attack was
+///    `host=raspberry exit_code=0 duration_ms=12
+///    event_type=command_executed`, 62 characters, under the cap, which made a
+///    logfmt consumer read an interrupted call as a **successful** one:
+///    exactly the two fields `CommandResult::Interrupted` documents as absent.
+///    No real host alias, no registered tool name, contains either character.
+/// 4. The characters that **reorder or hide** the rendered text, which is a
+///    different fault from the one `is_control()` covers. `char::is_control`
+///    is category **Cc only**, and neither sink escapes non-ASCII (`serde_json`
+///    does not), so before this: `U+2028`/`U+2029` (Zl/Zp) end a line for a
+///    JavaScript or some log readers; `U+200B` and `U+FEFF` are invisible;
+///    and `U+202A`..`U+202E` plus `U+2066`..`U+2069` are the bidi overrides
+///    and isolates — `host=raspberry\u{202E}` leaves the line valid for `jq`
+///    and **reverses everything after it for every human reader**, in a file
+///    whose only purpose is to be read.
+fn audited_text(raw: &str) -> String {
     let mut escaped = String::with_capacity(raw.len());
     for ch in raw.chars() {
         match ch {
             '\\' => escaped.push_str("\\\\"),
-            '<' | '>' => {
+            '<' | '>' | ' ' | '=' => {
                 let _ = write!(escaped, "\\u{{{:x}}}", u32::from(ch));
             }
-            c if c.is_control() => {
+            c if c.is_control() || reorders_or_hides(c) => {
                 let _ = write!(escaped, "\\u{{{:x}}}", u32::from(c));
             }
             c => escaped.push(c),
         }
     }
-    if escaped.chars().count() > GATE_AUDIT_MAX_VALUE_CHARS {
-        return format!("<elided: {} chars>", raw.chars().count());
-    }
     escaped
+}
+
+/// Whether `c` changes where the characters around it are DRAWN, rather than
+/// being merely unprintable.
+///
+/// Named for the property and not for a Unicode category because the category
+/// is what went wrong: `char::is_control()` is `Cc`, these are `Zl`, `Zp` and
+/// `Cf`, and the audit line's problem with them has nothing to do with which
+/// table they sit in.
+const fn reorders_or_hides(c: char) -> bool {
+    matches!(c,
+        // Zl / Zp: a line and a paragraph break that are not `Cc`.
+        '\u{2028}' | '\u{2029}'
+        // Cf, invisible: zero-width space/non-joiner/joiner, LRM/RLM, BOM.
+        | '\u{200b}'..='\u{200f}' | '\u{feff}'
+        // Cf, re-ordering: the bidi overrides and embeddings …
+        | '\u{202a}'..='\u{202e}'
+        // … and the bidi isolates added in Unicode 6.3, which do the same
+        // thing and which a list written from `U+202A..U+202E` alone misses.
+        | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Replace, by KEY NAME, the value of every argument that names a secret.
+///
+/// **This is the redaction that actually fires on this sink.** The `Sanitizer`
+/// runs on the rendered string and its key-anchored patterns need the key
+/// glued to its delimiter: the quoted family wants `"` immediately before
+/// `password`, the bare family wants `password` immediately before `:`. The
+/// JSON this module renders is `{"db_password":"…"}`, which satisfies
+/// neither, so `ssh_db_query` / `ssh_db_dump` / `ssh_db_restore` wrote their
+/// `db_password` **verbatim** to `audit.log`. The entropy backstop does not
+/// save it either: `entropy_min_length` is 16 by default.
+///
+/// By key rather than by pattern because the key is **structured** and in
+/// hand here, where the sanitizer only ever sees text whose anchors the
+/// quoting has already broken. The keyword list is
+/// [`Sanitizer::secret_keywords`] itself, not a copy, so the two cannot
+/// drift.
+///
+/// **Numbers, booleans and `null` are left alone**, which is what keeps the
+/// rule from eating readable values. Measured over the 426 schema property
+/// names in `src/mcp/tool_handlers/`: **9** contain a keyword as a
+/// substring, and they split three ways.
+///
+/// - Redacted, correctly: `password`, `db_password`, `kubeconfig` — all
+///   declared `string`.
+/// - Exempt by this rule, because they are declared `integer` or `boolean`:
+///   `summary_max_tokens` (`token`), `credential`, `credential_type`,
+///   `pass_credentials`.
+/// - Redacted although they hold no secret, and that is the direction chosen
+///   on purpose: `author` (matches `auth`) and `vault_password_file`. A
+///   redacted `author` costs a reader one name; the alternative costs a
+///   password.
+///
+/// The test is on the VALUE's type, not on the schema's, and that matters
+/// because this runs **before** validation — `register` precedes
+/// `registry.execute`. A caller that sends `"credential":"tok3n"` where the
+/// schema says `integer` is redacted; the exemption protects a well-formed
+/// number, not a key name.
+///
+/// Recursive, because a secret one level down (`{"creds":{"password":"…"}}`)
+/// is reached by no top-level key. Depth is bounded by `serde_json`'s own
+/// parse recursion limit, so this cannot be driven deeper than the input was.
+fn redact_secret_values(value: &serde_json::Value) -> serde_json::Value {
+    const REDACTED: &str = "[REDACTED]";
+
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, inner)| {
+                    let hide = key_names_a_secret(key)
+                        && !matches!(
+                            inner,
+                            serde_json::Value::Number(_)
+                                | serde_json::Value::Bool(_)
+                                | serde_json::Value::Null
+                        );
+                    let rendered = if hide {
+                        serde_json::Value::String(REDACTED.to_string())
+                    } else {
+                        redact_secret_values(inner)
+                    };
+                    (key.clone(), rendered)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_secret_values).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Whether an argument's key name contains one of the sanitizer's secret
+/// keywords, case-insensitively.
+fn key_names_a_secret(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    crate::security::Sanitizer::secret_keywords()
+        .iter()
+        .any(|keyword| lowered.contains(&keyword.to_ascii_lowercase()))
 }
 
 /// The `command` field for an event about a CALL rather than a command: the
@@ -548,13 +715,29 @@ pub(crate) fn audited_host(raw: &str) -> String {
 /// [`GATE_AUDIT_MAX_VALUE_CHARS`] per value and
 /// [`GATE_AUDIT_MAX_OPERATION_CHARS`] overall, both marked where they bite.
 ///
-/// The rule is a size rule on purpose, not a list of content-bearing field
-/// names: both callers see an opaque JSON object for any of 476 tools, so a
-/// name list (`content`, `body`, `script`, `playbook`, …) would have to be kept in
-/// step with every tool added and would leak in silence the first time a
-/// payload was called something else. A size rule cannot rot that way.
+/// The SIZE rule is a size rule on purpose, not a list of content-bearing
+/// field names: both callers see an opaque JSON object for any of 476 tools,
+/// so a name list (`content`, `body`, `script`, `playbook`, …) would have to
+/// be kept in step with every tool added and would leak in silence the first
+/// time a payload was called something else. A size rule cannot rot that way.
+///
+/// **The SECRET rule is a name rule, and the two are not in tension.** A size
+/// rule cannot tell a password from a path — a password is short — so
+/// [`redact_secret_values`] runs first, by key name, before anything is
+/// serialized. See there for why the `Sanitizer` cannot do it at this sink.
+///
+/// `tool_name` goes through [`audited_text`] like any other caller string.
+/// It is **not** validated before this runs: `register` happens before
+/// `registry.execute` resolves the name, so a `tools/call` whose `name`
+/// contains a newline reached `log_to_tracing` and forged a second, well-formed
+/// `Audit: …` record. `host` was rendered and the tool name beside it on the
+/// same line was not; that asymmetry was the defect.
 pub(crate) fn audited_operation(tool_name: &str, args: Option<&serde_json::Value>) -> String {
-    let bounded = match args {
+    // Secrets BEFORE sizes, and on the whole value rather than per member:
+    // the key that names the secret is the TOP-level one, so a per-member
+    // call would never look at it.
+    let safe = args.map(redact_secret_values);
+    let bounded = match safe.as_ref() {
         None => serde_json::Value::Object(serde_json::Map::new()),
         Some(serde_json::Value::Object(map)) => serde_json::Value::Object(
             map.iter()
@@ -564,7 +747,7 @@ pub(crate) fn audited_operation(tool_name: &str, args: Option<&serde_json::Value
         Some(other) => elide_oversized(other),
     };
     let rendered = serde_json::to_string(&bounded).unwrap_or_else(|_| "{}".to_string());
-    let operation = format!("{tool_name} {rendered}");
+    let operation = format!("{} {rendered}", audited_text(tool_name));
     let total = operation.chars().count();
     if total <= GATE_AUDIT_MAX_OPERATION_CHARS {
         return operation;
@@ -588,6 +771,281 @@ pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
         return value.clone();
     }
     serde_json::Value::String(format!("<elided: {len} chars>"))
+}
+
+// ===========================================================================
+// The in-flight registry
+//
+// Here and not in `src/mcp/server.rs` since round 1 of the review: the
+// handler's own audit write happens inside `registry.execute`, through
+// `ExecuteCommandUseCase`, and that use case lives in `src/domain/` — which
+// `tests/architecture_rules.rs::domain_must_not_import_mcp_adapter` forbids
+// from importing `src/mcp/`. The registry exists for no purpose but to
+// produce an audit line, so this is also where it belongs. `McpServer` still
+// OWNS it, as a field.
+// ===========================================================================
+
+/// One tool call handed to a handler, as much of it as a shutdown line needs.
+///
+/// Rendered at registration rather than kept raw, which is a deliberate
+/// departure from "the entry carries the tool name and the raw arguments":
+/// [`audited_operation`] bounds its result, so a registry of these is
+/// bounded by construction. Keeping an `Option<Value>` instead would have
+/// held a clone of the whole argument object for the life of the command,
+/// which for `ssh_file_write content=<a file>` is the file.
+///
+/// **The bound, in the unit that matters.** `host` is at most
+/// [`GATE_AUDIT_MAX_VALUE_CHARS`] = 256 **characters** and `operation` at
+/// most [`GATE_AUDIT_MAX_OPERATION_CHARS`] = 2048 plus the
+/// `<truncated: N chars total>` suffix, ~2075 in all. Both caps count
+/// `chars()`, and a UTF-8 char is up to 4 bytes, so the worst case is
+/// **~9.3 KB per entry**, not the ~2.3 KB an earlier version of this
+/// paragraph implied by quoting the character counts as if they were bytes.
+/// The registry's own size is bounded by the semaphore, not by a cap here:
+/// every `tools/call` takes a permit before it is dispatched and the tasks
+/// worker takes one before it registers, so the ceiling is
+/// `limits.max_concurrent_commands`, **5** by default — ~47 KB in all.
+///
+/// **The transient cost is the real one, and it is not bounded by the
+/// registry.** [`audited_operation`] now runs on every tool call, before the
+/// name is even known to be valid, and it does more than "about what the
+/// parse cost": [`redact_secret_values`] rebuilds the object, then
+/// `elide_oversized` clones each value under the cap, then the result is
+/// serialized, then the serialized form is walked once more by
+/// `chars().count()` — two full copies of the bounded object and two O(len)
+/// scans, plus, in `elide_oversized`, a full `to_string` of an oversized
+/// NON-string value purely to measure it. The cap does its job on the
+/// pathological case (a 256 KB `content=` string is measured by
+/// `chars().count()` without being copied), which is why the trade still
+/// stands — but it is a multiple of the request, not a rounding error, and
+/// `src/mcp/transport/stdio.rs` reads a line into an unbounded `String`
+/// while HTTP caps a body at 1 MB.
+///
+/// Neither a start instant nor a duration, and that is the variant's
+/// contract: see [`crate::security::CommandResult::Interrupted`].
+#[derive(Clone, Debug)]
+pub(crate) struct InFlightCall {
+    /// The event's `host`: the call's unresolved `host` argument, rendered.
+    pub(crate) host: String,
+    /// The event's `command`: the tool name and its bounded arguments.
+    pub(crate) operation: String,
+}
+
+impl InFlightCall {
+    /// Render a call's two audited fields, bounded, without keeping the
+    /// arguments.
+    pub(crate) fn render(tool_name: &str, args: Option<&serde_json::Value>) -> Self {
+        Self {
+            host: audited_host_from_args(args),
+            operation: audited_operation(tool_name, args),
+        }
+    }
+}
+
+/// The tool calls this server has dispatched and not yet seen finish.
+///
+/// **Why a new registry and not one of the four that already exist**, each
+/// measured before this was written:
+///
+/// - [`ActiveRequests`] is the closest skeleton and the wrong one twice over.
+///   It maps a request id to a `CancellationToken` and carries no tool name,
+///   no host and no arguments; and it is **per session** by a deliberate
+///   security fix (FIND-038, see its own doc), so it is unreachable from
+///   [`McpServer::serve`] and must not be promoted to a singleton to make it
+///   reachable.
+/// - `TaskStore` is global and reachable, but covers only the calls promoted
+///   to `io.modelcontextprotocol/tasks`, and `create_task` takes no arguments
+///   at all, so it stores neither a tool nor a host.
+/// - `concurrent_limit` counts and cannot name.
+/// - `SessionManager::sessions` is the trap the wave-4 notes pointed at: it
+///   holds hosts and ids, but reading it needs `lock().await` on the very
+///   `tokio::sync::Mutex` that `SessionManager::exec` holds for the whole of a
+///   remote command — so a shutdown snapshot taken from it would park behind
+///   the command it is trying to report, reopening through another door the
+///   unbounded wait `Self::close_bounded("sessions", ..)` just closed.
+///
+/// `std::sync::Mutex`, not tokio's, for that last reason stated positively:
+/// the lock is held for a hashmap insert, remove or drain and nothing else, no
+/// `.await` is taken inside the critical section, and therefore the shutdown
+/// snapshot **cannot park**. Same choice and same justification as
+/// [`ActiveRequests`].
+#[derive(Clone, Default)]
+pub(crate) struct InFlightCalls {
+    calls: Arc<std::sync::Mutex<std::collections::HashMap<u64, InFlightCall>>>,
+    /// Source of the keys. A counter and not the JSON-RPC `id`, which is
+    /// caller-chosen, not unique across sessions (`ActiveRequests`' doc says
+    /// so) and absent entirely from the tasks worker.
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl InFlightCalls {
+    /// Record a dispatched call and return the claim that removes it again.
+    ///
+    /// The claim is what must be held for the duration of the call; dropping
+    /// it is how the call is reported finished.
+    #[must_use]
+    pub(crate) fn register(
+        &self,
+        tool_name: &str,
+        args: Option<&serde_json::Value>,
+    ) -> InFlightClaim {
+        self.register_rendered(InFlightCall::render(tool_name, args))
+    }
+
+    /// [`Self::register`] for a call whose fields were rendered earlier.
+    ///
+    /// The tasks worker needs this split: its arguments are moved into the
+    /// spawned future, but it must not be registered until it holds a
+    /// concurrency permit — otherwise a task still queued on the semaphore at
+    /// shutdown is described as a command that was abandoned mid-flight,
+    /// when it had not started.
+    #[must_use]
+    pub(crate) fn register_rendered(&self, call: InFlightCall) -> InFlightClaim {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.lock().insert(id, call);
+        InFlightClaim {
+            calls: self.clone(),
+            id,
+        }
+    }
+
+    /// Take one call out of the map, returning it to whoever got there first.
+    ///
+    /// This **is** the claim: `HashMap::remove` returns the entry, so of the
+    /// two racers — the handler finishing and the shutdown snapshot — exactly
+    /// one can be handed it, and the other gets `None`. The pattern is
+    /// `ActiveRequests::cancel`'s, whose doc states the same property ("the
+    /// map entry is removed atomically with the cancel signal").
+    fn take(&self, id: u64) -> Option<InFlightCall> {
+        self.lock().remove(&id)
+    }
+
+    /// Take every call out of the map, for the shutdown snapshot.
+    ///
+    /// **Removes first and logs afterwards**, never the reverse, and the
+    /// order is not cosmetic. Logging first would leave a window as wide as
+    /// the write in which a handler can also finish and write its own line —
+    /// two lines for one call, one of them claiming an outcome was never read
+    /// when it was. Removing first inverts the exposure: a handler whose
+    /// `take` succeeded and whose own audit write is then cut off by process
+    /// exit loses its line, and that window is the few instructions between
+    /// `remove` and `send` rather than the duration of a write. It fails
+    /// closed — a line short, never a line wrong — which is this wave's
+    /// doctrine.
+    pub(crate) fn take_all(&self) -> Vec<InFlightCall> {
+        self.lock().drain().map(|(_, call)| call).collect()
+    }
+
+    /// The map, with a poisoned lock recovered rather than tolerated.
+    ///
+    /// [`ActiveRequests`] answers a poisoned lock with `if let Ok(..)`, which
+    /// silently does nothing. That is right for a cancellation — losing one
+    /// is not worth a panic — and wrong here: a `PoisonError` would retire
+    /// this registry permanently, and a registry that is permanently empty
+    /// writes no shutdown lines and reports success by writing nothing. So
+    /// the guard is taken back out of the poison, which is also what
+    /// `AuditLogger`'s own sender lock does.
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, InFlightCall>> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// How many calls are registered. Test helper, like `ActiveRequests::len`.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock().len()
+    }
+}
+
+/// A registered call's entry, removed when this is dropped.
+///
+/// RAII and not a paired `unregister` call, because the paths out of a tool
+/// call are not all returns: the handler can panic, and the task it runs in
+/// can be dropped at an await point when the runtime goes away. A `Drop` impl
+/// covers all three; an explicit call at the end of the happy path covers
+/// one.
+pub(crate) struct InFlightClaim {
+    calls: InFlightCalls,
+    id: u64,
+}
+
+impl Drop for InFlightClaim {
+    fn drop(&mut self) {
+        drop(self.calls.take(self.id));
+    }
+}
+
+impl InFlightClaim {
+    /// Take this call's entry out of the registry, if it is still there.
+    ///
+    /// Idempotent and NOT a suppression: it reports nothing to its caller,
+    /// because of what the measurement said about suppressing. See
+    /// [`release_in_flight_claim`].
+    fn release(&self) {
+        drop(self.calls.take(self.id));
+    }
+}
+
+tokio::task_local! {
+    /// The in-flight claim belonging to the tool call running in THIS task.
+    ///
+    /// A task-local and not a parameter, because the handler's own audit
+    /// write happens six frames down — inside `registry.execute`, at step 12
+    /// or 13 of the `StandardTool` pipeline — through
+    /// `ExecuteCommandUseCase`, which receives `tool`, `host` and `command`
+    /// and nothing that identifies the CALL. Counted before choosing: the six
+    /// facades have **98** call sites in `src/` outside their own file
+    /// (`grep -rn '\.(process_success|log_success|log_failure|log_state_change|log_denied|log_confirmed)(' --include='*.rs' src/ | grep -v execute_command.rs | wc -l`),
+    /// so threading a claim parameter through them is 98 production edits
+    /// plus every test literal.
+    /// A task-local carries per-call identity down a call stack without
+    /// touching a signature, and `McpServer::handle_tools_call` wraps exactly
+    /// the future whose frames need it.
+    ///
+    /// **What it does not reach, measured:** a `tokio::spawn` does not inherit
+    /// a task-local, so `ssh_exec_multi` — which fans its hosts out through a
+    /// `JoinSet` (`src/mcp/tool_handlers/ssh_exec_multi.rs`, `let mut
+    /// join_set = JoinSet::new();`) — writes its per-host lines in tasks where
+    /// `try_with` fails. Those calls keep the pre-existing behaviour: the
+    /// claim is released when the scope ends, i.e. after `execute` returns.
+    /// Degradation, not regression.
+    pub(crate) static IN_FLIGHT_CLAIM: InFlightClaim;
+}
+
+/// Hand this call's registry entry back BEFORE writing its audit line.
+///
+/// Every `ExecuteCommandUseCase` facade calls this as its first statement, so
+/// the order on the handler side is `remove` **then** `log` — the order the
+/// shutdown snapshot already used, and the one the whole scheme rests on.
+/// Before it, production did the reverse: the handler's line went out at step
+/// 13, inside `registry.execute`, and the entry was only dropped once
+/// `execute` RETURNED — with steps 14 to 19 still to run in between, among
+/// them `truncate_output_with_cache(..).await`,
+/// `save_output_to_file(..).await` (a real, awaited disk write of the whole
+/// output) and `T::enrich(..).await`. A shutdown snapshot landing in that
+/// window wrote a second, `Interrupted` line about a call that had already
+/// written its `Success` one. The window was as long as a file write, not
+/// "a few instructions".
+///
+/// **It releases and does not suppress, and the difference was measured.**
+/// Suppressing — "write only if my remove won" — would silently drop lines
+/// from the tools that legitimately write one audit event PER HOST in a plain
+/// loop inside one task: `ssh_metrics_multi` does exactly that
+/// (`for result in &sorted_results` around `process_success` / `log_failure`),
+/// so the 2nd..Nth host of every multi-host call would have gone unaudited.
+/// A one-shot claim cannot tell "I already reported this call" from "the
+/// shutdown reported it", so there is no shape of suppression that keeps both
+/// properties.
+///
+/// What therefore remains, and it is now the whole of it: if the snapshot
+/// drains the entry first, the handler still writes its own line afterwards.
+/// That window is from `take_all()` to `close_audit()` — a few `log()` calls,
+/// no `.await`, no disk write.
+pub(crate) fn release_in_flight_claim() {
+    let _ = IN_FLIGHT_CLAIM.try_with(InFlightClaim::release);
 }
 
 /// Audit logger that writes events to a file and/or tracing
@@ -1202,6 +1660,39 @@ impl AuditLogger {
     }
 
     /// Log event to tracing (synchronous, fast)
+    ///
+    /// **`host` and `command` are emitted as `Debug` (`?`), not `Display`
+    /// (`%`), and that is a security property of this function rather than a
+    /// formatting preference.** `tracing_subscriber`'s default visitor renders
+    /// a `Display` field RAW into a logfmt-shaped record, so a caller-supplied
+    /// value containing the format's own separators writes its own fields.
+    /// Measured attack, 62 characters and under every cap:
+    /// `host=raspberry exit_code=0 duration_ms=12 event_type=command_executed`
+    /// — which made a logfmt consumer (journald `_MESSAGE` parsers, Vector,
+    /// Promtail, Splunk `logfmt`) read an INTERRUPTED call as a successful
+    /// one, injecting precisely the two fields
+    /// [`CommandResult::Interrupted`] documents as absent. `Debug` on a `str`
+    /// quotes and escapes, so the whole value lands inside one quoted field
+    /// whatever it contains.
+    ///
+    /// It closes three findings at once, for every caller of this sink and
+    /// not only for the shutdown's line: that injection, the same forgery
+    /// through `command` (into which `audited_operation` interpolates a
+    /// caller-chosen `tool_name`, unvalidated because `register` precedes
+    /// `registry.execute`'s lookup), and the newline in a real shell command
+    /// that `log_success`/`log_failure` have always written here — the
+    /// `Sanitizer` strips ANSI and secrets, never line breaks.
+    ///
+    /// The other fields stay `Display` deliberately: `event_type` and
+    /// `tool_name` are writer-chosen, and `reason` / `message` / `by` are
+    /// fixed phrases or error text from this crate. The two caller-supplied
+    /// fields are the two that are quoted.
+    ///
+    /// Checked before changing it: the three `logs_contain` assertions in this
+    /// module's tests (`test_log_to_tracing_emits_*`) all probe a VALUE
+    /// (`"tracing-test-host"`, `"denied-host"`, `"error-host"`) and never the
+    /// `host=value` pair, so quoting leaves them matching as substrings. No
+    /// other test in the tree parses this sink.
     fn log_to_tracing(event: &AuditEvent) {
         match &event.result {
             CommandResult::Success {
@@ -1211,8 +1702,8 @@ impl AuditLogger {
                 info!(
                     event_type = %event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     exit_code = exit_code,
                     duration_ms = duration_ms,
                     "Audit: command executed"
@@ -1222,8 +1713,8 @@ impl AuditLogger {
                 info!(
                     event_type = %event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     error = %message,
                     "Audit: command failed"
                 );
@@ -1232,8 +1723,8 @@ impl AuditLogger {
                 info!(
                     event_type = %event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     reason = %reason,
                     "Audit: command denied"
                 );
@@ -1244,8 +1735,8 @@ impl AuditLogger {
                 info!(
                     event_type = %event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     duration_ms = duration_ms,
                     "Audit: state changed"
                 );
@@ -1257,8 +1748,8 @@ impl AuditLogger {
                 info!(
                     event_type = %event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     confirmed_by = %by,
                     "Audit: destructive call confirmed"
                 );
@@ -1269,8 +1760,8 @@ impl AuditLogger {
                 info!(
                     event_type = %event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     reason = %reason,
                     "Audit: command interrupted by shutdown"
                 );
@@ -3246,5 +3737,181 @@ mod tests {
 
         // Recent file should remain
         assert!(recent_file.exists(), "Recent file should not be cleaned up");
+    }
+
+    // ====================================================================
+    // Round 1 of the T45 review — rendering a caller's string into a line
+    // ====================================================================
+
+    /// **A database password used to reach the disk in clear.**
+    ///
+    /// The `Sanitizer` runs on this sink and catches nothing here: its
+    /// key-anchored families need the key glued to its delimiter, and the
+    /// JSON rendered by `audited_operation` is `{"db_password":"…"}`, which
+    /// puts a `"` between `password` and the `:` and a `db_` between the `"`
+    /// and `password`. `ssh_db_query` and `ssh_db_dump` are not destructive,
+    /// so the CLI gate never rendered them: this sink was their first path to
+    /// `audit.log`.
+    ///
+    /// Three properties, because dropping any one of them brings the leak
+    /// back by another door: the value is gone, the marker says so, and the
+    /// key stays readable.
+    #[test]
+    fn a_secret_named_argument_is_redacted_by_its_key() {
+        let args = serde_json::json!({
+            "host": "pi",
+            "db_password": "S3cr3t!x",
+            "query": "select 1",
+        });
+        let line = audited_operation("ssh_db_query", Some(&args));
+
+        assert!(
+            !line.contains("S3cr3t!x"),
+            "the password must not reach the line: {line}"
+        );
+        assert!(
+            line.contains(r#""db_password":"[REDACTED]""#),
+            "the key must stay readable and say it was redacted: {line}"
+        );
+        assert!(
+            line.contains(r#""query":"select 1""#),
+            "a value whose key names no secret must be untouched: {line}"
+        );
+    }
+
+    /// One level down is still a secret, and no top-level key names it.
+    #[test]
+    fn a_secret_nested_under_an_innocent_key_is_redacted_too() {
+        let args = serde_json::json!({"creds": {"password": "hunter2", "user": "pi"}});
+        let line = audited_operation("ssh_db_query", Some(&args));
+
+        assert!(!line.contains("hunter2"), "{line}");
+        assert!(line.contains(r#""user":"pi""#), "{line}");
+    }
+
+    /// The exemption that keeps the rule from eating readable values.
+    ///
+    /// `summary_max_tokens` contains `token`, and it is an integer on 15
+    /// tools. Redacting it would cost a reader a number and protect nothing.
+    #[test]
+    fn a_numeric_argument_is_not_redacted_even_when_its_key_names_a_secret() {
+        let args = serde_json::json!({"summary_max_tokens": 500, "token": "t0ps3cret"});
+        let line = audited_operation("ssh_exec", Some(&args));
+
+        assert!(
+            line.contains(r#""summary_max_tokens":500"#),
+            "an integer cannot be a secret: {line}"
+        );
+        assert!(
+            !line.contains("t0ps3cret"),
+            "a string under the same family must go: {line}"
+        );
+    }
+
+    /// **The 62-character input that made an interrupted call read as a
+    /// successful one.**
+    ///
+    /// `audited_host` escaped `\`, `<`, `>` and `Cc`, but neither of logfmt's
+    /// two separators, and the `tracing` sink wrote the field raw. Defence in
+    /// depth now: the sink quotes (see `AuditLogger::log_to_tracing`) AND the
+    /// separators are escaped here.
+    #[test]
+    fn the_logfmt_separators_cannot_write_a_second_field() {
+        let forged = audited_host("raspberry exit_code=0 duration_ms=12");
+
+        assert!(
+            !forged.contains(' ') && !forged.contains('='),
+            "neither logfmt separator may survive: {forged}"
+        );
+        assert!(
+            forged.starts_with("raspberry\\u{20}exit_code\\u{3d}0"),
+            "and they are escaped rather than dropped, so nothing is silently lost: {forged}"
+        );
+        assert_eq!(
+            audited_host("raspberry"),
+            "raspberry",
+            "a real alias is untouched"
+        );
+    }
+
+    /// The characters that reorder or hide the rest of the line.
+    ///
+    /// One case per family, because they are four different reasons and a
+    /// single probe would let three of them back in: `Zl`/`Zp` break a line,
+    /// the invisible `Cf` hide text, and the bidi overrides AND the newer
+    /// isolates reverse it. None is `char::is_control()`, which is `Cc` only,
+    /// and `serde_json` does not escape non-ASCII, so before this they reached
+    /// both sinks intact.
+    #[test]
+    fn a_reordering_or_hiding_character_cannot_reach_either_sink() {
+        for (name, ch) in [
+            ("U+2028 LINE SEPARATOR", '\u{2028}'),
+            ("U+2029 PARAGRAPH SEPARATOR", '\u{2029}'),
+            ("U+200B ZERO WIDTH SPACE", '\u{200b}'),
+            ("U+200F RIGHT-TO-LEFT MARK", '\u{200f}'),
+            ("U+202E RIGHT-TO-LEFT OVERRIDE", '\u{202e}'),
+            ("U+2066 LEFT-TO-RIGHT ISOLATE", '\u{2066}'),
+            ("U+2069 POP DIRECTIONAL ISOLATE", '\u{2069}'),
+            ("U+FEFF BYTE ORDER MARK", '\u{feff}'),
+        ] {
+            let rendered = audited_host(&format!("raspberry{ch}"));
+            assert!(
+                !rendered.contains(ch),
+                "{name} must not reach the line verbatim: {rendered:?}"
+            );
+            assert!(
+                rendered.contains(&format!("\\u{{{:x}}}", u32::from(ch))),
+                "{name} must be escaped, not dropped: {rendered:?}"
+            );
+        }
+    }
+
+    /// `host` was rendered and the tool name beside it on the same line was
+    /// not — and nothing validates the name before the registry sees it,
+    /// because `register` runs before `registry.execute` resolves it.
+    #[test]
+    fn a_tool_name_cannot_forge_a_second_audit_record() {
+        let line = audited_operation("ssh_exec\nAudit: command executed", None);
+
+        assert!(
+            !line.contains('\n'),
+            "a newline in the tool name forged a second journal record: {line:?}"
+        );
+        assert!(
+            line.starts_with("ssh_exec\\u{a}"),
+            "it is escaped rather than dropped: {line:?}"
+        );
+    }
+
+    /// The sink half of the logfmt fix, and the only test that can tell the
+    /// two halves apart.
+    ///
+    /// The event is built by hand with a RAW host, bypassing `audited_host`,
+    /// so what is under test is `log_to_tracing`'s `?` and nothing else. With
+    /// `%` the record carries `host=raspberry exit_code=0` — four unquoted
+    /// logfmt fields. With `?` the whole value sits inside one quoted field.
+    #[test]
+    #[tracing_test::traced_test]
+    fn the_tracing_sink_quotes_the_two_caller_supplied_fields() {
+        let logger = AuditLogger::disabled();
+        let event = AuditEvent::tagged(
+            "command_interrupted",
+            "raspberry exit_code=0 duration_ms=12",
+            "ssh_exec {}",
+            CommandResult::Interrupted {
+                reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+            },
+        );
+
+        logger.log(SHUTDOWN_TOOL, event);
+
+        assert!(
+            logs_contain(r#"host="raspberry exit_code=0 duration_ms=12""#),
+            "the whole caller value must sit inside ONE quoted field"
+        );
+        assert!(
+            !logs_contain("host=raspberry"),
+            "the unquoted form is what let the value write its own fields"
+        );
     }
 }

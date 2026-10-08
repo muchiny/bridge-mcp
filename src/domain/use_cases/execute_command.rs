@@ -202,6 +202,12 @@ impl ExecuteCommandUseCase {
     /// at all. An absent name proved nothing; it only meant a caller had
     /// not bothered.
     pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
+        // `remove` THEN `log`, which is the order the whole in-flight
+        // scheme rests on and which production used to get backwards on this
+        // side. No-op off the MCP request path (the CLI has no claim). See
+        // `crate::security::release_in_flight_claim` for why it releases
+        // rather than suppresses.
+        crate::security::release_in_flight_claim();
         // Same redaction as `process_success`, `log_failure`, `log_state_change`
         // and `log_confirmed` — see `process_success`'s comment. This was the
         // one entry point that did NOT pre-redact, and the asymmetry leaked:
@@ -253,6 +259,12 @@ impl ExecuteCommandUseCase {
     /// reason, so both halves of a gate decision are audit-only and
     /// `ssh_history` shows neither.
     pub fn log_confirmed(&self, tool: &str, host: &str, command: &str, by: &str) {
+        // `remove` THEN `log`, which is the order the whole in-flight
+        // scheme rests on and which production used to get backwards on this
+        // side. No-op off the MCP request path (the CLI has no claim). See
+        // `crate::security::release_in_flight_claim` for why it releases
+        // rather than suppresses.
+        crate::security::release_in_flight_claim();
         // Same redaction as `process_success` — see its comment. The string
         // is built from the call's own arguments, and those can carry a
         // password (`sudo_password`, a `--password` value in a free-form
@@ -370,6 +382,8 @@ impl ExecuteCommandUseCase {
         duration_ms: u64,
         reduction: &[&'static str],
     ) {
+        // `remove` THEN `log` — see `log_denied`.
+        crate::security::release_in_flight_claim();
         let mut event = AuditEvent::new(
             host,
             redacted,
@@ -441,6 +455,8 @@ impl ExecuteCommandUseCase {
     /// command history is not — but neither is complete, and no reader should
     /// take either for a count of attempts.
     pub fn log_state_change(&self, tool: &str, host: &str, operation: &str, duration_ms: u64) {
+        // `remove` THEN `log` — see `log_denied`.
+        crate::security::release_in_flight_claim();
         // Same redaction as `process_success` — see its comment. An operation
         // string is built from tool arguments, and `ssh_config_set` passes a
         // key and a value.
@@ -505,6 +521,8 @@ impl ExecuteCommandUseCase {
     ///
     /// `tool` is mandatory — see [`Self::log_denied`].
     pub fn log_failure(&self, tool: &str, host: &str, command: &str, error: &str) {
+        // `remove` THEN `log` — see `log_denied`.
+        crate::security::release_in_flight_claim();
         // Same redaction as `process_success` — see its comment.
         let redacted = self.sanitizer.sanitize(command);
 
