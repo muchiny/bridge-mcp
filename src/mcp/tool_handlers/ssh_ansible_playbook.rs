@@ -654,4 +654,33 @@ mod tests {
         assert!(cmd.contains("-b"));
         assert!(cmd.contains("--become-user 'root'"));
     }
+
+    /// `limit` here is `ansible-playbook --limit`, a host pattern. The reduction
+    /// used to strip it, so the playbook ran on every host of the inventory.
+    #[tokio::test]
+    async fn the_host_pattern_reaches_the_command_that_runs() {
+        let hosts = create_test_context_with_host().config.hosts.clone();
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(
+            hosts,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        SshAnsiblePlaybookHandler::new()
+            .execute(
+                Some(json!({"host": "server1", "playbook": "site.yml", "limit": "web01:web02"})),
+                &ctx,
+            )
+            .await
+            .expect("the handler must run");
+        let recorded = ctx.history.recent(1);
+        let command = &recorded.first().expect("one history entry").command;
+        assert!(
+            command.contains("--limit") && command.contains("web01:web02"),
+            "the host pattern must reach ansible-playbook: {command}"
+        );
+    }
 }

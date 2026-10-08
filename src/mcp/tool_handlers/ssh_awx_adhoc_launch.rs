@@ -392,4 +392,37 @@ mod tests {
             e => panic!("Expected CommandDenied, got: {e:?}"),
         }
     }
+
+    /// `limit` on this tool is an Ansible host pattern, not a row limit. The
+    /// reduction used to strip the key before the tool read it, so the job ran
+    /// on the whole inventory. Read what was RUN, from the history.
+    #[tokio::test]
+    async fn the_host_pattern_reaches_the_command_that_runs() {
+        let mut config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        config.awx = Some(crate::config::AwxConfig {
+            ssh_host: "server1".to_string(),
+            url: "https://awx.test".to_string(),
+            token: crate::config::RedactedSecret::from("awx-token"),
+            api_timeout: 30,
+            verify_ssl: true,
+        });
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        SshAwxAdhocLaunchHandler.execute(Some(json!({"inventory": 7, "credential": 3, "module_args": "uptime", "limit": "web01:web02"})), &ctx)
+            .await
+            .expect("the handler must run");
+        let recorded = ctx.history.recent(1);
+        let command = &recorded.first().expect("one history entry").command;
+        assert!(
+            command.contains("limit") && command.contains("web01:web02"),
+            "the host pattern must reach the launched command: {command}"
+        );
+    }
 }
