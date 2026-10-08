@@ -393,9 +393,13 @@ impl ToolHandler for SshAwxJobFollowHandler {
         // header is escaped once, `Bearer '<token>'`, which is the shape the
         // sanitizer redacts — and the shape every other AWX handler records.
         // `the_history_redacts_the_awx_token` pins this.
-        let response =
-            ctx.execute_use_case
-                .process_success(self.name(), host, &script, &output.into(), &[]);
+        let response = ctx.execute_use_case.process_success(
+            self.name(),
+            host,
+            &script,
+            &output.into(),
+            &dr.used_params(),
+        );
         let mut stdout = response.stdout;
 
         crate::mcp::standard_tool::apply_reduction_recorded(
@@ -1062,5 +1066,42 @@ esac
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("AWX not configured"));
+    }
+
+    /// `limit` on this tool is an Ansible host pattern, not a row limit. The
+    /// reduction used to strip the key before the tool read it, so the job ran
+    /// on the whole inventory. Read what was RUN, from the history.
+    #[tokio::test]
+    async fn the_host_pattern_reaches_the_command_that_runs() {
+        let mut config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        config.awx = Some(crate::config::AwxConfig {
+            ssh_host: "server1".to_string(),
+            url: "https://awx.test".to_string(),
+            token: crate::config::RedactedSecret::from("awx-token"),
+            api_timeout: 30,
+            verify_ssl: true,
+        });
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        SshAwxJobFollowHandler::new()
+            .execute(
+                Some(json!({"template_id": 7, "limit": "web01:web02"})),
+                &ctx,
+            )
+            .await
+            .expect("the handler must run");
+        let recorded = ctx.history.recent(1);
+        let command = &recorded.first().expect("one history entry").command;
+        assert!(
+            command.contains("limit") && command.contains("web01:web02"),
+            "the host pattern must reach the launched command: {command}"
+        );
     }
 }

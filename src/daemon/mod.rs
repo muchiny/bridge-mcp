@@ -89,13 +89,18 @@ pub async fn run_daemon(config: Arc<Config>, socket_path: &Path) -> Result<()> {
     let (server, audit_task) = McpServer::new((*config).clone());
     let server = Arc::new(server);
 
-    // 3. Bind the Unix socket listener + hook SIGINT to its shutdown
-    //    token so Ctrl+C unwinds the serve loop cleanly.
+    // 3. Bind the Unix socket listener + hook SIGINT **and SIGTERM** to its
+    //    shutdown token so both unwind the serve loop cleanly.
+    //
+    //    SIGTERM was not listened for until the audit-integrity wave, and it
+    //    is the signal `daemon stop` sends (`PidFile::stop`). The documented
+    //    way to stop a daemon therefore killed it by the signal's default
+    //    disposition, skipping `serve`'s whole teardown — the audit drain,
+    //    the pool `close_all`s and the socket cleanup included.
     let transport = UnixSocketTransport::bind(socket_path)?;
     let shutdown_token = transport.shutdown_token();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("SIGINT received, daemon shutting down");
+        crate::mcp::transport::shutdown_signal().await;
         shutdown_token.cancel();
     });
 

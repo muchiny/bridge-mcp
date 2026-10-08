@@ -1,8 +1,30 @@
 //! Utility functions for tool handlers
 
+use std::time::Instant;
+
 use crate::config::{Config, HostConfig, LimitsConfig, ShellType};
 use crate::error::{BridgeError, Result};
 use crate::ssh::{SshClient, TransferMode};
+
+/// Milliseconds elapsed since `start`, saturating instead of wrapping.
+///
+/// For the `duration_ms` of a `CommandResult::StateChanged` audit event: the
+/// state tools (`ssh_session_create`, `ssh_tunnel_close`, …) time their own
+/// operation, since no `CommandOutput` brings a duration back for them. The
+/// `try_from` is what keeps a 584-million-year uptime from reading as a few
+/// milliseconds.
+///
+/// Five other `elapsed_ms` live in the tree, all private to their module, and
+/// they do **not** agree: `ssm/mod.rs`, `cloud_exec/gcp.rs` and
+/// `cloud_exec/azure.rs` saturate the same way this one does, with
+/// `.min(u128::from(u64::MAX)) as u64`, while `ssh_exec_multi.rs` and
+/// `ssh_metrics_multi.rs` are a bare `as u64` that wraps. This is the sixth
+/// and the only public one; it is not a deduplication of the other five, and
+/// unifying them is not owed to the task that added it.
+#[must_use]
+pub fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Validate a file path for potential path traversal attacks.
 ///

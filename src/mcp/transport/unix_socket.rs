@@ -8,7 +8,7 @@
 //!
 //! The transport owns a `CancellationToken` that callers can trigger
 //! (via [`UnixSocketTransport::shutdown_token`]) to break out of the
-//! accept loop — used by `run_daemon` to react to SIGINT.
+//! accept loop — used by `run_daemon` to react to SIGINT and SIGTERM.
 
 use std::path::{Path, PathBuf};
 
@@ -105,6 +105,12 @@ impl Transport for UnixSocketTransport {
         // Best-effort cleanup: remove the socket file. Ignore errors —
         // we're exiting.
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+
+    /// `accept()` here returns `None` for exactly one reason: the token
+    /// fired. So reading the token IS reading "was I asked to stop".
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown.is_cancelled()
     }
 }
 

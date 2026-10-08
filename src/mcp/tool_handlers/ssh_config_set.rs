@@ -2,6 +2,8 @@
 //!
 //! Allows runtime modification of `max_output_chars` during a session.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,8 +11,10 @@ use tracing::info;
 
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::tool_handlers::utils::elapsed_ms;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
+use crate::security::NO_HOST;
 
 #[derive(Debug, Deserialize)]
 struct ConfigSetArgs {
@@ -82,11 +86,24 @@ impl ToolHandler for SshConfigSetHandler {
                 #[allow(clippy::cast_possible_truncation)]
                 let new_value = parsed.value as usize;
 
+                let started = Instant::now();
                 *handle.write().await = Some(new_value);
 
                 info!(
                     max_output_chars = new_value,
                     "Runtime max_output_chars updated"
+                );
+
+                // The ONE tool in the seven with no host of any kind: it
+                // changes a limit of the bridge process, as its own
+                // description says ("not a remote host (there is no host
+                // param)"). `NO_HOST` is the crate's single convention for
+                // that, and it is why the convention exists.
+                ctx.execute_use_case.log_state_change(
+                    self.name(),
+                    NO_HOST,
+                    &format!("{} key=max_output_chars value={new_value}", self.name()),
+                    elapsed_ms(started),
                 );
 
                 Ok(ToolCallResult::text(format!(
@@ -131,6 +148,60 @@ mod tests {
 
         assert!(text.contains("80000"));
         assert_eq!(*runtime_override.read().await, Some(80_000));
+    }
+
+    /// The only one of the seven state tools with no host at all: its line
+    /// carries the `NO_HOST` sentinel, a real `event_type`, and no exit code.
+    #[tokio::test]
+    async fn setting_a_runtime_limit_writes_one_hostless_state_change() {
+        let handler = SshConfigSetHandler;
+        let mut ctx = create_test_context();
+        ctx.runtime_max_output_chars = Some(Arc::new(RwLock::new(None)));
+
+        let args = serde_json::json!({"key": "max_output_chars", "value": 80000});
+        handler.execute(Some(args), &ctx).await.unwrap();
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "the state change must leave a line");
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_config_set"));
+        assert_eq!(events[0].event_type, "state_change");
+        assert_eq!(events[0].host, crate::security::NO_HOST);
+        assert_eq!(
+            events[0].command,
+            "ssh_config_set key=max_output_chars value=80000"
+        );
+        assert!(matches!(
+            events[0].result,
+            crate::security::CommandResult::StateChanged { .. }
+        ));
+    }
+
+    /// An unknown key changes nothing, so it writes nothing: the audit trail
+    /// records state CHANGES, not rejected requests.
+    ///
+    /// **Both halves are read**, and the first one was missing: this test
+    /// asserted only the absence of the audit line while its name promised
+    /// the state too. The handle is cloned the way
+    /// `test_config_set_max_output_chars` clones it, so the runtime override
+    /// is read back after the call instead of being taken on trust — a
+    /// handler that wrote the limit and merely skipped the logging would have
+    /// passed the old body.
+    #[tokio::test]
+    async fn a_rejected_key_changes_no_state_and_writes_no_line() {
+        let handler = SshConfigSetHandler;
+        let mut ctx = create_test_context();
+        let runtime_override = Arc::new(RwLock::new(None));
+        ctx.runtime_max_output_chars = Some(Arc::clone(&runtime_override));
+
+        let args = serde_json::json!({"key": "unknown_key", "value": 100});
+        handler.execute(Some(args), &ctx).await.unwrap();
+
+        assert_eq!(
+            *runtime_override.read().await,
+            None,
+            "a rejected key must leave the runtime limit untouched"
+        );
+        assert!(ctx.audit_logger.drain_for_test().is_empty());
     }
 
     #[tokio::test]

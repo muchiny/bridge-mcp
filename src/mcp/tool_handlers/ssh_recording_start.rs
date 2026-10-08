@@ -2,12 +2,15 @@
 //!
 //! Starts a new session recording for compliance auditing.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::tool_handlers::utils::elapsed_ms;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
@@ -84,9 +87,29 @@ impl ToolHandler for SshRecordingStartHandler {
             BridgeError::McpInvalidRequest("Session recording is not enabled".to_string())
         })?;
 
-        let session_id = recorder
-            .start_session(&args.host, args.title.as_deref())
-            .map_err(BridgeError::McpInvalidRequest)?;
+        // The compliance-recording control plane left no line in the
+        // compliance journal: starting and stopping a recording are the two
+        // state changes whose absence from the audit trail was worst in kind.
+        let started = Instant::now();
+        let session_id = match recorder.start_session(&args.host, args.title.as_deref()) {
+            Ok(id) => id,
+            Err(e) => {
+                ctx.execute_use_case.log_failure(
+                    self.name(),
+                    &args.host,
+                    &format!("{} host={}", self.name(), args.host),
+                    &e,
+                );
+                return Err(BridgeError::McpInvalidRequest(e));
+            }
+        };
+
+        ctx.execute_use_case.log_state_change(
+            self.name(),
+            &args.host,
+            &format!("{} session_id={session_id}", self.name()),
+            elapsed_ms(started),
+        );
 
         Ok(ToolCallResult::text(format!(
             "Recording started.\n\nSession ID: {session_id}\nHost: {}\n\n\
@@ -98,9 +121,85 @@ impl ToolHandler for SshRecordingStartHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use super::*;
-    use crate::ports::mock::create_test_context;
+    use crate::config::{AuthConfig, HostConfig, HostKeyVerification, OsType};
+    use crate::ports::mock::{create_test_context, create_test_context_with_config};
+    use crate::security::{NO_HOST, SessionRecorder};
     use serde_json::json;
+
+    fn test_host_config() -> HostConfig {
+        HostConfig {
+            hostname: "test".to_string(),
+            port: 22,
+            user: "test".to_string(),
+            auth: AuthConfig::Agent,
+            description: None,
+            host_key_verification: HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: OsType::default(),
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
+
+    /// The compliance-recording control plane now leaves a line in the
+    /// compliance journal. Before this, starting a recording for SOC2 / HIPAA
+    /// / PCI-DSS auditing wrote nothing to `audit.log` at all.
+    #[tokio::test]
+    async fn starting_a_recording_is_audited_as_a_state_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = HashMap::new();
+        hosts.insert("raspberry".to_string(), test_host_config());
+        let mut ctx = create_test_context_with_config(crate::config::Config {
+            hosts,
+            ..crate::config::Config::default()
+        });
+        ctx.session_recorder = Some(Arc::new(SessionRecorder::new(
+            dir.path().to_path_buf(),
+            false,
+            Vec::new(),
+            false,
+        )));
+
+        let handler = SshRecordingStartHandler;
+        handler
+            .execute(Some(json!({"host": "raspberry"})), &ctx)
+            .await
+            .unwrap();
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_recording_start"));
+        assert_eq!(events[0].event_type, "state_change");
+        assert_eq!(events[0].host, "raspberry");
+        assert_ne!(events[0].host, NO_HOST, "this tool has a real host");
+        assert!(
+            events[0]
+                .command
+                .starts_with("ssh_recording_start session_id=rec_raspberry_"),
+            "got {:?}",
+            events[0].command
+        );
+        assert!(matches!(
+            events[0].result,
+            crate::security::CommandResult::StateChanged { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {

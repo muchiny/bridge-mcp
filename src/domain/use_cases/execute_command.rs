@@ -168,19 +168,103 @@ impl ExecuteCommandUseCase {
 
     /// Log a denied command, recording which tool asked for it.
     ///
-    /// `tool` is mandatory: `AuditEvent::event_type` is the literal
-    /// `"ssh_exec"` for every event, so an audit line could not otherwise
-    /// say whether a denial came from `ssh_exec` itself or from
-    /// `ssh_file_write`. `tool_name` has existed on the event since it was
-    /// added, but as long as carrying it was optional nothing in
+    /// `tool` is mandatory, and the criterion is this: **`event_type` names a
+    /// kind of outcome, and no reader may take it for the tool that produced
+    /// it.** No entry point on this type can make it name the tool —
+    /// `AuditEvent::denied`, which this one uses, hard-codes
+    /// `"command_denied"`; `AuditEvent::new`, which the others use,
+    /// hard-codes `"ssh_exec"`; and the one constructor that takes the value,
+    /// `AuditEvent::tagged`, is reached only through facades here that each
+    /// pass a kind of their own (`"state_change"` from
+    /// [`Self::log_state_change`], `"command_confirmed"` from
+    /// [`Self::log_confirmed`]). The criterion holds for every
+    /// entry point present and for any entry point added, as long as that
+    /// stays true — which is its bound, and the only thing a later reader has
+    /// to re-check.
+    ///
+    /// **One of those four values is also a tool name, and that is the
+    /// point, not an exception to it.** `"ssh_exec"` is a kind of outcome
+    /// here — "a command ran on a host" — but it is spelled exactly like the
+    /// tool `ssh_exec`, so for that one tool `event_type == tool_name`
+    /// coincidentally, and for the 475 others it reads the same while naming
+    /// a different tool. A field that is right by accident for one tool out
+    /// of 476 is worse than one that is always wrong, because it invites the
+    /// inference. Without `tool`, then, an audit line could not say whether a
+    /// denial came from `ssh_exec` itself or from `ssh_file_write`.
+    /// `tool_name` has existed on the event since it was added, but as long
+    /// as carrying it was optional nothing in
     /// production ever set it: a 2026-09 measurement found 25% of 3,686
     /// audit lines with no `tool_name`, and `ssh_exec` — the escape hatch
     /// every free-form write goes through — never appeared as a tool name
     /// at all. An absent name proved nothing; it only meant a caller had
     /// not bothered.
     pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
+        // Same redaction as `process_success`, `log_failure`, `log_state_change`
+        // and `log_confirmed` — see `process_success`'s comment. This was the
+        // one entry point that did NOT pre-redact, and the asymmetry leaked:
+        // `self.sanitizer` carries the legacy `security.sanitize_patterns`
+        // while the logger's own sanitizer is built from `security.sanitize`
+        // alone, so a token matched only by a legacy pattern reached the
+        // denial line in clear while the confirmation line next to it was
+        // masked. A refusal is the line this gate exists to write; it must not
+        // be the one that leaks.
+        let redacted = self.sanitizer.sanitize(command);
+
         self.audit_logger
-            .log(AuditEvent::denied(host, command, reason).with_tool_name(tool));
+            .log(tool, AuditEvent::denied(host, &redacted, reason));
+    }
+
+    /// Log a confirmation gate letting a destructive call through, recording
+    /// which tool was about to run.
+    ///
+    /// The counterpart of [`Self::log_denied`], and `tool` is mandatory for
+    /// the reason spelled out there. `by` names what answered — the CLI's
+    /// `--yes` flag, or the terminal prompt — and `command` is the call the
+    /// gate was asked about, since at this point nothing has run.
+    ///
+    /// **Why the allow path is audited at all, when only the refusals were
+    /// asked for**: a trail of refusals alone cannot distinguish a
+    /// destructive call that ran *after* a confirmation from one that ran
+    /// without ever meeting the gate, and the second is exactly what the CLI
+    /// did until 2026-08-31 under the default configuration. It is also what
+    /// `--yes`'s own help text promises ("the choice is recorded in the audit
+    /// log").
+    ///
+    /// **The absence of such a line proves nothing on its own, and the bound
+    /// is worth stating because the obvious reading is wrong.** Only the
+    /// CLI's gate (`cli::runner::decide_destructive`) calls this. The MCP
+    /// server's own destructive gate (`check_destructive_elicitation`) writes
+    /// **no** audit event today, and the CLI, the daemon and the MCP server
+    /// all append to the same `audit.log` — so on a shared trail a
+    /// destructive line with no `command_confirmed` beside it means "this
+    /// call did not come through the CLI gate", not "the gate was bypassed".
+    /// The inference holds for CLI-served calls and for nothing else — and
+    /// on a shared trail it cannot even be applied, since `AuditEvent` has no
+    /// field naming what served the call, so the CLI-served lines cannot be
+    /// selected out. It is usable on a CLI-only trail.
+    ///
+    /// **No history entry**, for the reason given at length on
+    /// [`Self::log_state_change`]: `HistoryEntry::exit_code` is a
+    /// non-optional `u32` whose `0` means success, and nothing ran here
+    /// either. [`Self::log_denied`] writes no history entry for the same
+    /// reason, so both halves of a gate decision are audit-only and
+    /// `ssh_history` shows neither.
+    pub fn log_confirmed(&self, tool: &str, host: &str, command: &str, by: &str) {
+        // Same redaction as `process_success` — see its comment. The string
+        // is built from the call's own arguments, and those can carry a
+        // password (`sudo_password`, a `--password` value in a free-form
+        // command).
+        let redacted = self.sanitizer.sanitize(command);
+
+        self.audit_logger.log(
+            tool,
+            AuditEvent::tagged(
+                "command_confirmed",
+                host,
+                &redacted,
+                CommandResult::Confirmed { by: by.to_string() },
+            ),
+        );
     }
 
     /// Process a successful execution, recording which tool ran it.
@@ -290,12 +374,84 @@ impl ExecuteCommandUseCase {
                 exit_code,
                 duration_ms,
             },
-        )
-        .with_tool_name(tool);
+        );
         event.reduction = reduction.to_vec();
-        self.audit_logger.log(event);
+        self.audit_logger.log(tool, event);
         self.history
             .record_success(host, redacted, exit_code, duration_ms);
+    }
+
+    /// Record a server-state change that ran no process, naming the tool.
+    ///
+    /// The fifth entry point, for the operations whose whole effect is on the
+    /// bridge or on the SSH transport — a session or tunnel opened or closed,
+    /// a recording started or stopped, a runtime limit set. Seven tools did
+    /// all of that and wrote **nothing**: measured live, `ssh_session_create`
+    /// followed by `ssh_session_close` against a real host produced zero audit
+    /// lines, so a persistent remote shell was created and destroyed without
+    /// the trail saying so.
+    ///
+    /// `tool` is mandatory — see [`Self::log_denied`]. `operation` is the tool
+    /// and its identifying argument (`ssh_session_close session_id=…`), which
+    /// is what the event's `command` field carries; `host` is a real alias
+    /// whenever one is resolvable and [`crate::security::NO_HOST`] when the
+    /// operation has no target at all.
+    ///
+    /// Callers build the tool part of `operation` from `self.name()`, not
+    /// from a literal. `tool` above comes from `self.name()` too, and
+    /// `registry.rs` keys the tool registry on `handler.name()`, so `name()`
+    /// is the authority: two sources for the same string inside one call is a
+    /// divergence waiting to happen, and here the two strings end up in two
+    /// fields of the same line.
+    ///
+    /// **No history entry on this path, and that is the reason this is not
+    /// [`Self::log_success`].** `HistoryEntry` (`src/domain/history.rs`) has a
+    /// non-optional `exit_code: u32` and derives `success` from `exit_code ==
+    /// 0`, so recording a state change there would have to invent the very
+    /// `0` that [`CommandResult::StateChanged`] exists to refuse. The audit
+    /// trail can say "state changed, no code"; the command history cannot say
+    /// it at all, and it is a history of *commands*.
+    ///
+    /// **The asymmetry that follows, written down because it reads like an
+    /// oversight and is not one:** when the state-changing call itself
+    /// returns `Err` — `SessionManager::close`, `TunnelManager::register`,
+    /// `SessionRecorder::stop_session` and their siblings — the handler goes
+    /// through [`Self::log_failure`], which writes audit **and** history. So
+    /// `ssh_history` and `history://recent` show *some* failures of these
+    /// seven tools and **never** a success. That is more misleading than a
+    /// clean absence, and it is deliberate: the alternative is either a
+    /// fabricated `exit_code` on the success path or dropping failure lines
+    /// that exist today.
+    ///
+    /// *Some*, and the bound matters, because an earlier version of this
+    /// paragraph said the seven write history "when they fail" flatly and
+    /// that was measured false. Everything refused **before** that call
+    /// writes nothing at all, to either sink: malformed arguments, an unknown
+    /// host, a rate-limit refusal, a disabled recorder or a missing runtime
+    /// handle — and, in `ssh_tunnel_create`, a failed `TcpListener::bind` or
+    /// a failed SSH connection, measured with `local_port=80` as zero new
+    /// lines in the journal. `ssh_config_set` has no such call at all: both
+    /// of its non-success outcomes are refusals that changed nothing, so it
+    /// never reaches `log_failure`.
+    ///
+    /// `audit.log` is therefore the fuller record for these seven, and the
+    /// command history is not — but neither is complete, and no reader should
+    /// take either for a count of attempts.
+    pub fn log_state_change(&self, tool: &str, host: &str, operation: &str, duration_ms: u64) {
+        // Same redaction as `process_success` — see its comment. An operation
+        // string is built from tool arguments, and `ssh_config_set` passes a
+        // key and a value.
+        let redacted = self.sanitizer.sanitize(operation);
+
+        self.audit_logger.log(
+            tool,
+            AuditEvent::tagged(
+                "state_change",
+                host,
+                &redacted,
+                CommandResult::StateChanged { duration_ms },
+            ),
+        );
     }
 
     /// Log a failed command execution, recording which tool ran it.
@@ -306,14 +462,14 @@ impl ExecuteCommandUseCase {
         let redacted = self.sanitizer.sanitize(command);
 
         self.audit_logger.log(
+            tool,
             AuditEvent::new(
                 host,
                 &redacted,
                 CommandResult::Error {
                     message: error.to_string(),
                 },
-            )
-            .with_tool_name(tool),
+            ),
         );
 
         self.history.record_failure(host, &redacted);
@@ -346,7 +502,7 @@ mod tests {
     use super::*;
     use crate::config::{SecurityConfig, SecurityMode};
     use crate::domain::HistoryConfig;
-    use crate::security::CommandValidator;
+    use crate::security::{CommandValidator, NO_HOST};
 
     fn create_test_use_case() -> ExecuteCommandUseCase {
         let security_config = crate::config::SecurityConfig::default();
@@ -437,6 +593,92 @@ mod tests {
             events[0].tool_name.as_deref(),
             Some("ssh_exec"),
             "un événement d'audit sans nom d'outil n'est rattachable à rien"
+        );
+    }
+
+    /// The seven state tools wrote nothing at all; the point of the fifth
+    /// entry point is that what they now write carries the tool, the
+    /// operation, and **no exit code**, because none of them runs a process.
+    #[test]
+    fn a_state_change_is_audited_with_its_tool_and_without_an_exit_code() {
+        let uc = test_use_case();
+        uc.log_state_change(
+            "ssh_session_create",
+            "raspberry",
+            "ssh_session_create session_id=sess-1",
+            12,
+        );
+        let events = uc.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "one state change, one line");
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_session_create"));
+        assert_eq!(events[0].event_type, "state_change");
+        assert_eq!(events[0].host, "raspberry");
+        assert_eq!(events[0].command, "ssh_session_create session_id=sess-1");
+        assert!(
+            matches!(
+                events[0].result,
+                crate::security::CommandResult::StateChanged { duration_ms: 12 }
+            ),
+            "got {:?}",
+            events[0].result
+        );
+    }
+
+    /// No history entry, and it is deliberate: `HistoryEntry::exit_code` is a
+    /// non-optional `u32` whose `0` means success, so recording a state change
+    /// there would invent exactly the code `StateChanged` refuses.
+    #[test]
+    fn a_state_change_adds_nothing_to_the_command_history() {
+        let uc = test_use_case();
+        assert_eq!(uc.history.len(), 0);
+        uc.log_state_change("ssh_config_set", NO_HOST, "ssh_config_set key=k value=1", 0);
+        assert_eq!(
+            uc.history.len(),
+            0,
+            "a command history must not gain an entry for something that ran no command"
+        );
+        assert_eq!(uc.audit_logger.drain_for_test().len(), 1);
+    }
+
+    /// The redaction is applied to the OPERATION and not to the HOST, and
+    /// the asymmetry is what this pins.
+    ///
+    /// It replaces a test that asserted `NO_HOST` "survives redaction": since
+    /// neither `log_state_change` nor `AuditLogger::log` ever sanitizes
+    /// `host`, that could not fail on what it promised. The probe here is a
+    /// literal the default `Sanitizer` is known to mask (`AKIA` + 16, pinned
+    /// by `sanitizer.rs`'s own tests), placed in BOTH fields of one call: it
+    /// must disappear from `command` and remain in `host`. So the test goes
+    /// red if the redaction is ever dropped from the operation, and red again
+    /// if it is ever extended to the host — which would mangle `<no-host>`
+    /// and every real alias with it, and silently break the greps this
+    /// convention exists for.
+    #[test]
+    fn the_operation_is_redacted_and_the_host_is_passed_through_verbatim() {
+        let uc = test_use_case();
+        let probe = "AKIAIOSFODNN7EXAMPLE";
+        uc.log_state_change(
+            "ssh_config_set",
+            probe,
+            &format!("ssh_config_set key={probe} value=80000"),
+            0,
+        );
+        let events = uc.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert!(
+            !events[0].command.contains(probe),
+            "the operation goes through the sanitizer, got {:?}",
+            events[0].command
+        );
+        assert!(
+            events[0].command.starts_with("ssh_config_set key="),
+            "and only the secret is masked, got {:?}",
+            events[0].command
+        );
+        assert_eq!(
+            events[0].host, probe,
+            "`host` is passed through verbatim — the field a grep for an \
+             alias, or for the {NO_HOST} sentinel, has to be able to match"
         );
     }
 

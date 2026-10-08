@@ -2,6 +2,8 @@
 //!
 //! Closes a persistent shell session.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,8 +11,10 @@ use tracing::info;
 
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::tool_handlers::utils::elapsed_ms;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
+use crate::security::NO_HOST;
 
 /// Arguments for `ssh_session_close` tool
 #[derive(Debug, Deserialize)]
@@ -77,7 +81,26 @@ impl ToolHandler for SshSessionCloseHandler {
 
         info!(session_id = %args.session_id, "Closing session");
 
-        ctx.session_manager.close(&args.session_id).await?;
+        // Read the host BEFORE closing: `SessionManager::close` removes the
+        // entry, so after it there is nothing left to resolve the alias from.
+        // Same lookup `ssh_session_exec` already uses. `None` means the id
+        // matched no session, which is also the case `close` rejects below —
+        // there is no host to name for it, hence `NO_HOST`.
+        let host = ctx.session_manager.get_session_host(&args.session_id).await;
+        let host = host.as_deref().unwrap_or(NO_HOST);
+        let operation = format!("{} session_id={}", self.name(), args.session_id);
+
+        let started = Instant::now();
+        ctx.session_manager
+            .close(&args.session_id)
+            .await
+            .inspect_err(|e| {
+                ctx.execute_use_case
+                    .log_failure(self.name(), host, &operation, &e.to_string());
+            })?;
+
+        ctx.execute_use_case
+            .log_state_change(self.name(), host, &operation, elapsed_ms(started));
 
         Ok(ToolCallResult::text(
             serde_json::json!({"status": "closed", "session_id": args.session_id}).to_string(),
@@ -133,6 +156,33 @@ mod tests {
             }
             e => panic!("Expected SessionNotFound, got: {e:?}"),
         }
+    }
+
+    /// An id that matches nothing still leaves a line, and it carries
+    /// `NO_HOST` because there was never a session to read a host from — the
+    /// failure path the convention was written for.
+    #[tokio::test]
+    async fn closing_an_unknown_session_is_audited_without_a_host() {
+        let handler = SshSessionCloseHandler;
+        let ctx = create_test_context();
+
+        let result = handler
+            .execute(Some(json!({"session_id": "nonexistent"})), &ctx)
+            .await;
+        assert!(result.is_err());
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "a refused teardown is still an event");
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_session_close"));
+        assert_eq!(events[0].host, NO_HOST);
+        assert_eq!(
+            events[0].command,
+            "ssh_session_close session_id=nonexistent"
+        );
+        assert!(matches!(
+            events[0].result,
+            crate::security::CommandResult::Error { .. }
+        ));
     }
 
     #[tokio::test]

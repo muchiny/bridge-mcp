@@ -56,6 +56,19 @@ struct HostMetricsResult {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
+    /// The remote command's own exit code, carried only as far as the audit
+    /// event below. `None` means the host was never reached, which makes it
+    /// the same discriminator as `success` — the two are set together, in the
+    /// one `Ok` arm and the four `Err` literals.
+    ///
+    /// **`#[serde(skip)]`, deliberately.** This struct IS the tool's answer:
+    /// it is what `MultiMetricsResult.results` serializes to the caller, so a
+    /// serialized field here would change the contract of `ssh_metrics_multi`
+    /// — a new key in every element of `results`. A parallel host→code map
+    /// would avoid that too, but it would also have to be kept in step with
+    /// the sort below by hand; the skipped field travels with its own host.
+    #[serde(skip)]
+    exit_code: Option<u32>,
 }
 
 /// Aggregated results for all hosts
@@ -72,6 +85,11 @@ struct RawHostOutput {
     host: String,
     stdout: String,
     duration_ms: u64,
+    /// The remote command's own exit code, as `conn.exec` reported it.
+    /// It used to be dropped here — `collect_from_host` deconstructed the
+    /// `CommandOutput` and kept only `stdout` — and the audit event below
+    /// then carried a literal `0` instead.
+    exit_code: u32,
 }
 
 /// SSH Metrics Multi tool handler
@@ -259,16 +277,12 @@ impl ToolHandler for SshMetricsMultiHandler {
             }
         }
 
-        // A deliberate abstention, for the reason written in `ssh_metrics.rs`
-        // above its call to `parse_sections`: `Self::build_command` (above) is
-        // the same `;`-joined list, whose status describes only the last
-        // section, and `parse_sections` (below) already carries the per-field
-        // signal. What is specific to this handler is the fan-out.
-        //
-        // There is no badly-chosen remote code to propagate here: there is
-        // none at all. `RawHostOutput` (above) carries `host`, `stdout` and
-        // `duration_ms`, nothing else — `collect_from_host` drops the code
-        // when it builds its return value.
+        // A deliberate abstention — about the TOOL RESULT, and only about
+        // it. For the reason written in `ssh_metrics.rs` above its call to
+        // `parse_sections`: `Self::build_command` (above) is the same
+        // `;`-joined list, whose status describes only the last section, and
+        // `parse_sections` (below) already carries the per-field signal. What
+        // is specific to this handler is the fan-out.
         //
         // And the `success: true` in the `Ok(raw)` arm below holds for every
         // host whose SSH execution returned `Ok`, whatever the remote code
@@ -278,10 +292,29 @@ impl ToolHandler for SshMetricsMultiHandler {
         // its fan-out comment says why that would make exit 6 mean "the bridge
         // could not reach a host".
         //
-        // One consequence left unfixed here, since this block changes no
-        // behaviour: the history entry written below for each reached host
-        // carries a literal `exit_code: 0`, which is not the code the command
-        // returned.
+        // What is NOT abstention any more is what gets AUDITED. This block
+        // used to say the consequence left unfixed was that "the history entry
+        // written below for each reached host carries a literal
+        // `exit_code: 0`" — that understated it twice over.
+        // `process_success` calls `record_success_redacted`, which writes the
+        // audit event AND the history entry, so the fabricated `0` went into
+        // `audit.log` too; and the loop below only ran for `result.success`,
+        // so a host the bridge never reached produced no line at all. A
+        // fabricated `0` is the expensive direction of the defect: it
+        // announces a SUCCESS that may not have happened, which is what PR
+        // #218 and #219 spent two PRs removing elsewhere.
+        //
+        // `RawHostOutput` now carries the real code the whole way, and the
+        // loop below logs every host — the real code for the ones reached,
+        // `log_failure` for the ones that were not, which is exactly what the
+        // single-host `ssh_metrics` already does.
+        //
+        // **The limit of that remedy, so the next reader does not overstate
+        // it:** the real code is no more informative than the `0` was — it is
+        // only TRUE. It is the status of a `;`-joined list, i.e. of the LAST
+        // section alone (POSIX XCU 2.9.3), so four of five metric sections can
+        // fail while the recorded code reads 0. The audit line does not
+        // describe the five metrics; the per-metric `None` in the JSON does.
 
         // Parse results in parallel using rayon
         let metrics_types = args.metrics.clone();
@@ -296,6 +329,7 @@ impl ToolHandler for SshMetricsMultiHandler {
                         metrics: Some(metrics),
                         error: None,
                         duration_ms: Some(raw.duration_ms),
+                        exit_code: Some(raw.exit_code),
                     }
                 }
                 Err(error_result) => *error_result,
@@ -320,9 +354,20 @@ impl ToolHandler for SshMetricsMultiHandler {
         let succeeded = sorted_results.iter().filter(|r| r.success).count();
         let failed = sorted_results.len() - succeeded;
 
-        // Log in history for successful hosts
+        // Audit + history for EVERY host, reached or not. `exit_code` is
+        // `Some` exactly when the host was reached (set together with
+        // `success`), so it is the discriminator here: a real code for the
+        // reached hosts, `log_failure` for the rest. Matching on the code
+        // rather than on `success` is what keeps a `0` from being invented
+        // should the two ever drift apart.
+        //
+        // `stdout`/`stderr` stay empty: the raw stdout was consumed by
+        // `parse_sections` above, and `stderr` was never carried back here.
         for result in &sorted_results {
-            if result.success {
+            if let Some(exit_code) = result.exit_code {
+                // `&[]` is true here, not a placeholder: this tool declares no reduction
+                // parameter (`deny_unknown_fields`, no `DataReductionArgs`), so none can have
+                // acted on the output. Do not "fix" this by inventing a list.
                 let _ = ctx.execute_use_case.process_success(
                     self.name(),
                     &result.host,
@@ -330,10 +375,20 @@ impl ToolHandler for SshMetricsMultiHandler {
                     &CommandOutput {
                         stdout: String::new(),
                         stderr: String::new(),
-                        exit_code: 0,
+                        exit_code,
                         duration_ms: result.duration_ms.unwrap_or(0),
                     },
                     &[],
+                );
+            } else {
+                ctx.execute_use_case.log_failure(
+                    self.name(),
+                    &result.host,
+                    &command,
+                    result
+                        .error
+                        .as_deref()
+                        .unwrap_or("metrics collection failed"),
                 );
             }
         }
@@ -406,6 +461,7 @@ async fn collect_from_host(
             metrics: None,
             error: Some("Cancelled due to fail_fast".to_string()),
             duration_ms: None,
+            exit_code: None,
         }));
     }
 
@@ -417,6 +473,7 @@ async fn collect_from_host(
             metrics: None,
             error: Some("Rate limit exceeded".to_string()),
             duration_ms: Some(elapsed_ms(&start)),
+            exit_code: None,
         }));
     }
 
@@ -428,6 +485,7 @@ async fn collect_from_host(
             metrics: None,
             error: Some("Host config not found".to_string()),
             duration_ms: Some(elapsed_ms(&start)),
+            exit_code: None,
         }));
     };
 
@@ -474,6 +532,7 @@ async fn collect_from_host(
             host: host_name,
             stdout: output.stdout,
             duration_ms,
+            exit_code: output.exit_code,
         }),
         Err(e) => {
             if fail_fast {
@@ -486,6 +545,7 @@ async fn collect_from_host(
                 metrics: None,
                 error: Some(e.to_string()),
                 duration_ms: Some(duration_ms),
+                exit_code: None,
             }))
         }
     }
@@ -874,6 +934,142 @@ mod tests {
         let _ = result;
     }
 
+    fn mock_linux_host(hostname: &str) -> HostConfig {
+        HostConfig {
+            hostname: hostname.to_string(),
+            port: 22,
+            user: "admin".to_string(),
+            auth: AuthConfig::Key {
+                path: "~/.ssh/id_rsa".to_string(),
+                passphrase: None,
+            },
+            description: None,
+            host_key_verification: HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: OsType::Linux,
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
+
+    /// The audited exit code is the one the host returned, not a literal `0`.
+    ///
+    /// This is the defect that mattered: the loop used to hand
+    /// `process_success` a hand-built `CommandOutput { exit_code: 0, .. }`, so
+    /// `audit.log` AND the history recorded a SUCCESS for a command that may
+    /// have failed. The mock returns 3, and 3 is what has to appear.
+    #[tokio::test]
+    async fn the_audited_exit_code_is_the_one_the_host_returned() {
+        let handler = SshMetricsMultiHandler;
+        let mut hosts = HashMap::new();
+        hosts.insert("server1".to_string(), mock_linux_host("192.168.1.100"));
+        let mock_output = crate::ssh::CommandOutput {
+            stdout: "cpu  10000 500 3000 86000 200 100 200 0 0 0\n4\n".to_string(),
+            stderr: String::new(),
+            exit_code: 3,
+            duration_ms: 1,
+        };
+        let ctx = crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output);
+
+        let _ = handler
+            .execute(
+                Some(json!({"hosts": ["server1"], "metrics": ["cpu"]})),
+                &ctx,
+            )
+            .await;
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "one host, one audit line: {events:?}");
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_metrics_multi"));
+        assert!(
+            matches!(
+                events[0].result,
+                crate::security::CommandResult::Success { exit_code: 3, .. }
+            ),
+            "the real code must reach the audit event, got {:?}",
+            events[0].result
+        );
+    }
+
+    /// A host the bridge never reached now leaves a line. It used to leave
+    /// none at all: the loop was guarded by `if result.success`, so an SSH
+    /// failure, a rate-limit refusal or a `fail_fast` cancellation produced
+    /// neither an audit event nor a history entry. The single-host
+    /// `ssh_metrics` has always called `log_failure` here.
+    ///
+    /// An unknown host cannot drive this path — `execute` rejects the whole
+    /// call before spawning anything — so the refusal used is the rate limit,
+    /// whose one token is spent before the call.
+    #[tokio::test]
+    async fn an_unreachable_host_is_audited_as_a_failure() {
+        let handler = SshMetricsMultiHandler;
+        let mut hosts = HashMap::new();
+        hosts.insert("server1".to_string(), mock_linux_host("192.168.1.100"));
+        hosts.insert("server2".to_string(), mock_linux_host("192.168.1.101"));
+        let mock_output = crate::ssh::CommandOutput {
+            stdout: "cpu  10000 500 3000 86000 200 100 200 0 0 0\n4\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration_ms: 1,
+        };
+        let mut ctx =
+            crate::ports::mock::create_test_context_with_mock_executor(hosts, mock_output);
+        ctx.rate_limiter = Arc::new(RateLimiter::new(1));
+        // Spend server2's only token so `collect_from_host` refuses it.
+        assert!(ctx.rate_limiter.check("server2").is_ok());
+
+        let _ = handler
+            .execute(
+                Some(json!({"hosts": ["server1", "server2"], "metrics": ["cpu"]})),
+                &ctx,
+            )
+            .await;
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 2, "both hosts audited: {events:?}");
+        let refused = events
+            .iter()
+            .find(|e| e.host == "server2")
+            .expect("the host that was never reached must still have a line");
+        assert!(
+            matches!(refused.result, crate::security::CommandResult::Error { .. }),
+            "got {:?}",
+            refused.result
+        );
+        assert_eq!(refused.tool_name.as_deref(), Some("ssh_metrics_multi"));
+    }
+
+    /// The code travels to the audit event and **nowhere else**: adding it to
+    /// `HostMetricsResult` must not add a key to the tool's own JSON answer.
+    #[test]
+    fn the_carried_exit_code_stays_out_of_the_tool_result() {
+        let r = HostMetricsResult {
+            host: "server1".to_string(),
+            success: true,
+            metrics: None,
+            error: None,
+            duration_ms: Some(5),
+            exit_code: Some(3),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("exit_code"),
+            "#[serde(skip)] keeps the tool contract unchanged: {json}"
+        );
+    }
+
     #[test]
     #[allow(clippy::result_large_err)]
     fn test_parallel_parsing() {
@@ -884,6 +1080,7 @@ mod tests {
                     host: format!("host{i}"),
                     stdout: "cpu  10000 500 3000 86000 200 100 200 0 0 0\n4\n".to_string(),
                     duration_ms: 100,
+                    exit_code: 0,
                 })
             })
             .collect();
@@ -902,6 +1099,7 @@ mod tests {
                         metrics: Some(parsed),
                         error: None,
                         duration_ms: Some(raw.duration_ms),
+                        exit_code: Some(raw.exit_code),
                     }
                 }
                 Err(e) => e,

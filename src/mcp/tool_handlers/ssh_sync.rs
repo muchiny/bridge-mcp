@@ -179,23 +179,29 @@ impl ToolHandler for SshSyncHandler {
 
         match &result {
             Ok(transfer_result) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("{direction_label} {} -> {}", args.source, args.destination),
-                    AuditCommandResult::Success {
-                        exit_code: 0,
-                        duration_ms: transfer_result.duration_ms,
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("{direction_label} {} -> {}", args.source, args.destination),
+                        AuditCommandResult::Success {
+                            exit_code: 0,
+                            duration_ms: transfer_result.duration_ms,
+                        },
+                    ),
+                );
             }
             Err(e) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("{direction_label} {} -> {}", args.source, args.destination),
-                    AuditCommandResult::Error {
-                        message: e.to_string(),
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("{direction_label} {} -> {}", args.source, args.destination),
+                        AuditCommandResult::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                );
             }
         }
 

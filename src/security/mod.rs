@@ -6,7 +6,11 @@ pub mod recording;
 mod sanitizer;
 mod validator;
 
-pub use audit::{AuditEvent, AuditLogger, AuditWriterTask, CommandResult};
+/// Crate-internal: the bounded join every shutdown path uses on the audit
+/// writer. Not re-exported publicly — a library embedder spawns the task
+/// itself and owns its handle, so it joins it the way it likes.
+pub(crate) use audit::drain_audit_writer;
+pub use audit::{AuditEvent, AuditLogger, AuditWriterTask, CommandResult, NO_HOST};
 pub use entropy::EntropyDetector;
 pub use rate_limiter::{RateLimitExceeded, RateLimiter};
 pub use rbac::{RbacConfig, RbacEnforcer};

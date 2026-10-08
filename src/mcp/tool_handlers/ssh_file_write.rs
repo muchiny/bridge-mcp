@@ -129,10 +129,9 @@ impl ToolHandler for SshFileWriteHandler {
                     host: args.host.clone(),
                 })?;
 
-        if let Some(refusal) = crate::mcp::tool_handlers::utils::reject_posix_only_on_windows(
-            host_config,
-            "ssh_file_write",
-        ) {
+        if let Some(refusal) =
+            crate::mcp::tool_handlers::utils::reject_posix_only_on_windows(host_config, self.name())
+        {
             return Ok(refusal);
         }
 
@@ -252,7 +251,7 @@ impl SshFileWriteHandler {
         // Execute with retry
         let output = with_retry_if(
             &retry_config,
-            "ssh_file_write",
+            self.name(),
             async || {
                 let mut conn = ctx
                     .connection_pool
@@ -279,6 +278,10 @@ impl SshFileWriteHandler {
         })?;
 
         // Process success (audit + history + sanitize)
+        // `&[]` is true here, not a placeholder: this tool declares no reduction
+        // parameter (`deny_unknown_fields`, no `DataReductionArgs`), so none can have
+        // acted on the output. `max_output` truncation is not a reduction parameter
+        // either. Do not "fix" this by inventing a list.
         let response =
             ctx.execute_use_case
                 .process_success(self.name(), &host, &command, &output.into(), &[]);
@@ -322,23 +325,29 @@ impl SshFileWriteHandler {
         // Audit log
         match &result {
             Ok(transfer_result) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_WRITE {}", args.path),
-                    AuditCommandResult::Success {
-                        exit_code: 0,
-                        duration_ms: transfer_result.duration_ms,
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_WRITE {}", args.path),
+                        AuditCommandResult::Success {
+                            exit_code: 0,
+                            duration_ms: transfer_result.duration_ms,
+                        },
+                    ),
+                );
             }
             Err(e) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_WRITE {}", args.path),
-                    AuditCommandResult::Error {
-                        message: e.to_string(),
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_WRITE {}", args.path),
+                        AuditCommandResult::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                );
             }
         }
 

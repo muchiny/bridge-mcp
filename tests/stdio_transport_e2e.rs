@@ -98,3 +98,88 @@ async fn stdio_serve_responds_to_discover() {
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     let _ = child.start_kill();
 }
+
+/// Guards the OTHER half of T12's bounded session drain, and it is a half
+/// nothing else in the suite covers.
+///
+/// `McpServer::serve` bounds its session drain only when the transport says
+/// it was asked to stop (`Transport::shutdown_requested`). Stdio says `false`
+/// — its accept loop ends after the one session is handed out, long before
+/// that session does — so the wait there stays unbounded.
+///
+/// Measured, with that branch removed and the bound made unconditional: this
+/// binary answers the first request, then **stops answering** while stdin is
+/// still open (empty read on the second request, ~2 s after the first), while
+/// `stdio_serve_responds_to_discover` above stays GREEN because it answers
+/// inside 1.5 s. So the existing suite would not have caught a change that
+/// ends `bridge-mcp serve` a couple of seconds after start-up.
+///
+/// The idle is 3 s against a 2 s `SESSION_DRAIN_GRACE`: long enough to be
+/// past it, short enough to keep this test cheap.
+#[tokio::test(flavor = "multi_thread")]
+async fn stdio_serve_still_answers_after_an_idle_longer_than_the_drain_grace() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config = write_test_config(tmp.path());
+
+    let mut child = Command::new(BINARY)
+        .arg("--config")
+        .arg(&config)
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bridge-mcp serve");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+    let discover = |id: u8| {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"server/discover\",\
+             \"params\":{{\"_meta\":{{\
+             \"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\
+             \"io.modelcontextprotocol/clientInfo\":{{\"name\":\"idle-test\",\"version\":\"1\"}},\
+             \"io.modelcontextprotocol/clientCapabilities\":{{}}}}}}}}\n"
+        )
+    };
+
+    stdin
+        .write_all(discover(1).as_bytes())
+        .await
+        .expect("write first discover");
+    stdin.flush().await.expect("flush");
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_line(&mut line))
+        .await
+        .expect("first response within 5s")
+        .expect("read stdout");
+    assert!(line.contains("\"id\":1"), "unexpected first answer: {line}");
+
+    // stdin stays OPEN across the idle: no EOF, nothing to end the session.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    stdin
+        .write_all(discover(2).as_bytes())
+        .await
+        .expect("the server must still be reading stdin after the idle");
+    stdin.flush().await.expect("flush");
+    let mut second = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), stdout.read_line(&mut second))
+        .await
+        .expect("second response within 5s")
+        .expect("read stdout");
+    assert!(
+        read > 0,
+        "the server closed stdout during the idle: a stdio session must not be \
+         bounded by the shutdown drain"
+    );
+    assert!(
+        second.contains("\"id\":2"),
+        "unexpected second answer: {second}"
+    );
+
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let _ = child.start_kill();
+}

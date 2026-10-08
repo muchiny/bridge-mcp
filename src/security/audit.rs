@@ -10,30 +10,207 @@ use tracing::{error, info, warn};
 
 use crate::config::AuditConfig;
 
+/// Host value for an audited operation that has no target host at all.
+///
+/// **Five production callers**, counted in the tree; an earlier version of
+/// this sentence said "exactly one" and was out of date the day a second one
+/// was added without reopening it:
+///
+/// - `ssh_config_set`, which changes a limit of the bridge process itself
+///   ("not a remote host (there is no host param)", its own description);
+/// - the failure paths of `ssh_session_close`, `ssh_tunnel_close` and
+///   `ssh_recording_stop`, where the id handed in matched nothing, so no host
+///   was ever resolved to name;
+/// - and `cli::runner::gate_host`, the CLI's destructive gate, which is
+///   neither of those: it fires for **any** destructive call that carries no
+///   `host` argument. The gate runs before schema validation, so this is not
+///   limited to the three tools whose schema has no `host`: a call to
+///   `ssh_service_stop`, which requires one, writes
+///   `{"host":"<no-host>","event_type":"command_denied", …}` when the
+///   argument is simply left out
+///   (`a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event`).
+///
+/// The angle brackets are the point: no host alias in a `config.yaml` can
+/// contain them, so `"host":"<no-host>"` can never be confused with a real
+/// target, and `grep '<no-host>'` over `audit.log` enumerates exactly the
+/// hostless events. It is the single convention for the whole crate — before
+/// it there was none, every non-test caller passed a real alias, and the
+/// alternative was the empty string, which reads like a bug in the writer.
+///
+/// **That enumeration holds because the brackets are the writer's, not the
+/// caller's.** The gate is the one sink whose `host` is an unresolved
+/// argument rather than a resolved alias, and it used to pass it through
+/// verbatim: `--yes tool ssh_file_write 'host=<no-host>' …` produced a line
+/// no reader could tell from a genuinely hostless one. `cli::runner::
+/// audited_host` now escapes a caller's `<` and `>`, so the grep means again
+/// what this paragraph says it means.
+///
+/// **It reaches the command history too, not only `audit.log`.** The failure
+/// paths named above go through `ExecuteCommandUseCase::log_failure`, which
+/// writes a `HistoryEntry` as well, so `ssh_history` and the
+/// `history://recent` resource both show entries whose `host` is this
+/// sentinel. Checked, for those two consumers: `CommandHistory::for_host`
+/// filters on `e.host == host` with no validation and `ssh_history` only
+/// prints the field, so the value is inert — a real-alias query simply never
+/// matches it. One sharp edge, from the code: `history_resource`'s
+/// `parse_query` does no percent-decoding, so `history://recent?host=<no-host>`
+/// matches **literally** and the correctly-encoded `host=%3Cno-host%3E` does
+/// not.
+pub const NO_HOST: &str = "<no-host>";
+
 /// Result of a command execution for audit purposes
 #[derive(Debug, Clone, Serialize)]
 pub enum CommandResult {
+    /// A process ran on the target host and exited `exit_code`.
     Success { exit_code: u32, duration_ms: u64 },
+    /// The bridge could not carry the operation out: a connection failure, a
+    /// timeout, an unread exit code. Carries no code, because none was read.
     Error { message: String },
+    /// Security refused the command before anything ran.
     Denied { reason: String },
+    /// Server state changed, and **no process ran anywhere** to change it.
+    ///
+    /// For the operations whose whole effect is on the bridge or on the SSH
+    /// transport: opening or closing a persistent session, opening or closing
+    /// a tunnel, starting or stopping a recording, setting a runtime limit.
+    /// They are audited because they change what the server is, not because a
+    /// command was executed.
+    ///
+    /// **It carries the duration and no exit code, and the absence is the
+    /// honest information** — the same doctrine
+    /// `ToolCallResult::remote_exit_code` (`src/ports/protocol.rs`) states for
+    /// its `None`: *"no claim about a remote exit code. Either nothing ran
+    /// remotely, or …"*. Here it is the first of those: nothing ran. An
+    /// `exit_code: 0` would be a **verdict** ("a command succeeded") posted on
+    /// a **fact** that never happened, and announcing an outcome on a signal
+    /// that cannot establish one is the very fault this variant exists to
+    /// remove. It is also what `ssh_file_write` documents for its SFTP branch
+    /// and what `SessionExecResult::exit_code` was changed to stop doing.
+    ///
+    /// Reading one of these lines: `event_type` says which kind of state
+    /// change it is, `tool_name` which tool did it (always set — `AuditLogger::
+    /// log` is the only writer of that field), and `command` carries the
+    /// *operation* rather than a shell command, in the form
+    /// `<tool> <identifying-arg>=<value>`.
+    StateChanged { duration_ms: u64 },
+    /// A confirmation gate let a destructive call through, and **nothing has
+    /// run yet** when this line is written.
+    ///
+    /// Written by the CLI's destructive gate — `decide_destructive` reaches
+    /// the verdict and `apply_gate_decision` records it, both in
+    /// `src/cli/runner.rs` — through
+    /// `ExecuteCommandUseCase::log_confirmed`, at the moment the decision is
+    /// taken — before the call is dispatched, and before it is even settled
+    /// which path (a running daemon, or in-process) will serve it. This line
+    /// records the decision and nothing else.
+    ///
+    /// **A later event follows only if something RAN**, and the earlier
+    /// wording ("whatever the call then does writes its own, later event")
+    /// promised more than the code does. `run_gated_tool` records the
+    /// decision and *then* calls `forward_to_daemon`. A daemon that answers
+    /// at all — with a result, with an `isError` refusal, or with a JSON-RPC
+    /// error — has answered, so the CLI prints that answer and returns
+    /// without falling back to the in-process path. When the answer is a
+    /// refusal, nothing executed anywhere, nothing wrote a second event, and
+    /// this gate line is the only one. The in-process path is the same
+    /// whenever the call is refused before it reaches a sink.
+    ///
+    /// And on a daemon-served *success* the second line is written by the
+    /// **daemon process**, not by this one — so what this process's own trail
+    /// carries is the gate line, which is what
+    /// `a_daemon_served_call_still_drains_the_gate_line_to_disk`
+    /// (`tests/cli_exit_code.rs`) reads back after the daemon served the
+    /// call.
+    ///
+    /// So `command_confirmed` with nothing after it reads "the gate let it
+    /// past and then it did not run", not "the trail is truncated".
+    ///
+    /// **It carries neither an exit code nor a duration, for the reason
+    /// [`Self::StateChanged`] carries no code: nothing ran.** `by` names what
+    /// answered — the `--yes` flag, or the terminal prompt — which is the one
+    /// thing a reader cannot reconstruct from the rest of the line.
+    ///
+    /// **The allow path is audited, not only the refusals, and that is the
+    /// point of the variant.** A trail that recorded refusals alone could not
+    /// tell a destructive call that ran *after* the gate from one that ran
+    /// without ever meeting it — which is precisely what the CLI did until
+    /// 2026-08-31, on the default configuration.
+    ///
+    /// **It does not follow that a missing line means a bypassed gate**, and
+    /// the bound belongs here because this doc-comment opens by saying the
+    /// writer is the CLI: the MCP server's own destructive gate
+    /// (`check_destructive_elicitation`) writes no audit event at all today,
+    /// and the CLI, the daemon and the MCP server append to the **same**
+    /// `audit.log`. On a shared trail, a destructive line with no
+    /// `command_confirmed` beside it means "this call did not come through
+    /// the CLI gate". The inference is sound for CLI-served calls only.
+    ///
+    /// **And on a shared trail it is not just unsound but unusable**, because
+    /// [`AuditEvent`] carries no field naming what served the call: a reader
+    /// cannot tell which lines came from the CLI, so they cannot select the
+    /// population the rule applies to. Fully usable on a trail only the CLI
+    /// writes to.
+    Confirmed { by: String },
 }
 
 /// Audit event for logging
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
     pub timestamp: DateTime<Utc>,
+    /// The kind of outcome this line records, never the tool that produced
+    /// it — that is `tool_name`, and the two are not interchangeable.
+    ///
+    /// It used to be a fixed literal set by whichever constructor ran:
+    /// `"ssh_exec"` from [`AuditEvent::new`] for a command that ran,
+    /// `"command_denied"` from [`AuditEvent::denied`] for one that was
+    /// refused. [`AuditEvent::tagged`] now takes it as a parameter, so the
+    /// set is open; `"state_change"` (from
+    /// `ExecuteCommandUseCase::log_state_change`) and `"command_confirmed"`
+    /// (from `ExecuteCommandUseCase::log_confirmed`) are the third and fourth
+    /// values in the log today. A consumer must therefore treat an unknown value as data,
+    /// not as a parse error — and a caller must keep passing a kind of
+    /// outcome, which is the contract the field's name carries and the only
+    /// thing stopping it from drifting into a second, unreliable `tool_name`.
+    ///
+    /// **`"state_change"` is narrower than the operations it names, and that
+    /// trips the obvious query.** It is written on the *success* path of the
+    /// seven state-changing tools only. When one of them fails it goes
+    /// through `ExecuteCommandUseCase::log_failure`, which builds
+    /// [`AuditEvent::new`] — and `new` hard-codes `"ssh_exec"`. So
+    /// `select(.event_type == "state_change")` enumerates the successful
+    /// session, tunnel, recording and limit changes and **none of the failed
+    /// ones**, which are spelled exactly like an ordinary command event.
+    /// `tool_name` is the field that selects everything one of the seven did;
+    /// `result` is the field that distinguishes the outcomes.
     pub event_type: String,
+    /// Target host alias, or [`NO_HOST`] when the operation had no target.
     pub host: String,
+    /// The command that ran — or, when no command ran, the operation the
+    /// event is about: the state change for a [`CommandResult::StateChanged`]
+    /// event, and the call the gate was asked about for a
+    /// [`CommandResult::Confirmed`] one.
     pub command: String,
     /// Name of the tool that generated this event (e.g., `ssh_redis_cli`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     pub result: CommandResult,
-    /// Reduction params supplied on this call (`jq_filter`, `columns`, …),
-    /// so adoption can be measured from the log with a grep. Populated only
-    /// for tools on the `StandardTool` pipeline (`process_success_for_tool`);
-    /// the custom handlers still log through `process_success` and leave
-    /// this empty.
+    /// Reduction params supplied on this call (`jq_filter`, `columns`, ...),
+    /// so adoption can be measured from the log with a grep. Filled by the
+    /// `StandardTool` pipeline, by the direct handlers that go through
+    /// `process_success(.., &dr.used_params())`, and by `ssh_ls`, which builds
+    /// its own event. It lists what was *supplied*, written before the
+    /// reduction runs (the event is emitted by `process_success` itself): a
+    /// call whose reduction then fails, or is skipped on a non-zero exit,
+    /// still lists them.
+    ///
+    /// **An absent key does not mean "unfiltered output".** With
+    /// `skip_serializing_if` it also appears on events that hard-code the
+    /// list: `log_success` (`ssh_session_exec`), the file-transfer tools that
+    /// build an `AuditEvent` by hand (none takes a reduction param), and the
+    /// nine tools that reject every reduction param. And two things that
+    /// change what the caller saw are recorded nowhere: `max_output`
+    /// truncation and `summarize=true` sampling. Do not build the
+    /// "unfiltered" population from lines lacking this key.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reduction: Vec<&'static str>,
 }
@@ -69,7 +246,58 @@ impl AuditEvent {
         }
     }
 
-    /// Set the tool name for this audit event.
+    /// Create an event under the `event_type` **and** the `result` the caller
+    /// names — the only constructor that fixes neither.
+    ///
+    /// **That is the whole reason it exists.** [`Self::new`] hard-codes
+    /// `event_type: "ssh_exec"` and [`Self::denied`] hard-codes
+    /// `"command_denied"`, so before this no code outside this module could
+    /// write that field at all: a tunnel being opened would have been stamped
+    /// `ssh_exec`, which is the same conflation the mandatory `tool` on the
+    /// use-case entry points was added to remove, one layer down.
+    ///
+    /// `result` is a parameter for the same reason `event_type` is. A
+    /// constructor that took the type but pinned the result would open a door
+    /// its own body closes: the next caller that needs a new `event_type`
+    /// almost certainly needs a different `CommandResult` with it, and would
+    /// have to either mislabel its event or reopen this signature. The
+    /// `event_type`/`result` pair belongs to the caller, as one decision.
+    ///
+    /// Callers do not reach this directly. Each goes through the named,
+    /// typed facade for its kind of event — today
+    /// `ExecuteCommandUseCase::log_state_change`, which passes
+    /// `"state_change"` with [`CommandResult::StateChanged`], and
+    /// `ExecuteCommandUseCase::log_confirmed`, which passes
+    /// `"command_confirmed"` with [`CommandResult::Confirmed`] — because
+    /// `tool` is mandatory on those facades and consultative nowhere.
+    ///
+    /// `command` receives whatever identifies the thing audited: a shell
+    /// command for an event that ran one, or the **operation** (the tool and
+    /// its identifying argument, e.g.
+    /// `ssh_tunnel_close tunnel_id=tunnel-pi-8080-80`) for one that did not,
+    /// so every consumer that reads `command` keeps working on a non-empty,
+    /// meaningful value. `host` is a real alias whenever one is resolvable,
+    /// and [`NO_HOST`] when there is none.
+    ///
+    /// `tool_name` is left unset here, like in the other two constructors:
+    /// `AuditLogger::log` takes the tool and is the single writer of it.
+    #[must_use]
+    pub fn tagged(event_type: &str, host: &str, command: &str, result: CommandResult) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            event_type: event_type.to_string(),
+            host: host.to_string(),
+            command: command.to_string(),
+            tool_name: None,
+            result,
+            reduction: Vec::new(),
+        }
+    }
+
+    /// Convenience constructor step, used by tests to build an already named
+    /// event. Production does not rely on it: `AuditLogger::log` takes the
+    /// tool as a parameter and overwrites `tool_name` with it, so the name
+    /// set here never reaches a sink.
     #[must_use]
     pub fn with_tool_name(mut self, name: &str) -> Self {
         self.tool_name = Some(name.to_string());
@@ -87,7 +315,22 @@ pub struct AuditLogger {
     /// clone an `AuditConfig` nothing reads.
     #[cfg(test)]
     config: AuditConfig,
-    sender: Option<mpsc::UnboundedSender<AuditEvent>>,
+    /// Sending half of the writer channel, behind a lock so [`Self::close`]
+    /// can drop it through a `&self` — which is the only reference anything
+    /// holds, since every owner of a logger holds an [`Arc`] of it.
+    ///
+    /// **Why a lock and not a bare `Option`:** the writer loop ends when the
+    /// LAST sender is dropped, and clones of the `Arc<AuditLogger>` outlive
+    /// the function that has to wait for the drain — background tasks and
+    /// every `ToolContext` hold one. Dropping one owner therefore closes
+    /// nothing. Taking the sender out from behind this lock closes the
+    /// channel whatever the clone count is.
+    ///
+    /// The critical section is the `send` in [`Self::log`] and the `take` in
+    /// [`Self::close`], and nothing else: **no `.await` is ever taken while
+    /// this lock is held**, so a `std::sync::Mutex` is the right one and a
+    /// blocked runtime worker is impossible.
+    sender: std::sync::Mutex<Option<mpsc::UnboundedSender<AuditEvent>>>,
     sanitizer: Option<Arc<crate::security::Sanitizer>>,
     /// Clock used for the retention cutoff; injectable so the boundary
     /// (mtime == cutoff) is deterministically testable. Read only by
@@ -104,7 +347,14 @@ pub struct AuditLogger {
     captured: Option<std::sync::Mutex<Vec<AuditEvent>>>,
 }
 
-/// Background task that writes audit events to a file
+/// Background task that writes audit events to a file.
+///
+/// Its loop ends only when the channel closes, which happens when the last
+/// sender is dropped or when [`AuditLogger::close`] takes the sender out.
+/// **Join it, never `abort()` it**: the write itself runs in a
+/// `tokio::task::spawn_blocking` followed by `rotate_if_needed`, so an abort
+/// loses the event in flight and the rotation it was about to trigger.
+/// `drain_audit_writer` is the bounded join every entry point uses.
 pub struct AuditWriterTask {
     rx: mpsc::UnboundedReceiver<AuditEvent>,
     file: File,
@@ -416,6 +666,34 @@ fn cleanup_old_audit_files(
     info!(removed, cutoff = %cutoff, "audit retention swept archives");
 }
 
+/// How long a shutdown waits for the audit writer to finish.
+///
+/// Every entry point that owns a writer pays this at most once, and only
+/// when the writer is still busy — a drained writer joins immediately.
+pub(crate) const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Join an [`AuditWriterTask`]'s handle, bounded by [`DRAIN_TIMEOUT`].
+///
+/// The caller MUST have closed the channel first — [`AuditLogger::close`],
+/// or dropping every owner of the logger — or this waits the full timeout
+/// and then warns, because the writer is still blocked on `recv()`.
+///
+/// Joined and never `abort()`ed: the write runs in a `spawn_blocking` and is
+/// followed by `rotate_if_needed`, so an abort loses the event in flight and
+/// the rotation it was about to trigger.
+pub(crate) async fn drain_audit_writer(writer: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = writer
+        && tokio::time::timeout(DRAIN_TIMEOUT, handle).await.is_err()
+    {
+        // Formatted from the constant so the sentence cannot go stale if the
+        // bound changes.
+        warn!(
+            "audit writer did not drain within {}s; events may be lost",
+            DRAIN_TIMEOUT.as_secs()
+        );
+    }
+}
+
 impl AuditLogger {
     /// Create a new async audit logger with the given configuration
     ///
@@ -445,7 +723,7 @@ impl AuditLogger {
         let logger = Self {
             #[cfg(test)]
             config: config.clone(),
-            sender: Some(tx),
+            sender: std::sync::Mutex::new(Some(tx)),
             sanitizer: None,
             #[cfg(test)]
             now_fn: Utc::now,
@@ -495,6 +773,39 @@ impl AuditLogger {
         self.sanitizer.is_some()
     }
 
+    /// Close the channel to the writer task, so its loop can end and the
+    /// caller can join it.
+    ///
+    /// Call this, then join the [`AuditWriterTask`]'s handle (the
+    /// crate-internal `drain_audit_writer` is the bounded join the entry
+    /// points use), before the process exits. Without it the writer is
+    /// still blocked on `recv()` when the runtime goes away, and every
+    /// event still queued is lost — silently, because [`Self::log`] ends in
+    /// `let _ = sender.send(event)` on an unbounded channel, which cannot
+    /// fail in a way anything observes.
+    ///
+    /// **Why this exists rather than "drop the logger":** the writer loop
+    /// ends when the last sender is dropped, and the senders live in clones
+    /// of an `Arc<AuditLogger>` held by background tasks and by every
+    /// `ToolContext`. The function that has to wait for the drain does not
+    /// own them, cannot enumerate them, and nothing in the crate pins the
+    /// property that they die first. Taking the sender out from behind the
+    /// lock ends the channel whatever the clone count is.
+    ///
+    /// **Idempotent, and events logged afterwards are dropped on purpose**
+    /// — `log` keeps working, writes its `tracing` line, and sends nowhere.
+    /// After a close the file sink is gone; that is the point of calling it
+    /// at shutdown and nowhere else.
+    pub fn close(&self) {
+        let mut guard = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Dropped explicitly, not merely taken: dropping the sender is the
+        // whole effect.
+        drop(guard.take());
+    }
+
     /// Create a disabled audit logger (for testing or when audit is off)
     #[must_use]
     pub fn disabled() -> Self {
@@ -510,7 +821,7 @@ impl AuditLogger {
                 path: PathBuf::new(),
                 ..AuditConfig::default()
             },
-            sender: None,
+            sender: std::sync::Mutex::new(None),
             sanitizer: None,
             #[cfg(test)]
             now_fn: Utc::now,
@@ -554,14 +865,30 @@ impl AuditLogger {
         self.now_fn = now_fn;
     }
 
-    /// Log an audit event (non-blocking)
+    /// Log an audit event (non-blocking), attributed to `tool`.
+    ///
+    /// `tool` is mandatory and OVERWRITES any `event.tool_name` the event
+    /// already carried: this is the single writer of that field, so two
+    /// values can never disagree silently. Both sinks (the `tracing` line
+    /// and the file/channel line) carry the name, so a line emitted through
+    /// this entry point is never anonymous. `AuditEvent::new` itself still
+    /// builds a nameless event, which is why the name is taken here.
     ///
     /// The event is sent to a background task for file writing.
     /// If a sanitizer is configured, `event.command` is masked BEFORE the
     /// tracing emission and BEFORE the channel send (so neither sink ever
     /// sees the unredacted command).
-    pub fn log(&self, event: AuditEvent) {
+    ///
+    /// **The file sink is best-effort and its failures are silent.** The
+    /// send is `let _ = sender.send(event)` on an unbounded channel: it can
+    /// only fail once the receiver is gone, which is after
+    /// [`Self::close`] or once the writer task has ended, and nothing
+    /// observes it. An event logged after the shutdown drain therefore
+    /// reaches `tracing` and nothing else. The `tracing` sink, by contrast,
+    /// is synchronous and always emitted.
+    pub fn log(&self, tool: &str, event: AuditEvent) {
         let mut event = event;
+        event.tool_name = Some(tool.to_string());
         if let Some(ref s) = self.sanitizer {
             event.command = s.sanitize(&event.command).into_owned();
         }
@@ -577,8 +904,14 @@ impl AuditLogger {
                 .push(event.clone());
         }
 
-        // Send to channel for async file writing
-        if let Some(ref sender) = self.sender {
+        // Send to channel for async file writing. The lock is held for the
+        // send alone — `UnboundedSender::send` never blocks and never
+        // awaits — so this stays a few nanoseconds on the hot path.
+        let guard = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(sender) = guard.as_ref() {
             let _ = sender.send(event);
         }
     }
@@ -592,6 +925,7 @@ impl AuditLogger {
             } => {
                 info!(
                     event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
                     host = %event.host,
                     command = %event.command,
                     exit_code = exit_code,
@@ -602,6 +936,7 @@ impl AuditLogger {
             CommandResult::Error { message } => {
                 info!(
                     event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
                     host = %event.host,
                     command = %event.command,
                     error = %message,
@@ -611,10 +946,36 @@ impl AuditLogger {
             CommandResult::Denied { reason } => {
                 info!(
                     event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
                     host = %event.host,
                     command = %event.command,
                     reason = %reason,
                     "Audit: command denied"
+                );
+            }
+            // No `exit_code` field here, on purpose: nothing ran. The field
+            // is absent rather than zero, exactly as on the variant.
+            CommandResult::StateChanged { duration_ms } => {
+                info!(
+                    event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
+                    host = %event.host,
+                    command = %event.command,
+                    duration_ms = duration_ms,
+                    "Audit: state changed"
+                );
+            }
+            // Neither `exit_code` nor `duration_ms`: the decision is logged at
+            // the moment it is taken, so there is nothing yet to time and
+            // nothing yet to have exited.
+            CommandResult::Confirmed { by } => {
+                info!(
+                    event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
+                    host = %event.host,
+                    command = %event.command,
+                    confirmed_by = %by,
+                    "Audit: destructive call confirmed"
                 );
             }
         }
@@ -767,6 +1128,44 @@ mod tests {
     }
 
     #[test]
+    fn serialized_line_carries_the_tool_name() {
+        let ev = AuditEvent::new(
+            "h",
+            "c",
+            CommandResult::Success {
+                exit_code: 0,
+                duration_ms: 1,
+            },
+        );
+        let logger = AuditLogger::for_test();
+        logger.log("ssh_ls", ev);
+        let first = logger.drain_for_test().remove(0);
+        let line = serde_json::to_string(&first).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["tool_name"], "ssh_ls");
+    }
+
+    #[test]
+    fn log_stamps_tool_and_overwrites_a_conflicting_name() {
+        let logger = AuditLogger::for_test();
+        let ok = CommandResult::Success {
+            exit_code: 0,
+            duration_ms: 1,
+        };
+        // Anonymous event: the sink supplies the name.
+        logger.log("ssh_upload", AuditEvent::new("h", "c", ok.clone()));
+        // Event already named differently: the parameter wins (single writer).
+        logger.log(
+            "ssh_download",
+            AuditEvent::new("h", "c", ok).with_tool_name("ssh_exec"),
+        );
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_upload"));
+        assert_eq!(events[1].tool_name.as_deref(), Some("ssh_download"));
+    }
+
+    #[test]
     fn reduction_params_are_serialized_only_when_present() {
         let mut ev = AuditEvent::new(
             "h",
@@ -827,7 +1226,7 @@ mod tests {
         );
 
         // Should not panic
-        logger.log(event);
+        logger.log("test_tool", event);
     }
 
     #[test]
@@ -885,6 +1284,74 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"Error\""));
         assert!(json.contains("Connection refused"));
+    }
+
+    /// The one value, pinned. `NO_HOST` is a wire convention: it lands in
+    /// `audit.log` as `"host":"<no-host>"` and every consumer and every grep
+    /// has to tolerate exactly that string, so a change here is a change of
+    /// contract and must break a test rather than a downstream parser.
+    #[test]
+    fn no_host_sentinel_is_pinned_and_cannot_be_a_real_alias() {
+        assert_eq!(NO_HOST, "<no-host>");
+        // Angle brackets are the reason it cannot collide with a config alias.
+        assert!(NO_HOST.starts_with('<') && NO_HOST.ends_with('>'));
+    }
+
+    /// A state change is audited under its own `event_type` and **without any
+    /// exit code at all** — the serialized line is the proof, because that is
+    /// what a consumer reads.
+    #[test]
+    fn a_state_change_line_carries_no_exit_code_and_its_own_event_type() {
+        let logger = AuditLogger::for_test();
+        logger.log(
+            "ssh_tunnel_close",
+            AuditEvent::tagged(
+                "state_change",
+                "raspberry",
+                "ssh_tunnel_close tunnel_id=tunnel-raspberry-8080-80",
+                CommandResult::StateChanged { duration_ms: 7 },
+            ),
+        );
+        let line = serde_json::to_string(&logger.drain_for_test().remove(0)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(v["event_type"], "state_change", "{line}");
+        assert_eq!(v["tool_name"], "ssh_tunnel_close", "{line}");
+        assert_eq!(v["host"], "raspberry", "{line}");
+        assert_eq!(
+            v["command"], "ssh_tunnel_close tunnel_id=tunnel-raspberry-8080-80",
+            "the operation reaches the field every consumer already reads: {line}"
+        );
+        assert_eq!(v["result"]["StateChanged"]["duration_ms"], 7, "{line}");
+        assert!(
+            !line.contains("exit_code"),
+            "no process ran, so no code may appear — the absence IS the information: {line}"
+        );
+    }
+
+    /// `tagged` must hard-code NEITHER the `event_type` NOR the `result`:
+    /// that is the whole reason it exists, and a later task needs the same
+    /// mechanism for a different kind of event. A constructor that took the
+    /// type but pinned the result would open a door its own body closes.
+    #[test]
+    fn tagged_takes_both_the_event_type_and_the_result_from_the_caller() {
+        let ev = AuditEvent::tagged(
+            "some_other_type",
+            NO_HOST,
+            "ssh_config_set key=k",
+            CommandResult::Denied {
+                reason: "a kind of event that is not a state change".to_string(),
+            },
+        );
+        assert_eq!(ev.event_type, "some_other_type");
+        assert_eq!(ev.host, NO_HOST);
+        assert!(
+            matches!(ev.result, CommandResult::Denied { .. }),
+            "the result is the caller's too, got {:?}",
+            ev.result
+        );
+        // Like the other two constructors, it leaves the naming to the sink.
+        assert_eq!(ev.tool_name, None);
     }
 
     #[test]
@@ -1055,7 +1522,7 @@ mod tests {
                 duration_ms: 1,
             },
         );
-        logger.log(event);
+        logger.log("test_tool", event);
 
         // Check needs_rotation (should be false for small file)
         assert!(!logger.needs_rotation());
@@ -1075,7 +1542,7 @@ mod tests {
 
         // Log should not panic
         let event = AuditEvent::denied("test", "rm -rf /", "test");
-        logger.log(event);
+        logger.log("test_tool", event);
     }
 
     // ============== Full Event Serialization Tests ==============
@@ -1200,14 +1667,17 @@ mod tests {
         // 16th event, then ~0.5 MiB in the fresh file. Exactly one rotation.
         let big_command = "x".repeat(64 * 1024);
         for _ in 0..24 {
-            logger.log(AuditEvent::new(
-                "rotate-host",
-                &big_command,
-                CommandResult::Success {
-                    exit_code: 0,
-                    duration_ms: 1,
-                },
-            ));
+            logger.log(
+                "test_tool",
+                AuditEvent::new(
+                    "rotate-host",
+                    &big_command,
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
         }
 
         drop(logger); // closes the channel so run() returns
@@ -1272,14 +1742,17 @@ mod tests {
         let handle = tokio::spawn(task.expect("enabled audit must yield a writer task").run());
 
         // Exactly one small event: a few hundred bytes, nowhere near 1 MiB.
-        logger.log(AuditEvent::new(
-            "seed-host",
-            "echo hi",
-            CommandResult::Success {
-                exit_code: 0,
-                duration_ms: 1,
-            },
-        ));
+        logger.log(
+            "test_tool",
+            AuditEvent::new(
+                "seed-host",
+                "echo hi",
+                CommandResult::Success {
+                    exit_code: 0,
+                    duration_ms: 1,
+                },
+            ),
+        );
 
         drop(logger); // closes the channel so run() returns
         handle.await.unwrap();
@@ -1438,14 +1911,17 @@ mod tests {
         let handle = tokio::spawn(task.unwrap().run());
 
         for _ in 0..3 {
-            logger.log(AuditEvent::new(
-                "zero-host",
-                "echo hi",
-                CommandResult::Success {
-                    exit_code: 0,
-                    duration_ms: 1,
-                },
-            ));
+            logger.log(
+                "test_tool",
+                AuditEvent::new(
+                    "zero-host",
+                    "echo hi",
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
         }
 
         drop(logger);
@@ -1462,20 +1938,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_audit_logger_log_sends_to_channel() {
+    /// Its only assertion used to be `assert!(logger.sender.is_some())`
+    /// after logging three events: it checked that a call which does not
+    /// clear that field had not cleared it. Nothing observed whether an
+    /// event came out the other end — which is what the name promises, and
+    /// it was also the only place in the crate that read the field
+    /// directly, outside the constructors and `log` itself.
+    ///
+    /// It now runs the real writer, closes the channel, joins it, and reads
+    /// the file. Reading after the join is what makes the assertion
+    /// deterministic: the write happens in a `spawn_blocking`, so before the
+    /// join there is nothing to poll for.
+    #[tokio::test]
+    async fn test_audit_logger_log_sends_to_channel() {
         let temp_dir = tempfile::tempdir().unwrap();
         let audit_path = temp_dir.path().join("log-test.log");
 
         let config = AuditConfig {
             enabled: true,
-            path: audit_path,
+            path: audit_path.clone(),
             max_size_mb: 10,
             retain_days: 7,
         };
 
         let (logger, task) = AuditLogger::new(&config).unwrap();
-        assert!(task.is_some(), "Task should be created for enabled logger");
+        let task = task.expect("Task should be created for enabled logger");
+        let writer = tokio::spawn(task.run());
 
         // Log multiple events
         for i in 0..3 {
@@ -1487,11 +1975,186 @@ mod tests {
                     duration_ms: u64::from(i) * 10,
                 },
             );
-            logger.log(event);
+            logger.log("test_tool", event);
         }
 
-        // The sender should still be valid (not panic)
-        assert!(logger.sender.is_some());
+        // Without this the writer stays parked on `recv()` for ever: the
+        // logger still holds the sender.
+        logger.close();
+        tokio::time::timeout(DRAIN_TIMEOUT, writer)
+            .await
+            .expect("close() must let the writer's loop end")
+            .expect("the writer task must not panic");
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "all three logged events must be on disk, got: {contents}"
+        );
+        for (i, line) in lines.iter().enumerate() {
+            let event: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {line:?}"));
+            assert_eq!(event["host"], format!("host-{i}"));
+            assert_eq!(event["command"], format!("cmd-{i}"));
+            assert_eq!(event["tool_name"], "test_tool");
+        }
+    }
+
+    /// The reason the shutdown JOINS the writer and never `abort()`s it,
+    /// pinned on the only configuration where it can be observed: rotation
+    /// ON.
+    ///
+    /// The review of round 1 was right that nothing covered this. The claim
+    /// is that an abort would lose the event in its `spawn_blocking` **and**
+    /// the rotation that follows it in the same loop iteration — but
+    /// `close_ends_the_writer_while_a_clone_of_the_logger_survives` and the
+    /// two integration tests all run with `max_size_mb: 0`, which disables
+    /// rotation outright, so the second half of that claim had no witness.
+    ///
+    /// Sized so the LAST event is the one that rotates: `max_size_mb: 1` is
+    /// 1 048 576 bytes and each line is ~64 KiB of command plus ~150 bytes
+    /// of envelope, so the counter crosses the bound on the 16th. The
+    /// rotation therefore happens after `close()` has already been called —
+    /// inside the drain — which is exactly the window an `abort()` would cut.
+    ///
+    /// Counter-proof, measured: replacing the join with `handle.abort()`
+    /// leaves no archive at all and the live file at ~1 MiB. See the T12
+    /// report.
+    #[tokio::test]
+    async fn the_drain_lets_the_last_event_rotate_the_log() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 1,
+            retain_days: 7,
+        };
+
+        let (logger, task) = AuditLogger::new(&config).unwrap();
+        let writer = tokio::spawn(task.expect("enabled audit must yield a writer task").run());
+
+        let big_command = "x".repeat(64 * 1024);
+        for i in 0..16 {
+            logger.log(
+                "test_tool",
+                AuditEvent::new(
+                    "rotate-host",
+                    &format!("{big_command} marker-{i}"),
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
+        }
+
+        logger.close();
+        drain_audit_writer(Some(writer)).await;
+
+        let archives: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("audit.log."))
+            .collect();
+        assert_eq!(
+            archives.len(),
+            1,
+            "the drain must have let the rotation complete: expected exactly              one archive beside the live file"
+        );
+
+        let rotated_out = std::fs::read_to_string(archives[0].path()).unwrap();
+        assert_eq!(
+            rotated_out.lines().count(),
+            16,
+            "every event must be in the archive the rotation created"
+        );
+        assert!(
+            rotated_out.contains("marker-15"),
+            "the event that TRIGGERED the rotation must be in the archive,              not lost with the write that was in flight"
+        );
+
+        // Reopened, not left pointing at the renamed inode: that is the other
+        // half of what `rotate_if_needed` does after the write, and the half
+        // an abort would also cut.
+        assert!(audit_path.exists(), "the live log must have been reopened");
+        assert_eq!(
+            std::fs::metadata(&audit_path).unwrap().len(),
+            0,
+            "the reopened live log starts empty"
+        );
+    }
+
+    /// Why `close()` exists rather than "drop the logger and let the channel
+    /// close itself".
+    ///
+    /// The drop form works if and only if every clone of the
+    /// `Arc<AuditLogger>` dies first, and nothing in the crate establishes
+    /// that: background tasks and every `ToolContext` hold one. This test
+    /// keeps a clone alive across the shutdown on purpose. Under the drop
+    /// form the writer would still be parked on `recv()` and the join would
+    /// burn the whole timeout; here it ends.
+    ///
+    /// The second half is the price: a `log` on the surviving clone after
+    /// the close reaches `tracing` and the file not at all. That is the
+    /// documented behaviour, and the file length pins it.
+    #[tokio::test]
+    async fn close_ends_the_writer_while_a_clone_of_the_logger_survives() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 10,
+            retain_days: 7,
+        };
+
+        let (logger, task) = AuditLogger::new(&config).unwrap();
+        let logger = Arc::new(logger);
+        let writer = tokio::spawn(task.expect("enabled audit yields a writer").run());
+
+        // The clone the drop form cannot see.
+        let survivor = Arc::clone(&logger);
+
+        logger.log(
+            "test_tool",
+            AuditEvent::new(
+                "host-a",
+                "cmd-before-close",
+                CommandResult::StateChanged { duration_ms: 1 },
+            ),
+        );
+        logger.close();
+
+        tokio::time::timeout(DRAIN_TIMEOUT, writer)
+            .await
+            .expect("close() must end the writer even with a live clone of the logger")
+            .expect("the writer task must not panic");
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(
+            contents.contains("cmd-before-close"),
+            "the event logged before the close must be on disk, got: {contents}"
+        );
+
+        let before = std::fs::metadata(&audit_path).unwrap().len();
+        survivor.log(
+            "test_tool",
+            AuditEvent::new(
+                "host-b",
+                "cmd-after-close",
+                CommandResult::StateChanged { duration_ms: 1 },
+            ),
+        );
+        assert_eq!(
+            std::fs::metadata(&audit_path).unwrap().len(),
+            before,
+            "a log after close() must not reach the file (and must not panic)"
+        );
     }
 
     #[test]
@@ -2143,7 +2806,7 @@ mod tests {
         );
 
         // Call log() - this should send the event to the channel
-        logger.log(event);
+        logger.log("test_tool", event);
 
         // Drop logger to close the channel
         drop(logger);
@@ -2193,13 +2856,14 @@ mod tests {
         );
 
         // Call log() which internally calls log_to_tracing
-        logger.log(event);
+        logger.log("test_tool", event);
 
         // Verify tracing output was captured
         // tracing_test::traced_test captures logs and we can assert on them
         assert!(logs_contain("tracing-test-host"));
         assert!(logs_contain("tracing-test-command"));
         assert!(logs_contain("Audit: command executed"));
+        assert!(logs_contain("test_tool"));
     }
 
     #[test]
@@ -2208,11 +2872,12 @@ mod tests {
         let logger = AuditLogger::disabled();
         let event = AuditEvent::denied("denied-host", "rm -rf /", "blacklisted pattern");
 
-        logger.log(event);
+        logger.log("test_tool", event);
 
         assert!(logs_contain("denied-host"));
         assert!(logs_contain("Audit: command denied"));
         assert!(logs_contain("blacklisted pattern"));
+        assert!(logs_contain("test_tool"));
     }
 
     #[test]
@@ -2227,11 +2892,12 @@ mod tests {
             },
         );
 
-        logger.log(event);
+        logger.log("test_tool", event);
 
         assert!(logs_contain("error-host"));
         assert!(logs_contain("Audit: command failed"));
         assert!(logs_contain("Connection refused"));
+        assert!(logs_contain("test_tool"));
     }
 
     // ============== Tests to catch previously-missed mutations ==============

@@ -2,14 +2,18 @@
 //!
 //! Stops an active session recording.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::tool_handlers::utils::elapsed_ms;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
+use crate::security::NO_HOST;
 
 #[derive(Debug, Deserialize)]
 struct Args {
@@ -70,9 +74,26 @@ impl ToolHandler for SshRecordingStopHandler {
             BridgeError::McpInvalidRequest("Session recording is not enabled".to_string())
         })?;
 
-        let info = recorder
-            .stop_session(&args.session_id)
-            .map_err(BridgeError::McpInvalidRequest)?;
+        // The host comes back on the `RecordingInfo` the recorder returns.
+        // On the failure path the id matched no active recording, so there is
+        // no host to name: `NO_HOST`.
+        let operation = format!("{} session_id={}", self.name(), args.session_id);
+        let started = Instant::now();
+        let info = match recorder.stop_session(&args.session_id) {
+            Ok(info) => info,
+            Err(e) => {
+                ctx.execute_use_case
+                    .log_failure(self.name(), NO_HOST, &operation, &e);
+                return Err(BridgeError::McpInvalidRequest(e));
+            }
+        };
+
+        ctx.execute_use_case.log_state_change(
+            self.name(),
+            &info.host,
+            &operation,
+            elapsed_ms(started),
+        );
 
         Ok(ToolCallResult::text(format!(
             "Recording stopped.\n\n\
@@ -96,9 +117,77 @@ impl ToolHandler for SshRecordingStopHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::ports::mock::create_test_context;
+    use crate::security::SessionRecorder;
     use serde_json::json;
+
+    /// The other half of the compliance control plane: the recorded host
+    /// comes back on the `RecordingInfo`, so the line names a real host and
+    /// carries no exit code.
+    #[tokio::test]
+    async fn stopping_a_recording_is_audited_as_a_state_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(SessionRecorder::new(
+            dir.path().to_path_buf(),
+            false,
+            Vec::new(),
+            false,
+        ));
+        let session_id = recorder.start_session("raspberry", None).unwrap();
+
+        let mut ctx = create_test_context();
+        ctx.session_recorder = Some(Arc::clone(&recorder));
+
+        let handler = SshRecordingStopHandler;
+        handler
+            .execute(Some(json!({"session_id": session_id.clone()})), &ctx)
+            .await
+            .unwrap();
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_recording_stop"));
+        assert_eq!(events[0].event_type, "state_change");
+        assert_eq!(events[0].host, "raspberry");
+        assert_eq!(
+            events[0].command,
+            format!("ssh_recording_stop session_id={session_id}")
+        );
+        assert!(matches!(
+            events[0].result,
+            crate::security::CommandResult::StateChanged { .. }
+        ));
+    }
+
+    /// An id that matches no active recording: still a line, with `NO_HOST`.
+    #[tokio::test]
+    async fn stopping_an_unknown_recording_is_audited_without_a_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = create_test_context();
+        ctx.session_recorder = Some(Arc::new(SessionRecorder::new(
+            dir.path().to_path_buf(),
+            false,
+            Vec::new(),
+            false,
+        )));
+
+        let handler = SshRecordingStopHandler;
+        let result = handler
+            .execute(Some(json!({"session_id": "rec_nope_1"})), &ctx)
+            .await;
+        assert!(result.is_err());
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].host, NO_HOST);
+        assert!(matches!(
+            events[0].result,
+            crate::security::CommandResult::Error { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {

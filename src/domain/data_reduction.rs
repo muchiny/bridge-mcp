@@ -48,6 +48,14 @@ impl DataReductionArgs {
     /// Extract data reduction params from a JSON value, removing them
     /// so they don't interfere with tool-specific argument parsing.
     ///
+    /// `limit` is removed only when it is an integer, i.e. a row limit. Any
+    /// other value stays in the object: seven tools declare `limit` as an
+    /// Ansible host pattern, and a tool that declares nothing of that name
+    /// refuses it through `deny_unknown_fields`. Known gap: an integer is
+    /// always taken as a row limit, so a purely numeric host pattern cannot
+    /// reach those seven from the CLI (which converts `limit=5` to an integer)
+    /// or as a JSON number; a JSON string `"5"` reaches them intact.
+    ///
     /// # Errors
     ///
     /// When the binary is built WITHOUT the `jq` feature and the caller
@@ -92,13 +100,27 @@ impl DataReductionArgs {
             })
         });
 
-        let limit = match obj.remove("limit").and_then(|v| v.as_u64()) {
+        // `limit` is looked at before it is taken. Seven tools declare their
+        // own `limit: Option<String>` (an Ansible host pattern, not a row
+        // count) — four AWX plus three ansible; removing the key whatever its
+        // value stripped `limit=webservers` from the object before the tool
+        // could read it, and the job ran on the whole inventory. Only a value
+        // this reduction can use as a row limit is consumed; anything else
+        // stays in the object, where the tool that declares it reads it. On a
+        // tool that declares no `limit` of its own, what refuses it depends on
+        // the output kind: `deny_unknown_fields` for a tool the reduction
+        // schema applies to, `reject_unknown_args` for a `RawText` one.
+        let limit = match obj.get("limit").and_then(serde_json::Value::as_u64) {
             Some(0) => {
                 return Err(BridgeError::McpInvalidRequest(
                     "limit must be at least 1".to_string(),
                 ));
             }
-            other => other,
+            Some(n) => {
+                obj.remove("limit");
+                Some(n)
+            }
+            None => None,
         };
 
         #[cfg(feature = "jq")]
@@ -148,7 +170,8 @@ impl DataReductionArgs {
 
     /// Names of the reduction params actually supplied on this call,
     /// in a stable order (`jq_filter`, `yq_filter`, `output_format`, columns, limit).
-    /// Used by metrics to measure per-param adoption.
+    /// Used by metrics to measure per-param adoption, and recorded in the audit
+    /// event's `reduction` field.
     #[must_use]
     pub fn used_params(&self) -> Vec<&'static str> {
         let mut used = Vec::new();
@@ -175,9 +198,10 @@ impl DataReductionArgs {
 
     /// [`Self::extract`] plus the guard every handler must apply: a reduction
     /// param the tool's `OutputKind` cannot use is an error, not a no-op.
-    /// `extract` removes the keys unconditionally, so `deny_unknown_fields`
-    /// never sees them; a Json tool given `columns=[...]` returned the full
-    /// output with nothing to say why.
+    /// `extract` removes `columns` and the filters whatever their value (and
+    /// `limit` when it is an integer), so `deny_unknown_fields` never sees
+    /// them; a Json tool given `columns=[...]` returned the full output with
+    /// nothing to say why.
     ///
     /// # Errors
     ///
@@ -215,6 +239,67 @@ mod tests {
         assert_eq!(args.jq_filter.as_deref(), Some(".[] | {name}"));
         assert!(v.get("jq_filter").is_none());
         assert!(v.get("host").is_some());
+    }
+
+    #[test]
+    fn extract_leaves_a_non_integer_limit_in_the_object() {
+        for value in [
+            serde_json::json!("webservers"),
+            serde_json::json!("host1:host2"),
+            serde_json::json!("5"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(null),
+            serde_json::json!([1]),
+        ] {
+            let mut v = serde_json::json!({"host": "prod", "limit": value.clone()});
+            let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
+            assert_eq!(args.limit, None, "{value} is not a row limit");
+            assert!(
+                !args.used_params().contains(&"limit"),
+                "{value} must not be reported as a used reduction param"
+            );
+            assert_eq!(
+                v.get("limit"),
+                Some(&value),
+                "{value} must stay for the tool that declares it"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_takes_an_integer_limit_out_of_the_object() {
+        let mut v = serde_json::json!({"host": "prod", "limit": 5});
+        let args = DataReductionArgs::extract(&mut v).expect("extract must succeed");
+        assert_eq!(args.limit, Some(5));
+        assert!(v.get("limit").is_none());
+        assert!(v.get("host").is_some());
+    }
+
+    #[test]
+    fn extract_still_rejects_a_zero_limit() {
+        let mut v = serde_json::json!({"host": "prod", "limit": 0});
+        let err = DataReductionArgs::extract(&mut v).expect_err("limit 0 must be refused");
+        assert!(
+            err.to_string().contains("limit must be at least 1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn extract_for_does_not_refuse_a_limit_it_did_not_consume() {
+        // A RawText tool does not support `limit` as a reduction, so offering
+        // it to `reject_unsupported_reduction` would refuse. A host pattern is
+        // not consumed, so it must not be offered to that guard.
+        let mut v = serde_json::json!({"template_id": 42, "limit": "webservers"});
+        let args = DataReductionArgs::extract_for(
+            &mut v,
+            "ssh_awx_job_launch",
+            crate::domain::output_kind::OutputKind::RawText,
+        )
+        .expect("a host pattern is not a reduction param");
+        assert_eq!(args.used_params(), [] as [&str; 0]);
+        assert_eq!(v["limit"], "webservers");
     }
 
     #[test]

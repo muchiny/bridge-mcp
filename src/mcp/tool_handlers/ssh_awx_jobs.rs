@@ -161,7 +161,7 @@ impl ToolHandler for SshAwxJobsHandler {
 
         let raw = ctx
             .execute_use_case
-            .process_success(self.name(), host, &cmd, &output.into(), &[])
+            .process_success(self.name(), host, &cmd, &output.into(), &dr.used_params())
             .stdout;
         let mut stdout = AwxCommandBuilder::parse_checked_response(&raw)?;
         crate::mcp::standard_tool::apply_reduction_recorded(
@@ -176,6 +176,87 @@ impl ToolHandler for SshAwxJobsHandler {
 
 #[cfg(test)]
 mod tests {
+
+    /// `ctx` with AWX configured and a mock executor answering every `exec`
+    /// with `stdout`.
+    fn ctx_answering(stdout: &str) -> crate::ports::ToolContext {
+        let mut config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        config.awx = Some(crate::config::AwxConfig {
+            ssh_host: "server1".to_string(),
+            url: "https://awx.test".to_string(),
+            token: crate::config::RedactedSecret::from("awx-token"),
+            api_timeout: 30,
+            verify_ssl: true,
+        });
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        )
+    }
+
+    /// The single audit event `ssh_awx_jobs` wrote, read back from the logger
+    /// (a test about the journal reads the journal).
+    fn the_event(ctx: &crate::ports::ToolContext) -> crate::security::AuditEvent {
+        let mut mine = ctx
+            .audit_logger
+            .drain_for_test()
+            .into_iter()
+            .filter(|e| e.tool_name.as_deref() == Some("ssh_awx_jobs"));
+        let event = mine.next().expect("the call must write an audit event");
+        assert!(mine.next().is_none(), "exactly one event per call");
+        event
+    }
+
+    /// `limit` here is a real row cap (`OutputKind::Json`), unlike the
+    /// host-subset `limit` of `ssh_awx_job_follow`.
+    #[tokio::test]
+    async fn the_audit_event_names_the_row_limit_the_caller_supplied() {
+        let ctx = ctx_answering(r#"[{"id":1},{"id":2},{"id":3}]"#);
+        let result = SshAwxJobsHandler
+            .execute(Some(json!({"limit": 2})), &ctx)
+            .await
+            .expect("the handler must return a result");
+        assert_eq!(the_event(&ctx).reduction, vec!["limit"]);
+        // The event is not the only effect: the reduction really cut 3 rows to 2.
+        let crate::ports::protocol::ToolContent::Text { text } = &result.content[0] else {
+            panic!("expected a text result: {result:?}");
+        };
+        let rows: serde_json::Value = serde_json::from_str(text).expect("reduced output is JSON");
+        assert_eq!(rows.as_array().map(Vec::len), Some(2), "{text}");
+    }
+
+    #[cfg(feature = "jq")]
+    #[tokio::test]
+    async fn the_audit_event_names_jq_filter_and_output_format() {
+        let ctx = ctx_answering(r#"[{"id":1},{"id":2}]"#);
+        SshAwxJobsHandler
+            .execute(
+                Some(json!({"jq_filter": ".[].id", "output_format": "tsv"})),
+                &ctx,
+            )
+            .await
+            .expect("the handler must return a result");
+        assert_eq!(
+            the_event(&ctx).reduction,
+            vec!["jq_filter", "output_format"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_audit_event_has_no_reduction_when_the_caller_supplied_none() {
+        let ctx = ctx_answering(r#"[{"id":1}]"#);
+        SshAwxJobsHandler
+            .execute(Some(json!({})), &ctx)
+            .await
+            .expect("the handler must return a result");
+        assert_eq!(the_event(&ctx).reduction, [] as [&str; 0]);
+    }
+
     use super::*;
     use crate::error::BridgeError;
     use crate::ports::ToolHandler;

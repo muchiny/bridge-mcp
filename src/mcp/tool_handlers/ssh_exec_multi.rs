@@ -565,6 +565,10 @@ async fn execute_on_host(
 
     match output {
         Ok(output) => {
+            // `&[]` is true here, not a placeholder: this tool declares no reduction
+            // parameter (`deny_unknown_fields`, no `DataReductionArgs`), so none can have
+            // acted on the output. `max_output` truncation is not a reduction parameter
+            // either. Do not "fix" this by inventing a list.
             let response = execute_use_case.process_success(
                 "ssh_exec_multi",
                 &host_name,

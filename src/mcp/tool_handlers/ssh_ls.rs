@@ -204,14 +204,10 @@ impl ToolHandler for SshLsHandler {
         // Log the result
         match &result {
             Ok(entries) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_LS {}", args.path),
-                    AuditCommandResult::Success {
-                        exit_code: 0,
-                        duration_ms,
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    success_event(&args.host, &args.path, duration_ms, &dr),
+                );
 
                 let mut entries = entries.clone();
 
@@ -243,13 +239,16 @@ impl ToolHandler for SshLsHandler {
                 Ok(ToolCallResult::text(json_output))
             }
             Err(e) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_LS {}", args.path),
-                    AuditCommandResult::Error {
-                        message: e.to_string(),
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_LS {}", args.path),
+                        AuditCommandResult::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                );
 
                 Err(BridgeError::Sftp {
                     reason: e.to_string(),
@@ -259,8 +258,58 @@ impl ToolHandler for SshLsHandler {
     }
 }
 
+/// The audit event for a listing that succeeded. This handler writes its own
+/// event instead of going through `process_success`, so it must carry the
+/// reduction params itself, the way every other direct handler does: a
+/// `limit=3` that returns 3 of 200 entries has to be visible in the journal.
+fn success_event(
+    host: &str,
+    path: &str,
+    duration_ms: u64,
+    dr: &crate::domain::data_reduction::DataReductionArgs,
+) -> AuditEvent {
+    let mut event = AuditEvent::new(
+        host,
+        &format!("SFTP_LS {path}"),
+        AuditCommandResult::Success {
+            exit_code: 0,
+            duration_ms,
+        },
+    );
+    event.reduction = dr.used_params();
+    event
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// `execute` cannot run here (SFTP is not mockable), so nothing else would
+    /// notice if its audit event went back to a hand-built `AuditEvent::new`
+    /// and the reduction fell silent again. Scoped to the production half, as
+    /// `task_store_exposes_no_blocking_wait` is, so it cannot match itself.
+    #[test]
+    fn execute_logs_through_success_event() {
+        let src = include_str!("ssh_ls.rs");
+        let (production, _) = src
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("the test-module boundary must exist for this guard to scope itself");
+        assert!(
+            production.contains("success_event(&args.host, &args.path, duration_ms, &dr)"),
+            "the success path must log `success_event(.., &dr)` so `reduction` is recorded"
+        );
+    }
+
+    #[test]
+    fn the_success_event_carries_the_reduction_params() {
+        let mut v = json!({"limit": 3});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        let event = success_event("h", "/var/log", 5, &dr);
+        assert_eq!(event.reduction, vec!["limit"]);
+        assert_eq!(event.command, "SFTP_LS /var/log");
+        let none = crate::domain::data_reduction::DataReductionArgs::default();
+        assert_eq!(success_event("h", "/", 1, &none).reduction, [] as [&str; 0]);
+    }
+
     use super::*;
     use crate::error::BridgeError;
     use crate::ports::mock::create_test_context;

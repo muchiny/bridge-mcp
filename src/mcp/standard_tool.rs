@@ -439,8 +439,8 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         };
         // Step 0b (folded in): a reduction param the tool's `OutputKind`
         // cannot use is an error, not a no-op. `extract` removes these keys
-        // unconditionally, so `deny_unknown_fields` on `T::Args` never sees
-        // them and a `RawText` tool swallowed `limit=3` without a word.
+        // (`limit` only when it is an integer), so `deny_unknown_fields` on
+        // `T::Args` never sees what it took and a `RawText` tool swallowed `limit=3` without a word.
         let dr = crate::domain::data_reduction::DataReductionArgs::extract_for(
             &mut v,
             T::NAME,
@@ -451,8 +451,8 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
         let privilege = crate::domain::privilege::PrivilegeArgs::extract(&mut v)?;
 
         // Step 1: Parse args
-        let args: T::Args =
-            serde_json::from_value(v).map_err(|e| BridgeError::McpInvalidRequest(e.to_string()))?;
+        let args: T::Args = serde_json::from_value(v)
+            .map_err(|e| BridgeError::McpInvalidRequest(args_error(&e)))?;
 
         // Step 2: Host config lookup
         let host = args.host().to_string();
@@ -1301,6 +1301,21 @@ fn auto_populate_structured_content(mut result: ToolCallResult) -> ToolCallResul
     }
 
     result
+}
+
+/// Message for an argument-parse failure. `extract` leaves a non-integer
+/// `limit` in the object, and the published schema advertises `limit` as an
+/// integer on tools that do not declare it, so serde's bare "unknown field
+/// limit" would read as "this tool has no limit". Say what is wrong instead.
+fn args_error(e: &serde_json::Error) -> String {
+    let msg = e.to_string();
+    if msg.starts_with("unknown field `limit`") {
+        format!(
+            "{msg}. `limit`, where a tool takes one as a row limit, must be an integer of at least 1."
+        )
+    } else {
+        msg
+    }
 }
 
 #[cfg(test)]
@@ -3532,5 +3547,17 @@ mod tests {
             text.contains("preserved"),
             "non-zero exit must preserve raw output even with jq_filter — got {text:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_non_integer_limit_is_refused_with_a_message_that_says_why() {
+        let ctx = create_test_context_with_host();
+        let err = StandardToolHandler::<MockTool>::new()
+            .execute(Some(json!({"host": "server1", "limit": "abc"})), &ctx)
+            .await
+            .expect_err("a non-integer limit must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown field `limit`"), "{msg}");
+        assert!(msg.contains("must be an integer of at least 1"), "{msg}");
     }
 }

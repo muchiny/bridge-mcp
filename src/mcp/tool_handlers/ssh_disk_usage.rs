@@ -178,6 +178,10 @@ impl ToolHandler for SshDiskUsageHandler {
                 .log_failure(self.name(), &args.host, &command, &e.to_string());
         })?;
 
+        // `&[]` is true here, not a placeholder: this tool declares no reduction
+        // parameter (`deny_unknown_fields`, no `DataReductionArgs`), so none can have
+        // acted on the output. `max_output` truncation is not a reduction parameter
+        // either. Do not "fix" this by inventing a list.
         let response = ctx.execute_use_case.process_success(
             self.name(),
             &args.host,

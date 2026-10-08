@@ -180,23 +180,29 @@ impl ToolHandler for SshUploadHandler {
         // Log the result
         match &result {
             Ok(transfer_result) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_UPLOAD {} -> {}", args.local_path, args.remote_path),
-                    AuditCommandResult::Success {
-                        exit_code: 0,
-                        duration_ms: transfer_result.duration_ms,
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_UPLOAD {} -> {}", args.local_path, args.remote_path),
+                        AuditCommandResult::Success {
+                            exit_code: 0,
+                            duration_ms: transfer_result.duration_ms,
+                        },
+                    ),
+                );
             }
             Err(e) => {
-                ctx.audit_logger.log(AuditEvent::new(
-                    &args.host,
-                    &format!("SFTP_UPLOAD {} -> {}", args.local_path, args.remote_path),
-                    AuditCommandResult::Error {
-                        message: e.to_string(),
-                    },
-                ));
+                ctx.audit_logger.log(
+                    self.name(),
+                    AuditEvent::new(
+                        &args.host,
+                        &format!("SFTP_UPLOAD {} -> {}", args.local_path, args.remote_path),
+                        AuditCommandResult::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                );
             }
         }
 

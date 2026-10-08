@@ -2,6 +2,8 @@
 //!
 //! Closes an active SSH port forwarding tunnel.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,8 +11,10 @@ use tracing::info;
 
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::tool_handlers::utils::elapsed_ms;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
+use crate::security::NO_HOST;
 
 /// Arguments for `ssh_tunnel_close` tool
 #[derive(Debug, Deserialize)]
@@ -73,7 +77,27 @@ impl ToolHandler for SshTunnelCloseHandler {
 
         info!(tunnel_id = %args.tunnel_id, "Closing tunnel");
 
-        let closed = ctx.tunnel_manager.close(&args.tunnel_id).await?;
+        // The host comes back with the closed tunnel — `TunnelManager::close`
+        // returns the `TunnelInfo` it removed — so no prior lookup is needed.
+        // On the failure path the id matched no tunnel, so no host was ever
+        // resolved: `NO_HOST`.
+        let operation = format!("{} tunnel_id={}", self.name(), args.tunnel_id);
+        let started = Instant::now();
+        let closed = match ctx.tunnel_manager.close(&args.tunnel_id).await {
+            Ok(closed) => closed,
+            Err(e) => {
+                ctx.execute_use_case
+                    .log_failure(self.name(), NO_HOST, &operation, &e.to_string());
+                return Err(e);
+            }
+        };
+
+        ctx.execute_use_case.log_state_change(
+            self.name(),
+            &closed.host,
+            &operation,
+            elapsed_ms(started),
+        );
 
         let json = serde_json::to_string(&closed)
             .unwrap_or_else(|e| format!("Error serializing tunnel info: {e}"));
@@ -165,6 +189,76 @@ mod tests {
         // Verify tunnel is removed
         let tunnels = ctx.tunnel_manager.list().await;
         assert!(tunnels.is_empty());
+    }
+
+    /// The real host reaches the line, and no exit code does — nothing ran.
+    /// The host comes back on the `TunnelInfo` the manager removed, which is
+    /// why this tool needs no prior lookup and no synthetic host.
+    #[tokio::test]
+    async fn closing_a_tunnel_is_audited_as_a_state_change_on_its_real_host() {
+        let handler = SshTunnelCloseHandler;
+        let ctx = create_test_context();
+
+        let info = TunnelInfo {
+            id: "test-audit-1".to_string(),
+            host: "test-server".to_string(),
+            local_port: 9091,
+            remote_host: "localhost".to_string(),
+            remote_port: 3306,
+            direction: TunnelDirection::Local,
+            created_at: Instant::now(),
+            age_seconds: 0,
+        };
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_mins(1)).await;
+        });
+        ctx.tunnel_manager.register(info, handle).await.unwrap();
+
+        handler
+            .execute(Some(json!({"tunnel_id": "test-audit-1"})), &ctx)
+            .await
+            .unwrap();
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_tunnel_close"));
+        assert_eq!(events[0].event_type, "state_change");
+        assert_eq!(
+            events[0].host, "test-server",
+            "a real alias, not the sentinel"
+        );
+        assert_eq!(events[0].command, "ssh_tunnel_close tunnel_id=test-audit-1");
+        assert!(
+            matches!(
+                events[0].result,
+                crate::security::CommandResult::StateChanged { .. }
+            ),
+            "got {:?}",
+            events[0].result
+        );
+        // The history is a history of commands, and no command ran.
+        assert_eq!(ctx.history.len(), 0);
+    }
+
+    /// An id that matches nothing: the line is still written, with `NO_HOST`,
+    /// because no tunnel ever existed to read a host from.
+    #[tokio::test]
+    async fn closing_an_unknown_tunnel_is_audited_without_a_host() {
+        let handler = SshTunnelCloseHandler;
+        let ctx = create_test_context();
+
+        let result = handler
+            .execute(Some(json!({"tunnel_id": "nonexistent"})), &ctx)
+            .await;
+        assert!(result.is_err());
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].host, NO_HOST);
+        assert!(matches!(
+            events[0].result,
+            crate::security::CommandResult::Error { .. }
+        ));
     }
 
     #[tokio::test]

@@ -74,6 +74,56 @@ pub(crate) struct DiscoveryPayload {
 /// channel per subscribed path over SSH, which the bridge does not do.
 const RESOURCE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long [`McpServer::serve`] waits for its in-flight sessions to end by
+/// themselves, once the transport has said it was ASKED to stop.
+///
+/// Only then, and only for such a transport: for stdio the accept loop ends
+/// after the first session is handed out, long before that session does, so
+/// bounding there would cut `bridge-mcp serve` off mid-conversation. See
+/// `Transport::shutdown_requested`.
+const SESSION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long [`McpServer::serve`]'s teardown gives EACH of the three pool
+/// `close_all` calls before abandoning it.
+///
+/// Those closes are a courtesy: `SshClient::close` sends an SSH
+/// `DISCONNECT` and waits up to 5 s for it, per connection, sequentially.
+/// A process that is exiting does not need any of it — the kernel closes
+/// the sockets and `sshd` treats that as a dropped connection — so the
+/// shutdown must not be allowed to wait on it.
+///
+/// Unbounded, it was not merely slow but **open-ended**:
+/// `SessionManager::close_all` starts by taking the same lock that
+/// `SessionManager::exec` holds for the whole of a remote command, and
+/// `sessions.timeout_secs` defaults to **1800 s**. Measured against a real
+/// host, one session running `sleep 45` whose client had closed its socket:
+/// the bounded session drain finished in 1.7 s and then `close_all` parked
+/// **42.0 s** on that lock, `Daemon stopped.` having already been printed
+/// with exit 0. With `timeout_secs` at its default that is half an hour.
+///
+/// Two seconds, so the whole teardown is bounded by a CONSTANT rather than
+/// by `5 s x connections`: a healthy disconnect is a single packet, and
+/// anything slower is exactly what must not hold the process.
+const RESOURCE_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long [`McpServer::serve`] then waits after cancelling the sessions'
+/// reader loops, before aborting the tasks outright.
+///
+/// Longer than [`SESSION_DRAIN_GRACE`] on purpose: a cancelled reader loop
+/// still runs the session's OWN bounded teardown, which is 2 s for the
+/// natural drain of its writer plus 1 s after cancelling it (see
+/// `serve_session_with_context`). A shorter bound here would abort sessions
+/// that were about to finish flushing.
+///
+/// **And one arm of that loop never sees the token at all**, which is the
+/// other thing this second bound is for: a reader parked on
+/// `concurrent_limit.acquire_owned()` is inside the loop BODY, not in its
+/// `select!`, so a cancellation is invisible to it. Only the `abort` at the
+/// end of `McpServer::drain_sessions_bounded` ends that one. That arm has no
+/// test — reaching it needs `limits.max_concurrent_commands` requests in
+/// flight at the instant of the shutdown.
+const SESSION_BACKSTOP_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Decide which subscribed URIs get `notifications/resources/updated` on
 /// one tick of the watch loop.
 ///
@@ -1138,6 +1188,65 @@ impl McpServer {
     /// * `audit_task` — optional audit writer background task.
     /// * `config_path` — optional config path for hot-reload watching.
     ///
+    /// # Shutdown
+    ///
+    /// After the accept loop ends and the in-flight sessions are drained,
+    /// this tears down the global state in a fixed order, and **every step of
+    /// it is bounded** — on the transports whose accept loop ends on a
+    /// shutdown signal, which today means the daemon socket. Stdio ends on
+    /// EOF and its session drain stays open-ended by design, because for it
+    /// "nobody is talking any more" is the normal state and not a shutdown.
+    /// The steps: the sessions (2 s, then their reader loops are
+    /// cancelled, then 4 s, then aborted), the cleanup loops (aborted),
+    /// `close_all` on the tunnel / session / connection managers (2 s each,
+    /// see `RESOURCE_CLOSE_GRACE`), the transport, and last the audit
+    /// channel closed and its writer joined (2 s). **14 s in all**, a
+    /// constant with no term in the number of sessions or connections —
+    /// plus `Transport::shutdown`, which this code does not bound but which
+    /// is synchronous in both in-tree implementations. The audit writer comes
+    /// last because every step before it can still log, and it is closed
+    /// rather than dropped because clones of the `Arc<AuditLogger>` outlive
+    /// this function. Before the audit-integrity wave the writer's
+    /// `JoinHandle` was discarded here, so whatever was still queued when the
+    /// process exited was lost without a word — and the whole of this block
+    /// was unbounded, so `daemon stop` could leave a daemon no signal could
+    /// then kill.
+    ///
+    /// Returning is what triggers all of that, and nothing in this function
+    /// listens for a signal. The caller decides: the daemon cancels the
+    /// transport's shutdown token on SIGINT or SIGTERM, stdio ends on EOF.
+    /// **An `abort()` on this future skips the whole block.** Of the seven
+    /// tests in `tests/daemon_integration.rs`, three end their `run_daemon`
+    /// future with `abort()` and so measure no part of it, two never start a
+    /// server at all, and **two drive this block to its end** by cancelling
+    /// the transport's shutdown token instead:
+    /// `serve_returns_only_after_the_audit_lines_are_on_disk` and
+    /// `a_silent_connected_client_cannot_hold_the_shutdown`. Recount this
+    /// split before trusting it: it was already wrong once, in the form "the
+    /// daemon tests measure no part of this block" — true when written, and a
+    /// trap from the first test that drove the block to its end.
+    ///
+    /// **What can still be lost, and it is not any of the above:** every
+    /// dispatched request runs in a bare `tokio::spawn` — the per-request
+    /// task in `serve_session_with_context` and the
+    /// `io.modelcontextprotocol/tasks` worker in `handle_tools_call_async`
+    /// alike. Neither is in a vec or a `JoinSet`, both hold a
+    /// `ToolContext` and therefore a clone of the `Arc<AuditLogger>`, and
+    /// one still running when this function closes the channel logs to
+    /// `tracing` and not to the file. The request task is covered for about
+    /// the 2 s + 4 s of the session drain (its `Sender` clone is what the
+    /// session waits on); the tasks worker is not waited on at all.
+    ///
+    /// Which leaves an asymmetry worth stating rather than discovering:
+    /// **`ssh_exec command='sleep 20'` is abandoned after a few seconds and
+    /// its audit event is lost, while `ssh_session_exec command='sleep 600'`
+    /// used to hold the whole shutdown for ten minutes** — because the
+    /// latter's handler holds `SessionManager`'s lock and `close_all` queued
+    /// behind it. The bound on `close_all` makes the two behave alike: both
+    /// are abandoned, and the in-flight event of either is lost. That is a
+    /// deliberate choice of a bounded shutdown over a complete trail; see
+    /// `RESOURCE_CLOSE_GRACE`.
+    ///
     /// # Errors
     ///
     /// Returns an error only if the transport itself produces one.
@@ -1149,10 +1258,10 @@ impl McpServer {
         audit_task: Option<AuditWriterTask>,
         config_path: Option<&Path>,
     ) -> Result<()> {
-        // Spawn audit writer task if enabled (global, shared).
-        if let Some(task) = audit_task {
-            tokio::spawn(task.run());
-        }
+        // Spawn audit writer task if enabled (global, shared). The handle is
+        // KEPT, unlike the cleanup handles below: this one is closed and
+        // joined at the end of the function, never aborted (see there).
+        let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
 
         // Spawn cleanup tasks (global, shared across sessions), plus the
         // resource-update watch loop that feeds
@@ -1174,21 +1283,42 @@ impl McpServer {
         // the spawned `serve_session` task before it has read a single
         // byte from stdin.
         let mut sessions: JoinSet<()> = JoinSet::new();
+        // Backstop for the session reader loops. Not a cancellation of the
+        // sessions: nothing fires it unless the bounded drain below gives up.
+        let session_shutdown = tokio_util::sync::CancellationToken::new();
         while let Some(session) = transport.accept().await {
             let server = Arc::clone(&self);
+            let backstop = session_shutdown.clone();
             sessions.spawn(async move {
-                server.serve_session(session).await;
+                server.serve_session(session, backstop).await;
             });
         }
 
         info!("Transport accept loop ended, draining in-flight sessions");
 
-        while let Some(res) = sessions.join_next().await {
-            if let Err(e) = res
-                && !e.is_cancelled()
-            {
-                error!(error = %e, "session task failed");
-            }
+        // TWO shapes, because `accept()` returning `None` does not mean the
+        // same thing on both transports, and conflating them breaks one or
+        // the other.
+        //
+        // On the daemon socket it means "you were asked to stop", and a
+        // session whose client is connected and silent parks on
+        // `reader.recv()` for ever — so an unbounded join here let
+        // `daemon stop` leave a daemon that NO signal could then kill:
+        // measured on the real binary, `Daemon stopped.` printed, the log
+        // stopping at the line above, the process still alive 16 s later, a
+        // second `daemon stop` with no effect. It was invisible before this
+        // wave only because SIGTERM was unhandled and killed the process
+        // outright — and tokio's SIGTERM handler is permanent ("the default
+        // platform behavior will NOT be reset"), so that escape is gone for
+        // good.
+        //
+        // On stdio it means "there is only ever one session", and that
+        // session is the whole conversation: bounding it would end
+        // `bridge-mcp serve` a couple of seconds after start-up.
+        if transport.shutdown_requested() {
+            Self::drain_sessions_bounded(&mut sessions, &session_shutdown).await;
+        } else {
+            Self::drain_sessions(&mut sessions).await;
         }
 
         info!("All sessions drained, shutting down");
@@ -1197,12 +1327,127 @@ impl McpServer {
         for h in cleanup_handles {
             h.abort();
         }
-        self.tunnel_manager.close_all().await;
-        self.session_manager.close_all().await;
-        self.connection_pool.close_all().await;
+        // Each one BOUNDED, and the reason is in `RESOURCE_CLOSE_GRACE`:
+        // `session_manager.close_all()` takes the lock that
+        // `SessionManager::exec` holds for the whole of a remote command, so
+        // unbounded it reopened — through another door — exactly the defect
+        // the session drain above closes: `daemon stop` printing
+        // `Daemon stopped.` with exit 0 over a daemon that then lived on for
+        // the command's timeout.
+        Self::close_bounded("tunnels", self.tunnel_manager.close_all()).await;
+        Self::close_bounded("sessions", self.session_manager.close_all()).await;
+        Self::close_bounded("connection pool", self.connection_pool.close_all()).await;
         transport.shutdown().await;
 
+        // Audit writer LAST, and in two steps. Last because every teardown
+        // step above can still log. Two steps because the writer's loop ends
+        // only when the channel closes, and dropping this `Arc<Self>` would
+        // not close it: clones of the `Arc<AuditLogger>` live in the tool
+        // contexts handed to background tasks. So close the channel
+        // explicitly, then join — joining a writer that is still blocked on
+        // `recv()` would just burn the whole timeout.
+        //
+        // Joined, never `abort()`ed: the write runs in a `spawn_blocking`
+        // followed by `rotate_if_needed`, so an abort loses the event in
+        // flight and the rotation it was about to trigger. That is why this
+        // handle is not in `cleanup_handles`.
+        self.close_audit();
+        crate::security::drain_audit_writer(audit_writer).await;
+
         Ok(())
+    }
+
+    /// Join every in-flight session task, logging the ones that panicked.
+    ///
+    /// Cancel-safe, because `JoinSet::join_next` is: the bounded caller drops
+    /// this future on a timeout and calls it again afterwards, and no session
+    /// is lost between the two.
+    async fn drain_sessions(sessions: &mut JoinSet<()>) {
+        while let Some(res) = sessions.join_next().await {
+            if let Err(e) = res
+                && !e.is_cancelled()
+            {
+                error!(error = %e, "session task failed");
+            }
+        }
+    }
+
+    /// [`Self::drain_sessions`] with a bound, for a transport that said it
+    /// was asked to stop.
+    ///
+    /// Same three steps, same reasoning and in the same order as the
+    /// per-session writer backstop in [`Self::serve_session_with_context`]:
+    /// wait for the natural drain FIRST, because a client that is still
+    /// reading its replies should get them; only then cancel the reader
+    /// loops; and bound that too, because a session must not be able to hang
+    /// teardown by ignoring the cancellation either.
+    ///
+    /// `JoinSet::shutdown` is the last resort, and it is an `abort` — which
+    /// is acceptable here and nowhere near the audit writer: a session task
+    /// owns no `spawn_blocking` and no rotation, and the audit drain still
+    /// runs afterwards, in `serve`.
+    async fn drain_sessions_bounded(
+        sessions: &mut JoinSet<()>,
+        backstop: &tokio_util::sync::CancellationToken,
+    ) {
+        if tokio::time::timeout(SESSION_DRAIN_GRACE, Self::drain_sessions(sessions))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+
+        warn!(
+            grace_s = SESSION_DRAIN_GRACE.as_secs(),
+            "Sessions did not end on their own; cancelling their reader loops"
+        );
+        backstop.cancel();
+
+        if tokio::time::timeout(SESSION_BACKSTOP_GRACE, Self::drain_sessions(sessions))
+            .await
+            .is_err()
+        {
+            warn!(
+                grace_s = SESSION_BACKSTOP_GRACE.as_secs(),
+                "Sessions ignored cancellation, aborting them"
+            );
+            sessions.shutdown().await;
+        }
+    }
+
+    /// Run one pool's `close_all` under [`RESOURCE_CLOSE_GRACE`], warning and
+    /// moving on if it does not finish.
+    ///
+    /// Abandoning the future mid-flight is safe and is the point: the values
+    /// it had already drained are dropped with it, which closes their
+    /// transports anyway, and nothing it has not reached yet is touched. The
+    /// process is on its way out.
+    async fn close_bounded<F>(resource: &str, closing: F)
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if tokio::time::timeout(RESOURCE_CLOSE_GRACE, closing)
+            .await
+            .is_err()
+        {
+            warn!(
+                resource,
+                grace_s = RESOURCE_CLOSE_GRACE.as_secs(),
+                "Shutdown gave up closing this resource gracefully; the process is \
+                 exiting, so its connections are dropped instead"
+            );
+        }
+    }
+
+    /// Close this server's audit channel so its writer task can be joined.
+    ///
+    /// [`Self::serve`] does this inline; the HTTP transport
+    /// (`crate::mcp::transport::http::serve`) needs it from the outside,
+    /// because it owns the writer handle but hands the `Arc<McpServer>` to
+    /// the axum router. `pub(crate)`: this is a shutdown step, not something
+    /// a request handler may call.
+    pub(crate) fn close_audit(&self) {
+        self.audit_logger.close();
     }
 
     /// Assemble every process-global background task: the cleanup loops
@@ -1212,6 +1457,11 @@ impl McpServer {
     /// test. `serve()` needs a transport and an accept loop, so nothing
     /// could assert that the watch handle really joins the vec shutdown
     /// aborts — deleting the `push` reddened nothing.
+    ///
+    /// The audit writer is NOT one of them, and that is the point of the
+    /// split's sibling: it is spawned by `serve()` itself and joined there,
+    /// because this vec's contract is "abort on shutdown" and aborting the
+    /// writer loses the event in its `spawn_blocking`.
     fn spawn_global_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = self.spawn_cleanup_tasks();
         handles.push(self.spawn_resource_update_watch());
@@ -1357,10 +1607,18 @@ impl McpServer {
     /// [`Self::serve_session_with_context`], which is the whole of the
     /// behaviour. The split exists so a test can hold a handle on that bundle;
     /// see that function's docs.
-    async fn serve_session(self: Arc<Self>, session: Session) {
+    ///
+    /// `backstop` is [`Self::serve`]'s session-shutdown token: it is only
+    /// cancelled if the bounded drain there gives up, and it is the ONLY way
+    /// out of the reader loop other than the client closing its end.
+    async fn serve_session(
+        self: Arc<Self>,
+        session: Session,
+        backstop: tokio_util::sync::CancellationToken,
+    ) {
         let (tx, rx) = mpsc::channel::<WriterMessage>(100);
         let session_ctx = SessionContext::new(tx);
-        self.serve_session_with_context(session, session_ctx, rx)
+        self.serve_session_with_context(session, session_ctx, rx, backstop)
             .await;
     }
 
@@ -1395,6 +1653,7 @@ impl McpServer {
         session: Session,
         session_ctx: SessionContext,
         mut rx: mpsc::Receiver<WriterMessage>,
+        backstop: tokio_util::sync::CancellationToken,
     ) {
         let tx = session_ctx.notification_tx.clone();
 
@@ -1437,7 +1696,25 @@ impl McpServer {
         let mut reader = session.reader;
         info!("MCP session started");
 
-        while let Some(msg_result) = reader.recv().await {
+        // `reader.recv()` had exactly ONE exit: the client closing its end.
+        // A client that stays connected and says nothing parks this loop for
+        // ever, and `serve`'s drain waits on it — which is how `daemon stop`
+        // could leave a daemon alive that no signal would then kill. The
+        // token is a second exit, used only as a backstop: `serve` waits for
+        // the natural end first, exactly as this function's own writer
+        // teardown does, and cancels only if that wait runs out.
+        //
+        // `biased;` with the token first: once teardown has decided to stop,
+        // a client that keeps writing must not be able to keep the loop
+        // alive by starving the other branch.
+        while let Some(msg_result) = tokio::select! {
+            biased;
+            () = backstop.cancelled() => {
+                info!("Session reader cancelled by shutdown backstop");
+                None
+            }
+            msg = reader.recv() => msg,
+        } {
             let message = match msg_result {
                 Ok(m) => m,
                 Err(e) => {
@@ -3982,7 +4259,9 @@ mod tests {
         }
 
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         let mut expected_ids: std::collections::HashSet<Option<Value>> =
             std::collections::HashSet::new();
@@ -6530,6 +6809,108 @@ rbac:
         }
     }
 
+    /// Round 2 of the T12 review: the session drain was bounded and the
+    /// daemon still could not be stopped, because
+    /// `SessionManager::close_all` starts by taking the lock that
+    /// `SessionManager::exec` holds for the WHOLE of a remote command, and
+    /// `sessions.timeout_secs` defaults to 1800 s.
+    ///
+    /// Measured against a real host before the bound, one session running
+    /// `sleep 45` whose client had already closed its socket: the session
+    /// drain finished in 1.7 s, then `close_all` parked **42.0 s** on that
+    /// lock, with `Daemon stopped.` already printed and exit 0 already
+    /// returned. Same scenario after: the process is gone 4.0 s after
+    /// `daemon stop`, and the `WARN` names the resource it gave up on.
+    ///
+    /// `start_paused`, so the assertion is on virtual time and the test
+    /// costs nothing: tokio auto-advances the clock when nothing is ready,
+    /// which is exactly the state a `pending` close leaves the runtime in.
+    #[tokio::test(start_paused = true)]
+    async fn close_bounded_gives_up_on_a_close_that_never_finishes() {
+        let started = tokio::time::Instant::now();
+        McpServer::close_bounded("never", std::future::pending::<()>()).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= RESOURCE_CLOSE_GRACE,
+            "it must give the close its full grace first, waited {waited:?}"
+        );
+        assert!(
+            waited < RESOURCE_CLOSE_GRACE * 2,
+            "it must GIVE UP after the grace, not wait on: waited {waited:?}"
+        );
+    }
+
+    /// The other half, and it is what stops the bound from being a tax: a
+    /// close that finishes returns at once, so the common shutdown pays
+    /// nothing.
+    #[tokio::test(start_paused = true)]
+    async fn close_bounded_returns_at_once_when_the_close_finishes() {
+        let started = tokio::time::Instant::now();
+        McpServer::close_bounded("instant", std::future::ready(())).await;
+        assert!(
+            started.elapsed() < RESOURCE_CLOSE_GRACE,
+            "a close that completes must not pay the grace"
+        );
+    }
+
+    /// The wiring, as source text, because nothing else can see it.
+    ///
+    /// `close_bounded` itself is pinned by the two tests above, but a change
+    /// that unwrapped ONE of the three `close_all` calls would redden
+    /// nothing: making `session_manager.close_all()` park needs a lock held
+    /// by a live remote command, which needs a real SSH host, and the only
+    /// measurement of it in this repository is the one in the T12 report. A
+    /// source-text guard is the weakest kind of test; it is still stronger
+    /// than the runtime test that cannot be written here.
+    #[test]
+    fn every_close_all_in_the_teardown_is_bounded() {
+        let src = include_str!("server.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // Scope: `serve`'s body alone. `close_all` is also called by the
+        // cleanup loops' own code elsewhere, and those are not shutdown.
+        let from_fn = production
+            .find("pub async fn serve<T: Transport>(")
+            .expect("serve must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    /// Join every in-flight session task")
+            .expect("the drain helpers must follow serve");
+        let body = &body[..to_next_fn];
+
+        let wrapped = body.matches("Self::close_bounded(").count();
+        assert_eq!(
+            wrapped, 3,
+            "all three pools must be closed through `close_bounded`, found {wrapped}"
+        );
+
+        // Each pool named with its `self.` receiver, so the prose above the
+        // calls — which mentions `close_all()` without one — cannot be
+        // mistaken for a call site. Exactly once each, so a second,
+        // unwrapped call cannot be added beside the wrapped one.
+        for pool in [
+            "self.tunnel_manager.close_all()",
+            "self.session_manager.close_all()",
+            "self.connection_pool.close_all()",
+        ] {
+            assert_eq!(
+                body.matches(pool).count(),
+                1,
+                "{pool} must appear exactly once in serve's body"
+            );
+            let at = body.find(pool).expect("just counted it");
+            let line_start = body[..at].rfind('\n').map_or(0, |i| i + 1);
+            assert!(
+                body[line_start..at].contains("Self::close_bounded("),
+                "{pool} must be wrapped in `close_bounded`: an unbounded one reopens \
+                 the un-killable daemon through this door"
+            );
+        }
+    }
+
     /// D8: the destructive-op elicitation gate MUST resolve BEFORE a task
     /// exists. Creating the task first and asking for confirmation afterwards
     /// inverts the spec's ordering ("a server that needs client input _before_
@@ -8543,12 +8924,18 @@ rbac:
         handle.abort();
     }
 
-    /// Shutdown in `serve()` is `for h in cleanup_handles { h.abort(); }`,
-    /// so the watch loop is both STARTED and STOPPED only if it sits in
-    /// that vec. Neither half was asserted at `3f7c2fa` — deleting the
-    /// `push` left the suite green. A length assertion alone would be
-    /// satisfied by any fifth task, so this drives a real notification out
-    /// of the vec and then proves aborting it silences the bridge.
+    /// Shutdown in `serve()` aborts every handle in `cleanup_handles`
+    /// (`for h in cleanup_handles { h.abort(); }`), so the watch loop is
+    /// both STARTED and STOPPED only if it sits in that vec. Neither half
+    /// was asserted at `3f7c2fa` — deleting the `push` left the suite
+    /// green. A length assertion alone would be satisfied by any fifth
+    /// task, so this drives a real notification out of the vec and then
+    /// proves aborting it silences the bridge.
+    ///
+    /// Not every global task is in that vec, and the exception is
+    /// deliberate: the audit writer is closed and JOINED after this abort
+    /// loop, because aborting it would lose the event in its
+    /// `spawn_blocking` and the rotation that follows it.
     ///
     /// Subscribes to `health://server` rather than `history://recent` on
     /// purpose: remote-backed schemes are published on EVERY tick, so this
@@ -8655,7 +9042,9 @@ rbac:
     async fn test_accepted_listen_writes_no_response_to_the_transport() {
         let server = Arc::new(create_test_server());
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         client_tx
             .send(client_request(
@@ -8761,8 +9150,12 @@ rbac:
         // `notification_tx` clone and push teardown onto its 2s path.
         let active = session_ctx.active_requests.clone();
 
-        let serve =
-            tokio::spawn(Arc::clone(&server).serve_session_with_context(session, session_ctx, rx));
+        let serve = tokio::spawn(Arc::clone(&server).serve_session_with_context(
+            session,
+            session_ctx,
+            rx,
+            tokio_util::sync::CancellationToken::new(),
+        ));
 
         client_tx
             .send(client_request(
@@ -8844,7 +9237,9 @@ rbac:
     async fn a_transport_drop_closes_a_subscription_without_a_response() {
         let server = Arc::new(create_test_server());
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         client_tx
             .send(client_request(
@@ -10646,7 +11041,9 @@ rbac:
     async fn test_serve_session_sweeps_subscriptions_before_awaiting_the_writer() {
         let server = Arc::new(create_test_server());
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         client_tx
             .send(client_request(
@@ -10747,7 +11144,7 @@ rbac:
         let started = std::time::Instant::now();
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            Arc::clone(&server).serve_session(session),
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
         )
         .await
         .expect("serve_session must return on EOF, not hang");

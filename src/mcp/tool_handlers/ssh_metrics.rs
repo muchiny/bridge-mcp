@@ -269,7 +269,7 @@ impl ToolHandler for SshMetricsHandler {
             &args.host,
             &command,
             &output.into(),
-            &[],
+            &dr.used_params(),
         );
 
         // Serialize to JSON and sanitize output

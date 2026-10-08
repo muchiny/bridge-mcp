@@ -86,7 +86,26 @@ pub struct Cli {
     /// A tool annotated `destructiveHint` asks for confirmation on a terminal
     /// and is refused when stdin is not one. This flag answers yes in advance,
     /// which is what a script or a CI job needs; the choice is recorded in the
-    /// audit log.
+    /// audit log — `command_confirmed`, naming `--yes` or the prompt that
+    /// answered, when the call goes through, and `command_denied` when it is
+    /// refused. The line carries the tool and its arguments, with any value
+    /// over 256 characters replaced by its length and the whole rendering cut
+    /// at 2048, so a file passed as `content=` cannot be copied into the
+    /// trail whole.
+    ///
+    /// **A value that fits in 256 characters is written as it stands**, after
+    /// the same redaction every audit line gets. With `security.sanitize` at
+    /// its defaults that redaction is strong against the obvious case:
+    /// entropy detection is on (4.5 bits per character, 16 characters
+    /// minimum), so a random base64 token is masked. What it does not
+    /// separate goes through — a hexadecimal token (4.0 bits per character at
+    /// most, and `entropy_hex_threshold` is off by default), a passphrase, an
+    /// excerpt of a configuration file, an internal host name. So: nothing on
+    /// a destructive call's command line that does not belong in `audit.log`.
+    ///
+    /// Recorded only while audit logging is on (`audit.enabled`, default
+    /// true): with it off there is no trail to write to, and a run whose
+    /// audit file cannot be opened says so on stderr.
     #[arg(long, global = true)]
     pub yes: bool,
 
@@ -314,7 +333,7 @@ pub enum Commands {
 /// Sub-actions for the `daemon` command.
 #[derive(Subcommand, Clone, Debug)]
 pub enum DaemonAction {
-    /// Start the daemon in the foreground (blocks until SIGINT).
+    /// Start the daemon in the foreground (blocks until SIGINT or SIGTERM).
     Start {
         /// Override the socket path. Defaults to
         /// `$XDG_RUNTIME_DIR/bridge-mcp.sock` or `/tmp/bridge-mcp-$UID.sock`.

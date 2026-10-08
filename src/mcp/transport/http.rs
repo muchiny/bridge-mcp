@@ -372,42 +372,105 @@ fn build_router_inner(
 /// and every event was discarded by `let _ = send(...)`, leaving `audit.log`
 /// created-but-empty on the one transport whose selling point is the audit
 /// trail. Pass `None` only when auditing is genuinely disabled.
+///
+/// **Spawning it was only half the fix, and the other half arrived with the
+/// audit-integrity wave.** Until then this function had no shutdown block at
+/// all — `axum::serve(..).await` with no `with_graceful_shutdown` and no
+/// signal handler — so it only ever ended by the process dying, and whatever
+/// was still queued in the writer died with it. It now stops on SIGINT or
+/// SIGTERM, and once axum has returned (which is also when the router, and
+/// with it the `Arc<McpServer>` it holds, is gone) it closes the audit
+/// channel and joins the writer.
+///
+/// # Errors
+///
+/// Propagates a refused bind (see `refuse_unsafe_bind`), an OAuth
+/// validator that cannot be built, an I/O error from the TCP bind, and any
+/// error axum reports while serving. The audit writer is drained on every
+/// one of those paths that got far enough to spawn it.
 pub async fn serve(
     server: Arc<McpServer>,
     config: HttpTransportConfig,
     audit_task: Option<crate::security::AuditWriterTask>,
 ) -> crate::error::Result<()> {
+    serve_with_shutdown(server, config, audit_task, super::shutdown_signal(), None).await
+}
+
+/// [`serve`], with the shutdown trigger and the bound-address notification
+/// injected.
+///
+/// Split out for the test that drives the whole function to completion: the
+/// production trigger is a process signal, which a test cannot raise without
+/// hitting every other test in the binary, and the production bind is
+/// whatever `config.bind` says, which cannot be `:0` if the test has to send
+/// a request to it. `on_bind` is how the test learns the port the OS picked;
+/// [`serve`] passes `None`.
+async fn serve_with_shutdown<F>(
+    server: Arc<McpServer>,
+    config: HttpTransportConfig,
+    audit_task: Option<crate::security::AuditWriterTask>,
+    shutdown: F,
+    on_bind: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
+) -> crate::error::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // Before the writer is spawned, so a refused bind leaves nothing to
+    // drain — `audit_task` is dropped here and the channel closes with it.
     refuse_unsafe_bind(&config)?;
 
-    if let Some(task) = audit_task {
-        tokio::spawn(task.run());
-    }
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    // A clone kept on purpose: `server` is moved into the router below, and
+    // the shutdown step needs the logger back. With `close()` the clone count
+    // does not matter; what matters is having *a* handle.
+    let audit_owner = Arc::clone(&server);
 
-    let bind = config.bind.clone();
+    let outcome: crate::error::Result<()> = async move {
+        let bind = config.bind.clone();
 
-    let validator = if config.oauth.enabled {
-        let v = super::oauth::build_validator_from_runtime(&config.oauth)
+        let validator = if config.oauth.enabled {
+            let v = super::oauth::build_validator_from_runtime(&config.oauth)
+                .await
+                .map_err(crate::error::BridgeError::McpInvalidRequest)?;
+            Some(Arc::new(v))
+        } else {
+            None
+        };
+
+        let router = if let Some(v) = validator.as_ref() {
+            build_router_with_validator(server, config, v)
+        } else {
+            build_router(server, config)
+        };
+
+        info!(bind = %bind, "Starting MCP HTTP transport");
+
+        let listener = tokio::net::TcpListener::bind(&bind).await?;
+        if let Some(tx) = on_bind {
+            let _ = tx.send(listener.local_addr()?);
+        }
+        // `router` is moved in here, so it — and the `Arc<McpServer>` inside
+        // its state — is dropped when this future completes. That is the
+        // ordering the drain below depends on.
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
             .await
-            .map_err(crate::error::BridgeError::McpInvalidRequest)?;
-        Some(Arc::new(v))
-    } else {
-        None
-    };
+            .map_err(|e| {
+                crate::error::BridgeError::McpProtocol(format!("HTTP server error: {e}"))
+            })?;
 
-    let router = if let Some(v) = validator.as_ref() {
-        build_router_with_validator(server, config, v)
-    } else {
-        build_router(server, config)
-    };
+        info!("HTTP transport stopped accepting; draining the audit writer");
+        Ok(())
+    }
+    .await;
 
-    info!(bind = %bind, "Starting MCP HTTP transport");
+    // Both steps run whatever `outcome` says: an error after the writer was
+    // spawned is exactly when the queued events matter most.
+    audit_owner.close_audit();
+    drop(audit_owner);
+    crate::security::drain_audit_writer(audit_writer).await;
 
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| crate::error::BridgeError::McpProtocol(format!("HTTP server error: {e}")))?;
-
-    Ok(())
+    outcome
 }
 
 /// Refuse to bind to a non-loopback address when OAuth is disabled.
@@ -2602,5 +2665,253 @@ mod tests {
             ..Default::default()
         };
         assert!(refuse_unsafe_bind(&cfg).is_ok());
+    }
+
+    // ====================================================================
+    // T12 (audit-integrity wave) — graceful shutdown + the audit drain
+    // ====================================================================
+
+    /// How many pipelined POSTs the shutdown test issues.
+    ///
+    /// Five, same as the daemon twin and for the same measured reason:
+    /// volume does not make this kind of test a detector (see
+    /// `DRAIN_TEST_CALLS` in `tests/daemon_integration.rs`). Small enough
+    /// that the whole client exchange finishes well inside
+    /// [`BLOCKING_HOLD`], which is what does.
+    const DRAIN_TEST_CALLS: usize = 5;
+
+    /// How long the test holds the runtime's ONLY blocking thread.
+    ///
+    /// Round 0 of this test waited for every response before signalling the
+    /// shutdown, and by then the audit writer had caught up on its own — so
+    /// removing the drain left the test GREEN and it pinned only the
+    /// graceful-shutdown half. Round 1 of the review called that out, and
+    /// this is the fix: `AuditWriterTask` writes from a `spawn_blocking`, the
+    /// runtime here has `max_blocking_threads(1)`, and the test takes that
+    /// thread before the first POST. The writer then cannot write at all
+    /// until this sleep ends, whatever the scheduler does.
+    ///
+    /// Measured, with the `close_audit()` + `drain_audit_writer(..)` pair
+    /// removed: `0 of 5` lines, ten runs out of ten.
+    const BLOCKING_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+
+    fn audited_config(path: std::path::PathBuf) -> crate::config::Config {
+        crate::config::Config {
+            audit: crate::config::AuditConfig {
+                enabled: true,
+                path,
+                // No rotation, no retention sweep: this test reads the live
+                // file.
+                max_size_mb: 0,
+                retain_days: 0,
+            },
+            ..crate::config::Config::default()
+        }
+    }
+
+    /// One raw HTTP/1.1 `tools/call` for `ssh_session_close` on an unknown
+    /// session id — a call that audits without a network and without the
+    /// confirmation gate (`mutating`, not `destructive`).
+    ///
+    /// Hand-rolled rather than sent with a client crate: the repository has
+    /// no HTTP client in `dev-dependencies`, and adding one to reach a
+    /// loopback port for one test is a poor trade.
+    fn raw_post(addr: std::net::SocketAddr, i: usize, last: bool) -> String {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": i,
+            "method": "tools/call",
+            "params": {
+                "name": "ssh_session_close",
+                "arguments": {"session_id": format!("t12-{i}")},
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        })
+        .to_string();
+        // `Mcp-Protocol-Version`, `Mcp-Method` and `Mcp-Name` are REQUIRED by
+        // Server Validation; without them the POST is refused 400 before the
+        // tool runs and nothing is audited. `Origin` satisfies `origin_guard`.
+        let connection = if last { "close" } else { "keep-alive" };
+        format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Content-Type: application/json\r\n\
+             Accept: application/json, text/event-stream\r\n\
+             Origin: http://localhost:5173\r\n\
+             Mcp-Protocol-Version: 2026-07-28\r\n\
+             Mcp-Method: tools/call\r\n\
+             Mcp-Name: ssh_session_close\r\n\
+             Connection: {connection}\r\n\
+             Content-Length: {len}\r\n\
+             \r\n\
+             {body}",
+            len = body.len()
+        )
+    }
+
+    /// The HTTP transport had **no shutdown block at all**: `axum::serve`
+    /// with no `with_graceful_shutdown` and no signal handler, so this
+    /// function only ever ended by the process dying — taking whatever the
+    /// audit writer still had queued with it. On that code this test could
+    /// not even be written: there was no point at which `serve` returned.
+    ///
+    /// Two halves, and they are not equally decisive — say so rather than
+    /// let a reader assume:
+    ///
+    /// 1. **`serve` RETURNS when the shutdown future resolves.** Decisive,
+    ///    measured: with `.with_graceful_shutdown(shutdown)` dropped and the
+    ///    future held alive, this test fails on its 20 s timeout
+    ///    (`Elapsed(())`), because `serve` never comes back.
+    /// 2. **When it has returned, the audit lines are on disk** — read
+    ///    synchronously, no sleep and no retry loop, which is the guarantee
+    ///    `tests/http_audit_trail.rs` has to poll for (up to 5 s). Decisive
+    ///    too, since round 1: `0 of 5` lines with the drain removed, ten runs
+    ///    of ten. What makes it decisive is [`BLOCKING_HOLD`], not the call
+    ///    count — see there for what round 0 got wrong.
+    ///
+    /// Every response is still read before the shutdown is signalled, and
+    /// that part is deliberate: signalling earlier made the test race axum's
+    /// accept (measured, green alone and `0 of 200` inside the full `--lib`
+    /// run, because the shutdown landed before the connection was accepted
+    /// at all). With the blocking thread held, waiting costs nothing.
+    #[test]
+    fn http_serve_stops_on_shutdown_with_its_audit_lines_on_disk() {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            // ONE blocking thread, and the test takes it. See `BLOCKING_HOLD`.
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("build the drain-test runtime")
+            .block_on(http_shutdown_leaves_its_audit_lines_on_disk());
+    }
+
+    async fn http_shutdown_leaves_its_audit_lines_on_disk() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let audit_path = dir.path().join("audit.log");
+
+        let (server, audit_task) = crate::mcp::McpServer::new(audited_config(audit_path.clone()));
+        let audit_task = audit_task.expect("audit is enabled, so a writer task must be produced");
+        let server = Arc::new(server);
+
+        let cfg = HttpTransportConfig {
+            bind: "127.0.0.1:0".to_string(),
+            ..Default::default()
+        };
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(serve_with_shutdown(
+            server,
+            cfg,
+            Some(audit_task),
+            async {
+                let _ = stop_rx.await;
+            },
+            Some(bound_tx),
+        ));
+
+        let addr = bound_rx.await.expect("serve must report the bound address");
+
+        // Take the runtime's only blocking thread BEFORE the first POST, so
+        // the writer's first `spawn_blocking` queues behind this sleep.
+        // Nothing else here uses the blocking pool: hyper does not for plain
+        // HTTP/1, and this server has no cleanup loops on the HTTP path.
+        let hold = tokio::task::spawn_blocking(|| std::thread::sleep(BLOCKING_HOLD));
+
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (mut read_half, mut write_half) = stream.into_split();
+
+        // Drain the responses in the background: without a reader the server
+        // blocks writing them, the connection never completes, and the
+        // graceful shutdown waits for it — a hang that would look like a
+        // drain bug.
+        let answered = tokio::spawn(async move {
+            let mut raw = Vec::new();
+            let _ = read_half.read_to_end(&mut raw).await;
+            String::from_utf8_lossy(&raw).matches("\"jsonrpc\"").count()
+        });
+
+        let mut wire = String::new();
+        for i in 0..DRAIN_TEST_CALLS {
+            wire.push_str(&raw_post(addr, i, i + 1 == DRAIN_TEST_CALLS));
+        }
+        write_half
+            .write_all(wire.as_bytes())
+            .await
+            .expect("write the pipelined POSTs");
+        write_half.flush().await.expect("flush");
+
+        // Every response first: see the doc comment. Signalling before this
+        // point made the test race axum's accept.
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(20), answered)
+            .await
+            .expect("the server must answer every POST within 20s")
+            .expect("the response drain must not panic");
+        assert_eq!(
+            answered, DRAIN_TEST_CALLS,
+            "the server must have answered every POST it audited"
+        );
+
+        // The premise, asserted instead of assumed — see `BLOCKING_HOLD`.
+        // Without these two lines a slower run-up makes this test
+        // tautologically green and the drain could be deleted unnoticed.
+        assert!(
+            !hold.is_finished(),
+            "the blocking thread must still be held when the shutdown is signalled, \
+             or this test proves nothing about the drain"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&audit_path)
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            0,
+            "the audit file must still be EMPTY here: the writer cannot have written \
+             anything while its only blocking thread is held"
+        );
+
+        stop_tx
+            .send(())
+            .expect("the shutdown future must still be live");
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), serving)
+            .await
+            .expect("serve must return once the shutdown future resolves")
+            .expect("the serve task must not panic")
+            .expect("serve must not error");
+
+        // Next statement after the return. No retry loop.
+        let contents = std::fs::read_to_string(&audit_path).expect("the audit file must exist");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            DRAIN_TEST_CALLS,
+            "every served POST must have left its line on disk by the time serve() returned; \
+             got {} of {}",
+            lines.len(),
+            DRAIN_TEST_CALLS
+        );
+
+        // Looked up by its id, not taken at index 0: nothing orders the
+        // events, and the daemon-side twin of this test measured them
+        // arriving out of order.
+        let first = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {line:?}"))
+            })
+            .find(|e| e["command"] == "ssh_session_close session_id=t12-0")
+            .expect("the line for call 0 must be on disk");
+        assert_eq!(first["tool_name"], "ssh_session_close");
+        assert_eq!(first["host"], crate::security::NO_HOST);
+
+        hold.await.expect("the blocking hold must not panic");
     }
 }

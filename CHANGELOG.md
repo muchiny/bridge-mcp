@@ -24,7 +24,346 @@ host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 
+**`limit` is no longer swallowed when it is not a row count, so seven tools run
+on the hosts they were told to.** `DataReductionArgs::extract` removed the
+`limit` key from the arguments whatever its value, before the tool read its own.
+`ssh_awx_job_launch`, `ssh_awx_workflow_launch`, `ssh_awx_adhoc_launch`,
+`ssh_awx_job_follow`, `ssh_ansible_playbook`, `ssh_ansible_recap` and
+`ssh_ansible_run_background` declare `limit` as an Ansible host pattern
+(`webservers`, `host1:host2`), so `ssh_awx_job_launch template_id=42
+limit=webservers` reached AWX with no `limit` and ran on the whole inventory,
+without a word. `extract` now takes `limit` only when it is an integer; anything
+else stays in the arguments. All seven are pinned by a test that reads the
+command that was run. **Scope:** this fixes the call, not the published schema:
+`describe-tool` and MCP `tools/list` still advertise `limit` as an integer on
+five of the seven, so a client reading the schema will not discover the host
+pattern.
+
+**Breaking:** on a tool that does not declare `limit`, a non-integer value
+(`limit=abc`) used to be dropped and the call returned its full output with
+exit 0; it is now refused with ``unknown field `limit` `` plus a sentence
+saying `limit` must be an integer of at least 1 (serde's
+`deny_unknown_fields`). A script that relied on that silence will fail: remove
+the argument, or pass an integer if a row limit was meant. That added sentence
+is emitted by the `StandardTool` pipeline only: the direct handlers — about 42
+of them, the read-only AWX family among them — still return serde's bare
+message, which names `limit` as unknown on a tool whose published schema
+advertises it. Not fixed either: on the five of seven whose output kind lets
+the reduction schema apply, an integer `limit` is still taken as a row limit,
+and on the two `RawText` ones it is refused by their output-kind guard — so
+either way a purely numeric host pattern cannot be passed from the CLI or as a
+JSON number (a JSON string `"5"` reaches them).
+
+**Audit: the direct handlers now record the reduction params they were given.**
+Until now only the `StandardTool` pipeline filled the `reduction` field of an
+audit event; the 42 direct handlers that extract a `DataReductionArgs` passed
+`&[]` to `process_success`, and `ssh_ls`, which writes its own event, left it
+empty. They now record `used_params()`. Reading rule for the field, exceptions
+included: a `reduction` key is present exactly when the caller supplied a
+reduction param and the call SUCCEEDED, through the pipeline, one of those
+handlers, or `ssh_ls`; a failed call (`log_failure`, an `Error` event) never
+carries it, even when the caller supplied one. **Its absence does not mean the output was unfiltered**: it also
+appears on events that code `&[]` by hand (`ssh_session_exec` via
+`log_success`, the SFTP/file tools that build an `AuditEvent` themselves, none
+of which takes a reduction param), and no event records `summarize=true`
+sampling or `max_output` truncation, both of which change what the caller saw.
+The field lists the params *supplied*, written before the reduction runs; a
+reduction that then fails, or is skipped on a non-zero exit, is still listed.
+Nine tools (`ssh_exec`, `ssh_exec_multi`, `ssh_find`, `ssh_tail`,
+`ssh_disk_usage`, `ssh_file_write`, `ssh_metrics_multi` and the two
+`ssh_awx_*_stdout` tools) and `bridge-mcp exec` keep `&[]`: they reject every
+reduction param, so none can have acted.
+
+**The audit-integrity entry (`AuditLogger::log` taking `tool`) has a third
+basis.** The defect was measured live, against a real host through the MCP
+server: `ssh_session_exec` wrote a line
+`{"event_type":"ssh_exec","host":"raspberry",...}` with no `tool_name` field.
+But the binary queried was `~/.local/bin/bridge-mcp`, dated 2026-09-09, which
+predates this branch. The **fix** was not measured live; it rests on
+compilation (the 16 anonymous call sites were enumerated by the compiler), unit
+tests and a serialisation test.
+
 ### BREAKING
+
+- **(lib API) `AuditLogger::log(&self, event)` is now `log(&self, tool: &str, event)`,
+  and `tool` overwrites `event.tool_name`.** `AuditLogger` is a non-hidden
+  re-export, so this breaks external callers. Migration: pass the name of the
+  tool that produced the event as the first argument, and drop any
+  `.with_tool_name(..)` you chained on the event (it is now ignored; the sink is
+  the only writer of the field). `AuditEvent::new` still builds a nameless event,
+  so the guarantee is "no call to `log` without a tool", not "no `AuditEvent`
+  without a `tool_name`". Why: `event_type` is the literal `ssh_exec` for
+  every command event, and `tool_name` is skipped from the JSON when absent, so
+  a line from a handler that bypassed the use-case read exactly like an ordinary
+  `ssh_exec`. Sixteen call sites were anonymous (`ssh_ls`, `ssh_download`,
+  `ssh_upload`, `ssh_sync`, `ssh_file_write`'s SFTP branch, `ssh_files_write`,
+  and four in `cli/runner.rs`); they now carry their own name. Their
+  `exit_code: 0` on SFTP transfers and empty `reduction` are unchanged.
+
+  **(lib API, same entry) `CommandResult` has a fourth variant,
+  `StateChanged { duration_ms }`, so an exhaustive `match` on it stops
+  compiling, and a new `event_type` appears in `audit.log`.** `CommandResult`
+  is a `#[doc(hidden)]` re-export (`src/lib.rs`) and `AuditEvent.result`
+  serializes it, so both the Rust API and the JSONL shape change. Migration:
+  add an arm; the variant carries a duration and **no exit code**. Why: the
+  seven tools that change server state without running any process
+  (`ssh_session_create`, `ssh_session_close`, `ssh_tunnel_create`,
+  `ssh_tunnel_close`, `ssh_config_set`, `ssh_recording_start`,
+  `ssh_recording_stop`) wrote no event at all, and the only two ways to give
+  them one were a fabricated `exit_code: 0` — a success claimed for something
+  that never ran, the `ssh_file_write`/`SessionExecResult` trap — or a variant
+  that does not carry a code. The absence is the information, which is the
+  doctrine `ToolCallResult::remote_exit_code` already states for its `None`.
+  Three more additions come with it: `AuditEvent::tagged(event_type, host,
+  command, result)`, the first constructor that lets code outside
+  `src/security/audit.rs` choose **either** of those two (`new` hard-codes
+  `event_type: "ssh_exec"`, `denied` hard-codes `"command_denied"`, and both
+  pin the result); `ExecuteCommandUseCase::log_state_change(tool, host,
+  operation, duration_ms)`, a fifth entry point beside the four that take a
+  mandatory `tool` — and the named, typed facade the seven tools actually
+  call, since `tagged` alone would let a caller pair any type with any
+  result; and **`mcp::tool_handlers::utils::elapsed_ms(start: Instant) ->
+  u64`**, which is how those seven fill `duration_ms`, since no
+  `CommandOutput` brings a duration back for an operation that ran no
+  process. `mcp` is not a `#[doc(hidden)]` re-export, so `elapsed_ms` is
+  published API. **Migration: none**, it is an addition — an explicit `use`
+  or a local definition of the same name shadows a glob import, so only a
+  crate that globs `bridge_mcp::mcp::tool_handlers::utils::*` *and* globs
+  another module exporting `elapsed_ms` has to disambiguate, at the point of
+  use. It saturates (`u64::try_from(..).unwrap_or(u64::MAX)`). Counted: six
+  `fn elapsed_ms` in the tree, this being the only public one;
+  `ssh_exec_multi.rs` and `ssh_metrics_multi.rs` are a bare `as u64` that
+  wraps and are untouched by this, so the six do not agree.
+  Those seven lines read `{"event_type":"state_change",
+  "host":"raspberry","command":"ssh_session_close session_id=…",
+  "tool_name":"ssh_session_close","result":{"StateChanged":{"duration_ms":2}}}`
+  — no `exit_code` key anywhere.
+
+  On their **success** path they write **no history entry**:
+  `HistoryEntry::exit_code` is a non-optional `u32` whose `0` means success,
+  so the history cannot express "no code", and it is a history of commands.
+  When the state-changing call itself returns `Err` they go through
+  `log_failure`, which writes audit and history both — so `ssh_history` and
+  `history://recent` show **some** failures of these seven tools and never a
+  success.
+
+  **Which is also why `event_type` is the wrong key to select these seven
+  by.** `log_failure` builds `AuditEvent::new`, and `new` hard-codes
+  `event_type: "ssh_exec"`, so the failure lines these seven write are
+  spelled exactly like an ordinary command event, and
+  `jq 'select(.event_type == "state_change")'` returns their **successes
+  only**. Those failure lines are new in this release — the
+  `inspect_err(log_failure)` that writes them is part of this change — so the
+  omission is not inherited. Pinned by test:
+  `a_refused_session_writes_one_line_naming_this_tool` and
+  `the_line_shapes_this_tool_writes` both assert `event_type == "ssh_exec"`
+  on the failure line of a state tool. **Select on `tool_name`** when you
+  want everything one of the seven did, and on `result` when you want the
+  kind of outcome — this selector was run against rows of each shape:
+  `jq 'select(.tool_name | IN("ssh_session_create","ssh_session_close",
+  "ssh_tunnel_create","ssh_tunnel_close","ssh_config_set",
+  "ssh_recording_start","ssh_recording_stop"))'` — name the seven, do not
+  match a prefix: `^ssh_(session|tunnel|recording)_` also catches
+  `ssh_session_exec`, which logs on **every** call and is spelled
+  `event_type: "ssh_exec"`, so a prefix selector hands back every session
+  command as if it were a state change.
+
+  Anything refused *before* that call writes nothing to either sink:
+  bad arguments, an unknown host, a rate-limit refusal, a disabled recorder,
+  and in `ssh_tunnel_create` a failed bind or a failed SSH connection
+  (measured: `local_port=80`, zero new lines). `ssh_config_set` never reaches
+  `log_failure` at all. That asymmetry is deliberate and documented on
+  `log_state_change`; `audit.log` is the fuller record for these seven, the
+  command history is not, and neither is a count of attempts.
+
+- **(wire) `"host":"<no-host>"` is a new, reserved host value in
+  `audit.log`.** The constant `bridge_mcp::security::NO_HOST`, with **five**
+  production callers: `ssh_config_set` — which changes a limit of the bridge
+  process and has no host parameter at all — the failure paths of
+  `ssh_session_close`, `ssh_tunnel_close` and `ssh_recording_stop`, where the
+  id handed in matched nothing so no host was ever resolved, and the CLI's
+  destructive gate (`cli::runner::gate_host`). The gate's case is the broad
+  one and it is not the `*_close` case: it runs before schema validation, so
+  **any** destructive call that simply omits `host` lands on the sentinel,
+  not only the three AWX tools whose schema has none. Pinned by test: a call
+  to `ssh_service_stop`, which requires a host, writes
+  `{"host":"<no-host>","event_type":"command_denied", …}` when the argument is
+  left out. Any consumer that assumes `host` is a `config.yaml` alias must
+  tolerate it. The angle brackets are what make it impossible to confuse with
+  a real alias and trivial to grep; no such convention existed before
+  (checked: every non-test caller passed a real alias).
+
+  **And the brackets are the writer's, not the caller's**, which the first
+  version of the gate did not enforce: `host` arrived there as an unresolved
+  JSON argument and was written verbatim, so `--yes tool ssh_file_write
+  'host=<no-host>' …` produced a line indistinguishable from a genuinely
+  hostless one and `grep '<no-host>'` stopped enumerating what it claims to.
+  A caller's `<` and `>` are now escaped to `\u{3c}` / `\u{3e}`
+  (`cli::runner::audited_host`); so are control characters, because `host`
+  reached the `tracing` sink as `Display` with no rendering, and a newline
+  inside it added a complete, well-formed `Audit: command denied …` record to
+  the journal journald and syslog capture while `audit.log` stayed one line.
+  A real alias is untouched — letters, digits, dots, dashes, colons and
+  non-ASCII all pass through, because the sanitizer is deliberately not
+  applied to this field.
+
+  **It reaches the command history too**, not only `audit.log`: those failure
+  paths go through `log_failure`, which writes a `HistoryEntry` as well, so
+  `ssh_history` and `history://recent` can both return entries whose `host`
+  is the sentinel. Checked for those consumers — `CommandHistory::for_host`
+  is an unvalidated `==` filter and `ssh_history` only prints the field, so
+  the value is inert. One sharp edge: `history_resource`'s `parse_query` does
+  no percent-decoding, so `history://recent?host=<no-host>` matches
+  literally while the correctly-encoded `host=%3Cno-host%3E` does not.
+
+- **(lib API + wire) `CommandResult` has a fifth variant,
+  `Confirmed { by }`, and `"command_confirmed"` is a new `event_type` in
+  `audit.log`.** Same migration as the fourth: add an arm to any exhaustive
+  `match`. The variant carries **neither an exit code nor a duration** — it
+  is written the moment the CLI's destructive gate decides, before the call
+  is dispatched and before it is even settled whether a daemon or the
+  in-process path will serve it, so nothing has run to time or to exit. `by`
+  names what answered: `"--yes"` or `"terminal prompt"`.
+
+  Why: **the CLI's destructive gate left no trace in `audit.log` at all**,
+  while `--yes`'s own help text said "the choice is recorded in the audit
+  log". The decision went to a `tracing::warn!`, which reaches stderr and
+  never `audit.path` — and an operator reading that sentence believes the
+  two are the same file. Both refusal arms (stdin is not a terminal; the
+  operator declined) returned `CommandDenied` with no audit call either.
+  Structural, not a missing line: the gate ran 28 lines before the
+  `ToolContext` was built, so at the moment of the decision no `AuditLogger`
+  existed. The gate now **decides without writing** — `decide_destructive`
+  returns a `GateDecision` value, and `apply_gate_decision` records it and
+  turns a refusal into an error — so the decision is taken at the top of
+  `run_tool`, before every branch, while the logger is created only for a
+  call that produced a decision to record. A decision that is taken and not
+  recorded is no longer expressible on either side: the recording `match` is
+  exhaustive with `NotGated` as its only silent arm, and `GateDecision` is
+  `#[must_use]`, without which `decide_destructive(…);` in statement position
+  compiled in silence (clippy's `must_use_candidate` is pedantic-only and this
+  crate does not enable it). The gate itself did **not** move down
+  to where the context is built: the daemon branch ends in a `return`, so a
+  gate placed after it would never be reached by a call a live daemon serves,
+  which is exactly the 2026-08-31 regression this release fixed. That
+  ordering is now pinned by a test that stands up a stub daemon on
+  `$XDG_RUNTIME_DIR/bridge-mcp.sock` and checks the gate still refuses.
+
+  **All five of the gate's exits are covered**, including the one this change
+  found: a prompt whose answer cannot be read off stdin returns
+  `BridgeError::Io` and used to refuse without writing anything. It is now
+  recorded as a denial while keeping its own error kind, so an unreadable
+  stdin does not report as a security denial's exit code.
+
+  **The line carries the call's arguments, bounded, and the bound is
+  visible.** Any single argument value over `GATE_AUDIT_MAX_VALUE_CHARS`
+  (256 characters) is replaced by `<elided: N chars>`, and the whole
+  operation string is cut at `GATE_AUDIT_MAX_OPERATION_CHARS` (2048) with
+  `<truncated: N chars total>`. Without it,
+  `--yes tool ssh_file_write … content=<a file>` wrote a `command_confirmed`
+  line carrying that whole file. **Through `argv` the ceiling is
+  `MAX_ARG_STRLEN` — 32 pages, 128 KB per argument, and `ARG_MAX` for the
+  whole line; past that `execve` fails with `E2BIG` and the binary never
+  starts.** Measured by hand, not by a test: `fork` + `execv("/bin/true",
+  [prog, "A" × n])` succeeds for n = 131071 and fails with `E2BIG` (errno 7)
+  for n = 131072, `getconf PAGESIZE` = 4096. No test in the repository
+  establishes it —
+  `tests/cli_exit_code.rs` asserts it in a docstring to justify passing the
+  100 KB that *succeeds*, and the 400 KB figure is an in-memory unit test
+  that calls no `execve`. The number was right and the citation was not.
+  That ceiling is the real
+  one for this line, and it is worth saying why: the gate is CLI-only, and its
+  arguments come from `argv` even when the call is then forwarded to a daemon,
+  because the forwarding happens after the gate. An MCP-served call never
+  reaches this gate at all. So 128 KB per argument is not a worst case someone
+  else could exceed — it is the ceiling, and it is already three orders of
+  magnitude past what belongs on an audit line. This bounds volume — 128 KB a
+  line fills a 100 MB archive in 800 calls, and any JSONL consumer with a
+  line-length bound breaks — and it
+  bounds content at any size, since it defeated a deliberate exclusion: that
+  handler's own event is `SFTP_WRITE <path>` with no content at all. The rule
+  is a size rule rather
+  than a list of content-bearing field names on purpose: the gate sees an
+  opaque JSON object for any of 476 tools, so a name list would leak in
+  silence the first time a payload was called something else.
+
+  Costs, and one that was measured and then removed: the audit wiring is
+  built before the daemon branch only for a call the gate decided about. Built
+  for every call it cost the daemon fast path **391 ms in debug** (74 ms ->
+  465 ms; ~332 ms of it two `Sanitizer`s at 70 patterns, measured by rerunning
+  with `security.sanitize.enabled: false` at 133 ms) — on a path that exists
+  to save a ~95 ms handshake, for the 431 of 476 tools that are not
+  destructive and can never produce a gate line. What remains: a destructive
+  call now opens the audit file even when a daemon serves it, and its refusal
+  waits for the writer to drain, bounded by the existing 2 s timeout.
+
+  **Two processes now append to one `audit.log` on a destructive call** (the
+  CLI writes the gate line, the daemon writes the execution line). Appends of
+  one line interleave cleanly; **rotation does not** — two writers that
+  rename the live file race, and `audit.max_size_mb` is what triggers that.
+  The CLI's writer rotates on its own byte counter, seeded from the file's
+  length at open.
+
+  `--yes`'s decision also **changed `tracing` level, from WARN to INFO**: it
+  is now emitted by the audit sink like every other audit line. The CLI's
+  default filter is `info`, so it is still on stderr, but `RUST_LOG=warn` no
+  longer shows it.
+
+  One reading consequence, from a limitation that is unchanged: the gate runs
+  **before** the blacklist, so a blacklisted destructive command is confirmed
+  and then refused anyway (it fails closed). That pair now shows in the trail
+  as a `command_confirmed` line followed by a `command_denied` one for the
+  same tool. A `command_confirmed` line therefore means "the gate let it
+  past", not "it ran".
+
+  **The allow path is audited, not only the refusals**, through the new
+  `ExecuteCommandUseCase::log_confirmed(tool, host, command, by)` — a
+  sixth entry point beside the five that take a mandatory `tool`, built on
+  `AuditEvent::tagged` like `log_state_change` rather than as a third
+  mechanism. A trail of refusals alone cannot distinguish a destructive call
+  that ran *after* the gate from one that ran without ever meeting it, and
+  the second is precisely what the CLI did before 2026-08-31 on the default
+  configuration. Like `log_denied`, it writes **no history entry**: nothing
+  ran, and `HistoryEntry::exit_code` is a non-optional `u32`. `host` is the
+  call's `host` argument when it has one and `NO_HOST` otherwise — at the
+  gate the host is an unresolved JSON argument, and 3 of the 45 destructive
+  tools declare no `host` at all.
+
+  **A missing `command_confirmed` line does not mean a bypassed gate.** The
+  MCP server's own destructive gate writes **no** audit event today, and the
+  CLI, the daemon and the MCP server all append to the same file, so on a
+  shared trail the absence only means "this call did not come through the CLI
+  gate". The inference holds for CLI-served calls and nowhere else — and on a
+  shared trail it cannot be applied at all, because `AuditEvent` carries no
+  field naming what served a call, so a reader cannot select the CLI-served
+  lines to reason over. Usable on a CLI-only trail.
+
+  **Recorded only while audit logging is on.** With `audit.enabled: false`
+  there is no trail; and a run whose `audit.path` cannot be opened used to
+  fall back to no audit **in silence**, so it looked exactly like a run that
+  was audited. It now warns on stderr ("THIS RUN IS NOT AUDITED").
+
+  **(lib API, same entry) `ExecuteCommandUseCase::log_denied` now redacts
+  `command` before logging**, like the five entry points beside it. It was
+  the only one that did not, and the asymmetry leaked: the use case's
+  sanitizer carries the legacy `security.sanitize_patterns` while the audit
+  logger's own sanitizer is built from `security.sanitize` alone, so a token
+  matched **only** by a legacy pattern reached the denial line in clear next
+  to a masked confirmation line. Visible only with a non-empty
+  `sanitize_patterns` (empty by default). The root asymmetry — the audit
+  sink's sanitizer not being legacy-aware, which still affects the **11
+  `AuditLogger::log` call sites in six handlers** (`ssh_ls`, `ssh_upload`,
+  `ssh_sync`, `ssh_file_write`, `ssh_files_write`, `ssh_download`), plus four
+  in `src/cli/runner.rs` that are not handlers — is left alone here. The
+  "sixteen" above is the count of sites that were *anonymous before* this
+  release, which is a different quantity and one short of today's fifteen
+  anyway: `ssh_download` merged its two calls into one.
+
+  **Not covered by a test:** nothing now, for the gate's own branches. The
+  prompt's answer is mapped by a pure `decision_from_prompt_answer`, which is
+  tested for both answers, so the human-confirmation line is pinned without a
+  TTY; what no test exercises is `IsTerminal` returning true, i.e. the prompt
+  being printed and read at all.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
@@ -62,7 +401,11 @@ nothing in the text below would otherwise tell you which is which.
 
 - **A tool annotated `destructiveHint` is now gated in the CLI.** It prompts on
   a terminal and is refused with exit 4 when stdin is not one; scripts must pass
-  `--yes`, which is logged. Previously the direct path ran destructive tools
+  `--yes`. Every decision the gate takes is written to `audit.path` — see the
+  `CommandResult::Confirmed` entry above for what the line says, and for the
+  fact that until it the decision reached `tracing` on stderr only, which the
+  `--yes` help text described as the audit log.
+  Previously the direct path ran destructive tools
   unchallenged while the daemon path refused them, so the outcome depended on
   whether a daemon happened to be running — and the default, no daemon, was the
   unguarded one. The gate follows
@@ -232,9 +575,12 @@ nothing in the text below would otherwise tell you which is which.
   result body and no `outputSchema` changes; the server separately copies the
   code into `_meta` (see "Added").
 
-- **`ExecuteCommandUseCase::process_success_for_tool` takes a new
+- **`ExecuteCommandUseCase::process_success` takes a new
   `reduction: &[&'static str]` parameter.** Existing callers must pass the
-  reduction params actually used, or `&[]`.
+  reduction params actually used, or `&[]`. (This entry named a
+  `process_success_for_tool`; no such function exists in any tagged release —
+  checked, `git show v3.0.0` has zero occurrences — so the migration
+  instruction pointed at a symbol a caller could not find.)
 
 - **`ssh_session_exec` refuses a command whose top-level word is `exit`**,
   returning an invalid-request error (CLI exit 1) instead of running it. It used
@@ -563,6 +909,148 @@ nothing in the text below would otherwise tell you which is which.
 
 ### Fixed
 
+- **The audit writer is drained when any of the three MCP transports shuts
+  down, and `SIGTERM` is handled at all.** `McpServer::serve` and
+  `mcp::transport::http::serve` each spawned the `AuditWriterTask` and threw
+  the `JoinHandle` away. The writer's loop ends only when its channel closes,
+  and the channel closes only when the last sender is dropped — which never
+  happened, because `McpServer` holds an `Arc<AuditLogger>` and every
+  `ToolContext` holds a clone. So whatever was still queued when the process
+  exited was lost, and lost **silently**: `AuditLogger::log` ends in
+  `let _ = sender.send(event)` on an unbounded channel, which cannot report a
+  thing. Both sites now close the channel and **join** the writer, bounded at
+  2 s, as the five CLI entry points already did through `finish_audit`.
+
+  Joined and never `abort()`ed, which is why the handle is not in `serve`'s
+  `cleanup_handles` vec: the write runs in a `tokio::task::spawn_blocking`
+  followed by `rotate_if_needed`, so an abort would lose the event in flight
+  **and** the rotation it was about to trigger. Both halves are pinned, the
+  rotation one on the only configuration where it can be seen (`max_size_mb:
+  1`, the last of 16 events crossing the bound inside the drain): with the
+  join replaced by an abort, no archive is created at all.
+
+  **"The three transports' shutdown" is the exact scope, and it is narrower
+  than "no event can be lost".** EVERY dispatched request runs in a bare
+  `tokio::spawn` — the per-request task in `serve_session_with_context` and
+  the `io.modelcontextprotocol/tasks` worker in `handle_tools_call_async`
+  alike. None is in a vec or a `JoinSet`, all hold a `ToolContext` and so a
+  clone of the logger, and one still running when the channel closes logs to
+  `tracing` and not to the file. The request task is covered for about the
+  2 s + 4 s of the session drain, because its `Sender` clone is what the
+  session waits on; the tasks worker is not waited on at all. So
+  `ssh_exec command='sleep 20'` followed by `daemon stop` loses its event.
+  Not a regression — that queue used to die with the process — but not
+  covered either.
+
+  **Measured**, on a test that serves five `tools/call` requests over the
+  daemon socket and reads the audit file on the statement after `serve`
+  returns, with the runtime's single blocking thread held so the writer cannot
+  finish on its own: without the drain, **0 of 5** lines on disk, ten runs out
+  of ten. With it, 5 of 5. The twin test on the HTTP transport measures the
+  same, the same way.
+
+  **`mcp::transport::http::serve` had no shutdown block at all** — plain
+  `axum::serve(listener, router).await`, no `with_graceful_shutdown`, no
+  signal handler — so there was no point at which to close and join anything.
+  It now stops on SIGINT or SIGTERM and drains afterwards, in that order: the
+  router owns the `Arc<McpServer>`, so the audit logger is only reachable for
+  closing once axum has returned and the router is gone.
+
+  **`SIGTERM` was listened for nowhere in the process**, while
+  `bridge-mcp daemon stop` sends exactly that (`PidFile::stop`) and
+  `run_daemon`'s own doc-comment promised "`SIGINT` (Ctrl+C) or `SIGTERM`".
+  The only handler was `tokio::signal::ctrl_c()`. The documented way of
+  stopping a daemon therefore killed it by the signal's default disposition,
+  skipping the whole of `serve`'s teardown — the pools' `close_all`, the
+  socket cleanup, and now this drain. Both signals are handled, in one shared
+  `mcp::transport::shutdown_signal()`; the tokio `signal` feature was already
+  enabled, so this adds no dependency. **Stdio is deliberately left without a
+  handler**: its session ends on EOF of stdin, which is what a parent closing
+  the pipe already provides.
+
+  **`daemon stop` now bounds its session drain, which is the other half of
+  handling the signal.** `serve` joined its session tasks with no bound, and a
+  session's reader loop parked on `reader.recv()` with no second exit — so a
+  client that was connected and silent held the shutdown for ever. That
+  predates this release, but SIGTERM used to kill the process before it could
+  matter, and tokio's SIGTERM handler is permanent ("the default platform
+  behavior will NOT be reset"), so handling the signal removed the escape.
+  Measured on the built binary, one client connected without EOF:
+  `daemon stop` printed `Daemon stopped.` and returned 0, the log stopped at
+  `Transport accept loop ended, draining in-flight sessions`, the process was
+  **still alive 16.3 s later**, a second `daemon stop` printed
+  `Daemon stopped.` again with no effect, and `kill -9` was the only way out.
+  The drain now waits 2 s for the sessions to end on their own, then cancels
+  their reader loops, then waits 4 s more, then aborts the tasks — the same
+  three steps, in the same order, as the per-session writer backstop beside
+  it. Same scenario after the fix: the process is gone **2.3 s** after
+  `daemon stop`, the log reaches `All sessions drained` and `Daemon stopped`,
+  and the second `daemon stop` correctly reports no PID file.
+
+  Only for a transport that says it was asked to stop
+  (`Transport::shutdown_requested`, new, defaulted to `false`). **Stdio says
+  `false` and must**: its accept loop ends after the one session is handed
+  out, long before that session does, so bounding there would end
+  `bridge-mcp serve` a couple of seconds after start-up. Measured, with the
+  bound made unconditional: the binary answers the first request and then
+  stops answering with stdin still open.
+
+  **The three `close_all` calls are bounded too, and without that the
+  un-killable daemon came back through them.** `SessionManager::close_all`
+  begins by taking the lock that `SessionManager::exec` holds for the WHOLE
+  of a remote command, and `sessions.timeout_secs` defaults to **1800 s**
+  (schema ceiling 3600). Measured against a real host, one session running
+  `sleep 45` whose client had already closed its socket: the bounded session
+  drain finished in **1.7 s**, then `close_all` parked **42.0 s** on that
+  lock — with `Daemon stopped.` already printed and exit 0 already returned,
+  which is the symptom above, word for word, bounded by the command's
+  deadline instead of by the drain. Each `close_all` now gets **2 s**
+  (`RESOURCE_CLOSE_GRACE`) and is then abandoned: the process is exiting, the
+  kernel closes the sockets, and `sshd` sees a dropped connection. Same
+  scenario after: the process is gone **4.0 s** after `daemon stop`, with a
+  `WARN` naming the resource it gave up on.
+
+  **The trade that buys, stated plainly: an in-flight command's audit event
+  is now lost where it used to be waited for.** Same measurement, the audit
+  file: **two** lines before the bound (`ssh_session_create`, then
+  `ssh_session_exec` with `duration_ms: 45003` — it landed only because the
+  daemon stayed alive 44 s for it) and **one** after. On the `daemon stop`
+  path nothing regressed relative to 3.0.0 — SIGTERM was not handled there, it
+  killed the process outright, and that event was already lost. **On SIGINT
+  and on stdio EOF the trade is real**: those paths did wait for the command,
+  without a bound, so the event could land; they are now bounded like the
+  rest. Either way it is a bounded shutdown chosen over a complete trail, and
+  the loss is wider than one command — any handler still in flight past the
+  bound loses its event, including `ssh_exec` on a long command and the tasks
+  worker.
+
+  **Cost, and the earlier figure in this entry was wrong twice.** It first
+  said "up to 2 s longer", which is the audit drain alone; its replacement
+  then put the 5 s-per-connection term in the bound, which the `close_all`
+  bound removes. On the `daemon stop` path the whole of `serve`'s teardown is
+  new — it never ran there at all — and every step of it is now bounded:
+  **2 s** waiting for sessions to end, **4 s** more after their reader loops
+  are cancelled, **2 s** for each of the three `close_all` calls, **2 s** for
+  the audit writer. **14 s, a constant**, with no term in the number of
+  sessions or pooled connections — plus `Transport::shutdown`, which is not
+  bounded by this code but is synchronous in both implementations
+  (`UnixSocketTransport` cancels a token and unlinks a file, `StdioTransport`
+  does nothing), so an out-of-tree transport is the only way past the
+  constant. Measured end to end on the built binary:
+  **356 ms** when the client closed its socket (nothing to wait for),
+  **2.27 s** when it stayed connected and silent, **4.10 s** with a session
+  running a 45 s command — against **44.03 s** for that last case before the
+  `close_all` bound. The hot path pays one uncontended
+  `std::sync::Mutex` lock/unlock per audited event (see "Added").
+
+  **What is NOT covered by a test:** the signal wiring itself. No test raises
+  a signal at the process — doing so from one test reaches every other test in
+  the same binary, and tokio's registration is process-wide — so the in-process
+  tests cancel the transport's shutdown token or resolve the shutdown future
+  directly. What stands in for it is a measurement on the built binary
+  (`daemon start`, a tool call, `daemon stop`, then the audit file and the
+  pid), recorded in the T12 report with `SigCgt` from `/proc/<pid>/status`.
+
 - **A slow command no longer destroys its session.** Every `Err` from reading a
   session's output evicted and closed the session, under a comment asserting
   "Shell is dead" — a diagnosis the code had never made. A deadline expiring
@@ -713,8 +1201,8 @@ nothing in the text below would otherwise tell you which is which.
   `AuditWriterTask` on return, so every `bridge-mcp tool …` left a 0-byte
   `audit.log` and an empty rotated archive. The CLI entry points keep the
   writer, drop the context and wait up to 2 s for the drain. Tool events carry
-  `reduction: [...]` when reduction params were used — standard tools only,
-  the custom handlers are a follow-up. `bridge-mcp status` reports
+  `reduction: [...]` when reduction params were used — standard tools and, since
+  the audit-integrity wave, the direct handlers (see that entry). `bridge-mcp status` reports
   `"written_by": "mcp-server-and-cli"`.
 
 - **A patch is no longer reinterpreted by `printf`.**
@@ -761,6 +1249,48 @@ nothing in the text below would otherwise tell you which is which.
   silently stopped stopping. The code also survives the MCP `summarize=true`
   round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
   built by the real serializer; no test spawns a daemon process.
+
+- **`McpServer::serve`'s teardown is bounded end to end, at 14 s.** Sessions
+  2 s + 4 s, the three `close_all` calls 2 s each
+  (`RESOURCE_CLOSE_GRACE`), the audit writer 2 s. No step can wait on a
+  remote host, a lock held by a remote command, or a count of connections.
+  See the "Fixed" entry for what each bound replaces and what it costs.
+
+- **(lib API) `Transport::shutdown_requested(&self) -> bool`**, with a
+  default of `false`. Says whether `accept()` returned `None` because the
+  transport was ASKED to stop or merely because it has no further sessions to
+  hand out — two readings of the same `None` that `McpServer::serve` has to
+  tell apart, since one calls for a bounded drain and the other forbids it.
+  `UnixSocketTransport` overrides it (its `accept` returns `None` only when
+  its token fires); `StdioTransport` keeps the default. A defaulted method, so
+  an out-of-tree `Transport` keeps compiling and keeps today's behaviour, and
+  the default is the conservative one ("wait for them").
+
+- **(lib API) `AuditLogger::close(&self)`.** `AuditLogger` is re-exported from
+  `src/lib.rs` **without** `#[doc(hidden)]`, so this enters the documented
+  API. Adding a method is not a breaking change — no signature or variant
+  moves, nothing existing stops compiling — but it is the missing half of a
+  public contract: `AuditLogger::new` hands the caller an `AuditWriterTask`
+  whose only documented stopping condition was "every sender dropped", and an
+  embedder holding an `Arc<AuditLogger>` had no way to reach that state. It
+  takes `&self` because every owner holds an `Arc`.
+
+  **Why a method and not `drop`:** the drop form works if and only if every
+  clone of the `Arc<AuditLogger>` dies before the join, and nothing in the
+  crate establishes that — background tasks and every `ToolContext` hold one.
+  Measured, with the close removed and the bounded join kept: the drain waits
+  out its full 2 s and warns, and the daemon shutdown went from ~0.5 s to ~2.5
+  s (2.51, 2.44, 2.81 over three runs). The events still landed inside that
+  window, so the drop form's cost here is two seconds and an untrue warning
+  rather than lost events — but it degrades to real loss as soon as the writer
+  is slower than the window, and it would break silently for the next caller
+  who clones the logger.
+
+  **Consequence for the field it guards:** `AuditLogger.sender` is now a
+  `std::sync::Mutex<Option<_>>`, so an audited event costs one uncontended
+  lock/unlock. No `.await` is taken while the lock is held. A `log` after a
+  `close` still emits its `tracing` line and reaches the file sink not at all,
+  which is why `close` belongs at shutdown and nowhere else.
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
   the other 473 did not, so on a host where the interesting state is root-owned
@@ -881,34 +1411,98 @@ nothing in the text below would otherwise tell you which is which.
   exit 0 when their remote command fails — so the list of what is still open
   above stands as written.
 
-- **20 of the 77 handlers that implement `ToolHandler` directly write no audit
-  event at all.** This is the complement of the question asked about the audit
-  on this branch: that one inventoried which *events* carry no `tool_name`, and
-  nobody asked which *operations* produce no event to name. Making the name
-  mandatory on the four entry points cannot reach these, by construction — they
-  call none of them.
+- **The seven handlers that changed server state without writing an audit
+  event now write one. Thirteen local reads still write none.** This was the
+  complement of the question asked about the audit on this branch: that one
+  inventoried which *events* carry no `tool_name`, and nobody asked which
+  *operations* produce no event to name. Making the name mandatory on the four
+  entry points could not reach these, by construction — they called none of
+  them. They now call a fifth one, `log_state_change` (see the BREAKING entry
+  on `CommandResult::StateChanged` above for its shape and for why it carries
+  no exit code).
 
-  Counted, not estimated: of the 77 files under `src/mcp/tool_handlers/` with an
-  `impl ToolHandler for`, 20 mention none of `log_success`, `log_failure`,
-  `log_denied`, `process_success`, `AuditEvent` or `audit_logger` outside their
-  `#[cfg(test)]` module. **Seven of the 20 open a connection or change server
-  state, and those are the ones that matter:** `ssh_session_create`,
-  `ssh_session_close`, `ssh_tunnel_create`, `ssh_tunnel_close`,
-  `ssh_config_set`, `ssh_recording_start`, `ssh_recording_stop`. The other 13
-  are local reads: `ssh_status`, `ssh_health`, `ssh_history`, `ssh_config_get`,
+  Counted, not estimated, when the defect was written up: of the 77 files
+  under `src/mcp/tool_handlers/` with an `impl ToolHandler for`, 20 mentioned
+  none of `log_success`, `log_failure`, `log_denied`, `process_success`,
+  `AuditEvent` or `audit_logger` outside their `#[cfg(test)]` module.
+  **Seven of the 20 open a connection or change server state, and those are
+  the ones that mattered:** `ssh_session_create`, `ssh_session_close`,
+  `ssh_tunnel_create`, `ssh_tunnel_close`, `ssh_config_set`,
+  `ssh_recording_start`, `ssh_recording_stop` — all seven fixed here, so the
+  count that still holds is **13 of 77**. The remaining 13 are local reads:
+  `ssh_status`, `ssh_health`, `ssh_history`, `ssh_config_get`,
   `ssh_output_fetch`, `ssh_session_list`, `ssh_tunnel_list`,
   `ssh_runbook_execute`, `ssh_runbook_list`, `ssh_runbook_validate`,
-  `ssh_recording_list`, `ssh_recording_replay`, `ssh_recording_verify`.
+  `ssh_recording_list`, `ssh_recording_replay`, `ssh_recording_verify`. They
+  are deliberately left alone, and `ssh_runbook_execute` is the one to check
+  before trusting that classification: its name suggests an execution, and
+  the entry above establishes only that it runs no remote command.
 
-  **Nothing central covers them.** Neither the MCP dispatcher nor the CLI's
-  tool path writes an audit event per tool call. Outside the handlers themselves,
-  the only code that constructs an `AuditEvent` is
-  `src/domain/use_cases/execute_command.rs` — the four entry points, which a
-  caller has to invoke by name, as the `bridge-mcp exec` subcommand does — and
-  the four SFTP sites of `bridge-mcp upload` / `download` in `src/cli/runner.rs`
-  (`grep -rn 'AuditEvent::new\|AuditEvent::denied' src/`). So
-  `ssh_session_create host=pi` opens an SSH session to a host and leaves no line
-  behind saying it did.
+  **Measured live, before the fix**: `ssh_session_create` then
+  `ssh_session_close` against a real Raspberry Pi host, through the MCP
+  server, wrote **zero** lines — a persistent remote shell created and
+  destroyed, invisible in the trail. The two recording tools were the worst
+  in kind: the control plane of compliance recording left nothing in the
+  compliance journal. The **fix** was not measured live; it rests on
+  compilation, unit tests over the handlers (`ssh_config_set`,
+  `ssh_session_close`, `ssh_tunnel_close` both ways, `ssh_recording_start`,
+  `ssh_recording_stop` both ways) and a serialised-line test. The success
+  paths of `ssh_session_create` and `ssh_tunnel_create` need a live SSH
+  connection and are covered by compilation only.
+
+  **Nothing central covers them, which is still true.** Neither the MCP
+  dispatcher nor the CLI's tool path writes an audit event per tool call.
+  Outside the handlers themselves, the only code that constructs an
+  `AuditEvent` is `src/domain/use_cases/execute_command.rs` — now five entry
+  points, which a caller has to invoke by name, as the `bridge-mcp exec`
+  subcommand does — and the four SFTP sites of `bridge-mcp upload` /
+  `download` in `src/cli/runner.rs`
+  (`grep -rn 'AuditEvent::new\|AuditEvent::denied\|AuditEvent::tagged' src/`).
+
+- **A refused `ssh_tunnel_create` leaked the bound local port — and, very
+  likely, the SSH connection with it.** `TunnelManager::register` takes the forwarding task's
+  `JoinHandle` by value and drops it when it refuses (`max_tunnels` reached);
+  dropping a tokio handle **detaches** the task rather than cancelling it, so
+  the listener kept running for the life of the process, holding
+  `127.0.0.1:<local_port>` bound and the only `Arc<SshClient>` alive, for a
+  tunnel that was never registered — and so one that `ssh_tunnel_close` could
+  never reach, since it looks the tunnel up by id in the manager. `execute`
+  now takes an `AbortHandle` before the move and cancels on that path.
+  Predates the audit work and was found while bounding a docstring that
+  claimed more than the code did. The port release is **established**: a test
+  fails without the `abort()`. The SSH half is **not** — it rests on dropping
+  the last `Arc<SshClient>`, which is the same RAII the `jump_client` field
+  documents, but russh does not state that the socket closes with the
+  `Handle` it hands out, and `SshClient` has no `impl Drop` of its own. So the
+  cancellation is known to release that `Arc`; that the TCP connection goes
+  with it is very likely and unmeasured. An `ss -tnp` on the bridge host
+  across a `max_tunnels` refusal would settle it.
+
+- **`ssh_metrics_multi` audited a fabricated `exit_code: 0` for every host it
+  reached, and nothing at all for the hosts it did not.** The worse of the two
+  is the `0`: a **success** claimed for a command that may have failed, which
+  is the direction PR #218 and #219 spent two PRs removing elsewhere. The loop
+  handed `process_success` a hand-built `CommandOutput { exit_code: 0, .. }`,
+  and `process_success` writes the audit event **and** the history entry, so
+  the fabricated code went into `audit.log` too — the in-code comment claimed
+  only the history entry was affected, and that understatement is corrected in
+  the source. The second half: the loop was guarded by `if result.success`, so
+  an SSH failure, a rate-limit refusal or a `fail_fast` cancellation produced
+  no event and no history entry whatsoever.
+
+  The real code was never lost, only dropped: `collect_from_host` deconstructed
+  the `CommandOutput` and kept `stdout` alone. `RawHostOutput` now carries it,
+  `HostMetricsResult` carries it under `#[serde(skip)]` — so the tool's own
+  JSON answer is unchanged, no new key in `results[]` — and unreached hosts go
+  through `log_failure`, which is what the single-host `ssh_metrics` has always
+  done. **What the tool reports is unchanged**; only what it records is.
+
+  **The limit of the remedy, written into the code so it is not overstated:**
+  the real code is no more informative than the `0` was — it is only *true*.
+  It is the status of a `;`-joined list, i.e. of the last metric section
+  alone, so four of five sections can fail while the recorded code reads 0.
+  The audit line does not describe the five metrics; the per-metric `None` in
+  the JSON does.
 
 - **All 399 tools on the pipeline have now been read against the
   `NONZERO_EXIT_IS_ERROR` criterion, and the opt-out still has three users.**
