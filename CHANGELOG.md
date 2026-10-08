@@ -24,6 +24,25 @@ host.**
 That is a sound basis, but it is not the basis the sentence above describes, and
 nothing in the text below would otherwise tell you which is which.
 
+**Audit: the direct handlers now record the reduction params they were given.**
+Until now only the `StandardTool` pipeline filled the `reduction` field of an
+audit event; the 42 direct handlers that extract a `DataReductionArgs` passed
+`&[]` to `process_success`, and `ssh_ls`, which writes its own event, left it
+empty. They now record `used_params()`. Reading rule for the field, exceptions
+included: a `reduction` key is present exactly when the caller supplied a
+reduction param and the event came from the pipeline, one of those handlers, or
+`ssh_ls`. **Its absence does not mean the output was unfiltered**: it also
+appears on events that code `&[]` by hand (`ssh_session_exec` via
+`log_success`, the SFTP/file tools that build an `AuditEvent` themselves, none
+of which takes a reduction param), and no event records `summarize=true`
+sampling or `max_output` truncation, both of which change what the caller saw.
+The field lists the params *supplied*, written before the reduction runs; a
+reduction that then fails, or is skipped on a non-zero exit, is still listed.
+Nine tools (`ssh_exec`, `ssh_exec_multi`, `ssh_find`, `ssh_tail`,
+`ssh_disk_usage`, `ssh_file_write`, `ssh_metrics_multi` and the two
+`ssh_awx_*_stdout` tools) and `bridge-mcp exec` keep `&[]`: they reject every
+reduction param, so none can have acted.
+
 **The audit-integrity entry (`AuditLogger::log` taking `tool`) has a third
 basis.** The defect was measured live, against a real host through the MCP
 server: `ssh_session_exec` wrote a line
@@ -941,8 +960,8 @@ tests and a serialisation test.
   `AuditWriterTask` on return, so every `bridge-mcp tool …` left a 0-byte
   `audit.log` and an empty rotated archive. The CLI entry points keep the
   writer, drop the context and wait up to 2 s for the drain. Tool events carry
-  `reduction: [...]` when reduction params were used — standard tools only,
-  the custom handlers are a follow-up. `bridge-mcp status` reports
+  `reduction: [...]` when reduction params were used — standard tools and, since
+  the audit-integrity wave, the direct handlers (see that entry). `bridge-mcp status` reports
   `"written_by": "mcp-server-and-cli"`.
 
 - **A patch is no longer reinterpreted by `printf`.**

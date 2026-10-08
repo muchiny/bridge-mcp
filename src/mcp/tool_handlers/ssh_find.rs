@@ -80,15 +80,16 @@ impl ToolHandler for SshFindHandler {
          to prevent excessive traversal. Use name for glob patterns (e.g., '*.log') and type \
          for filtering (f=files, d=directories, l=symlinks). Only -name glob matching is \
          supported; for case-insensitive or regex searches use ssh_exec with find -iname/-regex. \
-         Returns one file path per line (plain text); use limit=N to cap result count on large \
-         filesystems or save_output=/tmp/out.txt to persist very large result sets. \
+         Returns one file path per line (plain text); there is no limit parameter: use max_depth to bound \
+         the search, max_output to cap the characters returned, or save_output=/tmp/out.txt to \
+         persist very large result sets. \
          For listing directory contents with metadata, use ssh_ls instead."
     }
 
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "ssh_find",
-            description: "Find files and directories on a remote host. Prefer this over ssh_exec for file searches as it provides safe escaping, path validation, and a default max depth of 5 to prevent excessive traversal. Use name for glob patterns (e.g., '*.log') and type for filtering (f=files, d=directories, l=symlinks). Only -name glob matching is supported; for case-insensitive or regex searches use ssh_exec with find -iname/-regex. Returns one file path per line (plain text); use limit=N to cap result count on large filesystems or save_output=/tmp/out.txt to persist very large result sets. For listing directory contents with metadata, use ssh_ls instead.",
+            description: "Find files and directories on a remote host. Prefer this over ssh_exec for file searches as it provides safe escaping, path validation, and a default max depth of 5 to prevent excessive traversal. Use name for glob patterns (e.g., '*.log') and type for filtering (f=files, d=directories, l=symlinks). Only -name glob matching is supported; for case-insensitive or regex searches use ssh_exec with find -iname/-regex. Returns one file path per line (plain text); there is no limit parameter: use max_depth to bound the search, max_output to cap the characters returned, or save_output=/tmp/out.txt to persist very large result sets. For listing directory contents with metadata, use ssh_ls instead.",
             input_schema: r#"{
                 "type": "object",
                 "properties": {

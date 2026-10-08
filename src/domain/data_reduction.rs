@@ -148,7 +148,8 @@ impl DataReductionArgs {
 
     /// Names of the reduction params actually supplied on this call,
     /// in a stable order (`jq_filter`, `yq_filter`, `output_format`, columns, limit).
-    /// Used by metrics to measure per-param adoption.
+    /// Used by metrics to measure per-param adoption, and recorded in the audit
+    /// event's `reduction` field.
     #[must_use]
     pub fn used_params(&self) -> Vec<&'static str> {
         let mut used = Vec::new();

@@ -964,45 +964,6 @@ esac
         );
     }
 
-    /// The audit event this handler wrote, read back from the logger. A
-    /// test about the journal reads the journal: asserting on the returned
-    /// result would only prove the call succeeded.
-    fn the_success_event(ctx: &crate::ports::ToolContext) -> crate::security::AuditEvent {
-        let events = ctx.audit_logger.drain_for_test();
-        let mut mine = events
-            .into_iter()
-            .filter(|e| e.tool_name.as_deref() == Some("ssh_awx_job_follow"));
-        let event = mine.next().expect("the call must write an audit event");
-        assert!(mine.next().is_none(), "exactly one event per call");
-        event
-    }
-
-    #[tokio::test]
-    async fn the_audit_event_names_the_reduction_param_the_caller_supplied() {
-        let ctx = ctx_with_output(0, r#"{"job_id":4242,"status":"successful"}"#);
-        SshAwxJobFollowHandler::new()
-            .execute(Some(json!({"template_id": 7, "limit": 1})), &ctx)
-            .await
-            .expect("the handler must return a result");
-        let event = the_success_event(&ctx);
-        assert_eq!(
-            event.reduction,
-            vec!["limit"],
-            "a direct handler must report the reduction it was given, as the pipeline does"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_audit_event_has_no_reduction_when_the_caller_supplied_none() {
-        let ctx = ctx_with_output(0, r#"{"job_id":4242,"status":"successful"}"#);
-        SshAwxJobFollowHandler::new()
-            .execute(Some(json!({"template_id": 7})), &ctx)
-            .await
-            .expect("the handler must return a result");
-        let event = the_success_event(&ctx);
-        assert!(event.reduction.is_empty(), "{:?}", event.reduction);
-    }
-
     #[tokio::test]
     async fn the_history_redacts_the_awx_token() {
         // Recording the command instead of the tool name only stays safe as

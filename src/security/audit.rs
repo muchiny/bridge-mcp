@@ -142,16 +142,23 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     pub result: CommandResult,
-    /// Reduction params supplied on this call (`jq_filter`, `columns`, …),
-    /// so adoption can be measured from the log with a grep. Recorded by the
-    /// `StandardTool` pipeline and by every direct handler that extracts a
-    /// `DataReductionArgs`, both through `process_success(.., &dr.used_params())`.
-    /// It is the list of params *supplied*, written before the reduction runs
-    /// (the event is emitted by `process_success` itself): a call whose
-    /// reduction then fails, or is skipped on a non-zero exit, still lists
-    /// them. Empty for the tools that declare no reduction param (`ssh_exec`,
-    /// `ssh_find`, ...), where it is true rather than missing. Truncation by
-    /// `max_output` is not a reduction param and is not recorded here.
+    /// Reduction params supplied on this call (`jq_filter`, `columns`, ...),
+    /// so adoption can be measured from the log with a grep. Filled by the
+    /// `StandardTool` pipeline, by the direct handlers that go through
+    /// `process_success(.., &dr.used_params())`, and by `ssh_ls`, which builds
+    /// its own event. It lists what was *supplied*, written before the
+    /// reduction runs (the event is emitted by `process_success` itself): a
+    /// call whose reduction then fails, or is skipped on a non-zero exit,
+    /// still lists them.
+    ///
+    /// **An absent key does not mean "unfiltered output".** With
+    /// `skip_serializing_if` it also appears on events that hard-code the
+    /// list: `log_success` (`ssh_session_exec`), the file-transfer tools that
+    /// build an `AuditEvent` by hand (none takes a reduction param), and the
+    /// nine tools that reject every reduction param. And two things that
+    /// change what the caller saw are recorded nowhere: `max_output`
+    /// truncation and `summarize=true` sampling. Do not build the
+    /// "unfiltered" population from lines lacking this key.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reduction: Vec<&'static str>,
 }

@@ -206,14 +206,7 @@ impl ToolHandler for SshLsHandler {
             Ok(entries) => {
                 ctx.audit_logger.log(
                     self.name(),
-                    AuditEvent::new(
-                        &args.host,
-                        &format!("SFTP_LS {}", args.path),
-                        AuditCommandResult::Success {
-                            exit_code: 0,
-                            duration_ms,
-                        },
-                    ),
+                    success_event(&args.host, &args.path, duration_ms, &dr),
                 );
 
                 let mut entries = entries.clone();
@@ -265,8 +258,42 @@ impl ToolHandler for SshLsHandler {
     }
 }
 
+/// The audit event for a listing that succeeded. This handler writes its own
+/// event instead of going through `process_success`, so it must carry the
+/// reduction params itself, the way every other direct handler does: a
+/// `limit=3` that returns 3 of 200 entries has to be visible in the journal.
+fn success_event(
+    host: &str,
+    path: &str,
+    duration_ms: u64,
+    dr: &crate::domain::data_reduction::DataReductionArgs,
+) -> AuditEvent {
+    let mut event = AuditEvent::new(
+        host,
+        &format!("SFTP_LS {path}"),
+        AuditCommandResult::Success {
+            exit_code: 0,
+            duration_ms,
+        },
+    );
+    event.reduction = dr.used_params();
+    event
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_success_event_carries_the_reduction_params() {
+        let mut v = json!({"limit": 3});
+        let dr = crate::domain::data_reduction::DataReductionArgs::extract(&mut v).unwrap();
+        let event = success_event("h", "/var/log", 5, &dr);
+        assert_eq!(event.reduction, vec!["limit"]);
+        assert_eq!(event.command, "SFTP_LS /var/log");
+        let none = crate::domain::data_reduction::DataReductionArgs::default();
+        assert!(success_event("h", "/", 1, &none).reduction.is_empty());
+    }
+
     use super::*;
     use crate::error::BridgeError;
     use crate::ports::mock::create_test_context;
