@@ -283,6 +283,22 @@ fn success_event(
 #[cfg(test)]
 mod tests {
 
+    /// `execute` cannot run here (SFTP is not mockable), so nothing else would
+    /// notice if its audit event went back to a hand-built `AuditEvent::new`
+    /// and the reduction fell silent again. Scoped to the production half, as
+    /// `task_store_exposes_no_blocking_wait` is, so it cannot match itself.
+    #[test]
+    fn execute_logs_through_success_event() {
+        let src = include_str!("ssh_ls.rs");
+        let (production, _) = src
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("the test-module boundary must exist for this guard to scope itself");
+        assert!(
+            production.contains("success_event(&args.host, &args.path, duration_ms, &dr)"),
+            "the success path must log `success_event(.., &dr)` so `reduction` is recorded"
+        );
+    }
+
     #[test]
     fn the_success_event_carries_the_reduction_params() {
         let mut v = json!({"limit": 3});

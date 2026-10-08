@@ -30,8 +30,9 @@ audit event; the 42 direct handlers that extract a `DataReductionArgs` passed
 `&[]` to `process_success`, and `ssh_ls`, which writes its own event, left it
 empty. They now record `used_params()`. Reading rule for the field, exceptions
 included: a `reduction` key is present exactly when the caller supplied a
-reduction param and the event came from the pipeline, one of those handlers, or
-`ssh_ls`. **Its absence does not mean the output was unfiltered**: it also
+reduction param and the call SUCCEEDED, through the pipeline, one of those
+handlers, or `ssh_ls`; a failed call (`log_failure`, an `Error` event) never
+carries it, even when the caller supplied one. **Its absence does not mean the output was unfiltered**: it also
 appears on events that code `&[]` by hand (`ssh_session_exec` via
 `log_success`, the SFTP/file tools that build an `AuditEvent` themselves, none
 of which takes a reduction param), and no event records `summarize=true`

@@ -222,7 +222,12 @@ mod tests {
             .await
             .expect("the handler must return a result");
         assert_eq!(the_event(&ctx).reduction, vec!["limit"]);
-        assert!(!result.content.is_empty());
+        // The event is not the only effect: the reduction really cut 3 rows to 2.
+        let crate::ports::protocol::ToolContent::Text { text } = &result.content[0] else {
+            panic!("expected a text result: {result:?}");
+        };
+        let rows: serde_json::Value = serde_json::from_str(text).expect("reduced output is JSON");
+        assert_eq!(rows.as_array().map(Vec::len), Some(2), "{text}");
     }
 
     #[cfg(feature = "jq")]
