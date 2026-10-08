@@ -999,6 +999,10 @@ async fn run_exec_in_context(
     })?;
 
     // Process success
+    // `&[]` is true here, not a placeholder: `bridge-mcp exec` applies no
+    // reduction. The global `--columns` / `--limit` flags parse for it but
+    // `main.rs` never forwards them to `run_exec`, so nothing acted on the
+    // output. Do not "fix" this by inventing a list.
     let response =
         ctx.execute_use_case
             .process_success("ssh_exec", host, command, &output.into(), &[]);

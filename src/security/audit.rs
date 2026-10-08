@@ -143,11 +143,15 @@ pub struct AuditEvent {
     pub tool_name: Option<String>,
     pub result: CommandResult,
     /// Reduction params supplied on this call (`jq_filter`, `columns`, …),
-    /// so adoption can be measured from the log with a grep. Populated only
-    /// for tools on the `StandardTool` pipeline, which is the one caller that
-    /// passes `process_success` a non-empty list (`&dr.used_params()`); the
-    /// custom handlers log through that same `process_success` with `&[]` and
-    /// leave this empty.
+    /// so adoption can be measured from the log with a grep. Recorded by the
+    /// `StandardTool` pipeline and by every direct handler that extracts a
+    /// `DataReductionArgs`, both through `process_success(.., &dr.used_params())`.
+    /// It is the list of params *supplied*, written before the reduction runs
+    /// (the event is emitted by `process_success` itself): a call whose
+    /// reduction then fails, or is skipped on a non-zero exit, still lists
+    /// them. Empty for the tools that declare no reduction param (`ssh_exec`,
+    /// `ssh_find`, ...), where it is true rather than missing. Truncation by
+    /// `max_output` is not a reduction param and is not recorded here.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reduction: Vec<&'static str>,
 }

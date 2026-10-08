@@ -125,6 +125,9 @@ impl ToolHandler for SshAwxProjectUpdateStdoutHandler {
             .await?;
         let output = conn.exec(&cmd, &limits).await?;
 
+        // `&[]` is true here, not a placeholder: this tool declares no reduction
+        // parameter (`deny_unknown_fields`, no `DataReductionArgs`), so none can have
+        // acted on the output. Do not "fix" this by inventing a list.
         let raw = ctx
             .execute_use_case
             .process_success(self.name(), host, &cmd, &output.into(), &[])

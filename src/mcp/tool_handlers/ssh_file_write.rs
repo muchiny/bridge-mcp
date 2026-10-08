@@ -278,6 +278,10 @@ impl SshFileWriteHandler {
         })?;
 
         // Process success (audit + history + sanitize)
+        // `&[]` is true here, not a placeholder: this tool declares no reduction
+        // parameter (`deny_unknown_fields`, no `DataReductionArgs`), so none can have
+        // acted on the output. `max_output` truncation is not a reduction parameter
+        // either. Do not "fix" this by inventing a list.
         let response =
             ctx.execute_use_case
                 .process_success(self.name(), &host, &command, &output.into(), &[]);

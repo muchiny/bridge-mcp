@@ -365,6 +365,9 @@ impl ToolHandler for SshMetricsMultiHandler {
         // `parse_sections` above, and `stderr` was never carried back here.
         for result in &sorted_results {
             if let Some(exit_code) = result.exit_code {
+                // `&[]` is true here, not a placeholder: this tool declares no reduction
+                // parameter (`deny_unknown_fields`, no `DataReductionArgs`), so none can have
+                // acted on the output. Do not "fix" this by inventing a list.
                 let _ = ctx.execute_use_case.process_success(
                     self.name(),
                     &result.host,
