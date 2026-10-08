@@ -946,9 +946,15 @@ tests and a serialisation test.
   is now lost where it used to be waited for.** Same measurement, the audit
   file: **two** lines before the bound (`ssh_session_create`, then
   `ssh_session_exec` with `duration_ms: 45003` — it landed only because the
-  daemon stayed alive 44 s for it) and **one** after. Relative to 3.0.0
-  nothing regressed — SIGTERM killed the process outright and that event was
-  lost too — but it is a bounded shutdown chosen over a complete trail.
+  daemon stayed alive 44 s for it) and **one** after. On the `daemon stop`
+  path nothing regressed relative to 3.0.0 — SIGTERM was not handled there, it
+  killed the process outright, and that event was already lost. **On SIGINT
+  and on stdio EOF the trade is real**: those paths did wait for the command,
+  without a bound, so the event could land; they are now bounded like the
+  rest. Either way it is a bounded shutdown chosen over a complete trail, and
+  the loss is wider than one command — any handler still in flight past the
+  bound loses its event, including `ssh_exec` on a long command and the tasks
+  worker.
 
   **Cost, and the earlier figure in this entry was wrong twice.** It first
   said "up to 2 s longer", which is the audit drain alone; its replacement
@@ -964,8 +970,9 @@ tests and a serialisation test.
   does nothing), so an out-of-tree transport is the only way past the
   constant. Measured end to end on the built binary:
   **356 ms** when the client closed its socket (nothing to wait for),
-  **2.24 s** when it stayed connected and silent, **4.03 s** with a session
-  running a 45 s command. The hot path pays one uncontended
+  **2.27 s** when it stayed connected and silent, **4.10 s** with a session
+  running a 45 s command — against **44.03 s** for that last case before the
+  `close_all` bound. The hot path pays one uncontended
   `std::sync::Mutex` lock/unlock per audited event (see "Added").
 
   **What is NOT covered by a test:** the signal wiring itself. No test raises

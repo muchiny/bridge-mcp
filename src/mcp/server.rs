@@ -1191,8 +1191,12 @@ impl McpServer {
     /// # Shutdown
     ///
     /// After the accept loop ends and the in-flight sessions are drained,
-    /// this tears down the global state in a fixed order, and **every step
-    /// is bounded**: the sessions (2 s, then their reader loops are
+    /// this tears down the global state in a fixed order, and **every step of
+    /// it is bounded** — on the transports whose accept loop ends on a
+    /// shutdown signal, which today means the daemon socket. Stdio ends on
+    /// EOF and its session drain stays open-ended by design, because for it
+    /// "nobody is talking any more" is the normal state and not a shutdown.
+    /// The steps: the sessions (2 s, then their reader loops are
     /// cancelled, then 4 s, then aborted), the cleanup loops (aborted),
     /// `close_all` on the tunnel / session / connection managers (2 s each,
     /// see `RESOURCE_CLOSE_GRACE`), the transport, and last the audit
@@ -1217,10 +1221,10 @@ impl McpServer {
     /// server at all, and **two drive this block to its end** by cancelling
     /// the transport's shutdown token instead:
     /// `serve_returns_only_after_the_audit_lines_are_on_disk` and
-    /// `a_silent_connected_client_cannot_hold_the_shutdown`. Round 0 of this
-    /// doc-comment said the daemon tests measured no part of it, which was
-    /// true when it was written and is the kind of sentence that becomes a
-    /// trap once it is not.
+    /// `a_silent_connected_client_cannot_hold_the_shutdown`. Recount this
+    /// split before trusting it: it was already wrong once, in the form "the
+    /// daemon tests measure no part of this block" — true when written, and a
+    /// trap from the first test that drove the block to its end.
     ///
     /// **What can still be lost, and it is not any of the above:** every
     /// dispatched request runs in a bare `tokio::spawn` — the per-request
