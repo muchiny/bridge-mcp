@@ -160,7 +160,13 @@ tests and a serialisation test.
   on the failure line of a state tool. **Select on `tool_name`** when you
   want everything one of the seven did, and on `result` when you want the
   kind of outcome — this selector was run against rows of each shape:
-  `jq 'select(.tool_name | test("^ssh_(session|tunnel|recording)_|^ssh_config_set$"))'`.
+  `jq 'select(.tool_name | IN("ssh_session_create","ssh_session_close",
+  "ssh_tunnel_create","ssh_tunnel_close","ssh_config_set",
+  "ssh_recording_start","ssh_recording_stop"))'` — name the seven, do not
+  match a prefix: `^ssh_(session|tunnel|recording)_` also catches
+  `ssh_session_exec`, which logs on **every** call and is spelled
+  `event_type: "ssh_exec"`, so a prefix selector hands back every session
+  command as if it were a state change.
 
   Anything refused *before* that call writes nothing to either sink:
   bad arguments, an unknown host, a rate-limit refusal, a disabled recorder,

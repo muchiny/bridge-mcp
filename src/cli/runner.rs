@@ -2175,7 +2175,7 @@ fn gate_host(args: Option<&serde_json::Value>) -> String {
 ///   value can render as `<no-host>`, as `<elided: N chars>`, or as any
 ///   marker added later.
 /// - **The `tracing` sink took a forged record.** `command` is JSON, so serde
-///   escapes it; `host` goes to `AuditLogger::emit_tracing` as `host =
+///   escapes it; `host` goes to `AuditLogger::log_to_tracing` as `host =
 ///   %event.host`, i.e. `Display`, with no rendering at all — so a newline
 ///   inside it put a second, well-formed `Audit: …` line into the journal
 ///   journald and syslog capture. Control characters are escaped here for
@@ -4858,10 +4858,12 @@ mod tests {
     ///
     /// Measured before the fix, on the real binary:
     /// `--yes tool ssh_file_write host=<100000 × H> path=/tmp/nothing
-    /// content=hi` wrote a 100 267-byte `audit.log` line whose `command` was
-    /// 85 characters — `elide_oversized` had done its job on the field it
-    /// covers, and the field beside it carried the 100 000 characters
-    /// instead. The ceiling `GATE_AUDIT_MAX_VALUE_CHARS` names is now the
+    /// content=hi` put all 100 000 characters in `host` while `command` came
+    /// out at 85 — `elide_oversized` had done its job on the field it covers,
+    /// and the field beside it carried the payload instead. (The byte figure
+    /// that stood here was a `wc -c` of the whole file, not of the line, and
+    /// it was not re-measured when this doc-comment was written. The
+    /// counter-proof below is what this code is pinned by.) The ceiling `GATE_AUDIT_MAX_VALUE_CHARS` names is now the
     /// ceiling of every field the gate writes.
     #[test]
     fn an_oversized_host_is_bounded_like_every_other_field() {
@@ -4964,7 +4966,7 @@ mod tests {
     }
 
     /// `command` is JSON, so serde escapes it; `host` reached
-    /// `AuditLogger::emit_tracing` as `%` (`Display`) with no rendering at
+    /// `AuditLogger::log_to_tracing` as `%` (`Display`) with no rendering at
     /// all. A newline inside it therefore added a complete, well-formed
     /// `Audit: command denied …` record to the `tracing` sink — the one
     /// journald and syslog capture — while `audit.log` stayed one line.
