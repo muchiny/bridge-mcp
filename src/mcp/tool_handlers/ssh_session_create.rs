@@ -2,6 +2,8 @@
 //!
 //! Creates a persistent interactive shell session on a remote host.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,6 +11,7 @@ use tracing::info;
 
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::tool_handlers::utils::elapsed_ms;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
@@ -112,10 +115,34 @@ impl ToolHandler for SshSessionCreateHandler {
                 .map(|jump_config| (jump_name.as_str(), jump_config))
         });
 
-        let session_info = ctx
+        // Audited as a state change, not as a command: a persistent remote
+        // shell is opened here and no process is run. Measured live before
+        // this call existed, `ssh_session_create` + `ssh_session_close`
+        // against a real host wrote ZERO audit lines.
+        let started = Instant::now();
+        let session_info = match ctx
             .session_manager
             .create(&args.host, host_config, &limits, jump_host)
-            .await?;
+            .await
+        {
+            Ok(info) => info,
+            Err(e) => {
+                ctx.execute_use_case.log_failure(
+                    self.name(),
+                    &args.host,
+                    &format!("ssh_session_create host={}", args.host),
+                    &e.to_string(),
+                );
+                return Err(e);
+            }
+        };
+
+        ctx.execute_use_case.log_state_change(
+            self.name(),
+            &args.host,
+            &format!("ssh_session_create session_id={}", session_info.id),
+            elapsed_ms(started),
+        );
 
         let json = serde_json::to_string(&session_info)
             .unwrap_or_else(|e| format!("Error serializing session info: {e}"));

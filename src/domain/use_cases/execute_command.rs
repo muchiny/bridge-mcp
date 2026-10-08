@@ -169,9 +169,12 @@ impl ExecuteCommandUseCase {
     /// Log a denied command, recording which tool asked for it.
     ///
     /// `tool` is mandatory: `AuditEvent::event_type` is the literal
-    /// `"ssh_exec"` for every event, so an audit line could not otherwise
-    /// say whether a denial came from `ssh_exec` itself or from
-    /// `ssh_file_write`. `tool_name` has existed on the event since it was
+    /// `"ssh_exec"` for every event this entry point and the three below can
+    /// produce, so an audit line could not otherwise say whether a denial
+    /// came from `ssh_exec` itself or from `ssh_file_write`. (Since
+    /// [`Self::log_state_change`] there is a second value in the log,
+    /// `"state_change"`, which names a kind of operation and still not a
+    /// tool — the argument is unchanged.) `tool_name` has existed on the event since it was
     /// added, but as long as carrying it was optional nothing in
     /// production ever set it: a 2026-09 measurement found 25% of 3,686
     /// audit lines with no `tool_name`, and `ssh_exec` — the escape hatch
@@ -297,6 +300,41 @@ impl ExecuteCommandUseCase {
             .record_success(host, redacted, exit_code, duration_ms);
     }
 
+    /// Record a server-state change that ran no process, naming the tool.
+    ///
+    /// The fifth entry point, for the operations whose whole effect is on the
+    /// bridge or on the SSH transport — a session or tunnel opened or closed,
+    /// a recording started or stopped, a runtime limit set. Seven tools did
+    /// all of that and wrote **nothing**: measured live, `ssh_session_create`
+    /// followed by `ssh_session_close` against a real host produced zero audit
+    /// lines, so a persistent remote shell was created and destroyed without
+    /// the trail saying so.
+    ///
+    /// `tool` is mandatory — see [`Self::log_denied`]. `operation` is the tool
+    /// and its identifying argument (`ssh_session_close session_id=…`), which
+    /// is what the event's `command` field carries; `host` is a real alias
+    /// whenever one is resolvable and [`crate::security::NO_HOST`] when the
+    /// operation has no target at all.
+    ///
+    /// **No history entry, and that is the reason this is not
+    /// [`Self::log_success`].** `HistoryEntry` (`src/domain/history.rs`) has a
+    /// non-optional `exit_code: u32` and derives `success` from `exit_code ==
+    /// 0`, so recording a state change there would have to invent the very
+    /// `0` that [`CommandResult::StateChanged`] exists to refuse. The audit
+    /// trail can say "state changed, no code"; the command history cannot say
+    /// it at all, and it is a history of *commands*.
+    pub fn log_state_change(&self, tool: &str, host: &str, operation: &str, duration_ms: u64) {
+        // Same redaction as `process_success` — see its comment. An operation
+        // string is built from tool arguments, and `ssh_config_set` passes a
+        // key and a value.
+        let redacted = self.sanitizer.sanitize(operation);
+
+        self.audit_logger.log(
+            tool,
+            AuditEvent::state_change("state_change", host, &redacted, duration_ms),
+        );
+    }
+
     /// Log a failed command execution, recording which tool ran it.
     ///
     /// `tool` is mandatory — see [`Self::log_denied`].
@@ -345,7 +383,7 @@ mod tests {
     use super::*;
     use crate::config::{SecurityConfig, SecurityMode};
     use crate::domain::HistoryConfig;
-    use crate::security::CommandValidator;
+    use crate::security::{CommandValidator, NO_HOST};
 
     fn create_test_use_case() -> ExecuteCommandUseCase {
         let security_config = crate::config::SecurityConfig::default();
@@ -436,6 +474,70 @@ mod tests {
             events[0].tool_name.as_deref(),
             Some("ssh_exec"),
             "un événement d'audit sans nom d'outil n'est rattachable à rien"
+        );
+    }
+
+    /// The seven state tools wrote nothing at all; the point of the fifth
+    /// entry point is that what they now write carries the tool, the
+    /// operation, and **no exit code**, because none of them runs a process.
+    #[test]
+    fn a_state_change_is_audited_with_its_tool_and_without_an_exit_code() {
+        let uc = test_use_case();
+        uc.log_state_change(
+            "ssh_session_create",
+            "raspberry",
+            "ssh_session_create session_id=sess-1",
+            12,
+        );
+        let events = uc.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "one state change, one line");
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_session_create"));
+        assert_eq!(events[0].event_type, "state_change");
+        assert_eq!(events[0].host, "raspberry");
+        assert_eq!(events[0].command, "ssh_session_create session_id=sess-1");
+        assert!(
+            matches!(
+                events[0].result,
+                crate::security::CommandResult::StateChanged { duration_ms: 12 }
+            ),
+            "got {:?}",
+            events[0].result
+        );
+    }
+
+    /// No history entry, and it is deliberate: `HistoryEntry::exit_code` is a
+    /// non-optional `u32` whose `0` means success, so recording a state change
+    /// there would invent exactly the code `StateChanged` refuses.
+    #[test]
+    fn a_state_change_adds_nothing_to_the_command_history() {
+        let uc = test_use_case();
+        assert_eq!(uc.history.len(), 0);
+        uc.log_state_change("ssh_config_set", NO_HOST, "ssh_config_set key=k value=1", 0);
+        assert_eq!(
+            uc.history.len(),
+            0,
+            "a command history must not gain an entry for something that ran no command"
+        );
+        assert_eq!(uc.audit_logger.drain_for_test().len(), 1);
+    }
+
+    /// `NO_HOST` is passed through untouched: the sanitizer must not mistake
+    /// the sentinel for something to redact, or every hostless line would
+    /// stop being greppable.
+    #[test]
+    fn the_hostless_sentinel_survives_redaction() {
+        let uc = test_use_case();
+        uc.log_state_change(
+            "ssh_config_set",
+            NO_HOST,
+            "ssh_config_set key=max_output_chars value=80000",
+            0,
+        );
+        let events = uc.audit_logger.drain_for_test();
+        assert_eq!(events[0].host, "<no-host>");
+        assert_eq!(
+            events[0].command,
+            "ssh_config_set key=max_output_chars value=80000"
         );
     }
 

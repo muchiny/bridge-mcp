@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use crate::domain::{TunnelDirection, TunnelInfo};
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
-use crate::mcp::tool_handlers::utils::connect_with_jump;
+use crate::mcp::tool_handlers::utils::{connect_with_jump, elapsed_ms};
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 
@@ -85,6 +85,11 @@ impl ToolHandler for SshTunnelCreateHandler {
         }
     }
 
+    // Already close to the limit; the two audit calls this task adds (a state
+    // change on success, `log_failure` on a failed registration) pushed it
+    // two lines over. Same reason `ssh_find` carries this allow. No behaviour
+    // in the forwarding loop changed, so an extraction is not owed here.
+    #[allow(clippy::too_many_lines)]
     async fn execute(&self, args: Option<Value>, ctx: &ToolContext) -> Result<ToolCallResult> {
         let Some(v) = args else {
             return Err(BridgeError::McpMissingParam {
@@ -189,9 +194,31 @@ impl ToolHandler for SshTunnelCreateHandler {
         });
 
         // Register in the tunnel manager
+        //
+        // Audited as a state change, not as a command: a forwarded port is
+        // opened here and no process is run on the host. `started` is taken
+        // after the connection is up, so the duration covers the registration
+        // and not the SSH handshake, which the connection path times itself.
+        let operation = format!("ssh_tunnel_create tunnel_id={tunnel_id}");
+        let started = Instant::now();
         ctx.tunnel_manager
             .register(tunnel_info.clone(), handle)
-            .await?;
+            .await
+            .inspect_err(|e| {
+                ctx.execute_use_case.log_failure(
+                    self.name(),
+                    &args.host,
+                    &operation,
+                    &e.to_string(),
+                );
+            })?;
+
+        ctx.execute_use_case.log_state_change(
+            self.name(),
+            &args.host,
+            &operation,
+            elapsed_ms(started),
+        );
 
         let json = serde_json::to_string(&tunnel_info)
             .unwrap_or_else(|e| format!("Error serializing tunnel info: {e}"));

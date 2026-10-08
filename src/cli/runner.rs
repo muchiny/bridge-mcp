@@ -2142,6 +2142,10 @@ mod tests {
         // connection-failure path (`log_failure`, whose event carries the
         // literal `event_type: "ssh_exec"` for every tool) does. So this
         // exercises a failed connection, not a blacklist denial.
+        //
+        // That literal is no longer the only `event_type` in the log —
+        // `log_state_change` writes `"state_change"` — but it is still the
+        // one every command event carries, including this one.
         let _ = run_tool(
             Arc::new(config),
             "ssh_exec",
@@ -2157,8 +2161,8 @@ mod tests {
             log.contains("ssh_exec"),
             "the CLI run must persist its audit event, got {log:?}"
         );
-        // `event_type` is the literal "ssh_exec" for every event (see the
-        // comment above), so that assertion alone would pass even if this
+        // `event_type` is the literal "ssh_exec" for every command event (see
+        // the comment above), so that assertion alone would pass even if this
         // run's event were never written and some other line happened to
         // match. Pin it to the host this test configured.
         assert!(

@@ -10,12 +10,57 @@ use tracing::{error, info, warn};
 
 use crate::config::AuditConfig;
 
+/// Host value for an audited operation that has no target host at all.
+///
+/// Exactly one production caller: `ssh_config_set`, which changes a limit of
+/// the bridge process itself ("not a remote host (there is no host param)",
+/// its own description) — plus the failure paths of the `*_close` / `*_stop`
+/// state tools, where the id handed in matched nothing, so no host was ever
+/// resolved to name.
+///
+/// The angle brackets are the point: no host alias in a `config.yaml` can
+/// contain them, so `"host":"<no-host>"` can never be confused with a real
+/// target, and `grep '<no-host>'` over `audit.log` enumerates exactly the
+/// hostless events. It is the single convention for the whole crate — before
+/// it there was none, every non-test caller passed a real alias, and the
+/// alternative was the empty string, which reads like a bug in the writer.
+pub const NO_HOST: &str = "<no-host>";
+
 /// Result of a command execution for audit purposes
 #[derive(Debug, Clone, Serialize)]
 pub enum CommandResult {
+    /// A process ran on the target host and exited `exit_code`.
     Success { exit_code: u32, duration_ms: u64 },
+    /// The bridge could not carry the operation out: a connection failure, a
+    /// timeout, an unread exit code. Carries no code, because none was read.
     Error { message: String },
+    /// Security refused the command before anything ran.
     Denied { reason: String },
+    /// Server state changed, and **no process ran anywhere** to change it.
+    ///
+    /// For the operations whose whole effect is on the bridge or on the SSH
+    /// transport: opening or closing a persistent session, opening or closing
+    /// a tunnel, starting or stopping a recording, setting a runtime limit.
+    /// They are audited because they change what the server is, not because a
+    /// command was executed.
+    ///
+    /// **It carries the duration and no exit code, and the absence is the
+    /// honest information** — the same doctrine
+    /// `ToolCallResult::remote_exit_code` (`src/ports/protocol.rs`) states for
+    /// its `None`: *"no claim about a remote exit code. Either nothing ran
+    /// remotely, or …"*. Here it is the first of those: nothing ran. An
+    /// `exit_code: 0` would be a **verdict** ("a command succeeded") posted on
+    /// a **fact** that never happened, and announcing an outcome on a signal
+    /// that cannot establish one is the very fault this variant exists to
+    /// remove. It is also what `ssh_file_write` documents for its SFTP branch
+    /// and what `SessionExecResult::exit_code` was changed to stop doing.
+    ///
+    /// Reading one of these lines: `event_type` says which kind of state
+    /// change it is, `tool_name` which tool did it (always set — `AuditLogger::
+    /// log` is the only writer of that field), and `command` carries the
+    /// *operation* rather than a shell command, in the form
+    /// `<tool> <identifying-arg>=<value>`.
+    StateChanged { duration_ms: u64 },
 }
 
 /// Audit event for logging
@@ -23,7 +68,10 @@ pub enum CommandResult {
 pub struct AuditEvent {
     pub timestamp: DateTime<Utc>,
     pub event_type: String,
+    /// Target host alias, or [`NO_HOST`] when the operation had no target.
     pub host: String,
+    /// The command that ran — or, for a [`CommandResult::StateChanged`]
+    /// event, the operation that changed state, since no command ran.
     pub command: String,
     /// Name of the tool that generated this event (e.g., `ssh_redis_cli`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +113,40 @@ impl AuditEvent {
             result: CommandResult::Denied {
                 reason: reason.to_string(),
             },
+            reduction: Vec::new(),
+        }
+    }
+
+    /// Create an event for a state change that ran no process, under the
+    /// `event_type` the caller names.
+    ///
+    /// **The `event_type` is a parameter, not a literal, and that is the whole
+    /// reason this constructor exists.** [`Self::new`] hard-codes
+    /// `"ssh_exec"` and [`Self::denied`] hard-codes `"command_denied"`, so
+    /// before this no code outside this module could write that field at all:
+    /// a tunnel being opened would have been stamped `ssh_exec`, which is the
+    /// same conflation the mandatory `tool` on the use-case entry points was
+    /// added to remove, one layer down. Callers pass their own type — the
+    /// state tools go through `ExecuteCommandUseCase::log_state_change`, which
+    /// passes `"state_change"`.
+    ///
+    /// `command` receives the **operation** (the tool and its identifying
+    /// argument, e.g. `ssh_tunnel_close tunnel_id=tunnel-pi-8080-80`) and not a
+    /// shell command, so every consumer that reads `command` keeps working on
+    /// a non-empty, meaningful value. `host` is a real alias whenever one is
+    /// resolvable, and [`NO_HOST`] when there is none.
+    ///
+    /// `tool_name` is left unset here, like in the other two constructors:
+    /// `AuditLogger::log` takes the tool and is the single writer of it.
+    #[must_use]
+    pub fn state_change(event_type: &str, host: &str, operation: &str, duration_ms: u64) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            event_type: event_type.to_string(),
+            host: host.to_string(),
+            command: operation.to_string(),
+            tool_name: None,
+            result: CommandResult::StateChanged { duration_ms },
             reduction: Vec::new(),
         }
     }
@@ -631,6 +713,18 @@ impl AuditLogger {
                     "Audit: command denied"
                 );
             }
+            // No `exit_code` field here, on purpose: nothing ran. The field
+            // is absent rather than zero, exactly as on the variant.
+            CommandResult::StateChanged { duration_ms } => {
+                info!(
+                    event_type = %event.event_type,
+                    tool_name = event.tool_name.as_deref(),
+                    host = %event.host,
+                    command = %event.command,
+                    duration_ms = duration_ms,
+                    "Audit: state changed"
+                );
+            }
         }
     }
 
@@ -937,6 +1031,61 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"Error\""));
         assert!(json.contains("Connection refused"));
+    }
+
+    /// The one value, pinned. `NO_HOST` is a wire convention: it lands in
+    /// `audit.log` as `"host":"<no-host>"` and every consumer and every grep
+    /// has to tolerate exactly that string, so a change here is a change of
+    /// contract and must break a test rather than a downstream parser.
+    #[test]
+    fn no_host_sentinel_is_pinned_and_cannot_be_a_real_alias() {
+        assert_eq!(NO_HOST, "<no-host>");
+        // Angle brackets are the reason it cannot collide with a config alias.
+        assert!(NO_HOST.starts_with('<') && NO_HOST.ends_with('>'));
+    }
+
+    /// A state change is audited under its own `event_type` and **without any
+    /// exit code at all** — the serialized line is the proof, because that is
+    /// what a consumer reads.
+    #[test]
+    fn a_state_change_line_carries_no_exit_code_and_its_own_event_type() {
+        let logger = AuditLogger::for_test();
+        logger.log(
+            "ssh_tunnel_close",
+            AuditEvent::state_change(
+                "state_change",
+                "raspberry",
+                "ssh_tunnel_close tunnel_id=tunnel-raspberry-8080-80",
+                7,
+            ),
+        );
+        let line = serde_json::to_string(&logger.drain_for_test().remove(0)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(v["event_type"], "state_change", "{line}");
+        assert_eq!(v["tool_name"], "ssh_tunnel_close", "{line}");
+        assert_eq!(v["host"], "raspberry", "{line}");
+        assert_eq!(
+            v["command"], "ssh_tunnel_close tunnel_id=tunnel-raspberry-8080-80",
+            "the operation reaches the field every consumer already reads: {line}"
+        );
+        assert_eq!(v["result"]["StateChanged"]["duration_ms"], 7, "{line}");
+        assert!(
+            !line.contains("exit_code"),
+            "no process ran, so no code may appear — the absence IS the information: {line}"
+        );
+    }
+
+    /// `state_change` must NOT hard-code its `event_type`: that is the whole
+    /// reason it exists, and a later task needs the same mechanism for a
+    /// different type of event.
+    #[test]
+    fn state_change_event_type_comes_from_the_caller() {
+        let ev = AuditEvent::state_change("some_other_type", NO_HOST, "ssh_config_set key=k", 0);
+        assert_eq!(ev.event_type, "some_other_type");
+        assert_eq!(ev.host, NO_HOST);
+        // Like the other two constructors, it leaves the naming to the sink.
+        assert_eq!(ev.tool_name, None);
     }
 
     #[test]

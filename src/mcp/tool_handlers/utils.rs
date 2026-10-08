@@ -1,8 +1,23 @@
 //! Utility functions for tool handlers
 
+use std::time::Instant;
+
 use crate::config::{Config, HostConfig, LimitsConfig, ShellType};
 use crate::error::{BridgeError, Result};
 use crate::ssh::{SshClient, TransferMode};
+
+/// Milliseconds elapsed since `start`, saturating instead of wrapping.
+///
+/// For the `duration_ms` of a `CommandResult::StateChanged` audit event: the
+/// state tools (`ssh_session_create`, `ssh_tunnel_close`, …) time their own
+/// operation, since no `CommandOutput` brings a duration back for them. The
+/// `try_from` is what keeps a 584-million-year uptime from reading as a few
+/// milliseconds; the four private `elapsed_ms` helpers elsewhere in the tree
+/// use `as u64` under an `allow(clippy::cast_possible_truncation)`.
+#[must_use]
+pub fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Validate a file path for potential path traversal attacks.
 ///

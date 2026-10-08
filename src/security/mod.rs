@@ -6,7 +6,7 @@ pub mod recording;
 mod sanitizer;
 mod validator;
 
-pub use audit::{AuditEvent, AuditLogger, AuditWriterTask, CommandResult};
+pub use audit::{AuditEvent, AuditLogger, AuditWriterTask, CommandResult, NO_HOST};
 pub use entropy::EntropyDetector;
 pub use rate_limiter::{RateLimitExceeded, RateLimiter};
 pub use rbac::{RbacConfig, RbacEnforcer};
