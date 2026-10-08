@@ -24,6 +24,18 @@ use crate::config::AuditConfig;
 /// hostless events. It is the single convention for the whole crate — before
 /// it there was none, every non-test caller passed a real alias, and the
 /// alternative was the empty string, which reads like a bug in the writer.
+///
+/// **It reaches the command history too, not only `audit.log`.** The failure
+/// paths named above go through `ExecuteCommandUseCase::log_failure`, which
+/// writes a `HistoryEntry` as well, so `ssh_history` and the
+/// `history://recent` resource both show entries whose `host` is this
+/// sentinel. Checked, for those two consumers: `CommandHistory::for_host`
+/// filters on `e.host == host` with no validation and `ssh_history` only
+/// prints the field, so the value is inert — a real-alias query simply never
+/// matches it. One sharp edge, from the code: `history_resource`'s
+/// `parse_query` does no percent-decoding, so `history://recent?host=<no-host>`
+/// matches **literally** and the correctly-encoded `host=%3Cno-host%3E` does
+/// not.
 pub const NO_HOST: &str = "<no-host>";
 
 /// Result of a command execution for audit purposes
@@ -67,6 +79,19 @@ pub enum CommandResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
     pub timestamp: DateTime<Utc>,
+    /// The kind of outcome this line records, never the tool that produced
+    /// it — that is `tool_name`, and the two are not interchangeable.
+    ///
+    /// It used to be a fixed literal set by whichever constructor ran:
+    /// `"ssh_exec"` from [`AuditEvent::new`] for a command that ran,
+    /// `"command_denied"` from [`AuditEvent::denied`] for one that was
+    /// refused. [`AuditEvent::tagged`] now takes it as a parameter, so the
+    /// set is open; `"state_change"` (from
+    /// `ExecuteCommandUseCase::log_state_change`) is the third value in the
+    /// log today. A consumer must therefore treat an unknown value as data,
+    /// not as a parse error — and a caller must keep passing a kind of
+    /// outcome, which is the contract the field's name carries and the only
+    /// thing stopping it from drifting into a second, unreliable `tool_name`.
     pub event_type: String,
     /// Target host alias, or [`NO_HOST`] when the operation had no target.
     pub host: String,
@@ -117,36 +142,48 @@ impl AuditEvent {
         }
     }
 
-    /// Create an event for a state change that ran no process, under the
-    /// `event_type` the caller names.
+    /// Create an event under the `event_type` **and** the `result` the caller
+    /// names — the only constructor that fixes neither.
     ///
-    /// **The `event_type` is a parameter, not a literal, and that is the whole
-    /// reason this constructor exists.** [`Self::new`] hard-codes
-    /// `"ssh_exec"` and [`Self::denied`] hard-codes `"command_denied"`, so
-    /// before this no code outside this module could write that field at all:
-    /// a tunnel being opened would have been stamped `ssh_exec`, which is the
-    /// same conflation the mandatory `tool` on the use-case entry points was
-    /// added to remove, one layer down. Callers pass their own type — the
-    /// state tools go through `ExecuteCommandUseCase::log_state_change`, which
-    /// passes `"state_change"`.
+    /// **That is the whole reason it exists.** [`Self::new`] hard-codes
+    /// `event_type: "ssh_exec"` and [`Self::denied`] hard-codes
+    /// `"command_denied"`, so before this no code outside this module could
+    /// write that field at all: a tunnel being opened would have been stamped
+    /// `ssh_exec`, which is the same conflation the mandatory `tool` on the
+    /// use-case entry points was added to remove, one layer down.
     ///
-    /// `command` receives the **operation** (the tool and its identifying
-    /// argument, e.g. `ssh_tunnel_close tunnel_id=tunnel-pi-8080-80`) and not a
-    /// shell command, so every consumer that reads `command` keeps working on
-    /// a non-empty, meaningful value. `host` is a real alias whenever one is
-    /// resolvable, and [`NO_HOST`] when there is none.
+    /// `result` is a parameter for the same reason `event_type` is. A
+    /// constructor that took the type but pinned the result would open a door
+    /// its own body closes: the next caller that needs a new `event_type`
+    /// almost certainly needs a different `CommandResult` with it, and would
+    /// have to either mislabel its event or reopen this signature. The
+    /// `event_type`/`result` pair belongs to the caller, as one decision.
+    ///
+    /// Callers do not reach this directly. Each goes through the named,
+    /// typed facade for its kind of event — today
+    /// `ExecuteCommandUseCase::log_state_change`, which passes
+    /// `"state_change"` with [`CommandResult::StateChanged`] — because `tool`
+    /// is mandatory on those facades and consultative nowhere.
+    ///
+    /// `command` receives whatever identifies the thing audited: a shell
+    /// command for an event that ran one, or the **operation** (the tool and
+    /// its identifying argument, e.g.
+    /// `ssh_tunnel_close tunnel_id=tunnel-pi-8080-80`) for one that did not,
+    /// so every consumer that reads `command` keeps working on a non-empty,
+    /// meaningful value. `host` is a real alias whenever one is resolvable,
+    /// and [`NO_HOST`] when there is none.
     ///
     /// `tool_name` is left unset here, like in the other two constructors:
     /// `AuditLogger::log` takes the tool and is the single writer of it.
     #[must_use]
-    pub fn state_change(event_type: &str, host: &str, operation: &str, duration_ms: u64) -> Self {
+    pub fn tagged(event_type: &str, host: &str, command: &str, result: CommandResult) -> Self {
         Self {
             timestamp: Utc::now(),
             event_type: event_type.to_string(),
             host: host.to_string(),
-            command: operation.to_string(),
+            command: command.to_string(),
             tool_name: None,
-            result: CommandResult::StateChanged { duration_ms },
+            result,
             reduction: Vec::new(),
         }
     }
@@ -1052,11 +1089,11 @@ mod tests {
         let logger = AuditLogger::for_test();
         logger.log(
             "ssh_tunnel_close",
-            AuditEvent::state_change(
+            AuditEvent::tagged(
                 "state_change",
                 "raspberry",
                 "ssh_tunnel_close tunnel_id=tunnel-raspberry-8080-80",
-                7,
+                CommandResult::StateChanged { duration_ms: 7 },
             ),
         );
         let line = serde_json::to_string(&logger.drain_for_test().remove(0)).unwrap();
@@ -1076,14 +1113,27 @@ mod tests {
         );
     }
 
-    /// `state_change` must NOT hard-code its `event_type`: that is the whole
-    /// reason it exists, and a later task needs the same mechanism for a
-    /// different type of event.
+    /// `tagged` must hard-code NEITHER the `event_type` NOR the `result`:
+    /// that is the whole reason it exists, and a later task needs the same
+    /// mechanism for a different kind of event. A constructor that took the
+    /// type but pinned the result would open a door its own body closes.
     #[test]
-    fn state_change_event_type_comes_from_the_caller() {
-        let ev = AuditEvent::state_change("some_other_type", NO_HOST, "ssh_config_set key=k", 0);
+    fn tagged_takes_both_the_event_type_and_the_result_from_the_caller() {
+        let ev = AuditEvent::tagged(
+            "some_other_type",
+            NO_HOST,
+            "ssh_config_set key=k",
+            CommandResult::Denied {
+                reason: "a kind of event that is not a state change".to_string(),
+            },
+        );
         assert_eq!(ev.event_type, "some_other_type");
         assert_eq!(ev.host, NO_HOST);
+        assert!(
+            matches!(ev.result, CommandResult::Denied { .. }),
+            "the result is the caller's too, got {:?}",
+            ev.result
+        );
         // Like the other two constructors, it leaves the naming to the sink.
         assert_eq!(ev.tool_name, None);
     }

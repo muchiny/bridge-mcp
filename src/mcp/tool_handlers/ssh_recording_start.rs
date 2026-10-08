@@ -97,7 +97,7 @@ impl ToolHandler for SshRecordingStartHandler {
                 ctx.execute_use_case.log_failure(
                     self.name(),
                     &args.host,
-                    &format!("ssh_recording_start host={}", args.host),
+                    &format!("{} host={}", self.name(), args.host),
                     &e,
                 );
                 return Err(BridgeError::McpInvalidRequest(e));
@@ -107,7 +107,7 @@ impl ToolHandler for SshRecordingStartHandler {
         ctx.execute_use_case.log_state_change(
             self.name(),
             &args.host,
-            &format!("ssh_recording_start session_id={session_id}"),
+            &format!("{} session_id={session_id}", self.name()),
             elapsed_ms(started),
         );
 

@@ -81,7 +81,7 @@ impl ToolHandler for SshTunnelCloseHandler {
         // returns the `TunnelInfo` it removed — so no prior lookup is needed.
         // On the failure path the id matched no tunnel, so no host was ever
         // resolved: `NO_HOST`.
-        let operation = format!("ssh_tunnel_close tunnel_id={}", args.tunnel_id);
+        let operation = format!("{} tunnel_id={}", self.name(), args.tunnel_id);
         let started = Instant::now();
         let closed = match ctx.tunnel_manager.close(&args.tunnel_id).await {
             Ok(closed) => closed,

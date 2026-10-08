@@ -168,13 +168,18 @@ impl ExecuteCommandUseCase {
 
     /// Log a denied command, recording which tool asked for it.
     ///
-    /// `tool` is mandatory: `AuditEvent::event_type` is the literal
-    /// `"ssh_exec"` for every event this entry point and the three below can
-    /// produce, so an audit line could not otherwise say whether a denial
-    /// came from `ssh_exec` itself or from `ssh_file_write`. (Since
-    /// [`Self::log_state_change`] there is a second value in the log,
-    /// `"state_change"`, which names a kind of operation and still not a
-    /// tool — the argument is unchanged.) `tool_name` has existed on the event since it was
+    /// `tool` is mandatory, and the criterion is this: **`event_type` names a
+    /// kind of outcome, never the tool that produced it.** No entry point on
+    /// this type can make it name a tool — `AuditEvent::denied`, which this
+    /// one uses, hard-codes `"command_denied"`; `AuditEvent::new`, which the
+    /// others use, hard-codes `"ssh_exec"`; and the one constructor that
+    /// takes the value, `AuditEvent::tagged`, is reached only through a facade
+    /// here that passes a kind of its own (`"state_change"`). The criterion
+    /// holds for every entry point present and for any entry point added, as
+    /// long as that stays true — which is its bound, and the only thing a
+    /// later reader has to re-check. Without `tool`, then, an audit line could
+    /// not say whether a denial came from `ssh_exec` itself or from
+    /// `ssh_file_write`. `tool_name` has existed on the event since it was
     /// added, but as long as carrying it was optional nothing in
     /// production ever set it: a 2026-09 measurement found 25% of 3,686
     /// audit lines with no `tool_name`, and `ssh_exec` — the escape hatch
@@ -316,13 +321,32 @@ impl ExecuteCommandUseCase {
     /// whenever one is resolvable and [`crate::security::NO_HOST`] when the
     /// operation has no target at all.
     ///
-    /// **No history entry, and that is the reason this is not
+    /// Callers build the tool part of `operation` from `self.name()`, not
+    /// from a literal. `tool` above comes from `self.name()` too, and
+    /// `registry.rs` keys the tool registry on `handler.name()`, so `name()`
+    /// is the authority: two sources for the same string inside one call is a
+    /// divergence waiting to happen, and here the two strings end up in two
+    /// fields of the same line.
+    ///
+    /// **No history entry on this path, and that is the reason this is not
     /// [`Self::log_success`].** `HistoryEntry` (`src/domain/history.rs`) has a
     /// non-optional `exit_code: u32` and derives `success` from `exit_code ==
     /// 0`, so recording a state change there would have to invent the very
     /// `0` that [`CommandResult::StateChanged`] exists to refuse. The audit
     /// trail can say "state changed, no code"; the command history cannot say
     /// it at all, and it is a history of *commands*.
+    ///
+    /// **The asymmetry that follows, written down because it reads like an
+    /// oversight and is not one:** the seven tools that call this *do* write
+    /// a history entry when they fail, because their failure path goes
+    /// through [`Self::log_failure`], which writes audit **and** history. So
+    /// `ssh_history` and `history://recent` show the failures of
+    /// `ssh_session_create`, `ssh_tunnel_close` and the rest, and never their
+    /// successes. That is more misleading than a clean absence, and it is
+    /// deliberate: the alternative is either a fabricated `exit_code` on the
+    /// success path or dropping failure lines that exist today. `audit.log`
+    /// is the complete record for these seven; the command history is not,
+    /// and no reader should take it for one.
     pub fn log_state_change(&self, tool: &str, host: &str, operation: &str, duration_ms: u64) {
         // Same redaction as `process_success` — see its comment. An operation
         // string is built from tool arguments, and `ssh_config_set` passes a
@@ -331,7 +355,12 @@ impl ExecuteCommandUseCase {
 
         self.audit_logger.log(
             tool,
-            AuditEvent::state_change("state_change", host, &redacted, duration_ms),
+            AuditEvent::tagged(
+                "state_change",
+                host,
+                &redacted,
+                CommandResult::StateChanged { duration_ms },
+            ),
         );
     }
 
@@ -521,23 +550,45 @@ mod tests {
         assert_eq!(uc.audit_logger.drain_for_test().len(), 1);
     }
 
-    /// `NO_HOST` is passed through untouched: the sanitizer must not mistake
-    /// the sentinel for something to redact, or every hostless line would
-    /// stop being greppable.
+    /// The redaction is applied to the OPERATION and not to the HOST, and
+    /// the asymmetry is what this pins.
+    ///
+    /// It replaces a test that asserted `NO_HOST` "survives redaction": since
+    /// neither `log_state_change` nor `AuditLogger::log` ever sanitizes
+    /// `host`, that could not fail on what it promised. The probe here is a
+    /// literal the default `Sanitizer` is known to mask (`AKIA` + 16, pinned
+    /// by `sanitizer.rs`'s own tests), placed in BOTH fields of one call: it
+    /// must disappear from `command` and remain in `host`. So the test goes
+    /// red if the redaction is ever dropped from the operation, and red again
+    /// if it is ever extended to the host — which would mangle `<no-host>`
+    /// and every real alias with it, and silently break the greps this
+    /// convention exists for.
     #[test]
-    fn the_hostless_sentinel_survives_redaction() {
+    fn the_operation_is_redacted_and_the_host_is_passed_through_verbatim() {
         let uc = test_use_case();
+        let probe = "AKIAIOSFODNN7EXAMPLE";
         uc.log_state_change(
             "ssh_config_set",
-            NO_HOST,
-            "ssh_config_set key=max_output_chars value=80000",
+            probe,
+            &format!("ssh_config_set key={probe} value=80000"),
             0,
         );
         let events = uc.audit_logger.drain_for_test();
-        assert_eq!(events[0].host, "<no-host>");
+        assert_eq!(events.len(), 1);
+        assert!(
+            !events[0].command.contains(probe),
+            "the operation goes through the sanitizer, got {:?}",
+            events[0].command
+        );
+        assert!(
+            events[0].command.starts_with("ssh_config_set key="),
+            "and only the secret is masked, got {:?}",
+            events[0].command
+        );
         assert_eq!(
-            events[0].command,
-            "ssh_config_set key=max_output_chars value=80000"
+            events[0].host, probe,
+            "`host` is passed through verbatim — the field a grep for an \
+             alias, or for the {NO_HOST} sentinel, has to be able to match"
         );
     }
 

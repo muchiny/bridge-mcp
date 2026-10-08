@@ -130,7 +130,7 @@ impl ToolHandler for SshSessionCreateHandler {
                 ctx.execute_use_case.log_failure(
                     self.name(),
                     &args.host,
-                    &format!("ssh_session_create host={}", args.host),
+                    &format!("{} host={}", self.name(), args.host),
                     &e.to_string(),
                 );
                 return Err(e);
@@ -140,7 +140,7 @@ impl ToolHandler for SshSessionCreateHandler {
         ctx.execute_use_case.log_state_change(
             self.name(),
             &args.host,
-            &format!("ssh_session_create session_id={}", session_info.id),
+            &format!("{} session_id={}", self.name(), session_info.id),
             elapsed_ms(started),
         );
 

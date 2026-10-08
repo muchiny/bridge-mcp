@@ -64,18 +64,27 @@ tests and a serialisation test.
   that never ran, the `ssh_file_write`/`SessionExecResult` trap — or a variant
   that does not carry a code. The absence is the information, which is the
   doctrine `ToolCallResult::remote_exit_code` already states for its `None`.
-  Two more additions come with it: `AuditEvent::state_change(event_type, host,
-  operation, duration_ms)`, the first constructor that lets code outside
-  `src/security/audit.rs` choose the `event_type` (`new` hard-codes
-  `"ssh_exec"`, `denied` hard-codes `"command_denied"`), and
-  `ExecuteCommandUseCase::log_state_change(tool, host, operation,
-  duration_ms)`, a fifth entry point beside the four that take a mandatory
-  `tool`. Those seven lines read `{"event_type":"state_change",
+  Two more additions come with it: `AuditEvent::tagged(event_type, host,
+  command, result)`, the first constructor that lets code outside
+  `src/security/audit.rs` choose **either** of those two (`new` hard-codes
+  `event_type: "ssh_exec"`, `denied` hard-codes `"command_denied"`, and both
+  pin the result), and `ExecuteCommandUseCase::log_state_change(tool, host,
+  operation, duration_ms)`, a fifth entry point beside the four that take a
+  mandatory `tool` — and the named, typed facade the seven tools actually
+  call, since `tagged` alone would let a caller pair any type with any
+  result. Those seven lines read `{"event_type":"state_change",
   "host":"raspberry","command":"ssh_session_close session_id=…",
   "tool_name":"ssh_session_close","result":{"StateChanged":{"duration_ms":2}}}`
-  — no `exit_code` key anywhere. They write **no history entry**:
+  — no `exit_code` key anywhere.
+
+  On their **success** path they write **no history entry**:
   `HistoryEntry::exit_code` is a non-optional `u32` whose `0` means success,
   so the history cannot express "no code", and it is a history of commands.
+  Their **failure** path still goes through `log_failure`, which writes audit
+  and history both — so `ssh_history` and `history://recent` show these seven
+  tools' failures and never their successes. That asymmetry is deliberate and
+  documented on `log_state_change`; `audit.log` is the complete record for
+  them, the command history is not.
 
 - **(wire) `"host":"<no-host>"` is a new, reserved host value in
   `audit.log`.** The constant `bridge_mcp::security::NO_HOST`, used by
@@ -86,6 +95,15 @@ tests and a serialisation test.
   must tolerate it. The angle brackets are what make it impossible to
   confuse with a real alias and trivial to grep; no such convention existed
   before (checked: every non-test caller passed a real alias).
+
+  **It reaches the command history too**, not only `audit.log`: those failure
+  paths go through `log_failure`, which writes a `HistoryEntry` as well, so
+  `ssh_history` and `history://recent` can both return entries whose `host`
+  is the sentinel. Checked for those consumers — `CommandHistory::for_host`
+  is an unvalidated `==` filter and `ssh_history` only prints the field, so
+  the value is inert. One sharp edge: `history_resource`'s `parse_query` does
+  no percent-decoding, so `history://recent?host=<no-host>` matches
+  literally while the correctly-encoded `host=%3Cno-host%3E` does not.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
@@ -988,7 +1006,7 @@ tests and a serialisation test.
   points, which a caller has to invoke by name, as the `bridge-mcp exec`
   subcommand does — and the four SFTP sites of `bridge-mcp upload` /
   `download` in `src/cli/runner.rs`
-  (`grep -rn 'AuditEvent::new\|AuditEvent::denied\|AuditEvent::state_change' src/`).
+  (`grep -rn 'AuditEvent::new\|AuditEvent::denied\|AuditEvent::tagged' src/`).
 
 - **`ssh_metrics_multi` audited a fabricated `exit_code: 0` for every host it
   reached, and nothing at all for the hosts it did not.** The worse of the two

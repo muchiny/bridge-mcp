@@ -77,7 +77,7 @@ impl ToolHandler for SshRecordingStopHandler {
         // The host comes back on the `RecordingInfo` the recorder returns.
         // On the failure path the id matched no active recording, so there is
         // no host to name: `NO_HOST`.
-        let operation = format!("ssh_recording_stop session_id={}", args.session_id);
+        let operation = format!("{} session_id={}", self.name(), args.session_id);
         let started = Instant::now();
         let info = match recorder.stop_session(&args.session_id) {
             Ok(info) => info,

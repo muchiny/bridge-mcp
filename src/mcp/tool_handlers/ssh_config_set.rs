@@ -102,7 +102,7 @@ impl ToolHandler for SshConfigSetHandler {
                 ctx.execute_use_case.log_state_change(
                     self.name(),
                     NO_HOST,
-                    &format!("ssh_config_set key=max_output_chars value={new_value}"),
+                    &format!("{} key=max_output_chars value={new_value}", self.name()),
                     elapsed_ms(started),
                 );
 

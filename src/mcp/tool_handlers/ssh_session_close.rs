@@ -88,7 +88,7 @@ impl ToolHandler for SshSessionCloseHandler {
         // there is no host to name for it, hence `NO_HOST`.
         let host = ctx.session_manager.get_session_host(&args.session_id).await;
         let host = host.as_deref().unwrap_or(NO_HOST);
-        let operation = format!("ssh_session_close session_id={}", args.session_id);
+        let operation = format!("{} session_id={}", self.name(), args.session_id);
 
         let started = Instant::now();
         ctx.session_manager

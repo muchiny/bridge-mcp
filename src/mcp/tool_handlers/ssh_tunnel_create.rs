@@ -17,6 +17,7 @@ use crate::mcp::protocol::ToolCallResult;
 use crate::mcp::tool_handlers::utils::{connect_with_jump, elapsed_ms};
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
+use crate::ssh::SshClient;
 
 /// Arguments for `ssh_tunnel_create` tool
 #[derive(Debug, Deserialize)]
@@ -85,11 +86,6 @@ impl ToolHandler for SshTunnelCreateHandler {
         }
     }
 
-    // Already close to the limit; the two audit calls this task adds (a state
-    // change on success, `log_failure` on a failed registration) pushed it
-    // two lines over. Same reason `ssh_find` carries this allow. No behaviour
-    // in the forwarding loop changed, so an extraction is not owed here.
-    #[allow(clippy::too_many_lines)]
     async fn execute(&self, args: Option<Value>, ctx: &ToolContext) -> Result<ToolCallResult> {
         let Some(v) = args else {
             return Err(BridgeError::McpMissingParam {
@@ -117,6 +113,31 @@ impl ToolHandler for SshTunnelCreateHandler {
                 args.host
             )));
         }
+
+        // The clock for the audit event's `duration_ms` starts HERE, before
+        // the first thing that can take any time, and runs to the end of the
+        // registration below.
+        //
+        // It used to start after `connect_with_jump`, around
+        // `TunnelManager::register` alone — a `Mutex` lock and a
+        // `HashMap::insert`. Measured live, that reported
+        // `{"StateChanged":{"duration_ms":0}}` for a tunnel creation that had
+        // really opened an SSH connection: a number that looked like a
+        // measurement without being one, which is the class of defect this
+        // variant exists to avoid. The old comment pleaded that "the
+        // connection path times itself" — true, and inoperative: that timing
+        // lives in a `tracing` span field (`SshClient::connect`), so it goes
+        // to stderr and never to `audit.path`.
+        //
+        // What it measures: the local bind, the SSH handshake (jump host
+        // included), the spawn of the forwarding task, and the registration.
+        // What it excludes, all of it local and before any state could
+        // change: argument parsing, the host-config lookup and the
+        // rate-limit check. What it is never reported for: a failed bind or a
+        // failed connection, which return early and write no event at all —
+        // so this duration only ever appears beside a tunnel that exists, or
+        // beside a registration that was refused.
+        let started = Instant::now();
 
         // Bind the local TCP listener first (fail fast if port is in use)
         let listener = TcpListener::bind(("127.0.0.1", args.local_port))
@@ -158,49 +179,18 @@ impl ToolHandler for SshTunnelCreateHandler {
         };
 
         // Spawn the forwarding task
-        let fwd_client = Arc::clone(&client);
-        let fwd_remote_host = remote_host.clone();
-        let fwd_remote_port = args.remote_port;
-        let fwd_tunnel_id = tunnel_id.clone();
+        let handle = spawn_forwarding_task(
+            listener,
+            client,
+            remote_host,
+            args.remote_port,
+            tunnel_id.clone(),
+        );
 
-        let handle = tokio::spawn(async move {
-            loop {
-                let (tcp_stream, peer_addr) = match listener.accept().await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        warn!(tunnel_id = %fwd_tunnel_id, error = %e, "Tunnel accept error");
-                        break;
-                    }
-                };
-
-                debug!(
-                    tunnel_id = %fwd_tunnel_id,
-                    peer = %peer_addr,
-                    "Tunnel: new connection"
-                );
-
-                let conn_client = Arc::clone(&fwd_client);
-                let conn_remote_host = fwd_remote_host.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = conn_client
-                        .forward_tcp_connection(tcp_stream, &conn_remote_host, fwd_remote_port)
-                        .await
-                    {
-                        debug!(error = %e, "Tunnel connection ended");
-                    }
-                });
-            }
-        });
-
-        // Register in the tunnel manager
-        //
-        // Audited as a state change, not as a command: a forwarded port is
-        // opened here and no process is run on the host. `started` is taken
-        // after the connection is up, so the duration covers the registration
-        // and not the SSH handshake, which the connection path times itself.
-        let operation = format!("ssh_tunnel_create tunnel_id={tunnel_id}");
-        let started = Instant::now();
+        // Register in the tunnel manager, then audit as a state change and
+        // not as a command: a forwarded port is opened here and no process
+        // runs on the host, so the event carries a duration and no exit code.
+        let operation = format!("{} tunnel_id={tunnel_id}", self.name());
         ctx.tunnel_manager
             .register(tunnel_info.clone(), handle)
             .await
@@ -225,6 +215,46 @@ impl ToolHandler for SshTunnelCreateHandler {
 
         Ok(ToolCallResult::text(json))
     }
+}
+
+/// Spawn the task that accepts on `listener` and forwards each connection
+/// through `client`.
+///
+/// Extracted from `execute` for its length alone — the loop is unchanged.
+/// It owns the listener, so the tunnel's lifetime is the task's: aborting the
+/// handle (what `TunnelManager::close` does) drops the bound port with it.
+fn spawn_forwarding_task(
+    listener: TcpListener,
+    client: Arc<SshClient>,
+    remote_host: String,
+    remote_port: u16,
+    tunnel_id: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let (tcp_stream, peer_addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    warn!(tunnel_id = %tunnel_id, error = %e, "Tunnel accept error");
+                    break;
+                }
+            };
+
+            debug!(tunnel_id = %tunnel_id, peer = %peer_addr, "Tunnel: new connection");
+
+            let conn_client = Arc::clone(&client);
+            let conn_remote_host = remote_host.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = conn_client
+                    .forward_tcp_connection(tcp_stream, &conn_remote_host, remote_port)
+                    .await
+                {
+                    debug!(error = %e, "Tunnel connection ended");
+                }
+            });
+        }
+    })
 }
 
 #[cfg(test)]
