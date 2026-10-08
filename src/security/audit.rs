@@ -96,8 +96,9 @@ pub enum CommandResult {
     /// A confirmation gate let a destructive call through, and **nothing has
     /// run yet** when this line is written.
     ///
-    /// Written by the CLI's destructive gate (`confirm_destructive`,
-    /// `src/cli/runner.rs`) through
+    /// Written by the CLI's destructive gate — `decide_destructive` reaches
+    /// the verdict and `apply_gate_decision` records it, both in
+    /// `src/cli/runner.rs` — through
     /// `ExecuteCommandUseCase::log_confirmed`, at the moment the decision is
     /// taken — before the call is dispatched, and before it is even settled
     /// which path (a running daemon, or in-process) will serve it. This line
