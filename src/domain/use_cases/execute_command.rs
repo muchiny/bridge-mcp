@@ -238,7 +238,10 @@ impl ExecuteCommandUseCase {
     /// all append to the same `audit.log` — so on a shared trail a
     /// destructive line with no `command_confirmed` beside it means "this
     /// call did not come through the CLI gate", not "the gate was bypassed".
-    /// The inference holds for CLI-served calls and for nothing else.
+    /// The inference holds for CLI-served calls and for nothing else — and
+    /// on a shared trail it cannot even be applied, since `AuditEvent` has no
+    /// field naming what served the call, so the CLI-served lines cannot be
+    /// selected out. It is usable on a CLI-only trail.
     ///
     /// **No history entry**, for the reason given at length on
     /// [`Self::log_state_change`]: `HistoryEntry::exit_code` is a

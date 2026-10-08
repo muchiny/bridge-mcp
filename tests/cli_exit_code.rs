@@ -34,7 +34,10 @@ fn run(config: &std::path::Path, args: &[&str]) -> Output {
 /// observe what the CLI does when a daemon IS up — no SSH, no real daemon,
 /// no host.
 ///
-/// Returned handle: dropping it stops the accept loop at the next connection.
+/// The returned handle is **detached** when dropped — a `JoinHandle` does not
+/// stop its thread — so the accept loop lives until the test process exits.
+/// That is harmless here (a blocked thread does not hold up process exit, and
+/// the socket goes with the `TempDir`), but it is not a shutdown.
 fn stub_daemon(runtime_dir: &std::path::Path) -> std::thread::JoinHandle<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;

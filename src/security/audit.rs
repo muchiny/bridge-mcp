@@ -103,6 +103,12 @@ pub enum CommandResult {
     /// `audit.log`. On a shared trail, a destructive line with no
     /// `command_confirmed` beside it means "this call did not come through
     /// the CLI gate". The inference is sound for CLI-served calls only.
+    ///
+    /// **And on a shared trail it is not just unsound but unusable**, because
+    /// [`AuditEvent`] carries no field naming what served the call: a reader
+    /// cannot tell which lines came from the CLI, so they cannot select the
+    /// population the rule applies to. Fully usable on a trail only the CLI
+    /// writes to.
     Confirmed { by: String },
 }
 

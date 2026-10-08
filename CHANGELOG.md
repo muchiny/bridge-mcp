@@ -132,8 +132,11 @@ tests and a serialisation test.
   turns a refusal into an error — so the decision is taken at the top of
   `run_tool`, before every branch, while the logger is created only for a
   call that produced a decision to record. A decision that is taken and not
-  recorded is no longer expressible: the `match` is exhaustive and `NotGated`
-  is the only arm that writes nothing. The gate itself did **not** move down
+  recorded is no longer expressible on either side: the recording `match` is
+  exhaustive with `NotGated` as its only silent arm, and `GateDecision` is
+  `#[must_use]`, without which `decide_destructive(…);` in statement position
+  compiled in silence (clippy's `must_use_candidate` is pedantic-only and this
+  crate does not enable it). The gate itself did **not** move down
   to where the context is built: the daemon branch ends in a `return`, so a
   gate placed after it would never be reached by a call a live daemon serves,
   which is exactly the 2026-08-31 regression this release fixed. That
@@ -151,11 +154,17 @@ tests and a serialisation test.
   (256 characters) is replaced by `<elided: N chars>`, and the whole
   operation string is cut at `GATE_AUDIT_MAX_OPERATION_CHARS` (2048) with
   `<truncated: N chars total>`. Without it,
-  `--yes tool ssh_file_write … content=<400 KB>` wrote a 400 KB
-  `command_confirmed` line carrying the whole file — 250 such calls fill a
-  100 MB archive, any JSONL consumer with a line-length bound breaks, and it
-  defeated a deliberate exclusion, since that handler's own event is
-  `SFTP_WRITE <path>` with no content at all. The rule is a size rule rather
+  `--yes tool ssh_file_write … content=<a file>` wrote a `command_confirmed`
+  line carrying that whole file. **Through `argv` the ceiling is
+  `MAX_ARG_STRLEN` — 32 pages, 128 KB per argument, and `ARG_MAX` for the
+  whole line; past that `execve` fails with `E2BIG` and the binary never
+  starts** (measured in `tests/cli_exit_code.rs`), while a daemon-forwarded or
+  MCP-served call carries its arguments as JSON over a socket and has no such
+  limit. So this bounds volume — 128 KB a line fills a 100 MB archive in 800
+  calls, and any JSONL consumer with a line-length bound breaks — and it
+  bounds content at any size, since it defeated a deliberate exclusion: that
+  handler's own event is `SFTP_WRITE <path>` with no content at all. The rule
+  is a size rule rather
   than a list of content-bearing field names on purpose: the gate sees an
   opaque JSON object for any of 476 tools, so a name list would leak in
   silence the first time a payload was called something else.
@@ -206,7 +215,10 @@ tests and a serialisation test.
   MCP server's own destructive gate writes **no** audit event today, and the
   CLI, the daemon and the MCP server all append to the same file, so on a
   shared trail the absence only means "this call did not come through the CLI
-  gate". The inference holds for CLI-served calls and nowhere else.
+  gate". The inference holds for CLI-served calls and nowhere else — and on a
+  shared trail it cannot be applied at all, because `AuditEvent` carries no
+  field naming what served a call, so a reader cannot select the CLI-served
+  lines to reason over. Usable on a CLI-only trail.
 
   **Recorded only while audit logging is on.** With `audit.enabled: false`
   there is no trail; and a run whose `audit.path` cannot be opened used to

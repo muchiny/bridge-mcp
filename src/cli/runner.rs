@@ -1731,6 +1731,41 @@ pub async fn run_tool(
     data_reduction: DataReductionFlags,
     assume_yes: bool,
 ) -> Result<i32> {
+    run_tool_via(
+        config,
+        tool_name,
+        kv_args,
+        json_args,
+        json_output,
+        data_reduction,
+        assume_yes,
+        &crate::daemon::default_socket_path(),
+    )
+    .await
+}
+
+/// [`run_tool`] with the daemon socket passed in rather than resolved.
+///
+/// The public entry point resolves `$XDG_RUNTIME_DIR/bridge-mcp.sock`, which
+/// means an **in-process** test of `run_tool` reaches whatever daemon the
+/// developer's session happens to have up — and a daemon changes what the
+/// audit trail of a call contains, because it serves the execution and the
+/// CLI writes only the gate line. `tests/cli_exit_code.rs` isolates that
+/// variable with `.env()`, but a lib test has no child process to set the
+/// environment of, and `std::env::set_var` is unsafe and racy under the
+/// parallel harness. So the path is a parameter here instead, and the test
+/// points it at a file that does not exist.
+#[allow(clippy::too_many_arguments)]
+async fn run_tool_via(
+    config: Arc<Config>,
+    tool_name: &str,
+    kv_args: &[String],
+    json_args: Option<&str>,
+    json_output: bool,
+    data_reduction: DataReductionFlags,
+    assume_yes: bool,
+    daemon_socket: &std::path::Path,
+) -> Result<i32> {
     use crate::mcp::registry::{create_filtered_registry, inject_reduction_schema};
 
     let registry = create_filtered_registry(&config.tool_groups);
@@ -1808,8 +1843,18 @@ pub async fn run_tool(
     // `decide_destructive` only *decides*. It writes nothing, which is why it
     // can run before any logger exists: the decision is a value, and the
     // caller records it. A decision taken and not recorded is therefore not
-    // expressible here — the `match` in `apply_gate_decision` is exhaustive,
-    // and `NotGated` is the only arm that writes nothing.
+    // expressible — on the recording side because the `match` in
+    // `apply_gate_decision` is exhaustive and `NotGated` is its only silent
+    // arm, and on THIS side because `GateDecision` is `#[must_use]`, without
+    // which `decide_destructive(…);` in statement position compiled in
+    // silence (clippy's `must_use_candidate` is pedantic-only and off here).
+    let run = ToolRun {
+        registry: &registry,
+        config: &config,
+        daemon_socket,
+        json_output,
+    };
+
     let decision = decide_destructive(tool_name, args.as_ref(), assume_yes, &config);
 
     if matches!(decision, GateDecision::NotGated) {
@@ -1820,7 +1865,7 @@ pub async fn run_tool(
         // building the wiring up front cost them 391 ms on the daemon fast
         // path (measured, debug: 74 ms -> 465 ms) — a path that exists to save
         // a ~95 ms handshake. 85% of that is two `Sanitizer`s at 70 patterns.
-        return run_ungated_tool(&registry, tool_name, args, &config, json_output).await;
+        return run_ungated_tool(&run, tool_name, args).await;
     }
 
     // One audit logger and one writer task for this invocation, created above
@@ -1830,18 +1875,26 @@ pub async fn run_tool(
     // Only the 45 destructive tools pay for this.
     let (wiring, audit_task) = create_audit_wiring(&config);
     let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
-    let outcome = run_gated_tool(
-        &registry,
-        tool_name,
-        args,
-        decision,
-        &config,
-        &wiring,
-        json_output,
-    )
-    .await;
+    let outcome = run_gated_tool(&run, tool_name, args, decision, &wiring).await;
     finish_audit_wiring(wiring, audit_writer).await;
     outcome
+}
+
+/// The plumbing one `bridge-mcp tool` invocation carries through both
+/// execution paths.
+///
+/// Bundled rather than threaded: `daemon_socket` became a parameter so a lib
+/// test could aim it at a path nothing binds, and that pushed
+/// `run_gated_tool` past clippy's argument bound — which `make lint` treats
+/// as an error. Grouping it means the next such parameter is added in one
+/// place instead of two signatures.
+struct ToolRun<'a> {
+    registry: &'a crate::mcp::registry::ToolRegistry,
+    config: &'a Arc<Config>,
+    /// Where a daemon would be listening. Resolved by `run_tool` from
+    /// `$XDG_RUNTIME_DIR`; see `run_tool_via` for why it is not read here.
+    daemon_socket: &'a std::path::Path,
+    json_output: bool,
 }
 
 /// Forward to a running daemon, if there is one.
@@ -1866,16 +1919,16 @@ pub async fn run_tool(
 ///
 /// Propagates a failure to talk to a daemon that *was* reachable.
 async fn forward_to_daemon(
+    daemon_socket: &std::path::Path,
     tool_name: &str,
     args: Option<&serde_json::Value>,
     json_output: bool,
 ) -> Result<Option<i32>> {
-    let daemon_socket = crate::daemon::default_socket_path();
     if !daemon_socket.exists() {
         return Ok(None);
     }
     let forwarded = try_forward_to_daemon(
-        &daemon_socket,
+        daemon_socket,
         tool_name,
         args.cloned().unwrap_or(serde_json::Value::Null),
     )
@@ -1890,13 +1943,11 @@ async fn forward_to_daemon(
 /// every early return below still passes through the caller's `finish_audit_
 /// wiring`, so the line survives the process exit.
 async fn run_gated_tool(
-    registry: &crate::mcp::registry::ToolRegistry,
+    run: &ToolRun<'_>,
     tool_name: &str,
     args: Option<serde_json::Value>,
     decision: GateDecision,
-    config: &Arc<Config>,
     wiring: &AuditWiring,
-    json_output: bool,
 ) -> Result<i32> {
     apply_gate_decision(
         decision,
@@ -1906,33 +1957,35 @@ async fn run_gated_tool(
         &audited_operation(tool_name, args.as_ref()),
     )?;
 
-    if let Some(code) = forward_to_daemon(tool_name, args.as_ref(), json_output).await? {
+    if let Some(code) =
+        forward_to_daemon(run.daemon_socket, tool_name, args.as_ref(), run.json_output).await?
+    {
         return Ok(code);
     }
 
     // Slow path: stateless in-process execution, reusing the logger that
     // already recorded the gate decision — exactly one per invocation.
-    let ctx = create_context_from_wiring(Arc::clone(config), wiring);
-    run_tool_in_context(registry, tool_name, args, &ctx, json_output).await
+    let ctx = create_context_from_wiring(Arc::clone(run.config), wiring);
+    run_tool_in_context(run.registry, tool_name, args, &ctx, run.json_output).await
 }
 
 /// A call the gate took no decision about, so there is nothing to record
 /// before the daemon branch and the audit wiring is built only if the
 /// in-process path is reached.
 async fn run_ungated_tool(
-    registry: &crate::mcp::registry::ToolRegistry,
+    run: &ToolRun<'_>,
     tool_name: &str,
     args: Option<serde_json::Value>,
-    config: &Arc<Config>,
-    json_output: bool,
 ) -> Result<i32> {
-    if let Some(code) = forward_to_daemon(tool_name, args.as_ref(), json_output).await? {
+    if let Some(code) =
+        forward_to_daemon(run.daemon_socket, tool_name, args.as_ref(), run.json_output).await?
+    {
         return Ok(code);
     }
 
-    let (ctx, audit_task) = create_context_with_audit(Arc::clone(config));
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(run.config));
     let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
-    let outcome = run_tool_in_context(registry, tool_name, args, &ctx, json_output).await;
+    let outcome = run_tool_in_context(run.registry, tool_name, args, &ctx, run.json_output).await;
     finish_audit(ctx, audit_writer).await;
     outcome
 }
@@ -1997,13 +2050,20 @@ const CONFIRMED_BY_PROMPT: &str = "terminal prompt";
 /// replaces it with its length.
 ///
 /// **This exists because the gate's audit line would otherwise persist the
-/// call's arguments in full.** `--yes tool ssh_file_write … content=<400 KB>`
-/// wrote a 400 KB `command_confirmed` line carrying the whole file, which 250
-/// calls turn into a 100 MB archive and which breaks any JSONL consumer with a
-/// line-length bound. Worse, it defeated a deliberate exclusion: the handler's
-/// own audit event for that write is `SFTP_WRITE <path>` and carries no
-/// content at all, precisely so the trail does not become a copy of the files
-/// it records.
+/// call's arguments in full.** `--yes tool ssh_file_write … content=<a file>`
+/// wrote a `command_confirmed` line carrying that whole file.
+///
+/// How large, exactly, because the obvious figure is wrong: through `argv` the
+/// ceiling is `MAX_ARG_STRLEN`, 32 pages — **128 KB per argument** — and
+/// `ARG_MAX` for the whole command line; past that `execve` fails with `E2BIG`
+/// and the binary never starts, which `tests/cli_exit_code.rs` measures. A
+/// daemon-forwarded or MCP-served call carries its arguments as JSON over a
+/// socket and has no such limit. So the bound matters for volume — 128 KB a
+/// line fills a 100 MB archive in 800 calls, and breaks any JSONL consumer
+/// with a line-length bound — and it matters for content at any size: it
+/// defeated a deliberate exclusion, since the handler's own audit event for
+/// that write is `SFTP_WRITE <path>` and carries no content at all, precisely
+/// so the trail does not become a copy of the files it records.
 ///
 /// 256 characters leaves every host alias, path, id, unit name and ordinary
 /// shell command intact — the values that make a line worth reading — while no
@@ -2022,6 +2082,15 @@ const GATE_AUDIT_MAX_OPERATION_CHARS: usize = 2048;
 
 /// What the destructive gate decided. **A value, not an effect** — see
 /// [`decide_destructive`] for why that matters.
+///
+/// `#[must_use]` is the other half of "a decision taken and not recorded is
+/// not expressible", and it is the half the type alone did not give. The
+/// exhaustive `match` in [`apply_gate_decision`] closes the recording side;
+/// without this attribute the **calling** side stayed open —
+/// `decide_destructive(…);` in statement position compiled silently, and
+/// `clippy::must_use_candidate` does not run here because `src/lib.rs` does
+/// not enable `clippy::pedantic`.
+#[must_use]
 #[derive(Debug)]
 enum GateDecision {
     /// The gate took no decision: the policy is off, or the tool is not
@@ -2139,7 +2208,43 @@ fn decide_destructive(
     assume_yes: bool,
     config: &Config,
 ) -> GateDecision {
-    use std::io::{IsTerminal, Write};
+    use std::io::IsTerminal;
+
+    let stdin = std::io::stdin();
+    let is_terminal = stdin.is_terminal();
+    decide_destructive_from(
+        tool_name,
+        args,
+        assume_yes,
+        config,
+        is_terminal,
+        &mut stdin.lock(),
+    )
+}
+
+/// [`decide_destructive`] with the terminal and the answer passed in.
+///
+/// **The split exists so the prompt branch is reachable by a test, wiring
+/// included.** `decision_from_prompt_answer` covers the decision *rule*, but
+/// the line that connects it to `read_line` was covered by nothing: replacing
+/// `Ok(_) => decision_from_prompt_answer(…)` with a hard-coded
+/// `Confirmed { by: CONFIRMED_BY_PROMPT }` left the whole suite green, and
+/// that mutation is the worst outcome this task has — an operator types `n`,
+/// the command runs, and the audit line says they confirmed. Not being able
+/// to reach `IsTerminal` was a fact; not being able to reach the wiring one
+/// line below it was a choice, and this undoes it.
+///
+/// The only thing now outside a test's reach is `std::io::stdin().is_terminal()`
+/// itself, i.e. whether the real process has a TTY.
+fn decide_destructive_from(
+    tool_name: &str,
+    args: Option<&serde_json::Value>,
+    assume_yes: bool,
+    config: &Config,
+    stdin_is_terminal: bool,
+    answers: &mut dyn std::io::BufRead,
+) -> GateDecision {
+    use std::io::Write;
 
     if !config.security.require_elicitation_on_destructive {
         return GateDecision::NotGated;
@@ -2156,7 +2261,7 @@ fn decide_destructive(
         };
     }
 
-    if !std::io::stdin().is_terminal() {
+    if !stdin_is_terminal {
         return GateDecision::Denied {
             reason: format!(
                 "`{tool_name}` is annotated destructive and stdin is not a terminal, \
@@ -2179,7 +2284,7 @@ fn decide_destructive(
     let _ = std::io::stderr().flush();
 
     let mut answer = String::new();
-    match std::io::stdin().read_line(&mut answer) {
+    match answers.read_line(&mut answer) {
         // Refused, like a declined prompt — but the error keeps its own kind,
         // so the exit code of an unreadable stdin does not become a security
         // denial's.
@@ -2194,9 +2299,9 @@ fn decide_destructive(
 }
 
 /// The prompt's answer, mapped to a decision. Split out of
-/// [`decide_destructive`] because that function needs a terminal on stdin and
-/// no test in this repo has one, while this mapping — which is what decides
-/// whether a human confirmed — is pure and testable.
+/// [`decide_destructive_from`] so the rule can be read and tested on its own;
+/// the wiring that calls it is covered through
+/// [`decide_destructive_from`]'s injected reader.
 fn decision_from_prompt_answer(tool_name: &str, answer: &str) -> GateDecision {
     if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
         GateDecision::Confirmed {
@@ -2517,6 +2622,15 @@ mod tests {
         // writes `"command_confirmed"` — but it is still the one every
         // command event carries, including this one.
         //
+        // The socket is passed in, and points at a name inside this test's own
+        // tempdir that nothing binds: this is an IN-PROCESS call, so without
+        // it the test would reach whatever daemon the developer's session has
+        // up — which serves the execution and leaves only the gate line, one
+        // instead of the two asserted below. `tests/cli_exit_code.rs` isolates
+        // `XDG_RUNTIME_DIR` with `.env()` for the same reason; there is no
+        // child process here to set an environment for, and
+        // `std::env::set_var` is unsafe and racy under the parallel harness.
+        //
         // `ssh_exec` IS annotated destructive, so the `--yes` below also
         // makes the gate write a `command_confirmed` line to this same file,
         // naming the same tool and the same host. That is why the assertions
@@ -2524,7 +2638,7 @@ mod tests {
         // whole file for `ssh_exec` or for the host: either of those would
         // now be satisfied by the gate's line alone, even if the run's own
         // event were never written.
-        let _ = run_tool(
+        let _ = run_tool_via(
             Arc::new(config),
             "ssh_exec",
             &["host=h".to_string(), "command=echo hi".to_string()],
@@ -2532,6 +2646,7 @@ mod tests {
             false,
             DataReductionFlags::default(),
             true,
+            &dir.path().join("no-daemon-here.sock"),
         )
         .await;
         let log = std::fs::read_to_string(&audit_path).expect("audit.log exists");
@@ -4588,6 +4703,38 @@ mod tests {
             "the truncation must say how much there was, got the tail {:?}",
             &line[line.len().saturating_sub(60)..]
         );
+        assert!(line.chars().count() <= GATE_AUDIT_MAX_OPERATION_CHARS + 64);
+    }
+
+    /// The shape the CLI actually produces, which neither of the other two
+    /// bound tests covered: **several values each just under the per-value
+    /// limit**, whose sum is far over the overall ceiling. 500 single-character
+    /// values is a synthetic extreme; this is what a real
+    /// `ssh_ansible_playbook` or `ssh_k8s_apply` invocation looks like.
+    #[test]
+    fn several_large_but_unelided_values_still_hit_the_overall_ceiling() {
+        let mut map = serde_json::Map::new();
+        for i in 0..20 {
+            // 200 chars each: under GATE_AUDIT_MAX_VALUE_CHARS, so NOT elided.
+            map.insert(format!("field{i}"), serde_json::json!("x".repeat(200)));
+        }
+        let args = serde_json::Value::Object(map);
+        let line = audited_operation("ssh_exec", Some(&args));
+
+        assert!(
+            !line.contains("<elided:"),
+            "no single value is over the per-value bound, so nothing should be elided"
+        );
+        assert!(
+            line.contains("<truncated:") && line.contains("chars total>"),
+            "4000+ chars of unelided values must still be cut, got {} chars",
+            line.chars().count()
+        );
+        assert!(
+            line.chars().count() <= GATE_AUDIT_MAX_OPERATION_CHARS + 64,
+            "the marker aside, the line must stay at the ceiling, got {} chars",
+            line.chars().count()
+        );
     }
 
     /// M4: `log_denied` was the one audit entry point that did not pre-redact,
@@ -4694,25 +4841,115 @@ mod tests {
     /// `run_tool` builds the audit wiring only for a call that produced a
     /// decision, so `NotGated` has to be exactly the set of calls that write
     /// nothing. Pinning it here keeps the two from drifting apart silently.
+    ///
+    /// **It reads the journal on both sides**, because the first version of
+    /// this test asserted only on the returned value: three `matches!` and no
+    /// logger. Its name promised "records nothing" and its body could not
+    /// have seen a `Confirmed` that recorded nothing.
     #[test]
     fn not_gated_is_exactly_the_set_that_records_nothing() {
         let on = gate_config(true);
         let off = gate_config(false);
         let args = serde_json::json!({"host": "pi"});
-        // Destructive + policy on, under --yes: a decision, so NOT NotGated.
-        assert!(!matches!(
-            decide_destructive("ssh_exec", Some(&args), true, &on),
-            GateDecision::NotGated
-        ));
-        // Either knob off: no decision.
-        assert!(matches!(
-            decide_destructive("ssh_exec", Some(&args), true, &off),
-            GateDecision::NotGated
-        ));
-        assert!(matches!(
-            decide_destructive("ssh_metrics", Some(&args), true, &on),
-            GateDecision::NotGated
-        ));
+
+        // Three cases, and for each: the decision AND what reached the trail.
+        for (tool, assume_yes, config, gated) in [
+            // Destructive + policy on, under --yes: a decision, so a line.
+            ("ssh_exec", true, &on, true),
+            // Either knob off: no decision, so no line.
+            ("ssh_exec", true, &off, false),
+            ("ssh_metrics", true, &on, false),
+        ] {
+            let decision = decide_destructive(tool, Some(&args), assume_yes, config);
+            assert_eq!(
+                !matches!(decision, GateDecision::NotGated),
+                gated,
+                "{tool}: wrong decision kind"
+            );
+
+            let (logger, audit) = gate_audit(config);
+            gate(tool, Some(&args), assume_yes, config, &audit).expect("none of these refuse");
+            let events = logger.drain_for_test();
+            assert_eq!(
+                !events.is_empty(),
+                gated,
+                "{tool}: `NotGated` must be exactly the set that writes nothing, \
+                 got {events:?}"
+            );
+        }
+    }
+
+    /// The prompt branch, wiring included — the mutation that
+    /// `decision_from_prompt_answer`'s own tests could not catch: replacing
+    /// `Ok(_) => decision_from_prompt_answer(…)` with a hard-coded
+    /// confirmation left the whole suite green, and that is an operator
+    /// typing `n`, the command running, and the trail saying they agreed.
+    #[test]
+    fn a_terminal_answer_decides_through_the_wiring_not_around_it() {
+        let config = gate_config(true);
+        let args = serde_json::json!({"host": "pi", "command": "rm -rf /tmp/x"});
+
+        for (answer, expect_confirmed) in [("y\n", true), ("n\n", false), ("\n", false)] {
+            let mut reader = std::io::Cursor::new(answer.as_bytes().to_vec());
+            let decision = decide_destructive_from(
+                "ssh_exec",
+                Some(&args),
+                false,
+                &config,
+                true, // stdin IS a terminal: the branch no test could reach
+                &mut reader,
+            );
+            let (logger, audit) = gate_audit(&config);
+            let outcome = apply_gate_decision(
+                decision,
+                &audit,
+                "ssh_exec",
+                gate_host(Some(&args)),
+                &audited_operation("ssh_exec", Some(&args)),
+            );
+            let events = logger.drain_for_test();
+            assert_eq!(events.len(), 1, "{answer:?}: expected one event");
+
+            if expect_confirmed {
+                outcome.expect("`y` must let the call through");
+                assert_eq!(events[0].event_type, "command_confirmed");
+                match &events[0].result {
+                    CommandResult::Confirmed { by } => assert_eq!(by, CONFIRMED_BY_PROMPT),
+                    r => panic!("expected Confirmed, got {r:?}"),
+                }
+            } else {
+                outcome.expect_err("anything but yes must refuse");
+                assert_eq!(
+                    events[0].event_type, "command_denied",
+                    "{answer:?}: the operator said no; the trail must not say otherwise"
+                );
+            }
+        }
+    }
+
+    /// The fifth exit, through the wiring: a reader that errors. Before the
+    /// reader was injectable this branch was reachable only by constructing
+    /// the decision by hand, which skipped the line under test.
+    #[test]
+    fn a_terminal_whose_answer_cannot_be_read_refuses_through_the_wiring() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("stdin went away"))
+            }
+        }
+
+        let config = gate_config(true);
+        let mut reader = std::io::BufReader::new(Broken);
+        let decision = decide_destructive_from("ssh_exec", None, false, &config, true, &mut reader);
+        let (logger, audit) = gate_audit(&config);
+        let err = apply_gate_decision(decision, &audit, "ssh_exec", "pi", "ssh_exec {}")
+            .expect_err("an unread answer must not confirm");
+        assert!(
+            matches!(err, BridgeError::Io(_)),
+            "the error must stay an I/O error, got {err:?}"
+        );
+        assert_eq!(logger.drain_for_test()[0].event_type, "command_denied");
     }
 
     // ============== coerce_value Tests ==============
