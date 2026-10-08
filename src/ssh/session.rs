@@ -3342,20 +3342,27 @@ mod tests {
         assert!(manager.list().await.is_empty());
     }
 
-    /// **The WIRING, as source text, because nothing else here can see it.**
+    /// **The WIRING, as source text, because no UNIT test can see it.**
     ///
-    /// No test in this repository can put a session into a `SessionManager`:
-    /// `ShellSession` holds a live `russh::Channel` and an `SshClient` with
-    /// no test constructor, so the five pre-existing `cleanup`/`close_all`
-    /// tests all run on an empty map and the test above calls
-    /// `audit_destroyed` directly. What that leaves uncovered is the join
-    /// between the verdict and the effect — whether the removal sites call
-    /// the helper at all — so it is pinned where it is written.
+    /// No unit test in this module can put a session into a
+    /// `SessionManager`: `ShellSession` is private and holds a live
+    /// `russh::Channel` and an `SshClient` with no `#[cfg(test)]`
+    /// constructor, so the five pre-existing `cleanup`/`close_all` tests all
+    /// run on an empty map and the tests above call `audit_destroyed`
+    /// directly.
+    ///
+    /// **Three of the six call sites ARE driven end to end**, from
+    /// `tests/session_reaper_audit.rs`, against the in-process mock SSH
+    /// server — which grew a `shell_request` handler for exactly that. It
+    /// covers `cleanup`'s line (both bounds, each named), `close_all`'s, and
+    /// `close`'s silence. What remains pinned only here are **`exec`'s four
+    /// branches**: reaching them needs a shell that accepts a command and
+    /// then dies mid-read, which the mock does not emulate.
     ///
     /// A source-text guard is the weakest kind of test. It is still stronger
-    /// than the runtime test that cannot be written here, and it is the one
-    /// assertion that would redden if a future refactor moved the audit
-    /// write into a shared `remove_and_close` reached from `close`.
+    /// than the runtime test that cannot be written for those four, and it
+    /// is the one assertion that would redden if a future refactor moved the
+    /// audit write into a shared `remove_and_close` reached from `close`.
     #[test]
     fn every_silent_removal_site_now_audits_except_the_explicit_close() {
         // `include_str!` pulls in this test too, whose own literals are what

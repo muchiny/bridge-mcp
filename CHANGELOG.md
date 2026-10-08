@@ -852,13 +852,18 @@ tests and a serialisation test.
      `close_all` is `drain()` + `abort()`, and `spawn_forwarding_task`'s own
      doc states that the port is released when the runtime drops the future,
      not when `abort` returns.
-  4. **No test in the tree can put a session into a `SessionManager`**:
-     `ShellSession` holds a live `russh::Channel` and an `SshClient` with no
-     test constructor, so the join between the verdict and the effect is
-     pinned as source text
-     (`every_silent_removal_site_now_audits_except_the_explicit_close`)
-     rather than driven end to end. The verdict and the written line are each
-     covered by a runtime test.
+  4. **`SessionManager::exec`'s four branches are pinned as source text
+     only.** No *unit* test can put a session into a `SessionManager` —
+     `ShellSession` is private and holds a live `russh::Channel` and an
+     `SshClient` with no `#[cfg(test)]` constructor — so the in-process mock
+     SSH server grew a `shell_request` handler and
+     `tests/session_reaper_audit.rs` now drives `cleanup` (both bounds, each
+     named), `close_all` and `close`'s silence end to end against a real
+     session. Reaching `exec`'s four branches needs a shell that accepts a
+     command and then dies mid-read, which the mock does not emulate; those
+     call sites are guarded by
+     `every_silent_removal_site_now_audits_except_the_explicit_close`
+     instead.
   5. **`ssh_recording_*` lines still say nothing about a session's
      lifetime.** `grep -c recording src/ssh/session.rs` → 0: the recorder and
      the session manager share no code, so closing a session stops no
