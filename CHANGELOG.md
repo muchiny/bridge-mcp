@@ -158,10 +158,15 @@ tests and a serialisation test.
   line carrying that whole file. **Through `argv` the ceiling is
   `MAX_ARG_STRLEN` — 32 pages, 128 KB per argument, and `ARG_MAX` for the
   whole line; past that `execve` fails with `E2BIG` and the binary never
-  starts** (measured in `tests/cli_exit_code.rs`), while a daemon-forwarded or
-  MCP-served call carries its arguments as JSON over a socket and has no such
-  limit. So this bounds volume — 128 KB a line fills a 100 MB archive in 800
-  calls, and any JSONL consumer with a line-length bound breaks — and it
+  starts** (measured in `tests/cli_exit_code.rs`). That ceiling is the real
+  one for this line, and it is worth saying why: the gate is CLI-only, and its
+  arguments come from `argv` even when the call is then forwarded to a daemon,
+  because the forwarding happens after the gate. An MCP-served call never
+  reaches this gate at all. So 128 KB per argument is not a worst case someone
+  else could exceed — it is the ceiling, and it is already three orders of
+  magnitude past what belongs on an audit line. This bounds volume — 128 KB a
+  line fills a 100 MB archive in 800 calls, and any JSONL consumer with a
+  line-length bound breaks — and it
   bounds content at any size, since it defeated a deliberate exclusion: that
   handler's own event is `SFTP_WRITE <path>` with no content at all. The rule
   is a size rule rather

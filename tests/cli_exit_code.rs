@@ -154,8 +154,11 @@ fn a_daemon_served_call_still_drains_the_gate_line_to_disk() {
 /// 100 KB, not the 400 KB of the unit test: Linux caps a single argv entry at
 /// `MAX_ARG_STRLEN` (32 pages, 128 KB), so a 400 KB `content=` cannot be
 /// spawned at all — `execve` fails with `E2BIG` before the binary starts.
-/// That bounds how large a gate line the **CLI** could ever have written; the
-/// unbounded case needs the daemon or MCP path, which the unit test covers.
+/// That bounds how large a gate line could ever have been written, full stop:
+/// the gate is CLI-only, and a daemon-forwarded call is gated before it is
+/// forwarded, so its arguments still come from `argv`. The unit test keeps
+/// 400 KB to exercise `audited_operation` past its own cap — a size the
+/// function must handle, not a size any caller can deliver.
 #[test]
 fn a_large_argument_is_not_copied_into_the_audit_file() {
     let dir = tempfile::tempdir().unwrap();

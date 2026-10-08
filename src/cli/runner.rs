@@ -1755,7 +1755,7 @@ pub async fn run_tool(
 /// environment of, and `std::env::set_var` is unsafe and racy under the
 /// parallel harness. So the path is a parameter here instead, and the test
 /// points it at a file that does not exist.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn run_tool_via(
     config: Arc<Config>,
     tool_name: &str,
