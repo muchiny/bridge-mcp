@@ -263,7 +263,22 @@ pub struct AuditLogger {
     /// clone an `AuditConfig` nothing reads.
     #[cfg(test)]
     config: AuditConfig,
-    sender: Option<mpsc::UnboundedSender<AuditEvent>>,
+    /// Sending half of the writer channel, behind a lock so [`Self::close`]
+    /// can drop it through a `&self` — which is the only reference anything
+    /// holds, since every owner of a logger holds an [`Arc`] of it.
+    ///
+    /// **Why a lock and not a bare `Option`:** the writer loop ends when the
+    /// LAST sender is dropped, and clones of the `Arc<AuditLogger>` outlive
+    /// the function that has to wait for the drain — background tasks and
+    /// every `ToolContext` hold one. Dropping one owner therefore closes
+    /// nothing. Taking the sender out from behind this lock closes the
+    /// channel whatever the clone count is.
+    ///
+    /// The critical section is the `send` in [`Self::log`] and the `take` in
+    /// [`Self::close`], and nothing else: **no `.await` is ever taken while
+    /// this lock is held**, so a `std::sync::Mutex` is the right one and a
+    /// blocked runtime worker is impossible.
+    sender: std::sync::Mutex<Option<mpsc::UnboundedSender<AuditEvent>>>,
     sanitizer: Option<Arc<crate::security::Sanitizer>>,
     /// Clock used for the retention cutoff; injectable so the boundary
     /// (mtime == cutoff) is deterministically testable. Read only by
@@ -280,7 +295,14 @@ pub struct AuditLogger {
     captured: Option<std::sync::Mutex<Vec<AuditEvent>>>,
 }
 
-/// Background task that writes audit events to a file
+/// Background task that writes audit events to a file.
+///
+/// Its loop ends only when the channel closes, which happens when the last
+/// sender is dropped or when [`AuditLogger::close`] takes the sender out.
+/// **Join it, never `abort()` it**: the write itself runs in a
+/// `tokio::task::spawn_blocking` followed by `rotate_if_needed`, so an abort
+/// loses the event in flight and the rotation it was about to trigger.
+/// `drain_audit_writer` is the bounded join every entry point uses.
 pub struct AuditWriterTask {
     rx: mpsc::UnboundedReceiver<AuditEvent>,
     file: File,
@@ -592,6 +614,34 @@ fn cleanup_old_audit_files(
     info!(removed, cutoff = %cutoff, "audit retention swept archives");
 }
 
+/// How long a shutdown waits for the audit writer to finish.
+///
+/// Every entry point that owns a writer pays this at most once, and only
+/// when the writer is still busy — a drained writer joins immediately.
+pub(crate) const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Join an [`AuditWriterTask`]'s handle, bounded by [`DRAIN_TIMEOUT`].
+///
+/// The caller MUST have closed the channel first — [`AuditLogger::close`],
+/// or dropping every owner of the logger — or this waits the full timeout
+/// and then warns, because the writer is still blocked on `recv()`.
+///
+/// Joined and never `abort()`ed: the write runs in a `spawn_blocking` and is
+/// followed by `rotate_if_needed`, so an abort loses the event in flight and
+/// the rotation it was about to trigger.
+pub(crate) async fn drain_audit_writer(writer: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = writer
+        && tokio::time::timeout(DRAIN_TIMEOUT, handle).await.is_err()
+    {
+        // Formatted from the constant so the sentence cannot go stale if the
+        // bound changes.
+        warn!(
+            "audit writer did not drain within {}s; events may be lost",
+            DRAIN_TIMEOUT.as_secs()
+        );
+    }
+}
+
 impl AuditLogger {
     /// Create a new async audit logger with the given configuration
     ///
@@ -621,7 +671,7 @@ impl AuditLogger {
         let logger = Self {
             #[cfg(test)]
             config: config.clone(),
-            sender: Some(tx),
+            sender: std::sync::Mutex::new(Some(tx)),
             sanitizer: None,
             #[cfg(test)]
             now_fn: Utc::now,
@@ -671,6 +721,39 @@ impl AuditLogger {
         self.sanitizer.is_some()
     }
 
+    /// Close the channel to the writer task, so its loop can end and the
+    /// caller can join it.
+    ///
+    /// Call this, then join the [`AuditWriterTask`]'s handle (the
+    /// crate-internal `drain_audit_writer` is the bounded join the entry
+    /// points use), before the process exits. Without it the writer is
+    /// still blocked on `recv()` when the runtime goes away, and every
+    /// event still queued is lost — silently, because [`Self::log`] ends in
+    /// `let _ = sender.send(event)` on an unbounded channel, which cannot
+    /// fail in a way anything observes.
+    ///
+    /// **Why this exists rather than "drop the logger":** the writer loop
+    /// ends when the last sender is dropped, and the senders live in clones
+    /// of an `Arc<AuditLogger>` held by background tasks and by every
+    /// `ToolContext`. The function that has to wait for the drain does not
+    /// own them, cannot enumerate them, and nothing in the crate pins the
+    /// property that they die first. Taking the sender out from behind the
+    /// lock ends the channel whatever the clone count is.
+    ///
+    /// **Idempotent, and events logged afterwards are dropped on purpose**
+    /// — `log` keeps working, writes its `tracing` line, and sends nowhere.
+    /// After a close the file sink is gone; that is the point of calling it
+    /// at shutdown and nowhere else.
+    pub fn close(&self) {
+        let mut guard = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Dropped explicitly, not merely taken: dropping the sender is the
+        // whole effect.
+        drop(guard.take());
+    }
+
     /// Create a disabled audit logger (for testing or when audit is off)
     #[must_use]
     pub fn disabled() -> Self {
@@ -686,7 +769,7 @@ impl AuditLogger {
                 path: PathBuf::new(),
                 ..AuditConfig::default()
             },
-            sender: None,
+            sender: std::sync::Mutex::new(None),
             sanitizer: None,
             #[cfg(test)]
             now_fn: Utc::now,
@@ -743,6 +826,14 @@ impl AuditLogger {
     /// If a sanitizer is configured, `event.command` is masked BEFORE the
     /// tracing emission and BEFORE the channel send (so neither sink ever
     /// sees the unredacted command).
+    ///
+    /// **The file sink is best-effort and its failures are silent.** The
+    /// send is `let _ = sender.send(event)` on an unbounded channel: it can
+    /// only fail once the receiver is gone, which is after
+    /// [`Self::close`] or once the writer task has ended, and nothing
+    /// observes it. An event logged after the shutdown drain therefore
+    /// reaches `tracing` and nothing else. The `tracing` sink, by contrast,
+    /// is synchronous and always emitted.
     pub fn log(&self, tool: &str, event: AuditEvent) {
         let mut event = event;
         event.tool_name = Some(tool.to_string());
@@ -761,8 +852,14 @@ impl AuditLogger {
                 .push(event.clone());
         }
 
-        // Send to channel for async file writing
-        if let Some(ref sender) = self.sender {
+        // Send to channel for async file writing. The lock is held for the
+        // send alone — `UnboundedSender::send` never blocks and never
+        // awaits — so this stays a few nanoseconds on the hot path.
+        let guard = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(sender) = guard.as_ref() {
             let _ = sender.send(event);
         }
     }
@@ -1789,20 +1886,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_audit_logger_log_sends_to_channel() {
+    /// Its only assertion used to be `assert!(logger.sender.is_some())`
+    /// after logging three events: it checked that a call which does not
+    /// clear that field had not cleared it. Nothing observed whether an
+    /// event came out the other end — which is what the name promises, and
+    /// it was also the only place in the crate that read the field
+    /// directly, outside the constructors and `log` itself.
+    ///
+    /// It now runs the real writer, closes the channel, joins it, and reads
+    /// the file. Reading after the join is what makes the assertion
+    /// deterministic: the write happens in a `spawn_blocking`, so before the
+    /// join there is nothing to poll for.
+    #[tokio::test]
+    async fn test_audit_logger_log_sends_to_channel() {
         let temp_dir = tempfile::tempdir().unwrap();
         let audit_path = temp_dir.path().join("log-test.log");
 
         let config = AuditConfig {
             enabled: true,
-            path: audit_path,
+            path: audit_path.clone(),
             max_size_mb: 10,
             retain_days: 7,
         };
 
         let (logger, task) = AuditLogger::new(&config).unwrap();
-        assert!(task.is_some(), "Task should be created for enabled logger");
+        let task = task.expect("Task should be created for enabled logger");
+        let writer = tokio::spawn(task.run());
 
         // Log multiple events
         for i in 0..3 {
@@ -1817,8 +1926,97 @@ mod tests {
             logger.log("test_tool", event);
         }
 
-        // The sender should still be valid (not panic)
-        assert!(logger.sender.is_some());
+        // Without this the writer stays parked on `recv()` for ever: the
+        // logger still holds the sender.
+        logger.close();
+        tokio::time::timeout(DRAIN_TIMEOUT, writer)
+            .await
+            .expect("close() must let the writer's loop end")
+            .expect("the writer task must not panic");
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "all three logged events must be on disk, got: {contents}"
+        );
+        for (i, line) in lines.iter().enumerate() {
+            let event: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {line:?}"));
+            assert_eq!(event["host"], format!("host-{i}"));
+            assert_eq!(event["command"], format!("cmd-{i}"));
+            assert_eq!(event["tool_name"], "test_tool");
+        }
+    }
+
+    /// Why `close()` exists rather than "drop the logger and let the channel
+    /// close itself".
+    ///
+    /// The drop form works if and only if every clone of the
+    /// `Arc<AuditLogger>` dies first, and nothing in the crate establishes
+    /// that: background tasks and every `ToolContext` hold one. This test
+    /// keeps a clone alive across the shutdown on purpose. Under the drop
+    /// form the writer would still be parked on `recv()` and the join would
+    /// burn the whole timeout; here it ends.
+    ///
+    /// The second half is the price: a `log` on the surviving clone after
+    /// the close reaches `tracing` and the file not at all. That is the
+    /// documented behaviour, and the file length pins it.
+    #[tokio::test]
+    async fn close_ends_the_writer_while_a_clone_of_the_logger_survives() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 10,
+            retain_days: 7,
+        };
+
+        let (logger, task) = AuditLogger::new(&config).unwrap();
+        let logger = Arc::new(logger);
+        let writer = tokio::spawn(task.expect("enabled audit yields a writer").run());
+
+        // The clone the drop form cannot see.
+        let survivor = Arc::clone(&logger);
+
+        logger.log(
+            "test_tool",
+            AuditEvent::new(
+                "host-a",
+                "cmd-before-close",
+                CommandResult::StateChanged { duration_ms: 1 },
+            ),
+        );
+        logger.close();
+
+        tokio::time::timeout(DRAIN_TIMEOUT, writer)
+            .await
+            .expect("close() must end the writer even with a live clone of the logger")
+            .expect("the writer task must not panic");
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(
+            contents.contains("cmd-before-close"),
+            "the event logged before the close must be on disk, got: {contents}"
+        );
+
+        let before = std::fs::metadata(&audit_path).unwrap().len();
+        survivor.log(
+            "test_tool",
+            AuditEvent::new(
+                "host-b",
+                "cmd-after-close",
+                CommandResult::StateChanged { duration_ms: 1 },
+            ),
+        );
+        assert_eq!(
+            std::fs::metadata(&audit_path).unwrap().len(),
+            before,
+            "a log after close() must not reach the file (and must not panic)"
+        );
     }
 
     #[test]

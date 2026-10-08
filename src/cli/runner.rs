@@ -25,7 +25,7 @@ use crate::ports::ToolContext;
 use crate::ports::ToolHandler as _;
 use crate::security::{
     AuditEvent, AuditLogger, AuditWriterTask, CommandResult, CommandValidator, RateLimiter,
-    Sanitizer,
+    Sanitizer, drain_audit_writer,
 };
 use crate::ssh::{
     SessionManager, SshClient, TransferOptions, TransferProgress, is_retryable_error_for,
@@ -855,6 +855,14 @@ fn create_context(config: Arc<Config>) -> ToolContext {
 /// and through `execute_use_case`) holds them all, so the context is
 /// consumed here on purpose. A writer that cannot finish in two seconds is
 /// abandoned with a warning rather than hanging the CLI.
+///
+/// This path is the one case where "drop every owner" is a property the code
+/// can actually establish: one process, one context, no background task
+/// holding a clone. The MCP surfaces cannot, and close their channel
+/// explicitly through [`crate::security::AuditLogger::close`] instead. If a
+/// clone of the logger is ever handed to something that outlives the context
+/// here, this function stops draining and starts waiting out the timeout —
+/// so it would have to call `close()` too.
 async fn finish_audit(ctx: ToolContext, writer: Option<tokio::task::JoinHandle<()>>) {
     drop(ctx);
     drain_audit_writer(writer).await;
@@ -867,16 +875,6 @@ async fn finish_audit(ctx: ToolContext, writer: Option<tokio::task::JoinHandle<(
 async fn finish_audit_wiring(wiring: AuditWiring, writer: Option<tokio::task::JoinHandle<()>>) {
     drop(wiring);
     drain_audit_writer(writer).await;
-}
-
-async fn drain_audit_writer(writer: Option<tokio::task::JoinHandle<()>>) {
-    if let Some(handle) = writer
-        && tokio::time::timeout(std::time::Duration::from_secs(2), handle)
-            .await
-            .is_err()
-    {
-        tracing::warn!("audit writer did not drain within 2s; events may be lost");
-    }
 }
 
 /// Execute a command on a remote host.

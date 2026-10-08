@@ -835,6 +835,61 @@ tests and a serialisation test.
 
 ### Fixed
 
+- **The audit writer is drained at shutdown on all three MCP surfaces, and
+  `SIGTERM` is handled at all.** `McpServer::serve` and
+  `mcp::transport::http::serve` each spawned the `AuditWriterTask` and threw
+  the `JoinHandle` away. The writer's loop ends only when its channel closes,
+  and the channel closes only when the last sender is dropped — which never
+  happened, because `McpServer` holds an `Arc<AuditLogger>` and every
+  `ToolContext` holds a clone. So whatever was still queued when the process
+  exited was lost, and lost **silently**: `AuditLogger::log` ends in
+  `let _ = sender.send(event)` on an unbounded channel, which cannot report a
+  thing. Both sites now close the channel and **join** the writer, bounded at
+  2 s, as the five CLI entry points already did through `finish_audit`.
+
+  Joined and never `abort()`ed, which is why the handle is not in `serve`'s
+  `cleanup_handles` vec: the write runs in a `tokio::task::spawn_blocking`
+  followed by `rotate_if_needed`, so an abort would lose the event in flight
+  **and** the rotation it was about to trigger.
+
+  **Measured**, on a test that serves 200 pipelined `tools/call` requests over
+  the daemon socket and reads the audit file on the statement after `serve`
+  returns: without the drain, 8 runs out of 8 were short — between 12 and 37
+  of the 200 lines never reached the disk (163, 164, 174, 176, 179, 183, 184
+  and 188 of 200). With it, 200 of 200.
+
+  **`mcp::transport::http::serve` had no shutdown block at all** — plain
+  `axum::serve(listener, router).await`, no `with_graceful_shutdown`, no
+  signal handler — so there was no point at which to close and join anything.
+  It now stops on SIGINT or SIGTERM and drains afterwards, in that order: the
+  router owns the `Arc<McpServer>`, so the audit logger is only reachable for
+  closing once axum has returned and the router is gone.
+
+  **`SIGTERM` was listened for nowhere in the process**, while
+  `bridge-mcp daemon stop` sends exactly that (`PidFile::stop`) and
+  `run_daemon`'s own doc-comment promised "`SIGINT` (Ctrl+C) or `SIGTERM`".
+  The only handler was `tokio::signal::ctrl_c()`. The documented way of
+  stopping a daemon therefore killed it by the signal's default disposition,
+  skipping the whole of `serve`'s teardown — the pools' `close_all`, the
+  socket cleanup, and now this drain. Both signals are handled, in one shared
+  `mcp::transport::shutdown_signal()`; the tokio `signal` feature was already
+  enabled, so this adds no dependency. **Stdio is deliberately left without a
+  handler**: its session ends on EOF of stdin, which is what a parent closing
+  the pipe already provides.
+
+  **Cost.** The shutdown of the daemon and of `serve-http` can now take up to
+  2 s longer, and only when the writer is genuinely behind — a drained writer
+  joins at once. Measured: the 200-call test takes ~0.5 s end to end with the
+  drain in place. The hot path pays one uncontended `std::sync::Mutex`
+  lock/unlock per audited event (see "Added").
+
+  **What is NOT fixed, and it is not an oversight here:** no test runs a real
+  `bridge-mcp` process, sends it a SIGTERM and inspects the file afterwards,
+  so the signal wiring itself rests on compilation and on reading
+  `tokio::signal`. The in-process tests cancel the transport's shutdown token
+  / resolve the shutdown future directly, because raising a process signal
+  from one test reaches every other test in the same binary.
+
 - **A slow command no longer destroys its session.** Every `Err` from reading a
   session's output evicted and closed the session, under a comment asserting
   "Shell is dead" — a diagnosis the code had never made. A deadline expiring
@@ -1033,6 +1088,32 @@ tests and a serialisation test.
   silently stopped stopping. The code also survives the MCP `summarize=true`
   round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
   built by the real serializer; no test spawns a daemon process.
+
+- **(lib API) `AuditLogger::close(&self)`.** `AuditLogger` is re-exported from
+  `src/lib.rs` **without** `#[doc(hidden)]`, so this enters the documented
+  API. Adding a method is not a breaking change — no signature or variant
+  moves, nothing existing stops compiling — but it is the missing half of a
+  public contract: `AuditLogger::new` hands the caller an `AuditWriterTask`
+  whose only documented stopping condition was "every sender dropped", and an
+  embedder holding an `Arc<AuditLogger>` had no way to reach that state. It
+  takes `&self` because every owner holds an `Arc`.
+
+  **Why a method and not `drop`:** the drop form works if and only if every
+  clone of the `Arc<AuditLogger>` dies before the join, and nothing in the
+  crate establishes that — background tasks and every `ToolContext` hold one.
+  Measured, with the close removed and the bounded join kept: the drain waits
+  out its full 2 s and warns, and the daemon shutdown went from ~0.5 s to ~2.5
+  s (2.51, 2.44, 2.81 over three runs). The events still landed inside that
+  window, so the drop form's cost here is two seconds and an untrue warning
+  rather than lost events — but it degrades to real loss as soon as the writer
+  is slower than the window, and it would break silently for the next caller
+  who clones the logger.
+
+  **Consequence for the field it guards:** `AuditLogger.sender` is now a
+  `std::sync::Mutex<Option<_>>`, so an audited event costs one uncontended
+  lock/unlock. No `.await` is taken while the lock is held. A `log` after a
+  `close` still emits its `tracing` line and reaches the file sink not at all,
+  which is why `close` belongs at shutdown and nowhere else.
 
 - **`sudo` / `sudo_user` on every standard tool.** Three handlers took them;
   the other 473 did not, so on a host where the interesting state is root-owned

@@ -322,7 +322,7 @@ pub enum Commands {
 /// Sub-actions for the `daemon` command.
 #[derive(Subcommand, Clone, Debug)]
 pub enum DaemonAction {
-    /// Start the daemon in the foreground (blocks until SIGINT).
+    /// Start the daemon in the foreground (blocks until SIGINT or SIGTERM).
     Start {
         /// Override the socket path. Defaults to
         /// `$XDG_RUNTIME_DIR/bridge-mcp.sock` or `/tmp/bridge-mcp-$UID.sock`.

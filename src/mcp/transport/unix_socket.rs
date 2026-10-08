@@ -8,7 +8,7 @@
 //!
 //! The transport owns a `CancellationToken` that callers can trigger
 //! (via [`UnixSocketTransport::shutdown_token`]) to break out of the
-//! accept loop — used by `run_daemon` to react to SIGINT.
+//! accept loop — used by `run_daemon` to react to SIGINT and SIGTERM.
 
 use std::path::{Path, PathBuf};
 

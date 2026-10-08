@@ -37,6 +37,54 @@ use async_trait::async_trait;
 
 use super::protocol::{JsonRpcError, JsonRpcMessage, WriterMessage};
 
+/// Resolve once the process is asked to stop: on `SIGINT` **or** `SIGTERM`.
+///
+/// Both, and `SIGTERM` is the one that was missing. `bridge-mcp daemon stop`
+/// sends `SIGTERM` (`crate::daemon::PidFile::stop`), and only `SIGINT` was
+/// listened for, so the documented way of stopping a daemon killed it by the
+/// signal's default disposition: no drain of the audit writer, no
+/// `close_all` on the pools, no socket cleanup. A shutdown path that the
+/// documented stop command never takes is worse than no shutdown path,
+/// because it documents itself.
+///
+/// Used by the daemon (to cancel [`unix_socket::UnixSocketTransport`]'s
+/// token) and, behind the `http` feature, as axum's graceful-shutdown
+/// future. The **stdio** transport deliberately installs no handler: its
+/// session ends on EOF of stdin, which is what a parent closing the pipe
+/// already gives it.
+///
+/// If the `SIGTERM` handler cannot be registered the arm parks forever
+/// instead of resolving, so a registration failure cannot be mistaken for a
+/// shutdown request.
+pub(crate) async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    let terminate = async {
+        match signal(SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "could not install a SIGTERM handler; `daemon stop` will kill \
+                     this process without draining the audit writer"
+                );
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    tokio::select! {
+        () = interrupt => tracing::info!("SIGINT received, shutting down"),
+        () = terminate => tracing::info!("SIGTERM received, shutting down"),
+    }
+}
+
 /// Transport abstraction for MCP JSON-RPC communication.
 ///
 /// A transport is a **session listener**: each `accept()` call yields the

@@ -1138,6 +1138,25 @@ impl McpServer {
     /// * `audit_task` — optional audit writer background task.
     /// * `config_path` — optional config path for hot-reload watching.
     ///
+    /// # Shutdown
+    ///
+    /// After the accept loop ends and the in-flight sessions are drained,
+    /// this tears down the global state in a fixed order: abort the cleanup
+    /// loops, `close_all` the tunnel / session / connection managers, shut
+    /// the transport down, then **close the audit channel and join the
+    /// writer**, bounded at two seconds. The audit writer comes last because
+    /// every step before it can still log, and it is closed rather than
+    /// dropped because clones of the `Arc<AuditLogger>` outlive this
+    /// function. Before the audit-integrity wave the writer's `JoinHandle`
+    /// was discarded here, so whatever was still queued when the process
+    /// exited was lost without a word.
+    ///
+    /// Returning is what triggers all of that, and nothing in this function
+    /// listens for a signal. The caller decides: the daemon cancels the
+    /// transport's shutdown token on SIGINT or SIGTERM, stdio ends on EOF.
+    /// **An `abort()` on this future skips the whole block** — which is what
+    /// the daemon's own integration tests do, so they measure no part of it.
+    ///
     /// # Errors
     ///
     /// Returns an error only if the transport itself produces one.
@@ -1149,10 +1168,10 @@ impl McpServer {
         audit_task: Option<AuditWriterTask>,
         config_path: Option<&Path>,
     ) -> Result<()> {
-        // Spawn audit writer task if enabled (global, shared).
-        if let Some(task) = audit_task {
-            tokio::spawn(task.run());
-        }
+        // Spawn audit writer task if enabled (global, shared). The handle is
+        // KEPT, unlike the cleanup handles below: this one is closed and
+        // joined at the end of the function, never aborted (see there).
+        let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
 
         // Spawn cleanup tasks (global, shared across sessions), plus the
         // resource-update watch loop that feeds
@@ -1202,7 +1221,33 @@ impl McpServer {
         self.connection_pool.close_all().await;
         transport.shutdown().await;
 
+        // Audit writer LAST, and in two steps. Last because every teardown
+        // step above can still log. Two steps because the writer's loop ends
+        // only when the channel closes, and dropping this `Arc<Self>` would
+        // not close it: clones of the `Arc<AuditLogger>` live in the tool
+        // contexts handed to background tasks. So close the channel
+        // explicitly, then join — joining a writer that is still blocked on
+        // `recv()` would just burn the whole timeout.
+        //
+        // Joined, never `abort()`ed: the write runs in a `spawn_blocking`
+        // followed by `rotate_if_needed`, so an abort loses the event in
+        // flight and the rotation it was about to trigger. That is why this
+        // handle is not in `cleanup_handles`.
+        self.close_audit();
+        crate::security::drain_audit_writer(audit_writer).await;
+
         Ok(())
+    }
+
+    /// Close this server's audit channel so its writer task can be joined.
+    ///
+    /// [`Self::serve`] does this inline; the HTTP transport
+    /// (`crate::mcp::transport::http::serve`) needs it from the outside,
+    /// because it owns the writer handle but hands the `Arc<McpServer>` to
+    /// the axum router. `pub(crate)`: this is a shutdown step, not something
+    /// a request handler may call.
+    pub(crate) fn close_audit(&self) {
+        self.audit_logger.close();
     }
 
     /// Assemble every process-global background task: the cleanup loops
@@ -1212,6 +1257,11 @@ impl McpServer {
     /// test. `serve()` needs a transport and an accept loop, so nothing
     /// could assert that the watch handle really joins the vec shutdown
     /// aborts — deleting the `push` reddened nothing.
+    ///
+    /// The audit writer is NOT one of them, and that is the point of the
+    /// split's sibling: it is spawned by `serve()` itself and joined there,
+    /// because this vec's contract is "abort on shutdown" and aborting the
+    /// writer loses the event in its `spawn_blocking`.
     fn spawn_global_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = self.spawn_cleanup_tasks();
         handles.push(self.spawn_resource_update_watch());
@@ -8543,12 +8593,18 @@ rbac:
         handle.abort();
     }
 
-    /// Shutdown in `serve()` is `for h in cleanup_handles { h.abort(); }`,
-    /// so the watch loop is both STARTED and STOPPED only if it sits in
-    /// that vec. Neither half was asserted at `3f7c2fa` — deleting the
-    /// `push` left the suite green. A length assertion alone would be
-    /// satisfied by any fifth task, so this drives a real notification out
-    /// of the vec and then proves aborting it silences the bridge.
+    /// Shutdown in `serve()` aborts every handle in `cleanup_handles`
+    /// (`for h in cleanup_handles { h.abort(); }`), so the watch loop is
+    /// both STARTED and STOPPED only if it sits in that vec. Neither half
+    /// was asserted at `3f7c2fa` — deleting the `push` left the suite
+    /// green. A length assertion alone would be satisfied by any fifth
+    /// task, so this drives a real notification out of the vec and then
+    /// proves aborting it silences the bridge.
+    ///
+    /// Not every global task is in that vec, and the exception is
+    /// deliberate: the audit writer is closed and JOINED after this abort
+    /// loop, because aborting it would lose the event in its
+    /// `spawn_blocking` and the rotation that follows it.
     ///
     /// Subscribes to `health://server` rather than `history://recent` on
     /// purpose: remote-backed schemes are published on EVERY tick, so this
