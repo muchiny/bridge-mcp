@@ -862,11 +862,17 @@ tests and a serialisation test.
   join replaced by an abort, no archive is created at all.
 
   **"The three transports' shutdown" is the exact scope, and it is narrower
-  than "no event can be lost".** The `io.modelcontextprotocol/tasks` worker is
-  a bare `tokio::spawn` holding its own `ToolContext`, in no vec and no
-  `JoinSet`; one still running when the channel closes logs to `tracing` and
-  not to the file. Not a regression — that queue used to die with the process
-  — but not covered either.
+  than "no event can be lost".** EVERY dispatched request runs in a bare
+  `tokio::spawn` — the per-request task in `serve_session_with_context` and
+  the `io.modelcontextprotocol/tasks` worker in `handle_tools_call_async`
+  alike. None is in a vec or a `JoinSet`, all hold a `ToolContext` and so a
+  clone of the logger, and one still running when the channel closes logs to
+  `tracing` and not to the file. The request task is covered for about the
+  2 s + 4 s of the session drain, because its `Sender` clone is what the
+  session waits on; the tasks worker is not waited on at all. So
+  `ssh_exec command='sleep 20'` followed by `daemon stop` loses its event.
+  Not a regression — that queue used to die with the process — but not
+  covered either.
 
   **Measured**, on a test that serves five `tools/call` requests over the
   daemon socket and reads the audit file on the statement after `serve`
@@ -921,20 +927,46 @@ tests and a serialisation test.
   bound made unconditional: the binary answers the first request and then
   stops answering with stdin still open.
 
-  **Cost, and the earlier figure in this entry was wrong.** It said "up to 2 s
-  longer", which is the audit drain alone. On the `daemon stop` path the whole
-  of `serve`'s teardown is new — it never ran there at all — so the real
-  bound is, in order: **up to 2 s** waiting for sessions to end, **up to 4 s**
-  more after their reader loops are cancelled, then `tunnel_manager`,
-  `session_manager` and `connection_pool` closed **sequentially**, each
-  connection with its own **5 s** timeout (`SshClient::close`), and only then
-  **up to 2 s** for the audit writer. It is therefore bounded by
-  `6 s + 5 s x (persistent sessions + pooled connections) + 2 s`, and
-  **not** by a constant. Measured end to end on the built binary, no SSH host
-  reachable so no connection to close: **368 ms** when the client closed its
-  socket (nothing to wait for), **2.3 s** when it did not. The hot path pays
-  one uncontended `std::sync::Mutex` lock/unlock per audited event (see
-  "Added").
+  **The three `close_all` calls are bounded too, and without that the
+  un-killable daemon came back through them.** `SessionManager::close_all`
+  begins by taking the lock that `SessionManager::exec` holds for the WHOLE
+  of a remote command, and `sessions.timeout_secs` defaults to **1800 s**
+  (schema ceiling 3600). Measured against a real host, one session running
+  `sleep 45` whose client had already closed its socket: the bounded session
+  drain finished in **1.7 s**, then `close_all` parked **42.0 s** on that
+  lock — with `Daemon stopped.` already printed and exit 0 already returned,
+  which is the symptom above, word for word, bounded by the command's
+  deadline instead of by the drain. Each `close_all` now gets **2 s**
+  (`RESOURCE_CLOSE_GRACE`) and is then abandoned: the process is exiting, the
+  kernel closes the sockets, and `sshd` sees a dropped connection. Same
+  scenario after: the process is gone **4.0 s** after `daemon stop`, with a
+  `WARN` naming the resource it gave up on.
+
+  **The trade that buys, stated plainly: an in-flight command's audit event
+  is now lost where it used to be waited for.** Same measurement, the audit
+  file: **two** lines before the bound (`ssh_session_create`, then
+  `ssh_session_exec` with `duration_ms: 45003` — it landed only because the
+  daemon stayed alive 44 s for it) and **one** after. Relative to 3.0.0
+  nothing regressed — SIGTERM killed the process outright and that event was
+  lost too — but it is a bounded shutdown chosen over a complete trail.
+
+  **Cost, and the earlier figure in this entry was wrong twice.** It first
+  said "up to 2 s longer", which is the audit drain alone; its replacement
+  then put the 5 s-per-connection term in the bound, which the `close_all`
+  bound removes. On the `daemon stop` path the whole of `serve`'s teardown is
+  new — it never ran there at all — and every step of it is now bounded:
+  **2 s** waiting for sessions to end, **4 s** more after their reader loops
+  are cancelled, **2 s** for each of the three `close_all` calls, **2 s** for
+  the audit writer. **14 s, a constant**, with no term in the number of
+  sessions or pooled connections — plus `Transport::shutdown`, which is not
+  bounded by this code but is synchronous in both implementations
+  (`UnixSocketTransport` cancels a token and unlinks a file, `StdioTransport`
+  does nothing), so an out-of-tree transport is the only way past the
+  constant. Measured end to end on the built binary:
+  **356 ms** when the client closed its socket (nothing to wait for),
+  **2.24 s** when it stayed connected and silent, **4.03 s** with a session
+  running a 45 s command. The hot path pays one uncontended
+  `std::sync::Mutex` lock/unlock per audited event (see "Added").
 
   **What is NOT covered by a test:** the signal wiring itself. No test raises
   a signal at the process — doing so from one test reaches every other test in
@@ -1142,6 +1174,12 @@ tests and a serialisation test.
   silently stopped stopping. The code also survives the MCP `summarize=true`
   round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
   built by the real serializer; no test spawns a daemon process.
+
+- **`McpServer::serve`'s teardown is bounded end to end, at 14 s.** Sessions
+  2 s + 4 s, the three `close_all` calls 2 s each
+  (`RESOURCE_CLOSE_GRACE`), the audit writer 2 s. No step can wait on a
+  remote host, a lock held by a remote command, or a count of connections.
+  See the "Fixed" entry for what each bound replaces and what it costs.
 
 - **(lib API) `Transport::shutdown_requested(&self) -> bool`**, with a
   default of `false`. Says whether `accept()` returned `None` because the

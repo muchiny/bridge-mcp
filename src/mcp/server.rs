@@ -83,6 +83,29 @@ const RESOURCE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 /// `Transport::shutdown_requested`.
 const SESSION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long [`McpServer::serve`]'s teardown gives EACH of the three pool
+/// `close_all` calls before abandoning it.
+///
+/// Those closes are a courtesy: `SshClient::close` sends an SSH
+/// `DISCONNECT` and waits up to 5 s for it, per connection, sequentially.
+/// A process that is exiting does not need any of it — the kernel closes
+/// the sockets and `sshd` treats that as a dropped connection — so the
+/// shutdown must not be allowed to wait on it.
+///
+/// Unbounded, it was not merely slow but **open-ended**:
+/// `SessionManager::close_all` starts by taking the same lock that
+/// `SessionManager::exec` holds for the whole of a remote command, and
+/// `sessions.timeout_secs` defaults to **1800 s**. Measured against a real
+/// host, one session running `sleep 45` whose client had closed its socket:
+/// the bounded session drain finished in 1.7 s and then `close_all` parked
+/// **42.0 s** on that lock, `Daemon stopped.` having already been printed
+/// with exit 0. With `timeout_secs` at its default that is half an hour.
+///
+/// Two seconds, so the whole teardown is bounded by a CONSTANT rather than
+/// by `5 s x connections`: a healthy disconnect is a single packet, and
+/// anything slower is exactly what must not hold the process.
+const RESOURCE_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How long [`McpServer::serve`] then waits after cancelling the sessions'
 /// reader loops, before aborting the tasks outright.
 ///
@@ -91,6 +114,14 @@ const SESSION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// natural drain of its writer plus 1 s after cancelling it (see
 /// `serve_session_with_context`). A shorter bound here would abort sessions
 /// that were about to finish flushing.
+///
+/// **And one arm of that loop never sees the token at all**, which is the
+/// other thing this second bound is for: a reader parked on
+/// `concurrent_limit.acquire_owned()` is inside the loop BODY, not in its
+/// `select!`, so a cancellation is invisible to it. Only the `abort` at the
+/// end of `McpServer::drain_sessions_bounded` ends that one. That arm has no
+/// test — reaching it needs `limits.max_concurrent_commands` requests in
+/// flight at the instant of the shutdown.
 const SESSION_BACKSTOP_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Decide which subscribed URIs get `notifications/resources/updated` on
@@ -1160,31 +1191,57 @@ impl McpServer {
     /// # Shutdown
     ///
     /// After the accept loop ends and the in-flight sessions are drained,
-    /// this tears down the global state in a fixed order: abort the cleanup
-    /// loops, `close_all` the tunnel / session / connection managers, shut
-    /// the transport down, then **close the audit channel and join the
-    /// writer**, bounded at two seconds. The audit writer comes last because
-    /// every step before it can still log, and it is closed rather than
-    /// dropped because clones of the `Arc<AuditLogger>` outlive this
-    /// function. Before the audit-integrity wave the writer's `JoinHandle`
-    /// was discarded here, so whatever was still queued when the process
-    /// exited was lost without a word.
+    /// this tears down the global state in a fixed order, and **every step
+    /// is bounded**: the sessions (2 s, then their reader loops are
+    /// cancelled, then 4 s, then aborted), the cleanup loops (aborted),
+    /// `close_all` on the tunnel / session / connection managers (2 s each,
+    /// see `RESOURCE_CLOSE_GRACE`), the transport, and last the audit
+    /// channel closed and its writer joined (2 s). **14 s in all**, a
+    /// constant with no term in the number of sessions or connections —
+    /// plus `Transport::shutdown`, which this code does not bound but which
+    /// is synchronous in both in-tree implementations. The audit writer comes
+    /// last because every step before it can still log, and it is closed
+    /// rather than dropped because clones of the `Arc<AuditLogger>` outlive
+    /// this function. Before the audit-integrity wave the writer's
+    /// `JoinHandle` was discarded here, so whatever was still queued when the
+    /// process exited was lost without a word — and the whole of this block
+    /// was unbounded, so `daemon stop` could leave a daemon no signal could
+    /// then kill.
     ///
     /// Returning is what triggers all of that, and nothing in this function
     /// listens for a signal. The caller decides: the daemon cancels the
     /// transport's shutdown token on SIGINT or SIGTERM, stdio ends on EOF.
-    /// **An `abort()` on this future skips the whole block** — which is what
-    /// the daemon's own integration tests do, so they measure no part of it.
+    /// **An `abort()` on this future skips the whole block.** Of the seven
+    /// tests in `tests/daemon_integration.rs`, three end their `run_daemon`
+    /// future with `abort()` and so measure no part of it, two never start a
+    /// server at all, and **two drive this block to its end** by cancelling
+    /// the transport's shutdown token instead:
+    /// `serve_returns_only_after_the_audit_lines_are_on_disk` and
+    /// `a_silent_connected_client_cannot_hold_the_shutdown`. Round 0 of this
+    /// doc-comment said the daemon tests measured no part of it, which was
+    /// true when it was written and is the kind of sentence that becomes a
+    /// trap once it is not.
     ///
-    /// **One event can still be lost after the close, and it is not the
-    /// transports':** the `io.modelcontextprotocol/tasks` worker in
-    /// `handle_tools_call_async` is a bare `tokio::spawn` holding its
-    /// own `ToolContext`, so it is in no vec and no `JoinSet`. A worker still
-    /// running when this function closes the channel logs to `tracing` and
-    /// not to the file. That is not a regression — before this drain existed,
-    /// the whole queue died with the process — but "the writer is drained on
-    /// shutdown" means the three transports' shutdown, not every task the
-    /// server ever spawned.
+    /// **What can still be lost, and it is not any of the above:** every
+    /// dispatched request runs in a bare `tokio::spawn` — the per-request
+    /// task in `serve_session_with_context` and the
+    /// `io.modelcontextprotocol/tasks` worker in `handle_tools_call_async`
+    /// alike. Neither is in a vec or a `JoinSet`, both hold a
+    /// `ToolContext` and therefore a clone of the `Arc<AuditLogger>`, and
+    /// one still running when this function closes the channel logs to
+    /// `tracing` and not to the file. The request task is covered for about
+    /// the 2 s + 4 s of the session drain (its `Sender` clone is what the
+    /// session waits on); the tasks worker is not waited on at all.
+    ///
+    /// Which leaves an asymmetry worth stating rather than discovering:
+    /// **`ssh_exec command='sleep 20'` is abandoned after a few seconds and
+    /// its audit event is lost, while `ssh_session_exec command='sleep 600'`
+    /// used to hold the whole shutdown for ten minutes** — because the
+    /// latter's handler holds `SessionManager`'s lock and `close_all` queued
+    /// behind it. The bound on `close_all` makes the two behave alike: both
+    /// are abandoned, and the in-flight event of either is lost. That is a
+    /// deliberate choice of a bounded shutdown over a complete trail; see
+    /// `RESOURCE_CLOSE_GRACE`.
     ///
     /// # Errors
     ///
@@ -1266,9 +1323,16 @@ impl McpServer {
         for h in cleanup_handles {
             h.abort();
         }
-        self.tunnel_manager.close_all().await;
-        self.session_manager.close_all().await;
-        self.connection_pool.close_all().await;
+        // Each one BOUNDED, and the reason is in `RESOURCE_CLOSE_GRACE`:
+        // `session_manager.close_all()` takes the lock that
+        // `SessionManager::exec` holds for the whole of a remote command, so
+        // unbounded it reopened — through another door — exactly the defect
+        // the session drain above closes: `daemon stop` printing
+        // `Daemon stopped.` with exit 0 over a daemon that then lived on for
+        // the command's timeout.
+        Self::close_bounded("tunnels", self.tunnel_manager.close_all()).await;
+        Self::close_bounded("sessions", self.session_manager.close_all()).await;
+        Self::close_bounded("connection pool", self.connection_pool.close_all()).await;
         transport.shutdown().await;
 
         // Audit writer LAST, and in two steps. Last because every teardown
@@ -1344,6 +1408,30 @@ impl McpServer {
                 "Sessions ignored cancellation, aborting them"
             );
             sessions.shutdown().await;
+        }
+    }
+
+    /// Run one pool's `close_all` under [`RESOURCE_CLOSE_GRACE`], warning and
+    /// moving on if it does not finish.
+    ///
+    /// Abandoning the future mid-flight is safe and is the point: the values
+    /// it had already drained are dropped with it, which closes their
+    /// transports anyway, and nothing it has not reached yet is touched. The
+    /// process is on its way out.
+    async fn close_bounded<F>(resource: &str, closing: F)
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if tokio::time::timeout(RESOURCE_CLOSE_GRACE, closing)
+            .await
+            .is_err()
+        {
+            warn!(
+                resource,
+                grace_s = RESOURCE_CLOSE_GRACE.as_secs(),
+                "Shutdown gave up closing this resource gracefully; the process is \
+                 exiting, so its connections are dropped instead"
+            );
         }
     }
 
@@ -6713,6 +6801,108 @@ rbac:
             assert!(
                 !tool.to_string().contains("taskSupport"),
                 "tool {name} still mentions taskSupport somewhere: {tool}"
+            );
+        }
+    }
+
+    /// Round 2 of the T12 review: the session drain was bounded and the
+    /// daemon still could not be stopped, because
+    /// `SessionManager::close_all` starts by taking the lock that
+    /// `SessionManager::exec` holds for the WHOLE of a remote command, and
+    /// `sessions.timeout_secs` defaults to 1800 s.
+    ///
+    /// Measured against a real host before the bound, one session running
+    /// `sleep 45` whose client had already closed its socket: the session
+    /// drain finished in 1.7 s, then `close_all` parked **42.0 s** on that
+    /// lock, with `Daemon stopped.` already printed and exit 0 already
+    /// returned. Same scenario after: the process is gone 4.0 s after
+    /// `daemon stop`, and the `WARN` names the resource it gave up on.
+    ///
+    /// `start_paused`, so the assertion is on virtual time and the test
+    /// costs nothing: tokio auto-advances the clock when nothing is ready,
+    /// which is exactly the state a `pending` close leaves the runtime in.
+    #[tokio::test(start_paused = true)]
+    async fn close_bounded_gives_up_on_a_close_that_never_finishes() {
+        let started = tokio::time::Instant::now();
+        McpServer::close_bounded("never", std::future::pending::<()>()).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= RESOURCE_CLOSE_GRACE,
+            "it must give the close its full grace first, waited {waited:?}"
+        );
+        assert!(
+            waited < RESOURCE_CLOSE_GRACE * 2,
+            "it must GIVE UP after the grace, not wait on: waited {waited:?}"
+        );
+    }
+
+    /// The other half, and it is what stops the bound from being a tax: a
+    /// close that finishes returns at once, so the common shutdown pays
+    /// nothing.
+    #[tokio::test(start_paused = true)]
+    async fn close_bounded_returns_at_once_when_the_close_finishes() {
+        let started = tokio::time::Instant::now();
+        McpServer::close_bounded("instant", std::future::ready(())).await;
+        assert!(
+            started.elapsed() < RESOURCE_CLOSE_GRACE,
+            "a close that completes must not pay the grace"
+        );
+    }
+
+    /// The wiring, as source text, because nothing else can see it.
+    ///
+    /// `close_bounded` itself is pinned by the two tests above, but a change
+    /// that unwrapped ONE of the three `close_all` calls would redden
+    /// nothing: making `session_manager.close_all()` park needs a lock held
+    /// by a live remote command, which needs a real SSH host, and the only
+    /// measurement of it in this repository is the one in the T12 report. A
+    /// source-text guard is the weakest kind of test; it is still stronger
+    /// than the runtime test that cannot be written here.
+    #[test]
+    fn every_close_all_in_the_teardown_is_bounded() {
+        let src = include_str!("server.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // Scope: `serve`'s body alone. `close_all` is also called by the
+        // cleanup loops' own code elsewhere, and those are not shutdown.
+        let from_fn = production
+            .find("pub async fn serve<T: Transport>(")
+            .expect("serve must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    /// Join every in-flight session task")
+            .expect("the drain helpers must follow serve");
+        let body = &body[..to_next_fn];
+
+        let wrapped = body.matches("Self::close_bounded(").count();
+        assert_eq!(
+            wrapped, 3,
+            "all three pools must be closed through `close_bounded`, found {wrapped}"
+        );
+
+        // Each pool named with its `self.` receiver, so the prose above the
+        // calls — which mentions `close_all()` without one — cannot be
+        // mistaken for a call site. Exactly once each, so a second,
+        // unwrapped call cannot be added beside the wrapped one.
+        for pool in [
+            "self.tunnel_manager.close_all()",
+            "self.session_manager.close_all()",
+            "self.connection_pool.close_all()",
+        ] {
+            assert_eq!(
+                body.matches(pool).count(),
+                1,
+                "{pool} must appear exactly once in serve's body"
+            );
+            let at = body.find(pool).expect("just counted it");
+            let line_start = body[..at].rfind('\n').map_or(0, |i| i + 1);
+            assert!(
+                body[line_start..at].contains("Self::close_bounded("),
+                "{pool} must be wrapped in `close_bounded`: an unbounded one reopens \
+                 the un-killable daemon through this door"
             );
         }
     }

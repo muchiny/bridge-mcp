@@ -2858,6 +2858,24 @@ mod tests {
             "the server must have answered every POST it audited"
         );
 
+        // The premise, asserted instead of assumed — see `BLOCKING_HOLD`.
+        // Without these two lines a slower run-up makes this test
+        // tautologically green and the drain could be deleted unnoticed.
+        assert!(
+            !hold.is_finished(),
+            "the blocking thread must still be held when the shutdown is signalled, \
+             or this test proves nothing about the drain"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&audit_path)
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            0,
+            "the audit file must still be EMPTY here: the writer cannot have written \
+             anything while its only blocking thread is held"
+        );
+
         stop_tx
             .send(())
             .expect("the shutdown future must still be live");

@@ -381,25 +381,30 @@ async fn test_daemon_parse_error_response_sent_for_bad_json() {
 
 /// How many tool calls the drain test issues.
 ///
-/// Five, and the smallness is the point: **volume was measured and it does
-/// not work.** Round 1 of this test tried to make the producer outrun the
-/// writer by pipelining, on the theory that one event's backlog clears on its
-/// own during teardown. With the `self.close_audit(); drain_audit_writer(..)`
-/// pair at the end of `McpServer::serve` commented out, measured on this
-/// machine, on the test as it stands (first-response handshake included):
+/// Five, and the smallness is the point: **volume cannot be the
+/// discriminator here, for a structural reason.**
 ///
-/// - 200 calls: red in **7 runs of 8** (36, 36, 162, 103, 151, 194, 105 of
-///   200 on disk) — and GREEN once.
-/// - 600 calls: **worse**, red in 5 of 8 (596, 420, 372, 332, 519 of 600).
-///   More calls give the writer MORE time to keep up, because the session
-///   takes longer to dispatch them; the backlog never becomes durable.
+/// A session's own teardown already waits for its writer's natural drain,
+/// and that channel only yields `None` once EVERY `Sender` clone is gone —
+/// which means every dispatched handler has finished. So by the time `serve`
+/// reads the file, **every audit event has already been SENT**. The only
+/// possible shortfall is the writer's flushing lag, which depends on the
+/// ratio of the two rates and not on how many events went through. Round 1
+/// of this comment blamed "more calls give the writer more time", which is a
+/// story about the producer; the real reason is that there is no backlog of
+/// *unsent* events to grow in the first place.
 ///
-/// A first table, in the round-0 report, claimed 8 of 8 at 200 — it was taken
-/// on a version of this test whose cancel raced the accept, which compressed
-/// the timeline. That table was wrong and this note replaces it.
+/// The measurements agree with that, once they are not over-read. With the
+/// `self.close_audit(); drain_audit_writer(..)` pair commented out, eight
+/// runs each: 200 calls red 7 times, 600 calls red 5 times. **Eight runs do
+/// not separate those two** (p ~ 0.3), so "600 is worse" was an
+/// over-interpretation; what they do show is that neither figure is a
+/// reliable detector. A first table, in the round-0 report, claimed 8 of 8 at
+/// 200 — taken on a version of this test whose cancel raced the accept, which
+/// compressed the timeline.
 ///
-/// So the discriminator is not volume, it is [`BLOCKING_HOLD`]: the writer is
-/// made unable to finish on its own, deterministically. See there.
+/// So the discriminator is [`BLOCKING_HOLD`]: the writer is made unable to
+/// flush at all, deterministically, rather than merely outrun. See there.
 const DRAIN_TEST_CALLS: usize = 5;
 
 /// How long the test holds the runtime's ONLY blocking thread.
@@ -477,6 +482,35 @@ fn drain_responses(
         }
         (answers, notifications)
     })
+}
+
+/// The premise of the drain tests, asserted instead of assumed.
+///
+/// Without it a drain test can go **tautologically green**: if anything ever
+/// makes the run-up slower than [`BLOCKING_HOLD`], the writer gets its thread
+/// back on its own, the file fills whatever `serve` does, and the whole
+/// `close_audit()` + `drain_audit_writer(..)` pair could be deleted with
+/// nothing reddening. That drift is silent — the advertised symptom
+/// (`0 of 5` with the drain in place) only appears once the run-up exceeds the
+/// drain's own 2 s bound, not merely the 400 ms hold.
+///
+/// A file that is EMPTY at this point is what makes the lines it holds
+/// afterwards attributable to the drain and to nothing else.
+fn assert_writer_still_blocked(hold: &tokio::task::JoinHandle<()>, audit_path: &std::path::Path) {
+    assert!(
+        !hold.is_finished(),
+        "the blocking thread must still be held when the shutdown is signalled, or \
+         this test proves nothing about the drain"
+    );
+    assert_eq!(
+        std::fs::read_to_string(audit_path)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        0,
+        "the audit file must still be EMPTY here: the writer cannot have written \
+         anything while its only blocking thread is held"
+    );
 }
 
 /// T12's acceptance: when `McpServer::serve` returns, the audit lines of the
@@ -600,6 +634,9 @@ async fn the_audit_lines_are_on_disk_when_serve_returns() {
         .await
         .expect("the server must answer the first call within 10s")
         .expect("the response drain must not drop the handshake");
+
+    assert_writer_still_blocked(&hold, &audit_path);
+
     shutdown.cancel();
 
     tokio::time::timeout(Duration::from_secs(20), serving)
@@ -686,10 +723,14 @@ async fn the_audit_lines_are_on_disk_when_serve_returns() {
 /// no effect. `kill -9` was the only way out. The same scenario after the
 /// fix, same binary, is in the T12 report.
 ///
-/// In-process the analogue of "the process dies" is "`serve` returns", which
-/// is also what releases the audit drain — so this test asserts both: the
-/// return, and the line on disk afterwards. The client's socket is held open
-/// deliberately, past every assertion, so the server never sees EOF.
+/// In-process the analogue of "the process dies" is "`serve` returns", and
+/// that is the ONE decisive assertion here: without the bounded drain this
+/// test fails on its 20 s timeout. The line-on-disk assertion that follows
+/// is a consistency check, not a second proof — the audit drain is pinned by
+/// `serve_returns_only_after_the_audit_lines_are_on_disk`, which holds the
+/// blocking thread; this test does not, so its single event could have been
+/// flushed on its own. The client's socket is held open deliberately, past
+/// every assertion, so the server never sees EOF.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_silent_connected_client_cannot_hold_the_shutdown() {
     use bridge_mcp::mcp::McpServer;
