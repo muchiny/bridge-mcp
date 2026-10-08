@@ -199,6 +199,105 @@ mod tests {
         }
     }
 
+    /// This tool's audit line, read off the logger — the proof the other
+    /// state tools have and this one did not. It was closed by a live
+    /// measurement instead, which is a fact about one afternoon and not a
+    /// guard: nothing stopped a later commit from deleting the call.
+    ///
+    /// **It is the failure line, because that is the one a fixture can
+    /// reach.** `SessionManager::create` checks `max_sessions` *before* it
+    /// opens anything, so `max_sessions: 0` refuses with no network I/O at
+    /// all and the handler's `log_failure` runs. What it pins: that the
+    /// handler writes exactly one line, that the line names the tool, the
+    /// host and the operation the handler built, and that `log_failure`
+    /// hard-codes `event_type: "ssh_exec"` even here — which is why
+    /// `select(.event_type == "state_change")` does not find these seven
+    /// tools' failures.
+    ///
+    /// **What it does not cover:** the `log_state_change` call on the success
+    /// path, which is downstream of a real SSH handshake no fixture can
+    /// supply. Its shape is pinned by
+    /// `the_success_line_shape_this_tool_writes` below, from the sink's side.
+    #[tokio::test]
+    async fn a_refused_session_writes_one_line_naming_this_tool() {
+        let handler = SshSessionCreateHandler;
+        let mut ctx = crate::ports::mock::create_test_context_with_host();
+        ctx.session_manager = std::sync::Arc::new(crate::ssh::SessionManager::new(
+            crate::config::SessionConfig {
+                max_sessions: 0,
+                ..crate::config::SessionConfig::default()
+            },
+        ));
+
+        let err = handler
+            .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .expect_err("max_sessions: 0 must refuse every creation");
+        assert!(
+            matches!(err, BridgeError::TooManySessions { .. }),
+            "the refusal must come from the limit, not from the network: {err:?}"
+        );
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_session_create"));
+        assert_eq!(events[0].host, "server1");
+        assert_eq!(events[0].command, "ssh_session_create host=server1");
+        assert_eq!(
+            events[0].event_type, "ssh_exec",
+            "`log_failure` builds `AuditEvent::new`, which hard-codes this"
+        );
+        assert!(
+            matches!(
+                events[0].result,
+                crate::security::CommandResult::Error { .. }
+            ),
+            "got {:?}",
+            events[0].result
+        );
+    }
+
+    /// The success line's shape, through the sink rather than through the
+    /// handler — the use-case test's pattern, for the same reason it exists
+    /// there: `log_state_change` is reachable here only behind a real SSH
+    /// handshake.
+    ///
+    /// **This is a weaker guard than the test above and the difference
+    /// matters.** It pins the line's fields and the operation's shape, built
+    /// from `handler.name()` so a rename of the tool moves both ends at once.
+    /// It cannot see the call being removed from `execute`: that remains
+    /// proved by compilation and by the 2026-09 live run, and by nothing a
+    /// test can assert.
+    #[tokio::test]
+    async fn the_success_line_shape_this_tool_writes() {
+        let handler = SshSessionCreateHandler;
+        let ctx = create_test_context();
+        let session_id = "6a0f8a2e-0000-4000-8000-000000000000";
+
+        ctx.execute_use_case.log_state_change(
+            handler.name(),
+            "server1",
+            &format!("{} session_id={session_id}", handler.name()),
+            7,
+        );
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert_eq!(events[0].tool_name.as_deref(), Some("ssh_session_create"));
+        assert_eq!(events[0].event_type, "state_change");
+        assert_eq!(events[0].host, "server1");
+        assert_eq!(
+            events[0].command,
+            format!("ssh_session_create session_id={session_id}")
+        );
+        match events[0].result {
+            crate::security::CommandResult::StateChanged { duration_ms } => {
+                assert_eq!(duration_ms, 7, "the duration must survive the sink");
+            }
+            ref other => panic!("a state change must audit as StateChanged, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_invalid_arguments() {
         let handler = SshSessionCreateHandler;

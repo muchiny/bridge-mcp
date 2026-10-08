@@ -178,15 +178,29 @@ mod tests {
 
     /// An unknown key changes nothing, so it writes nothing: the audit trail
     /// records state CHANGES, not rejected requests.
+    ///
+    /// **Both halves are read**, and the first one was missing: this test
+    /// asserted only the absence of the audit line while its name promised
+    /// the state too. The handle is cloned the way
+    /// `test_config_set_max_output_chars` clones it, so the runtime override
+    /// is read back after the call instead of being taken on trust — a
+    /// handler that wrote the limit and merely skipped the logging would have
+    /// passed the old body.
     #[tokio::test]
     async fn a_rejected_key_changes_no_state_and_writes_no_line() {
         let handler = SshConfigSetHandler;
         let mut ctx = create_test_context();
-        ctx.runtime_max_output_chars = Some(Arc::new(RwLock::new(None)));
+        let runtime_override = Arc::new(RwLock::new(None));
+        ctx.runtime_max_output_chars = Some(Arc::clone(&runtime_override));
 
         let args = serde_json::json!({"key": "unknown_key", "value": 100});
         handler.execute(Some(args), &ctx).await.unwrap();
 
+        assert_eq!(
+            *runtime_override.read().await,
+            None,
+            "a rejected key must leave the runtime limit untouched"
+        );
         assert!(ctx.audit_logger.drain_for_test().is_empty());
     }
 

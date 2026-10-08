@@ -364,6 +364,82 @@ mod tests {
         );
     }
 
+    /// This tool's audit line, read off the logger — the proof the other
+    /// state tools have and this one did not. It was closed by a live
+    /// measurement instead, which is a fact about one afternoon and not a
+    /// guard.
+    ///
+    /// **It reads the sink, not the handler, and that bound is the honest
+    /// part.** Unlike `ssh_session_create`, this handler has no sink call a
+    /// fixture can reach at all: `log_failure` sits on
+    /// `TunnelManager::register`, which `execute` reaches only after
+    /// `TcpListener::bind` *and* `connect_with_jump`, i.e. after a real SSH
+    /// handshake — the same wall the test above
+    /// (`a_refused_registration_releases_the_bound_port`) states for the
+    /// mechanism it drives. A bind failure and a connection failure both
+    /// return before any event exists — the measurement for that one is
+    /// recorded on `ExecuteCommandUseCase::log_state_change`
+    /// (`local_port=80`, zero new lines).
+    ///
+    /// So what this pins is both lines' shape — the fields, and an operation
+    /// built from `handler.name()` and the same `tunnel-<host>-<local>-
+    /// <remote>` id `execute` builds, so a rename moves both ends at once.
+    /// What it cannot see is either call being removed from `execute`. That
+    /// is left to compilation and to the 2026-09 live run, and it is the one
+    /// gap this file cannot close.
+    #[tokio::test]
+    async fn the_line_shapes_this_tool_writes() {
+        let handler = SshTunnelCreateHandler;
+        let ctx = create_test_context();
+        let tunnel_id = format!("tunnel-{}-{}-{}", "server1", 18080, 80);
+        let operation = format!("{} tunnel_id={tunnel_id}", handler.name());
+
+        // The success path: a state change, carrying a duration and no code.
+        ctx.execute_use_case
+            .log_state_change(handler.name(), "server1", &operation, 11);
+        // The refused-registration path, which `execute` audits as a failure
+        // because `CommandResult::Error` has nowhere to put a duration.
+        ctx.execute_use_case.log_failure(
+            handler.name(),
+            "server1",
+            &operation,
+            "Maximum number of tunnels (0) reached",
+        );
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 2, "expected exactly two events: {events:?}");
+        for e in &events {
+            assert_eq!(e.tool_name.as_deref(), Some("ssh_tunnel_create"));
+            assert_eq!(e.host, "server1");
+            assert_eq!(
+                e.command,
+                "ssh_tunnel_create tunnel_id=tunnel-server1-18080-80"
+            );
+        }
+
+        assert_eq!(events[0].event_type, "state_change");
+        match events[0].result {
+            crate::security::CommandResult::StateChanged { duration_ms } => {
+                assert_eq!(duration_ms, 11, "the duration must survive the sink");
+            }
+            ref other => panic!("a state change must audit as StateChanged, got {other:?}"),
+        }
+
+        assert_eq!(
+            events[1].event_type, "ssh_exec",
+            "`log_failure` builds `AuditEvent::new`, which hard-codes this — so \
+             `select(.event_type == \"state_change\")` misses this line"
+        );
+        assert!(
+            matches!(
+                events[1].result,
+                crate::security::CommandResult::Error { .. }
+            ),
+            "got {:?}",
+            events[1].result
+        );
+    }
+
     #[test]
     fn test_schema() {
         let handler = SshTunnelCreateHandler;

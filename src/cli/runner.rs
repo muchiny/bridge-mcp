@@ -1956,7 +1956,7 @@ async fn run_gated_tool(
         decision,
         &wiring.use_case,
         tool_name,
-        gate_host(args.as_ref()),
+        &gate_host(args.as_ref()),
         &audited_operation(tool_name, args.as_ref()),
     )?;
 
@@ -2059,8 +2059,18 @@ const CONFIRMED_BY_PROMPT: &str = "terminal prompt";
 /// How large, exactly, because the obvious figure is wrong: through `argv` the
 /// ceiling is `MAX_ARG_STRLEN`, 32 pages — **128 KB per argument** — and
 /// `ARG_MAX` for the whole command line; past that `execve` fails with `E2BIG`
-/// and the binary never starts, which `tests/cli_exit_code.rs` measures. A
-/// daemon-forwarded or MCP-served call carries its arguments as JSON over a
+/// and the binary never starts.
+///
+/// **Where that comes from, since the attribution here used to be wrong:**
+/// `fork` + `execv("/bin/true", [prog, "A" × n])`, run directly, *succeeds*
+/// for n = 131071 and fails with `E2BIG` (errno 7) for n = 131072, with
+/// `getconf PAGESIZE` = 4096 — 32 pages, terminating NUL included. No test in
+/// this repository measures it: `tests/cli_exit_code.rs` *asserts* it in a
+/// docstring, to justify passing the 100 KB that succeeds, and the 400 KB
+/// figure lives in an in-memory unit test that calls no `execve` at all. The
+/// number is right; the citation was not.
+///
+/// A daemon-forwarded or MCP-served call carries its arguments as JSON over a
 /// socket and has no such limit. So the bound matters for volume — 128 KB a
 /// line fills a 100 MB archive in 800 calls, and breaks any JSONL consumer
 /// with a line-length bound — and it matters for content at any size: it
@@ -2114,20 +2124,91 @@ enum GateDecision {
     },
 }
 
-/// The host to put on a gate event: the call's `host` argument when it has
-/// one, [`crate::security::NO_HOST`] otherwise.
+/// The host to put on a gate event: the call's `host` argument, rendered by
+/// [`audited_host`], or [`crate::security::NO_HOST`] when the call carries no
+/// `host` string at all.
 ///
 /// At the gate the host is an unresolved JSON argument and nothing more — the
 /// alias is not looked up until the handler runs, which is why the gate can
-/// refuse a call naming a host that does not exist. Three of the 45
-/// destructive tools (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`,
-/// `ssh_awx_workflow_cancel`) declare no `host` at all, and none declares a
-/// plural `hosts`, so the sentinel is the exact answer here and not a
-/// fallback for a case that cannot happen.
-fn gate_host(args: Option<&serde_json::Value>) -> &str {
-    args.and_then(|a| a.get("host"))
+/// refuse a call naming a host that does not exist. **So the sentinel is not
+/// reserved for the tools whose schema has no `host`**: the gate runs before
+/// any schema validation, so *any* destructive call that simply omits the
+/// argument lands on it too — pinned for `ssh_service_stop`, which requires
+/// one, in `a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event`.
+/// Three of the 45 destructive tools
+/// (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`, `ssh_awx_workflow_cancel`)
+/// declare no `host` at all and none declares a plural `hosts`, so for those
+/// three it is the only possible answer; for the other 42 it is also what an
+/// incomplete call produces.
+///
+/// Returns an owned `String` because the value is *rendered*, not borrowed —
+/// see [`audited_host`] for what that rendering is for.
+fn gate_host(args: Option<&serde_json::Value>) -> String {
+    match args
+        .and_then(|a| a.get("host"))
         .and_then(serde_json::Value::as_str)
-        .unwrap_or(crate::security::NO_HOST)
+    {
+        Some(raw) => audited_host(raw),
+        None => crate::security::NO_HOST.to_string(),
+    }
+}
+
+/// Render a caller-supplied `host` for a gate event: bounded, and unable to
+/// write anything the *writer* reserves for itself.
+///
+/// The gate is the only audit sink in the crate whose `host` is not an alias
+/// the config already resolved — everywhere else resolution precedes the
+/// write. Three consequences of handing that string through verbatim, each
+/// re-measured by removing this function's body and watching the matching
+/// test go red:
+///
+/// - **The bound beside it was decorative.** `elide_oversized` caps
+///   `command` and nothing capped `host`, so a 100 000-character `host`
+///   reached the line whole while the `command` field on the same line was
+///   elided to its length. A cap on one field of a line is not a cap on the
+///   line.
+/// - **The sentinel was forgeable.** `NO_HOST`'s own doc justifies the angle
+///   brackets with "`grep '<no-host>'` over `audit.log` enumerates exactly
+///   the hostless events"; `host=<no-host>` produced a `host` field equal to
+///   the sentinel, character for character. The angle brackets are now the
+///   **writer's** namespace: a caller's `<` and `>` are escaped, so no caller
+///   value can render as `<no-host>`, as `<elided: N chars>`, or as any
+///   marker added later.
+/// - **The `tracing` sink took a forged record.** `command` is JSON, so serde
+///   escapes it; `host` goes to `AuditLogger::emit_tracing` as `host =
+///   %event.host`, i.e. `Display`, with no rendering at all — so a newline
+///   inside it put a second, well-formed `Audit: …` line into the journal
+///   journald and syslog capture. Control characters are escaped here for
+///   that reason, not for `audit.log`, whose JSON was never at risk.
+///
+/// The escape is `\u{..}` with the backslash doubled first, so the rendering
+/// is unambiguous: a literal `\u{3c}` typed by a caller comes out
+/// `\\u{3c}`. Everything else — letters, digits, dots, dashes, colons,
+/// non-ASCII — passes through untouched, because a real alias must stay
+/// greppable and the sanitizer is deliberately **not** applied to this field
+/// (`the_operation_is_redacted_and_the_host_is_passed_through_verbatim`).
+///
+/// The cap is [`GATE_AUDIT_MAX_VALUE_CHARS`], the same one `elide_oversized`
+/// applies, and it reports the length of what the **caller** supplied rather
+/// than of the escaped form: that is the number a reader wants.
+fn audited_host(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '<' | '>' => {
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(ch));
+            }
+            c if c.is_control() => {
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => escaped.push(c),
+        }
+    }
+    if escaped.chars().count() > GATE_AUDIT_MAX_VALUE_CHARS {
+        return format!("<elided: {} chars>", raw.chars().count());
+    }
+    escaped
 }
 
 /// The `command` field for a gate event: the tool and its arguments, bounded.
@@ -2330,9 +2411,10 @@ fn decision_from_prompt_answer(tool_name: &str, answer: &str) -> GateDecision {
 /// opened**; `create_audit_wiring` warns when it could not, because a run
 /// whose gate decision was not written must not look like one that was.
 ///
-/// `host` is the call's `host` argument when it has one and
-/// [`crate::security::NO_HOST`] otherwise — see [`gate_host`]. `operation` is
-/// the bounded rendering from [`audited_operation`], never the raw arguments.
+/// `host` is the bounded rendering of the call's `host` argument when it has
+/// one and [`crate::security::NO_HOST`] otherwise — see [`gate_host`] and
+/// [`audited_host`], never the raw argument. `operation` is the bounded
+/// rendering from [`audited_operation`], never the raw arguments either.
 ///
 /// # Errors
 ///
@@ -4378,12 +4460,24 @@ mod tests {
 
     // ============== destructive gate Tests ==============
     //
-    // Under `cargo test` stdin is never a TTY, so `decide_destructive` can
-    // only reach the branches that decide without asking. The prompt's own
-    // decision is reachable anyway, because mapping the answer is a pure
-    // function (`decision_from_prompt_answer`) and these tests call it: what
-    // stays untested is `IsTerminal` returning true, i.e. the prompt being
-    // printed and read at all.
+    // **No test here reads the real stdin, and that is not a convenience.**
+    // An earlier version of this comment said "under `cargo test` stdin is
+    // never a TTY", and four tests were built on it. It is false: `cargo
+    // test` inherits the terminal's stdin, so those four printed `Proceed?
+    // [y/N]` and blocked forever. Measured before this change, one revision
+    // of this file, the same four tests: stdin from `/dev/null` -> `4
+    // passed`; stdin from a pty -> killed at 45 s having finished none.
+    // `make ci` runs `cargo nextest`, which hands each test a non-TTY stdin,
+    // so the suite was green while `cargo test` in a developer's own
+    // terminal hung without a message — and `make ci`'s own fallback when
+    // nextest is absent is `cargo test`, so that machine would have hung
+    // too.
+    //
+    // So `gate` below calls `decide_destructive_from` with the terminal flag
+    // and the answer passed in, the split T14 introduced for exactly this.
+    // What no test exercises is `std::io::stdin().is_terminal()` itself, i.e.
+    // whether the real process has a TTY — one line, in
+    // `decide_destructive`.
 
     fn gate_config(require: bool) -> Config {
         let mut config = Config::default();
@@ -4415,6 +4509,16 @@ mod tests {
 
     /// Decide, then record, exactly as `run_gated_tool` does — so these tests
     /// exercise the production pairing of the two halves, not one of them.
+    ///
+    /// **Through `decide_destructive_from`, with no terminal and an empty
+    /// reader**, not through `decide_destructive`. The difference is the
+    /// whole of the comment above this module's helpers: with the real stdin,
+    /// every caller of this helper that is destructive, policy-on and
+    /// `assume_yes: false` blocks on a prompt the moment someone runs
+    /// `cargo test` from a terminal. The reader is never read — the
+    /// no-terminal branch returns before the prompt — but it is empty rather
+    /// than absent so that nothing here can fall back to the process's own
+    /// stdin.
     fn gate(
         tool_name: &str,
         args: Option<&serde_json::Value>,
@@ -4422,12 +4526,14 @@ mod tests {
         config: &Config,
         audit: &ExecuteCommandUseCase,
     ) -> Result<()> {
-        let decision = decide_destructive(tool_name, args, assume_yes, config);
+        let mut no_answer = std::io::Cursor::new(Vec::new());
+        let decision =
+            decide_destructive_from(tool_name, args, assume_yes, config, false, &mut no_answer);
         apply_gate_decision(
             decision,
             audit,
             tool_name,
-            gate_host(args),
+            &gate_host(args),
             &audited_operation(tool_name, args),
         )
     }
@@ -4740,6 +4846,157 @@ mod tests {
         );
     }
 
+    /// The written event, serialized as `AuditWriterTask` writes it. The three
+    /// tests below are about the **whole line**, and the whole line is what
+    /// the two bounds beside them failed to cover: `command` was capped while
+    /// `host` on the same line was not.
+    fn gate_line(event: &crate::security::AuditEvent) -> String {
+        serde_json::to_string(event).expect("an AuditEvent must serialize")
+    }
+
+    /// A cap on one field of a line is not a cap on the line.
+    ///
+    /// Measured before the fix, on the real binary:
+    /// `--yes tool ssh_file_write host=<100000 × H> path=/tmp/nothing
+    /// content=hi` wrote a 100 267-byte `audit.log` line whose `command` was
+    /// 85 characters — `elide_oversized` had done its job on the field it
+    /// covers, and the field beside it carried the 100 000 characters
+    /// instead. The ceiling `GATE_AUDIT_MAX_VALUE_CHARS` names is now the
+    /// ceiling of every field the gate writes.
+    #[test]
+    fn an_oversized_host_is_bounded_like_every_other_field() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let host = "H".repeat(100_000);
+        let args = serde_json::json!({"host": host, "path": "/tmp/nothing", "content": "hi"});
+        gate("ssh_file_write", Some(&args), true, &config, &audit).expect("--yes confirms");
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert!(
+            !events[0].host.contains(&host),
+            "the host argument must not reach the trail whole ({} chars)",
+            events[0].host.chars().count()
+        );
+        assert_eq!(
+            events[0].host, "<elided: 100000 chars>",
+            "the elision must say what was dropped"
+        );
+        // The property the bound exists for: the LINE is bounded, not one
+        // field of it. `command` (2048) + `host` (256) + the fixed keys.
+        let line = gate_line(&events[0]);
+        assert!(
+            line.chars().count()
+                <= GATE_AUDIT_MAX_OPERATION_CHARS + GATE_AUDIT_MAX_VALUE_CHARS + 512,
+            "the whole line must stay bounded, got {} chars",
+            line.chars().count()
+        );
+    }
+
+    /// `NO_HOST`'s doc justifies its angle brackets with "`grep '<no-host>'`
+    /// over `audit.log` enumerates exactly the hostless events". Before this,
+    /// `host=<no-host>` on the command line produced a line a reader could
+    /// not tell from a real hostless one — so the grep enumerated the
+    /// hostless events **plus** whatever a caller chose to put there.
+    ///
+    /// Both halves are asserted, because only the pair is the property: the
+    /// forged value must not render as the sentinel, and the genuinely
+    /// hostless call must still render as it.
+    #[test]
+    fn a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event() {
+        let config = gate_config(true);
+
+        let (forged_logger, forged_audit) = gate_audit(&config);
+        let args = serde_json::json!({"host": crate::security::NO_HOST, "path": "/tmp/nothing"});
+        gate("ssh_file_write", Some(&args), true, &config, &forged_audit).expect("--yes confirms");
+        let forged = forged_logger.drain_for_test();
+        assert_eq!(forged.len(), 1, "expected exactly one event: {forged:?}");
+        assert_ne!(
+            forged[0].host,
+            crate::security::NO_HOST,
+            "a caller's value must not read as the sentinel"
+        );
+        // Substring, not equality: `grep` is a substring match, so a
+        // rendering that merely *contains* `<no-host>` breaks the same
+        // enumeration that equality would.
+        assert!(
+            !forged[0].host.contains(crate::security::NO_HOST),
+            "the sentinel must not appear inside a caller value either, got {:?}",
+            forged[0].host
+        );
+        assert_eq!(
+            forged[0].host, "\\u{3c}no-host\\u{3e}",
+            "the caller's text is kept, with the writer's brackets escaped"
+        );
+
+        let (real_logger, real_audit) = gate_audit(&config);
+        let _ = gate("ssh_exec", None, false, &config, &real_audit);
+        let real = real_logger.drain_for_test();
+        assert_eq!(real.len(), 1, "expected exactly one event: {real:?}");
+        assert_eq!(
+            real[0].host,
+            crate::security::NO_HOST,
+            "a call with no host argument must still carry the sentinel"
+        );
+
+        // And the sentinel's scope, which `NO_HOST`'s doc used to understate:
+        // the gate runs before any schema validation, so an *incomplete* call
+        // to a tool that requires a host lands on it too. Not only the three
+        // destructive tools whose schema has no `host`.
+        let (omitted_logger, omitted_audit) = gate_audit(&config);
+        let omitted = serde_json::json!({"service": "nope"});
+        let _ = gate(
+            "ssh_service_stop",
+            Some(&omitted),
+            false,
+            &config,
+            &omitted_audit,
+        );
+        let events = omitted_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert_eq!(events[0].event_type, "command_denied");
+        assert_eq!(
+            events[0].host,
+            crate::security::NO_HOST,
+            "`ssh_service_stop` requires a host and still lands on the sentinel \
+             when the argument is left out"
+        );
+    }
+
+    /// `command` is JSON, so serde escapes it; `host` reached
+    /// `AuditLogger::emit_tracing` as `%` (`Display`) with no rendering at
+    /// all. A newline inside it therefore added a complete, well-formed
+    /// `Audit: command denied …` record to the `tracing` sink — the one
+    /// journald and syslog capture — while `audit.log` stayed one line.
+    ///
+    /// `audit.log` was never the vulnerable sink, which is why this test
+    /// asserts on the **field** and not on the JSON: the field is what both
+    /// sinks share, and the `tracing` sink has no escaping of its own to
+    /// assert against.
+    #[test]
+    fn a_host_carrying_a_newline_cannot_forge_a_second_record() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let forged = "pi\n2026-10-08T00:00:00.000000Z  INFO Audit: command denied \
+                      event_type=command_denied tool_name=\"ssh_file_write\" host=pi \
+                      command=FORGED reason=forged";
+        let args = serde_json::json!({"host": forged, "path": "/tmp/nothing"});
+        gate("ssh_file_write", Some(&args), true, &config, &audit).expect("--yes confirms");
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert!(
+            !events[0].host.chars().any(char::is_control),
+            "no control character may reach either sink, got {:?}",
+            events[0].host
+        );
+        assert!(
+            events[0].host.starts_with("pi\\u{a}"),
+            "the newline must be escaped, not dropped, got {:?}",
+            events[0].host
+        );
+    }
+
     /// M4: `log_denied` was the one audit entry point that did not pre-redact,
     /// so a secret matched ONLY by a legacy `sanitize_patterns` entry reached
     /// the refusal line in clear while the confirmation line beside it was
@@ -4907,7 +5164,7 @@ mod tests {
                 decision,
                 &audit,
                 "ssh_exec",
-                gate_host(Some(&args)),
+                &gate_host(Some(&args)),
                 &audited_operation("ssh_exec", Some(&args)),
             );
             let events = logger.drain_for_test();
