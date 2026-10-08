@@ -122,6 +122,34 @@ pub(crate) const SHUTDOWN_TOOL: &str = "<shutdown>";
 /// from arguments could therefore put a secret on the line.
 pub(crate) const INTERRUPTED_BY_SHUTDOWN: &str = "the server stopped before this call returned";
 
+/// `tool_name` for a line the bridge wrote about a session or a tunnel **it
+/// destroyed on its own**, with nobody asking.
+///
+/// [`AuditLogger::log`] takes the tool as a mandatory parameter and is the
+/// single writer of `tool_name`, so these lines have to name *something*
+/// there, and there is no tool to name: the idle reaper, the shutdown's
+/// `close_all` and the dead-channel branches of `SessionManager::exec` are
+/// the bridge's own machinery. `"ssh_session_close"` was the tempting value
+/// and it is the one that must never be used — the line would then be
+/// indistinguishable, on the one field a reader selects a tool by, from a
+/// close the operator actually asked for, which is the confusion this whole
+/// release exists to remove.
+///
+/// Same convention and the same reason as [`NO_HOST`] and `SHUTDOWN_TOOL`:
+/// the angle brackets are the writer's namespace, and no registered name can
+/// collide with a value containing one. Re-measured for this constant rather
+/// than inherited from `SHUTDOWN_TOOL`'s paragraph: every `fn name(&self) ->
+/// &'static str` body and every `const NAME` literal under `src/`, collected
+/// and deduplicated, is **503 names** of which **0** contain `<` or `>`.
+///
+/// **It names the WRITER, not a kind of resource**, which is why one sentinel
+/// covers tunnels as well as sessions. A reader who wants one of the two
+/// populations selects on `command`, whose second and third fields are
+/// `reason=` and either `session_id=` or `tunnel_id=`; a reader who wants
+/// "everything the bridge tore down by itself" selects on this field alone,
+/// and that is the query the release notes give.
+pub(crate) const SESSION_REAPER_TOOL: &str = "<session-reaper>";
+
 /// Result of a command execution for audit purposes
 #[derive(Debug, Clone, Serialize)]
 pub enum CommandResult {
@@ -140,6 +168,15 @@ pub enum CommandResult {
     /// They are audited because they change what the server is, not because a
     /// command was executed.
     ///
+    /// **And for the destructions NOBODY ASKED FOR**, which is the larger
+    /// population of the two and reads nothing like a tool call: the idle
+    /// reaper (`SessionManager::cleanup`, every 60 s), the shutdown's
+    /// `close_all` for sessions and for tunnels, and the four branches of
+    /// `SessionManager::exec` that find a session expired or its channel
+    /// dead. Those lines carry `SESSION_REAPER_TOOL` in `tool_name` and a
+    /// `reason=` in `command`; `crate::security::reaped_event` builds them
+    /// all.
+    ///
     /// **It carries the duration and no exit code, and the absence is the
     /// honest information** — the same doctrine
     /// `ToolCallResult::remote_exit_code` (`src/ports/protocol.rs`) states for
@@ -152,10 +189,21 @@ pub enum CommandResult {
     /// and what `SessionExecResult::exit_code` was changed to stop doing.
     ///
     /// Reading one of these lines: `event_type` says which kind of state
-    /// change it is, `tool_name` which tool did it (always set — `AuditLogger::
-    /// log` is the only writer of that field), and `command` carries the
+    /// change it is, `tool_name` says **who wrote it** — a tool's own name
+    /// when a tool did it, `SESSION_REAPER_TOOL` when the bridge destroyed
+    /// the thing by itself; always set either way, since `AuditLogger::log`
+    /// is the only writer of that field — and `command` carries the
     /// *operation* rather than a shell command, in the form
-    /// `<tool> <identifying-arg>=<value>`.
+    /// `<writer> <identifying-arg>=<value> …`.
+    ///
+    /// **`duration_ms` means two different things on these lines, and the
+    /// field cannot tell you which.** On a tool's line it is how long the
+    /// operation took, timed by the handler
+    /// (`mcp::tool_handlers::utils::elapsed_ms`). On a reaped line it is the
+    /// **lifetime of the session or tunnel that was destroyed** — nobody
+    /// timed the teardown, and the lifetime is the number that makes the
+    /// field worth carrying at all. `tool_name` is what disambiguates: a
+    /// reaped line's is `SESSION_REAPER_TOOL`.
     StateChanged { duration_ms: u64 },
     /// A confirmation gate let a destructive call through, and **nothing has
     /// run yet** when this line is written.
@@ -300,15 +348,27 @@ pub struct AuditEvent {
     /// thing stopping it from drifting into a second, unreliable `tool_name`.
     ///
     /// **`"state_change"` is narrower than the operations it names, and that
-    /// trips the obvious query.** It is written on the *success* path of the
-    /// seven state-changing tools only. When one of them fails it goes
-    /// through `ExecuteCommandUseCase::log_failure`, which builds
-    /// [`AuditEvent::new`] — and `new` hard-codes `"ssh_exec"`. So
+    /// trips the obvious query.** On the tools' side it is written on the
+    /// *success* path of the seven state-changing tools only. When one of
+    /// them fails it goes through `ExecuteCommandUseCase::log_failure`, which
+    /// builds [`AuditEvent::new`] — and `new` hard-codes `"ssh_exec"`. So
     /// `select(.event_type == "state_change")` enumerates the successful
     /// session, tunnel, recording and limit changes and **none of the failed
     /// ones**, which are spelled exactly like an ordinary command event.
     /// `tool_name` is the field that selects everything one of the seven did;
     /// `result` is the field that distinguishes the outcomes.
+    ///
+    /// **And it is no longer only the seven tools that write it.** Every
+    /// session or tunnel the bridge destroys by itself — the idle reaper, the
+    /// shutdown's `close_all`, a dead channel found by
+    /// `SessionManager::exec` — writes `"state_change"` too, with
+    /// `SESSION_REAPER_TOOL` in `tool_name` (see
+    /// `crate::security::reaped_event`). That is deliberate: destruction of a
+    /// session is one population and must answer to one query. The
+    /// consequence for the sentence above is that `tool_name` selects
+    /// everything one of the **seven** did and *not* everything that happened
+    /// to a session — for that, select `"state_change"` and read `tool_name`
+    /// to learn who did it.
     pub event_type: String,
     /// Target host alias, or [`NO_HOST`] when the operation had no target.
     pub host: String,
@@ -390,13 +450,22 @@ impl AuditEvent {
     /// have to either mislabel its event or reopen this signature. The
     /// `event_type`/`result` pair belongs to the caller, as one decision.
     ///
-    /// Callers do not reach this directly. Each goes through the named,
-    /// typed facade for its kind of event — today
-    /// `ExecuteCommandUseCase::log_state_change`, which passes
-    /// `"state_change"` with [`CommandResult::StateChanged`], and
-    /// `ExecuteCommandUseCase::log_confirmed`, which passes
-    /// `"command_confirmed"` with [`CommandResult::Confirmed`] — because
-    /// `tool` is mandatory on those facades and consultative nowhere.
+    /// Callers outside this module do not reach this directly. Each goes
+    /// through the named, typed facade for its kind of event, and the list is
+    /// written out rather than counted because it has been out of date twice:
+    /// `ExecuteCommandUseCase::log_state_change` (`"state_change"` with
+    /// [`CommandResult::StateChanged`]), `…::log_confirmed`
+    /// (`"command_confirmed"` with [`CommandResult::Confirmed`]) and
+    /// `…::log_interrupted` (`"command_interrupted"` with
+    /// [`CommandResult::Interrupted`]) — because `tool` is mandatory on those
+    /// facades and consultative nowhere.
+    ///
+    /// The one caller inside this module is `reaped_event`, which is a
+    /// renderer and not a facade: it takes no `tool` because its `tool_name`
+    /// can only ever be `SESSION_REAPER_TOOL`, exactly as
+    /// `log_interrupted` takes none for `SHUTDOWN_TOOL`. Its two call sites
+    /// are in two adapters that cannot see each other, which is why the
+    /// shape lives here.
     ///
     /// `command` receives whatever identifies the thing audited: a shell
     /// command for an event that ran one, or the **operation** (the tool and
@@ -975,6 +1044,65 @@ pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
         return value.clone();
     }
     serde_json::Value::String(format!("<elided: {len} chars>"))
+}
+
+/// The whole event for a session or a tunnel the bridge destroyed by itself:
+/// the idle reaper, the shutdown, or a dead channel.
+///
+/// **One renderer for two call sites in two layers**, and that is the only
+/// reason it lives here rather than beside either of them.
+/// `SessionManager::audit_destroyed` (`src/ssh/session.rs`) writes the
+/// session lines and `McpServer::audit_tunnels_at_shutdown`
+/// (`src/mcp/server.rs`) writes the tunnel ones; neither adapter can see the
+/// other, and a second copy of this shape is how the two lines would come to
+/// disagree about the field a `jq` rule selects on.
+///
+/// `event_type` is **`"state_change"`**, the same value the seven
+/// state-changing tools write, and deliberately not a new one: an auditor
+/// asking "when was this session destroyed" must get one query, not two.
+/// What tells the two apart is `tool_name` — `SESSION_REAPER_TOOL` here, a
+/// real tool name there.
+///
+/// `duration_ms` is the resource's **LIFETIME**, not the time the teardown
+/// took, and that is a departure from what the field means on the other
+/// `state_change` lines. It is the one number that makes
+/// [`CommandResult::StateChanged`]'s duration meaningful for an event nobody
+/// timed: "this session existed for 43 minutes and then the reaper took it".
+/// Stated on the variant too, because a reader comparing a reaped line with
+/// an `ssh_session_close` line would otherwise read the same field two ways
+/// without being told.
+///
+/// **The separators are ` ` and `=`, and neither is new.** Both are already
+/// in [`audited_text`]'s family 3, so `id` and `host` — a UUID this crate
+/// minted and a host alias a caller named — cannot forge a fourth field.
+/// `reason` and `id_key` are `&'static str` **on purpose**: they are the
+/// writer's own vocabulary out of a closed enum, so there is no path by
+/// which caller data reaches them unescaped, and a `&str` parameter would
+/// invite one.
+///
+/// The `u64::try_from(..).unwrap_or(u64::MAX)` is the same saturation
+/// `mcp::tool_handlers::utils::elapsed_ms` applies, open-coded rather than
+/// imported: `src/security/` must not depend on `src/mcp/`.
+pub(crate) fn reaped_event(
+    reason: &'static str,
+    id_key: &'static str,
+    id: &str,
+    host: &str,
+    lifetime: std::time::Duration,
+) -> AuditEvent {
+    let command = format!(
+        "{SESSION_REAPER_TOOL} reason={reason} {id_key}={} host={}",
+        audited_text(id),
+        audited_text(host)
+    );
+    AuditEvent::tagged(
+        "state_change",
+        &audited_host(host),
+        &command,
+        CommandResult::StateChanged {
+            duration_ms: u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX),
+        },
+    )
 }
 
 // ===========================================================================

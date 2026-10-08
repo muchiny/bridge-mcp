@@ -834,7 +834,14 @@ fn create_audit_wiring(config: &Arc<Config>) -> (AuditWiring, Option<AuditWriter
 fn create_context_from_wiring(config: Arc<Config>, wiring: &AuditWiring) -> ToolContext {
     let connection_pool = Arc::new(ExecutorRouter::with_defaults());
     let rate_limiter = Arc::new(RateLimiter::new(config.limits.rate_limit_per_second));
-    let session_manager = Arc::new(SessionManager::new(config.sessions.clone()));
+    // The logger goes in through the setter, same as `McpServer::new`. On
+    // this path it records far less than on the server's: the CLI is one
+    // process per call, so it runs no reaper and no `close_all`, and a
+    // session created by one invocation does not exist in the next. What it
+    // can still write are `exec`'s dead-channel branches.
+    let session_manager = Arc::new(
+        SessionManager::new(config.sessions.clone()).with_audit_logger(Arc::clone(&wiring.logger)),
+    );
 
     ToolContext::new(
         config,

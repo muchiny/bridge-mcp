@@ -568,8 +568,16 @@ impl McpServer {
         // Create rate limiter (0 = disabled by default)
         let rate_limiter = Arc::new(RateLimiter::new(config.limits.rate_limit_per_second));
 
-        // Create session manager for persistent shells
-        let session_manager = Arc::new(SessionManager::new(config.sessions.clone()));
+        // Create session manager for persistent shells. The logger is handed
+        // in by a setter and not by `new`, because `new` has 129 test call
+        // sites and Rust has no default arguments; see
+        // `SessionManager::with_audit_logger`. Without it the idle reaper
+        // destroys a session every 300 s under the default config and the
+        // trail says nothing at all.
+        let session_manager = Arc::new(
+            SessionManager::new(config.sessions.clone())
+                .with_audit_logger(Arc::clone(&audit_logger)),
+        );
 
         // Create tunnel manager
         let tunnel_manager = Arc::new(TunnelManager::new(20));
@@ -1355,6 +1363,15 @@ impl McpServer {
         // the session drain above closes: `daemon stop` printing
         // `Daemon stopped.` with exit 0 over a daemon that then lived on for
         // the command's timeout.
+        // One line per tunnel still open, written from HERE and not from
+        // inside the manager: `TunnelManager` lives in `src/domain/`, which
+        // `tests/architecture_rules.rs::domain_security_import_limited_to_execute_command`
+        // forbids from importing `crate::security` — see
+        // `audit_tunnels_at_shutdown`. Sessions audit themselves, because
+        // `SessionManager` is an adapter and its reaper runs where no caller
+        // can see it.
+        let open_tunnels = self.tunnel_manager.list().await;
+        self.audit_tunnels_at_shutdown(&open_tunnels);
         Self::close_bounded("tunnels", self.tunnel_manager.close_all()).await;
         Self::close_bounded("sessions", self.session_manager.close_all()).await;
         Self::close_bounded("connection pool", self.connection_pool.close_all()).await;
@@ -1576,6 +1593,79 @@ impl McpServer {
                 &call.host,
                 &call.operation,
                 call.events_recorded,
+            );
+        }
+    }
+
+    /// One audit line per tunnel the shutdown is about to abort.
+    ///
+    /// **Written from the adapter, by the caller, and that is a layering
+    /// decision rather than a convenience.** `TunnelManager` is in
+    /// `src/domain/use_cases/tunnel.rs`, and
+    /// `tests/architecture_rules.rs::domain_security_import_limited_to_execute_command`
+    /// allows `use crate::security::` in `execute_command.rs` only — so a
+    /// logger inside the manager would redden that test. The letter-of-the-law
+    /// escape exists (the rule's scanner only reads lines beginning
+    /// `use crate::`, so an inline `crate::security::…` path would pass while
+    /// violating it) and is not taken. `TunnelManager` is unchanged by this
+    /// wave, which also leaves wave 4's leak fix where it lives — on the
+    /// handler side of `ssh_tunnel_create`, whose `abort_handle` is what the
+    /// port-rebinding fixture depends on.
+    ///
+    /// `list()` rather than a return value from `close_all`: `close_all`'s
+    /// signature is pinned as source text by
+    /// `every_close_all_in_the_teardown_is_bounded`, which looks for the
+    /// literal `self.tunnel_manager.close_all()`.
+    ///
+    /// **Not wrapped in `close_bounded`, and it does not need to be.** The
+    /// session manager's lock is held for the whole of a remote command,
+    /// which is why its `close_all` is bounded; `TunnelManager`'s mutex is
+    /// never held across an `await` in any of `register` / `list` / `close` /
+    /// `close_all`, so `list()` cannot park on a live handler. A fourth
+    /// `Self::close_bounded(` in `serve` would also redden the guard named
+    /// above, which counts exactly three.
+    ///
+    /// **What the line claims is the decision, not a completed teardown.**
+    /// `close_all` is `drain()` + `abort()`, and `spawn_forwarding_task`'s
+    /// own doc states the semantics: the port is released when the runtime
+    /// drops the future, not when `abort` returns, and a per-connection
+    /// subtask already spawned holds its own. So this records "the shutdown
+    /// gave up this tunnel", which is what was true at that instant.
+    ///
+    /// Two things it does not cover, said rather than implied. The window
+    /// between `list()` and `close_all()` is not locked, so a tunnel
+    /// registered in between is aborted without a line — the accept loop has
+    /// already ended, so the only writer left would be a handler still
+    /// running inside an aborted cleanup task. And the HTTP transport calls
+    /// neither this nor `close_all` at all (`grep -c close_all
+    /// src/mcp/transport/http.rs` → 0), so a tunnel opened over HTTP is
+    /// destroyed by process exit with nothing recorded anywhere.
+    pub(crate) fn audit_tunnels_at_shutdown(&self, tunnels: &[crate::domain::TunnelInfo]) {
+        if tunnels.is_empty() {
+            return;
+        }
+
+        warn!(
+            count = tunnels.len(),
+            "Stopping with tunnels still open; auditing each as destroyed by the shutdown"
+        );
+        for tunnel in tunnels {
+            // Straight to the logger: `reaped_event` already fixes the
+            // `event_type`, the `result` and the `tool_name` this line can
+            // have, so there is nothing for a facade to decide. Going
+            // through `ExecuteCommandUseCase` would also add a sixth
+            // `claim_this_write()` and redden
+            // `every_writing_facade_claims_before_it_logs` for a line the
+            // in-flight registry has no business counting.
+            self.audit_logger.log(
+                crate::security::SESSION_REAPER_TOOL,
+                crate::security::reaped_event(
+                    "shutdown",
+                    "tunnel_id",
+                    &tunnel.id,
+                    &tunnel.host,
+                    tunnel.created_at.elapsed(),
+                ),
             );
         }
     }
@@ -7718,6 +7808,166 @@ rbac:
         assert!(
             http_emit < http_close,
             "the HTTP teardown must emit before closing the channel, for the same reason"
+        );
+    }
+
+    // ====================================================================
+    // T53 (audit-honesty wave) — the tunnels the shutdown aborts
+    // ====================================================================
+
+    fn tunnel_info(id: &str, host: &str) -> crate::domain::TunnelInfo {
+        crate::domain::TunnelInfo {
+            id: id.to_string(),
+            host: host.to_string(),
+            local_port: 8080,
+            remote_host: "localhost".to_string(),
+            remote_port: 80,
+            direction: crate::domain::TunnelDirection::Local,
+            created_at: std::time::Instant::now(),
+            age_seconds: 0,
+        }
+    }
+
+    /// **A tunnel open at shutdown leaves a line, read off the JSONL.**
+    ///
+    /// `TunnelManager::close_all` was `drain()` + `abort()` with **no log of
+    /// any kind** — not even `tracing` — so a port forwarded to a production
+    /// database was torn down and the trail recorded nothing at all. The
+    /// assertions are on the file: the reaper sentinel in `tool_name`, the
+    /// `shutdown` reason and the tunnel id in `command`, the host, and no
+    /// `exit_code` in the raw text.
+    ///
+    /// Counter-proof: delete the `self.audit_logger.log(..)` call in
+    /// `audit_tunnels_at_shutdown` and `lines.len()` is 0.
+    #[tokio::test]
+    async fn a_tunnel_open_at_shutdown_leaves_one_line_naming_the_reaper() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        server
+            .tunnel_manager
+            .register(tunnel_info("tunnel-pi-8080-80", "raspberry"), {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                let handle = tokio::spawn(async move {
+                    let _ = rx.await;
+                });
+                drop(tx);
+                handle
+            })
+            .await
+            .expect("the manager holds 20, so the first registration must succeed");
+
+        let open = server.tunnel_manager.list().await;
+        assert_eq!(
+            open.len(),
+            1,
+            "the tunnel must be registered before the snapshot, or this test proves nothing"
+        );
+        server.audit_tunnels_at_shutdown(&open);
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one open tunnel must leave exactly one line; got {lines:?}"
+        );
+        let event: Value = serde_json::from_str(&lines[0])
+            .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {:?}", lines[0]));
+
+        assert_eq!(event["event_type"], "state_change");
+        assert_eq!(event["tool_name"], crate::security::SESSION_REAPER_TOOL);
+        assert_eq!(event["host"], "raspberry");
+        assert_eq!(
+            event["command"],
+            "<session-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80 host=raspberry",
+            "`tunnel_id=` is what tells a tunnel line from a session one, since both carry \
+             the same `tool_name`"
+        );
+        assert!(!lines[0].contains("exit_code"), "nothing ran: {}", lines[0]);
+    }
+
+    /// The ordinary shutdown has no tunnels and must stay silent, which the
+    /// four exact-line-count assertions elsewhere depend on.
+    #[tokio::test]
+    async fn a_shutdown_with_no_tunnels_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        server.audit_tunnels_at_shutdown(&server.tunnel_manager.list().await);
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        assert!(
+            audit_lines(&audit_path).is_empty(),
+            "no tunnel, no line: {:?}",
+            audit_lines(&audit_path)
+        );
+    }
+
+    /// The wiring for the tunnel lines, as source text.
+    ///
+    /// `serve` needs a transport and an accept loop, so the test above calls
+    /// the emitter directly and this pins that `serve` calls it, exactly
+    /// once, **before** the bounded close that aborts the tasks it is about
+    /// to describe — and therefore long before `close_audit()`, after which
+    /// `AuditLogger::log` reaches `tracing` and never the file.
+    ///
+    /// Anchored on `let open_tunnels =` rather than on
+    /// `self.tunnel_manager.list()`: the sibling guard
+    /// `every_close_all_in_the_teardown_is_bounded` counts occurrences of
+    /// the three `self.<pool>.close_all()` literals in this same body and
+    /// asserts each appears exactly once, so an anchor here that quoted one
+    /// of them would make that guard fail with a message about an unbounded
+    /// close.
+    #[test]
+    fn serve_audits_the_open_tunnels_before_it_aborts_them() {
+        let src = include_str!("server.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+        let from_fn = production
+            .find("pub async fn serve<T: Transport>(")
+            .expect("serve must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    /// Join every in-flight session task")
+            .expect("the drain helpers must follow serve");
+        let body = &body[..to_next_fn];
+
+        assert_eq!(
+            body.matches("self.audit_tunnels_at_shutdown(").count(),
+            1,
+            "serve must audit the tunnels its teardown aborts, exactly once"
+        );
+        let emit = body
+            .find("self.audit_tunnels_at_shutdown(")
+            .expect("just counted it");
+        let snapshot = body
+            .find("let open_tunnels =")
+            .expect("the snapshot must be taken in serve's body");
+        let abort = body
+            .find("Self::close_bounded(\"tunnels\"")
+            .expect("the bounded tunnel close must exist");
+        assert!(
+            snapshot < emit && emit < abort,
+            "the order must be snapshot, then emit, then abort: a line written after the \
+             abort describes tunnels the manager has already forgotten"
         );
     }
 

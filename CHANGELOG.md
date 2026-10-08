@@ -185,6 +185,25 @@ tests and a serialisation test.
   sharply: matched on `command` it also catches an interrupted
   `ssh_session_exec`.
 
+  **Amended a second time in this same cycle, and the hole is wider than the
+  first one: `"<session-reaper>"` is a THIRD value `tool_name` can take, and
+  it is the one the normal case lands on.** Under the default config a
+  session idle for `sessions.idle_timeout_seconds` (300 s) is destroyed by a
+  60 s loop that nobody asked, and a tunnel open at shutdown is aborted the
+  same way; those lines are `event_type: "state_change"` with
+  `tool_name: "<session-reaper>"`, so neither the seven-name list nor the
+  `"<shutdown>"` clause above sees them. An MCP client rarely calls
+  `ssh_session_close` at all, so for most sessions the reaped line is the
+  *only* record of the destruction. To get every session and tunnel
+  destruction — asked for or not — select the outcome and read the writer:
+  `jq 'select(.event_type == "state_change") | {tool_name, host, command,
+  ms: .result.StateChanged.duration_ms}'`. For the reaped ones alone,
+  `jq 'select(.tool_name == "<session-reaper>")'`, and the `reason=` field
+  of `command` says which bound or which failure fired. **Mind
+  `duration_ms`**: on a tool's line it is how long the operation took, on a
+  `<session-reaper>` line it is the destroyed resource's **lifetime** —
+  `tool_name` is what tells the two apart.
+
   Anything refused *before* that call writes nothing to either sink:
   bad arguments, an unknown host, a rate-limit refusal, a disabled recorder,
   and in `ssh_tunnel_create` a failed bind or a failed SSH connection
@@ -709,6 +728,143 @@ tests and a serialisation test.
   re-export and are `pub(crate)` now, so nothing published changed and there
   is nothing to migrate. Listed because two entries above cite two of them by
   their old path, and those citations are corrected in place.
+
+- **(wire) `"<session-reaper>"` is a new, reserved `tool_name` in `audit.log`,
+  and `"state_change"` is no longer written only by the seven state-changing
+  tools.** No new `event_type`, no new `CommandResult` variant, no new config
+  key: a session or a tunnel the bridge destroys by itself writes
+  `event_type: "state_change"` with `CommandResult::StateChanged`, the same
+  shape `ssh_session_close` writes, so destruction of a session is **one**
+  `jq` query and not two. **Migration: none** for Rust callers — nothing in
+  the public API changed. For a log consumer: a `state_change` line's
+  `tool_name` is no longer necessarily a tool, so any rule that groups by
+  `tool_name` or that assumes a `state_change` came from one of the seven
+  needs the sentinel added; the amended selector is in the fourth-variant
+  entry above.
+
+  Why: **under the default configuration every session idle for five minutes
+  is destroyed, and the trail said nothing.** `sessions.idle_timeout_seconds`
+  defaults to 300 and `sessions.max_age_seconds` to 3600
+  (`src/config/types.rs`, `default_session_idle_timeout` /
+  `default_session_max_age`), and `spawn_cleanup_tasks` runs
+  `SessionManager::cleanup` every 60 s. Wave 4 audited the *explicit* close
+  from `ssh_session_close`'s handler; every other destruction path was mute
+  on `audit.log`. An auditor pairing `ssh_session_create` with
+  `ssh_session_close` therefore concluded that any session not closed by hand
+  — the normal case, since an MCP client rarely closes one explicitly — had
+  stayed open indefinitely.
+
+  **Seven removal sites, not the three the fix was scoped to.** Counted with
+  `grep -n "sessions.remove(\|sessions.drain()\|client.close().await"
+  src/ssh/session.rs` over the production half of the file: `close`,
+  `close_all`, `cleanup`, and **four inside `SessionManager::exec`** — all
+  four silent on audit and three of them silent on `tracing` as well. Six of
+  the seven now write a line. The seventh is `close`, and it must not: its
+  handler already writes one, and a shared helper reached from there is
+  exactly how a double line would be born.
+
+  **One of those four is the idle timeout enforced a second time**, by `exec`
+  itself, with the same predicate as the reaper — so a session could be
+  destroyed "for inactivity" without the 60 s loop ever touching it, and an
+  acceptance test driving `cleanup()` would have gone green over a mute path
+  that a real client hits more often. Both sites now call one pure function,
+  `SessionManager::expiry_reason(idle, age, &config) -> Option<ReapReason>`,
+  which also makes the bound nameable: the single `||` they each used could
+  not say whether `idle_timeout` or `max_age` had fired. The two sites
+  disagreed on operand order before this; with the bound named that becomes a
+  decision, and **`max_age` wins a tie**, because the age bound is the
+  unconditional one.
+
+  Six reasons, each a stable wire literal in the `reason=` field of
+  `command`: `idle_timeout`, `max_age`, `shutdown`,
+  `shell_closed_while_draining`, `channel_write_failed`, `shell_gone`.
+  The lines, read back off disk by
+  `a_reaped_session_leaves_one_audit_line_naming_the_reason` and
+  `a_tunnel_open_at_shutdown_leaves_one_line_naming_the_reaper`:
+
+  ```json
+  {"timestamp":"2026-10-08T23:21:52.297949262Z","event_type":"state_change","host":"raspberry","command":"<session-reaper> reason=idle_timeout session_id=4f1c-session host=raspberry","tool_name":"<session-reaper>","result":{"StateChanged":{"duration_ms":43210}}}
+  {"timestamp":"2026-10-08T23:21:53.762836042Z","event_type":"state_change","host":"raspberry","command":"<session-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80 host=raspberry","tool_name":"<session-reaper>","result":{"StateChanged":{"duration_ms":0}}}
+  ```
+
+  **No `exit_code` key anywhere** — nothing ran — and `duration_ms` is the
+  destroyed resource's **lifetime**, which is what finally makes that field
+  mean something on a line nobody timed. `tunnel_id=` versus `session_id=` is
+  what distinguishes the two populations, since both carry the same
+  `tool_name`: the sentinel names the **writer**, not a kind of resource.
+
+  **The emission is conditional, and that is a contract.** Nothing
+  destroyed, nothing written. Four assertions elsewhere count the lines in
+  `audit.log` exactly after a teardown — two in
+  `tests/daemon_integration.rs`, one in `src/mcp/transport/http.rs`, one in
+  `src/cli/runner.rs` — and in all four both managers are empty; an
+  unconditional line would redden all four while proving nothing. The
+  ordinary shutdown of an idle server still writes nothing at all.
+
+  **(behaviour, security) An expired session now gets its SSH DISCONNECT.**
+  `exec`'s expiry branch was `sessions.remove(session_id);` as a bare
+  statement: the `ShellSession` was discarded and its `SshClient` dropped
+  without `close()`, where the other six removal sites in the file all send
+  `russh::Disconnect::ByApplication`. The server was left to notice the TCP
+  teardown by itself. All of `exec`'s four branches now go through one
+  `remove_dead_session` helper that removes, audits and closes in that
+  order, so none of them can forget again. Cost: that path can now spend up
+  to `SshClient::close`'s own 5 s timeout on a connection already in a bad
+  state, on a call that was returning `SessionExpired` anyway — the same cost
+  the other three branches have always paid.
+
+  **(internal, no API change) `SessionManager::with_audit_logger(self,
+  Arc<AuditLogger>) -> Self`**, an additive constructor step; `new` keeps its
+  signature. Measured reason: `git grep -c "SessionManager::new(" <rev>`
+  over `src`, `tests`, `benches` and `examples`, summed, is **131** at the
+  revision before this change, of which **2** are production — and Rust has
+  no default arguments, so a new parameter (even `Option`) would have to be
+  written at all 131. A manager built with `new` alone has no logger and
+  stays silent, exactly as before. `TunnelManager` is **not** changed at all:
+  it lives in `src/domain/use_cases/tunnel.rs`, and
+  `tests/architecture_rules.rs::domain_security_import_limited_to_execute_command`
+  allows `use crate::security::` in `execute_command.rs` only, so its lines
+  are written by its caller, `McpServer::audit_tunnels_at_shutdown`, from
+  `list()` taken immediately before the bounded close. (The rule's scanner
+  only reads lines beginning `use crate::`, so an inline
+  `crate::security::…` path would have passed while violating it. Not taken.)
+
+  **Known gaps, measured and not fixed here.**
+  1. **Over HTTP nothing is reaped and nothing is recorded.**
+     `src/mcp/transport/http.rs` calls neither `spawn_global_tasks` nor any
+     `close_all`. The probe has to exclude comments, and the reason is
+     instructive: the raw
+     `grep -c "close_all\|spawn_global_tasks" src/mcp/transport/http.rs`
+     returns **3**, all three of them inside a comment added by the previous
+     entry which itself asserts that the grep "returns nothing".
+     `sed -E 's@^[[:space:]]*//.*@@' src/mcp/transport/http.rs | grep -cE
+     "close_all|spawn_global_tasks"` returns **0**. So a session opened over
+     HTTP is never touched by the 60 s loop, and
+     both it and any HTTP tunnel are destroyed by process exit with no line
+     from anywhere. That is a separate hole from the one this entry closes,
+     and it is wider than wave 4's note about in-flight commands on the same
+     transport.
+  2. **The window between `list()` and the tunnel `close_all` is not
+     locked**, so a tunnel registered in between is aborted without a line.
+     The accept loop has already ended by then, so the only writer left
+     would be a handler still running inside an aborted cleanup task.
+  3. **A tunnel line records the decision, not a completed teardown.**
+     `close_all` is `drain()` + `abort()`, and `spawn_forwarding_task`'s own
+     doc states that the port is released when the runtime drops the future,
+     not when `abort` returns.
+  4. **No test in the tree can put a session into a `SessionManager`**:
+     `ShellSession` holds a live `russh::Channel` and an `SshClient` with no
+     test constructor, so the join between the verdict and the effect is
+     pinned as source text
+     (`every_silent_removal_site_now_audits_except_the_explicit_close`)
+     rather than driven end to end. The verdict and the written line are each
+     covered by a runtime test.
+  5. **`ssh_recording_*` lines still say nothing about a session's
+     lifetime.** `grep -c recording src/ssh/session.rs` → 0: the recorder and
+     the session manager share no code, so closing a session stops no
+     recording through this path, and an auditor correlating
+     `ssh_recording_stop` with "the session ended" is reading two disjoint
+     populations.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
