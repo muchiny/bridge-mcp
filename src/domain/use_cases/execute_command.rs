@@ -11,8 +11,8 @@ use crate::domain::CommandHistory;
 use crate::error::Result;
 use crate::ports::CommandOutput;
 use crate::security::{
-    AuditEvent, AuditLogger, CommandResult, CommandValidator, INTERRUPTED_BY_SHUTDOWN,
-    SHUTDOWN_TOOL, Sanitizer,
+    AuditEvent, AuditLogger, CommandResult, CommandValidator, INTERRUPTED_BEFORE_ANY_RESULT,
+    SHUTDOWN_TOOL, Sanitizer, interrupted_after_results,
 };
 
 /// Request for executing a command
@@ -130,6 +130,30 @@ pub struct ExecuteCommandUseCase {
     sanitizer: Arc<Sanitizer>,
     audit_logger: Arc<AuditLogger>,
     history: Arc<CommandHistory>,
+    /// This call's entry in the server's in-flight registry, when there is
+    /// one.
+    ///
+    /// **A field and not a hidden channel, and round 2 of the review is why.**
+    /// The first version carried the claim in a `tokio::task_local`, which
+    /// cost nothing in signatures and two things that matter: it could be
+    /// broken without any signature changing (so only a source-text guard
+    /// pinned it), and it does not cross a `tokio::spawn`, which left
+    /// `ssh_exec_multi` — whose per-host writes happen inside
+    /// `join_set.spawn` — on the old behaviour.
+    ///
+    /// A field costs neither, because of three facts the re-review measured:
+    /// `ToolContext` is built per request; it already carries per-call state
+    /// of exactly this kind (`mrtr`, "shared by `Arc` so a `ToolContext`
+    /// cloned into a sub-task still records into the same slot"); and all 98
+    /// call sites of the facades below reach them **through**
+    /// `ctx.execute_use_case`, which is filled at one place on the tool path.
+    /// So a per-call use case reaches every one of them with **zero**
+    /// call-site edits, is visible in a struct, and travels into a spawned
+    /// sub-task with the `Arc` the handler clones out of the context.
+    ///
+    /// `None` off the MCP request path: the CLI builds its own use case and
+    /// has no shutdown registry to report to.
+    in_flight: Option<Arc<crate::security::InFlightClaim>>,
 }
 
 impl ExecuteCommandUseCase {
@@ -144,6 +168,41 @@ impl ExecuteCommandUseCase {
             sanitizer,
             audit_logger,
             history,
+            in_flight: None,
+        }
+    }
+
+    /// This use case again, bound to one call's in-flight claim.
+    ///
+    /// Called once per `tools/call`, by `McpServer::handle_tools_call` and by
+    /// the tasks worker, which put the result in
+    /// `ToolContext::execute_use_case`. Four `Arc` clones, so the cost is a
+    /// refcount bump per call and no deep copy.
+    ///
+    /// `pub(crate)`: [`crate::security::InFlightClaim`] is crate-internal and
+    /// must not appear in the public API through this signature.
+    #[must_use]
+    pub(crate) fn with_claim(&self, claim: Arc<crate::security::InFlightClaim>) -> Self {
+        Self {
+            validator: Arc::clone(&self.validator),
+            sanitizer: Arc::clone(&self.sanitizer),
+            audit_logger: Arc::clone(&self.audit_logger),
+            history: Arc::clone(&self.history),
+            in_flight: Some(claim),
+        }
+    }
+
+    /// Count the audit event this call is ABOUT to write.
+    ///
+    /// Called as the first statement of every facade below that writes about
+    /// a call somebody else made, so the claim is taken before the write.
+    /// Never called by [`Self::log_interrupted`], which IS the shutdown's
+    /// write. See `crate::security::InFlightCall::events_recorded` for why it
+    /// counts rather than removing — the removing version made a multi-event
+    /// call unreportable from its first event on.
+    fn claim_this_write(&self) {
+        if let Some(ref claim) = self.in_flight {
+            claim.record_event();
         }
     }
 
@@ -202,12 +261,10 @@ impl ExecuteCommandUseCase {
     /// at all. An absent name proved nothing; it only meant a caller had
     /// not bothered.
     pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
-        // `remove` THEN `log`, which is the order the whole in-flight
-        // scheme rests on and which production used to get backwards on this
-        // side. No-op off the MCP request path (the CLI has no claim). See
-        // `crate::security::release_in_flight_claim` for why it releases
-        // rather than suppresses.
-        crate::security::release_in_flight_claim();
+        // Claim THEN log, which is the order the whole in-flight scheme rests
+        // on and which production used to get backwards on this side. A no-op
+        // off the MCP request path: the CLI has no registry to report to.
+        self.claim_this_write();
         // Same redaction as `process_success`, `log_failure`, `log_state_change`
         // and `log_confirmed` — see `process_success`'s comment. This was the
         // one entry point that did NOT pre-redact, and the asymmetry leaked:
@@ -259,12 +316,10 @@ impl ExecuteCommandUseCase {
     /// reason, so both halves of a gate decision are audit-only and
     /// `ssh_history` shows neither.
     pub fn log_confirmed(&self, tool: &str, host: &str, command: &str, by: &str) {
-        // `remove` THEN `log`, which is the order the whole in-flight
-        // scheme rests on and which production used to get backwards on this
-        // side. No-op off the MCP request path (the CLI has no claim). See
-        // `crate::security::release_in_flight_claim` for why it releases
-        // rather than suppresses.
-        crate::security::release_in_flight_claim();
+        // Claim THEN log, which is the order the whole in-flight scheme rests
+        // on and which production used to get backwards on this side. A no-op
+        // off the MCP request path: the CLI has no registry to report to.
+        self.claim_this_write();
         // Same redaction as `process_success` — see its comment. The string
         // is built from the call's own arguments, and those can carry a
         // password (`sudo_password`, a `--password` value in a free-form
@@ -382,8 +437,8 @@ impl ExecuteCommandUseCase {
         duration_ms: u64,
         reduction: &[&'static str],
     ) {
-        // `remove` THEN `log` — see `log_denied`.
-        crate::security::release_in_flight_claim();
+        // Claim THEN log — see `log_denied`.
+        self.claim_this_write();
         let mut event = AuditEvent::new(
             host,
             redacted,
@@ -455,8 +510,8 @@ impl ExecuteCommandUseCase {
     /// command history is not — but neither is complete, and no reader should
     /// take either for a count of attempts.
     pub fn log_state_change(&self, tool: &str, host: &str, operation: &str, duration_ms: u64) {
-        // `remove` THEN `log` — see `log_denied`.
-        crate::security::release_in_flight_claim();
+        // Claim THEN log — see `log_denied`.
+        self.claim_this_write();
         // Same redaction as `process_success` — see its comment. An operation
         // string is built from tool arguments, and `ssh_config_set` passes a
         // key and a value.
@@ -499,10 +554,17 @@ impl ExecuteCommandUseCase {
     /// `event.command` and nothing else, so a `CommandResult`'s own strings
     /// reach both sinks unredacted. One fixed phrase, in the crate's own
     /// constant.
-    pub fn log_interrupted(&self, host: &str, operation: &str) {
-        // Same redaction as `log_state_change` — the operation string is
-        // built from a call's arguments, which can carry a secret.
+    pub fn log_interrupted(&self, host: &str, operation: &str, events_recorded: u64) {
+        // Same redaction as `log_state_change`. The operation string is now
+        // argument NAMES only (`audited_argument_names`), so there is far
+        // less for a sanitizer to find — but it is still caller-chosen text
+        // and the redaction stays.
         let redacted = self.sanitizer.sanitize(operation);
+        let reason = if events_recorded == 0 {
+            INTERRUPTED_BEFORE_ANY_RESULT.to_string()
+        } else {
+            interrupted_after_results(events_recorded)
+        };
 
         self.audit_logger.log(
             SHUTDOWN_TOOL,
@@ -510,9 +572,7 @@ impl ExecuteCommandUseCase {
                 "command_interrupted",
                 host,
                 &redacted,
-                CommandResult::Interrupted {
-                    reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
-                },
+                CommandResult::Interrupted { reason },
             ),
         );
     }
@@ -521,8 +581,8 @@ impl ExecuteCommandUseCase {
     ///
     /// `tool` is mandatory — see [`Self::log_denied`].
     pub fn log_failure(&self, tool: &str, host: &str, command: &str, error: &str) {
-        // `remove` THEN `log` — see `log_denied`.
-        crate::security::release_in_flight_claim();
+        // Claim THEN log — see `log_denied`.
+        self.claim_this_write();
         // Same redaction as `process_success` — see its comment.
         let redacted = self.sanitizer.sanitize(command);
 

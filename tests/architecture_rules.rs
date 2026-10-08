@@ -29,6 +29,25 @@ fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Extract all `use crate::` lines from a file, returning (line number, line content) pairs.
+///
+/// **This sees only `use` lines, so an INLINE path crosses every boundary
+/// below unseen** — `crate::mcp::some_fn()` in the middle of an expression is
+/// invisible here. That is not hypothetical: the audit-honesty wave moved
+/// three types out of `src/mcp/` citing `domain_must_not_import_mcp_adapter`,
+/// and the domain call the move exists to allow is itself an inline
+/// `crate::security::…` path, so the rule was right and this test was green
+/// for another reason.
+///
+/// **Measured, and deliberately NOT fixed here.** Widening the filter to
+/// `trimmed.contains("crate::")` and the prefixes to bare paths was tried:
+/// the four `domain_*` rules and `ports_must_not_import_cli` stay green — so
+/// the wave's own justification holds under the stronger check — and exactly
+/// one rule reddens, `ports_must_not_import_mcp_adapter`, on **14**
+/// pre-existing inline `crate::mcp::protocol` / `crate::mcp::logger` /
+/// `crate::mcp::progress` paths in `src/ports/tools.rs` (a file no commit of
+/// that wave touched). Closing that is an architecture decision about
+/// `ToolContext`, not a test fix, so it goes to the plan rather than being
+/// smuggled in behind an allowlist entry.
 fn extract_crate_imports(path: &Path) -> Vec<(usize, String)> {
     let content = std::fs::read_to_string(path).expect("failed to read file");
     content

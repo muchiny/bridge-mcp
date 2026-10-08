@@ -476,6 +476,12 @@ tests and a serialisation test.
     abort, which runs its claim's `Drop` before the snapshot, so it gets no
     line by this mechanism either. Bounding that abort would reopen the
     unbounded wait the teardown bound exists to close.
+  - *The remaining double-write window.* If the snapshot reports a call and
+    the handler then finishes, the handler's own lines still go out — which
+    is correct now that the shutdown's line says how many results had been
+    recorded, and is in any case bounded by `close_audit()`, the next
+    statement. What is gone is the version where that second line claimed
+    nothing had been recorded.
   - *The second abandonment path, which is the better outcome and still a
     hole in the inference.* `session_manager.close_all()` runs **before** the
     snapshot and closes the SSH session under a live handler; that handler's
@@ -498,70 +504,113 @@ tests and a serialisation test.
     lost. New in kind, not in volume — the volume is at most
     `max_concurrent_commands` lines once per process lifetime.
 
-  **The handler side of "`remove` then `log`" was backwards, and is fixed.**
-  The first version released the claim when `registry.execute` RETURNED,
-  while the handler's own line goes out at step 13 **inside** that call —
-  with steps 14 to 19 still to run, among them
-  `truncate_output_with_cache(..).await`, `save_output_to_file(..).await` (a
-  real, awaited disk write of the whole output) and `T::enrich(..).await`. A
-  snapshot landing in that window wrote a second, `Interrupted` line about a
-  call that had already written its `Success` one, and the window was as long
-  as a file write, not "a few instructions" as first claimed. The claim now
-  travels into `execute` in a `tokio::task_local` and each of the **six**
-  `ExecuteCommandUseCase` facades releases it as its first statement, before
-  it writes — `log_denied`, `log_confirmed`, `log_state_change`,
-  `log_failure` and, through `record_success_redacted`, `process_success` and
-  `log_success`. Six, not seven: `log_interrupted` is the shutdown's own
-  write and must not release anything.
+  **The handler side of "claim then log" was backwards, and is fixed — in
+  the third shape, because the first two each broke something else.** The
+  entry used to survive until `registry.execute` RETURNED, while the
+  handler's own line goes out at step 13 **inside** that call, with steps 14
+  to 19 still to run — among them `truncate_output_with_cache(..).await`,
+  `save_output_to_file(..).await` (a real, awaited disk write of the whole
+  output) and `T::enrich(..).await`. A snapshot landing in that window wrote
+  a second, `Interrupted` line about a call that had already written its
+  `Success` one, and the window was as long as a file write, not "a few
+  instructions".
 
-  **It releases rather than suppresses, and that was a measurement, not a
-  preference.** "Write only if my remove won" would silently drop lines from
-  the tools that legitimately write one audit event **per host** in a plain
-  loop inside one task — `ssh_metrics_multi` does exactly that — so the
-  2nd..Nth host of every multi-host call would have gone unaudited. A
-  one-shot claim cannot tell "I already reported this call" from "the
-  shutdown reported it", so no shape of suppression keeps both properties.
-  What remains is the window from `take_all()` to `close_audit()`: a few
-  `log()` calls, no `.await`, no disk write. A task-local was chosen over a
-  claim parameter because the six facades have **98** call sites in `src/`
-  outside their own file (`grep -rn '\.\(process_success\|log_success\|log_failure\|log_state_change\|log_denied\|log_confirmed\)(' --include='*.rs' src/ | grep -v execute_command.rs | wc -l`);
-  it does not cross a `tokio::spawn`, so `ssh_exec_multi`, which fans out
-  through a `JoinSet`, keeps the old release point.
+  Shape two had each facade **remove** the entry before writing. That is the
+  literal "remove then log", and it made a multi-event call unreportable from
+  its first event on: a shutdown between host 1 and host 2 of an
+  `ssh_metrics_multi` — which audits **per host** in a plain `for` loop in
+  one task — found an empty registry and wrote **nothing**, while hosts 2..N
+  wrote into a channel `close_audit()` had closed. Nothing false, a line
+  **missing**, which is the defect this whole entry exists to remove.
+  (Suppressing instead — "write only if my remove won" — fails the same way
+  and worse: a one-shot claim cannot tell "I already reported this call" from
+  "the shutdown reported it", so hosts 2..N would have gone unaudited even
+  without a shutdown.)
+
+  Shape three, which is what ships: a write **transitions** the entry instead
+  of taking it. Each of the **six** `ExecuteCommandUseCase` facades
+  increments the call's event counter as its first statement, before writing
+  — `log_denied`, `log_confirmed`, `log_state_change`, `log_failure` and,
+  through `record_success_redacted`, `process_success` and `log_success`. Six,
+  not seven: `log_interrupted` is the shutdown's own write. The snapshot then
+  reports **every** remaining entry, with the reason the counter selects:
+  `"the server stopped before any result of this call was recorded"` at 0, or
+  `"the server stopped after N result(s) of this call were recorded, before
+  the call returned"` above it. Both are true, including for a call that had
+  written everything and not yet left `execute` — and the reader has those
+  success lines beside this one.
+
+  The claim reaches the facades through a **per-call
+  `ExecuteCommandUseCase`** placed in `ToolContext::execute_use_case`, not
+  through a `tokio::task_local` as an earlier revision had it. `ToolContext`
+  is built per request and already carries per-call state of this kind
+  (`mrtr`), and all **98** call sites of those six facades reach them
+  *through* `ctx.execute_use_case`, so the claim arrives with zero call-site
+  edits, sits in a visible struct field rather than a hidden channel, and —
+  unlike a task-local — **crosses `tokio::spawn`**, which is what brings
+  `ssh_exec_multi`'s per-host writes, issued inside `join_set.spawn`, under
+  the same rule as everything else.
 
   **Four things a caller could put on this line, and could before this
   release too — the new sink is simply the first path to disk for some of
   them.**
 
-  - **A database password, in clear.** `ssh_db_query`, `ssh_db_dump` and
-    `ssh_db_restore` take a `db_password`, and the `Sanitizer`'s key-anchored
-    patterns do not match the JSON this sink renders: the quoted family needs
-    the `"` glued to `password` (`"db_password"` fails) and the bare family
-    needs `password` glued to the `:` (the `"` blocks it). The entropy
-    backstop does not save it either — `entropy_min_length` is 16. Two of the
-    three are **not** destructive, so the CLI gate had never rendered them.
-    Fixed at the source: argument values are now redacted **by key name**
-    before anything is serialized, reusing `Sanitizer::secret_keywords()`
-    itself rather than a copy. Numbers, booleans and `null` are exempt, which
-    is what keeps `summary_max_tokens` readable; of the 426 schema property
-    names in `src/mcp/tool_handlers/`, 9 match a keyword — 3 declared
-    `string` and genuinely secret (`password`, `db_password`, `kubeconfig`),
-    4 declared `integer`/`boolean` and so exempt (`summary_max_tokens`,
-    `credential`, `credential_type`, `pass_credentials`), and 2 strings
-    over-redacted on purpose (`author`, matching `auth`, and
-    `vault_password_file`). The test is on the VALUE's type, not the
-    schema's, because the redaction runs before validation. **Not fixed here, and it goes to the plan:** the
-    sanitizer's own pattern family is narrower than its documentation implies
-    for every JSON it is handed, not only this line.
-  - **Two forged fields in the `tracing` sink.**
+  - **Secrets, and the ruling is that this line carries argument NAMES and
+    no values at all.** Three measured ways a value reached the file:
+    `ssh_db_query` / `ssh_db_dump` / `ssh_db_restore` take a `db_password`,
+    and the `Sanitizer`'s key-anchored patterns do not match the JSON that
+    used to be rendered here — the quoted family needs the `"` glued to
+    `password` and the bare family needs `password` glued to the `:`, and
+    `{"db_password":…}` satisfies neither, with `entropy_min_length` at 16 as
+    the only backstop. A redaction keyed on the argument NAME fixed those and
+    was itself defeated twice: `ssh_k8s_create_secret` takes
+    `from_literal: [{"key": …, "value": …}]`, whose own schema says "values
+    are secret, never logged" and neither of whose member names matches any
+    keyword; and the exemption for `Number | Bool | Null` tested a type **the
+    caller chooses**, so `{"password": 12345678}` went through. Two of the
+    database tools and `ssh_k8s_create_secret` are **not** destructive, so
+    the CLI gate had never rendered any of them — this line was their first
+    path to disk. **A key cannot carry a secret and a keyword list can**, so
+    the shutdown's `command` is now `<tool> {name,name,name}`: sorted,
+    escaped, bounded, no values. That is enough for what the event has to
+    say — which tool, on which host, with which arguments present. **The CLI
+    gate keeps values**, because showing an operator what is about to run is
+    its purpose, so the two sinks no longer share one renderer.
+  - **Redaction by key name stays, for the gate, and loses its type
+    exemption**: if the key matches, the value goes whatever its type.
+    Census, over the 476 schema-bearing files in `src/mcp/tool_handlers/`:
+    **450** distinct property names, **11** matching a keyword — 3 real
+    secrets (`password`, `db_password`, `docker_password`) against **8**
+    over-redactions, two of which are information an auditor wants:
+    `kubeconfig` (a *path*, on **10** schemas) and `secret_type` (a fixed
+    enum). `vault_password_file` and `author` cost a reader little;
+    `credential`, `credential_type`, `pass_credentials` and
+    `summary_max_tokens` are the numbers and booleans the removed exemption
+    used to spare. An incomplete key list over-redacts, which is the safe
+    direction to be wrong in — but exempting those eight by name is a
+    decision, not a detail, and it is open. **Not fixed here, and it goes to
+    the plan:** the sanitizer's own pattern family is narrower than its
+    documentation implies for every JSON it is handed, not only this line.
+  - **Forged fields in the `tracing` sink, and the rule is now mechanical.**
     `host=raspberry exit_code=0 duration_ms=12 event_type=command_executed`
     — 62 characters, under every cap — made a logfmt consumer read an
     interrupted call as a **successful** one, injecting precisely the two
-    fields this variant documents as absent. `AuditLogger::log_to_tracing`
-    now emits `host` and `command` as `Debug` rather than `Display`, so the
-    whole caller value lands inside one quoted field. That closes the same
-    forgery through `command` and the newline that `log_success` /
-    `log_failure` have always been able to write there. **`audit.log` itself
-    was never affected** — serde quotes both fields.
+    fields this variant documents as absent. The first fix quoted `host` and
+    `command` and justified leaving the rest on the ground that they were
+    "writer-chosen"; **that justification was false**, and the same input
+    forged the same fields again through `reason=`, which carries caller text
+    by design (`src/mcp/standard_tool.rs`: "validators interpolate it into
+    their `reason`"), and through `error=`, which carries it via
+    `BridgeError`'s `Display` (`Session not found: {session_id}`).
+    `AuditLogger::log_to_tracing` now emits **every string-valued field** as
+    `Debug`: `event_type`, `host`, `command`, `reason`, `error` and
+    `confirmed_by`. `exit_code` and `duration_ms` are integers and cannot
+    carry text. `tool_name` is the one field left bare, on a provenance
+    argument rather than an escaping one — every `log()` call site passes a
+    literal, a `handler.name()` or the shutdown sentinel. It also closes the
+    newline that `log_success` / `log_failure` have always been able to write
+    there. **`audit.log` itself was never affected** — serde quotes its
+    fields.
   - **An unrendered tool name.** `register` runs before `registry.execute`
     resolves the name, and the name was interpolated into `command` raw, so a
     `tools/call` whose `name` contained a newline forged a second
@@ -574,6 +623,20 @@ tests and a serialisation test.
     and **reverses the rest of the line for every human reader**. All four
     families are escaped now, and the logfmt separators ` ` and `=` with
     them, as defence in depth behind the sink fix.
+
+  **The CLI gate's own lines change shape, and nothing above says so
+  otherwise.** The two sinks still share `audited_host_from_args` and
+  `audited_host`, and the gate still shares `audited_operation`, so a
+  `command_confirmed` / `command_denied` line now (a) replaces the value of
+  any argument whose NAME matches a secret keyword with `[REDACTED]`,
+  whatever its type, and (b) escapes ` `, `=`, the bidi controls and the
+  zero-width characters **in the `host` argument** — the wave's earlier entry
+  covers only `<`, `>` and the `Cc` controls there. Argument **values** are
+  unchanged on that sink: they are serialized as before, so a command with
+  spaces still reads as a command. Checked: no test or documented behaviour
+  depended on the old form (`cli_exit_code` 10 passed, and the gate's own
+  assertions are on `event_type`, `tool_name`, `host` and
+  `command.contains(..)`).
 
   **(internal, no API change) Six items moved from `src/cli/runner.rs` to
   `src/security/audit.rs`**: `GATE_AUDIT_MAX_VALUE_CHARS`,

@@ -18,8 +18,8 @@ use crate::mcp::instructions;
 use crate::ports::ExecutorRouter;
 use crate::ports::{MrtrSlot, ToolContext};
 use crate::security::{
-    AuditLogger, AuditWriterTask, CommandValidator, IN_FLIGHT_CLAIM, InFlightCall, InFlightCalls,
-    RateLimiter, Sanitizer,
+    AuditLogger, AuditWriterTask, CommandValidator, InFlightCall, InFlightCalls, RateLimiter,
+    Sanitizer,
 };
 use crate::ssh::SessionManager;
 
@@ -1529,6 +1529,18 @@ impl McpServer {
     /// host); the tests call this method directly and the ordering inside
     /// both teardowns is pinned as source text.
     ///
+    /// **A call that has already written some of its lines is still reported,
+    /// and round 2 is why that had to change.** For one revision the
+    /// handler's own audit write REMOVED the entry, which made a multi-event
+    /// call unreportable from its first event on: a shutdown between host 1
+    /// and host 2 of an `ssh_metrics_multi` found an empty registry and said
+    /// nothing, while hosts 2..N wrote into a channel `close_audit()` had
+    /// closed. Nothing false, a line **missing** — this task's own defect,
+    /// reintroduced by its own fix. A write now only increments
+    /// `InFlightCall::events_recorded`, and this method reads it to choose
+    /// between two statements that are both true: nothing was recorded, or N
+    /// were recorded and the call had not returned.
+    ///
     /// **One new availability risk, in kind and not in degree.**
     /// `AuditWriterTask` calls `rotate_if_needed()` after EVERY event it
     /// writes, and this emission is now the last write before
@@ -1551,8 +1563,14 @@ impl McpServer {
             "Stopping with tool calls still in flight; auditing each as interrupted"
         );
         for call in stranded {
-            self.execute_use_case
-                .log_interrupted(&call.host, &call.operation);
+            // `self.execute_use_case`, not a per-call one: this write is the
+            // shutdown's own, so it must not count itself against anybody's
+            // claim. `log_interrupted` is the one facade that never claims.
+            self.execute_use_case.log_interrupted(
+                &call.host,
+                &call.operation,
+                call.events_recorded,
+            );
         }
     }
 
@@ -3071,28 +3089,30 @@ impl McpServer {
         // convention, and the audit convention for "no host was named" is
         // `NO_HOST`. Two derivations of one value is a drift risk, so it is
         // worth being explicit that they answer different questions.
-        let in_flight = self
-            .in_flight
-            .register(&tool_name, call_params.arguments.as_ref());
+        // The claim goes into the context's OWN use case, so the handler's
+        // audit write — six frames down, through `ExecuteCommandUseCase` —
+        // counts this call before it logs. A field and not a task-local: see
+        // `ExecuteCommandUseCase::in_flight` for the three measurements that
+        // made the field cheaper on every axis, including the one a
+        // task-local could not reach (a handler that writes from inside
+        // `tokio::spawn`).
+        let in_flight = Arc::new(
+            self.in_flight
+                .register(&tool_name, call_params.arguments.as_ref()),
+        );
+        ctx.execute_use_case = Arc::new(ctx.execute_use_case.with_claim(Arc::clone(&in_flight)));
 
-        // The claim travels into `execute` as a task-local, so the handler's
-        // own audit write — six frames down, inside
-        // `ExecuteCommandUseCase` — hands the entry back BEFORE it logs. That
-        // is what closes the window round 1 measured: previously the entry
-        // survived until `execute` RETURNED, with an awaited disk write
-        // (`save_output_to_file`) still to run after the handler's line had
-        // gone out. See `crate::security::release_in_flight_claim`.
-        //
-        // The scope OWNS the claim, so every way out of this future —
-        // return, panic, the task being dropped at this await — still
-        // removes the entry. That is the RAII the `drop(..)` used to provide.
-        let outcome = IN_FLIGHT_CLAIM
-            .scope(
-                in_flight,
-                self.registry
-                    .execute(&call_params.name, call_params.arguments, &ctx),
-            )
+        let outcome = self
+            .registry
+            .execute(&call_params.name, call_params.arguments, &ctx)
             .await;
+
+        // The entry's life is exactly `execute`'s. `InFlightClaim::drop` would
+        // do this too, but only once every `Arc` is gone — and a handler that
+        // left a `ToolContext` clone in a detached task would hold one. This
+        // bounds it to the call whatever a handler did with its context.
+        in_flight.finish();
+        drop(in_flight);
 
         match outcome {
             Ok(result) => {
@@ -3335,14 +3355,16 @@ impl McpServer {
                 () = cancel_token.cancelled() => return,
             };
 
-            // Now it is really in flight. The scope below owns the claim, so
-            // every path out of this future removes the entry: the
-            // cancellation arm's `return`, a panic, or the runtime dropping
-            // the whole task.
-            let claim = in_flight.register_rendered(in_flight_call);
+            // Now it is really in flight. The claim is held by this future
+            // and by the context's use case, so every path out of here drops
+            // the entry: the cancellation arm's `return`, a panic, or the
+            // runtime dropping the whole task.
+            let claim = Arc::new(in_flight.register_rendered(in_flight_call));
+            let mut ctx = ctx;
+            ctx.execute_use_case = Arc::new(ctx.execute_use_case.with_claim(Arc::clone(&claim)));
 
             let result = tokio::select! {
-                res = IN_FLIGHT_CLAIM.scope(claim, handler.execute(arguments, &ctx)) => res,
+                res = handler.execute(arguments, &ctx) => res,
                 () = cancel_token.cancelled() => {
                     // Task was cancelled, no need to store result
                     return;
@@ -7203,25 +7225,97 @@ rbac:
         );
     }
 
-    /// **The production order, exercised through the production mechanism.**
+    /// **The order, OBSERVED at the moment of the write.**
     ///
-    /// The first version of this test dropped the claim by hand and then
-    /// called `log_success`, and its docstring said that was "the order the
-    /// whole scheme rests on". Production did the reverse — the handler's
-    /// line went out at step 13, INSIDE `registry.execute`, and the entry
-    /// only went away once `execute` returned — so the test proved
-    /// `HashMap::remove`'s take-and-win and read like coverage of a property
-    /// the code did not have. Round 1 of the review caught it; this is the
-    /// rewrite.
+    /// Two previous versions of this test asserted an order their assertions
+    /// could not see. The first dropped the claim by hand and then called
+    /// `log_success`. The second went through the real facade but still only
+    /// looked at the registry **after** `log_success` returned — and round 2
+    /// of the review proved that blind by moving the claim below the
+    /// `log(..)` call and watching everything stay green. Both counter-proofs
+    /// deleted the claim, which proves "it claims", never "it claims first".
     ///
-    /// What it exercises now is the real path: the claim is in the
-    /// `IN_FLIGHT_CLAIM` task-local, as `handle_tools_call` puts it there,
-    /// and nothing drops it by hand. The release happens where production
-    /// releases it — as the first statement of the use-case facade, before
-    /// the write. So the snapshot that follows finds an empty registry
-    /// **because the facade emptied it**, and the file holds one line.
+    /// So this one does not infer the order, it observes it. `AuditLogger`
+    /// carries a write-time hook of the same kind as its injected clock, and
+    /// the hook reads the registry at the instant the line is written. If the
+    /// claim moves below the write, the hook sees `Some(0)` and the test
+    /// fails with a message about what it actually saw.
     #[tokio::test]
-    async fn the_handlers_own_write_claims_the_entry_before_logging() {
+    async fn the_facade_claims_the_write_before_it_writes() {
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        let calls = InFlightCalls::default();
+        let claim = StdArc::new(calls.register("ssh_exec", Some(&json!({"host": "raspberry"}))));
+
+        // What the hook saw, at the instant `log` was entered.
+        let seen: StdArc<StdMutex<Vec<Option<u64>>>> = StdArc::new(StdMutex::new(Vec::new()));
+
+        let mut logger = AuditLogger::for_test();
+        {
+            let seen = StdArc::clone(&seen);
+            let claim = StdArc::clone(&claim);
+            logger.observe_writes(StdArc::new(move |_event: &crate::security::AuditEvent| {
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(claim.events_recorded());
+            }));
+        }
+
+        let security = crate::config::SecurityConfig::default();
+        let base = crate::domain::ExecuteCommandUseCase::new(
+            Arc::new(CommandValidator::new(&security)),
+            Arc::new(Sanitizer::from_config(&security.sanitize)),
+            Arc::new(logger),
+            Arc::new(CommandHistory::with_defaults()),
+        );
+        let per_call = base.with_claim(StdArc::clone(&claim));
+
+        assert_eq!(
+            claim.events_recorded(),
+            Some(0),
+            "nothing is recorded before the facade runs"
+        );
+
+        per_call.log_success("ssh_exec", "raspberry", "uptime", 0, 12);
+
+        let seen = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the facade must have written exactly one line"
+        );
+        assert_eq!(
+            seen[0],
+            Some(1),
+            "AT THE MOMENT the line was written the call must already be counted; \
+             {seen:?} means the claim happens after the write, which is the order this \
+             whole scheme exists to invert"
+        );
+
+        // And the entry is still there, which is the round-2 change: a write
+        // transitions the call, it does not make it unreportable.
+        assert_eq!(
+            claim.events_recorded(),
+            Some(1),
+            "a write must not remove the entry: a multi-event call has to stay reportable"
+        );
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// **A call that has already written is still reported, with a different
+    /// reason.**
+    ///
+    /// This is the hole round 2 found in round 1: releasing on the first
+    /// write made a multi-event call unreportable from its first event on, so
+    /// a shutdown between host 1 and host 2 of an `ssh_metrics_multi` wrote
+    /// **zero** lines where `4dd213d` wrote one. Nothing false, a line
+    /// missing — this task's original defect. Both reasons are asserted,
+    /// because a single one of them is what made the other case wrong.
+    #[tokio::test]
+    async fn a_call_that_already_wrote_is_reported_with_the_other_reason() {
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.log");
         let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
@@ -7231,54 +7325,65 @@ rbac:
                 .run(),
         );
 
-        let claim = server.in_flight.register(
-            "ssh_exec",
-            Some(&json!({"host": "raspberry", "command": "uptime"})),
+        // Two calls: one that has recorded nothing, one that has recorded two
+        // results and not returned — the multi-host shape.
+        let untouched = Arc::new(
+            server
+                .in_flight
+                .register("ssh_exec", Some(&json!({"host": "pi-a"}))),
         );
+        let halfway = Arc::new(server.in_flight.register(
+            "ssh_metrics_multi",
+            Some(&json!({"hosts": ["pi-b", "pi-c"]})),
+        ));
+        let per_call = server.execute_use_case.with_claim(Arc::clone(&halfway));
+        per_call.log_success("ssh_metrics_multi", "pi-b", "uptime", 0, 7);
+        per_call.log_failure("ssh_metrics_multi", "pi-c", "uptime", "unreachable");
 
-        // Exactly what `handle_tools_call` does: the claim rides in the
-        // task-local for the duration of the call, and the handler's own
-        // audit write happens inside that scope.
-        IN_FLIGHT_CLAIM
-            .scope(claim, async {
-                assert_eq!(
-                    server.in_flight.len(),
-                    1,
-                    "the call must be registered while it runs, or this test proves nothing"
-                );
-                server
-                    .execute_use_case
-                    .log_success("ssh_exec", "raspberry", "uptime", 0, 12);
-                assert_eq!(
-                    server.in_flight.len(),
-                    0,
-                    "the facade must hand the entry back BEFORE it logs: this is the \
-                     assertion the first version of this test could not make, because it \
-                     did the removal itself"
-                );
-            })
-            .await;
-
-        // The shutdown arrives afterwards and has nothing to say.
         server.audit_interrupted_in_flight();
-
+        drop(untouched);
+        drop(halfway);
         server.close_audit();
         crate::security::drain_audit_writer(Some(writer)).await;
 
         let lines = audit_lines(&audit_path);
+        let events: Vec<Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("audit line must be JSONL"))
+            .collect();
+        let interrupted: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["event_type"] == "command_interrupted")
+            .collect();
         assert_eq!(
-            lines.len(),
-            1,
-            "one call that finished must leave one line, not its own plus a shutdown's; \
-             got {lines:?}"
+            interrupted.len(),
+            2,
+            "BOTH calls must be reported, including the one that already wrote: {lines:?}"
         );
-        assert!(
-            !lines[0].contains("command_interrupted"),
-            "the line must be the handler's own: {:?}",
-            lines[0]
+
+        let before = interrupted
+            .iter()
+            .find(|e| e["command"].as_str().unwrap_or("").starts_with("ssh_exec "))
+            .expect("the untouched call must have a line");
+        assert_eq!(
+            before["result"]["Interrupted"]["reason"],
+            crate::security::INTERRUPTED_BEFORE_ANY_RESULT
         );
-        let event: Value = serde_json::from_str(&lines[0]).expect("audit line must be JSONL");
-        assert_eq!(event["tool_name"], "ssh_exec");
+
+        let after = interrupted
+            .iter()
+            .find(|e| {
+                e["command"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("ssh_metrics_multi ")
+            })
+            .expect("the half-written call must have a line too");
+        assert_eq!(
+            after["result"]["Interrupted"]["reason"],
+            crate::security::interrupted_after_results(2),
+            "and it must say how many results it had recorded, not that none had been"
+        );
     }
 
     /// The registry primitive on its own: `remove` returns the entry, so of
@@ -7307,14 +7412,22 @@ rbac:
         );
     }
 
-    /// **A secret named by its key never reaches the file.**
+    /// **No value of any shape reaches the shutdown's line.**
     ///
-    /// The end-to-end form of the unit tests in `crate::security::audit`:
-    /// this one goes through the registry, the emission, the use-case facade
-    /// and the writer task, and reads the JSONL back. `ssh_db_dump` is the
-    /// exact tool the review named — not destructive, so the CLI gate never
-    /// rendered it, which made this sink its first path to disk — and
-    /// `db_password` the exact argument.
+    /// Round 2's acceptance, end to end: through the registry, the emission,
+    /// the use-case facade and the writer task, read back off disk. The three
+    /// shapes are the three that defeated the previous versions:
+    ///
+    /// - `db_password`, a string whose key matches a keyword — caught by the
+    ///   round-1 redaction, and the tool (`ssh_db_dump`) is not destructive,
+    ///   so the CLI gate had never rendered it;
+    /// - `password` holding a NUMBER — the value-type exemption was the
+    ///   caller's choice, so round 1 wrote it as-is;
+    /// - `from_literal: [{key, value}]`, where no name matches a keyword at
+    ///   all, which is the defeat a keyword list cannot avoid.
+    ///
+    /// All three are absent for one reason now: this sink renders argument
+    /// **names**.
     #[tokio::test]
     async fn an_abandoned_call_does_not_write_its_password_to_the_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7326,37 +7439,48 @@ rbac:
                 .run(),
         );
 
-        let claim = server.in_flight.register(
+        let a = Arc::new(server.in_flight.register(
             "ssh_db_dump",
             Some(&json!({
                 "host": "raspberry",
-                "db_type": "postgres",
                 "database": "prod",
                 "db_password": "S3cr3t!x",
             })),
+        ));
+        let b = Arc::new(
+            server
+                .in_flight
+                .register("ssh_exec", Some(&json!({"password": 12_345_678}))),
         );
+        let c = Arc::new(server.in_flight.register(
+            "ssh_k8s_create_secret",
+            Some(&json!({"from_literal": [{"key": "pw", "value": "N0tOnDisk"}]})),
+        ));
 
         server.audit_interrupted_in_flight();
-        drop(claim);
+        drop((a, b, c));
         server.close_audit();
         crate::security::drain_audit_writer(Some(writer)).await;
 
         let lines = audit_lines(&audit_path);
-        assert_eq!(lines.len(), 1, "got {lines:?}");
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        let whole = lines.join("\n");
+
+        for secret in ["S3cr3t!x", "12345678", "N0tOnDisk"] {
+            assert!(
+                !whole.contains(secret),
+                "{secret} must not be on any line: {whole}"
+            );
+        }
+        // And not because the lines are empty: the names ARE there.
         assert!(
-            !lines[0].contains("S3cr3t!x"),
-            "the password must not be on the line: {:?}",
-            lines[0]
+            whole.contains("ssh_db_dump {database,db_password,host}"),
+            "{whole}"
         );
+        assert!(whole.contains("ssh_exec {password}"), "{whole}");
         assert!(
-            lines[0].contains("[REDACTED]"),
-            "and the line must say it was redacted rather than silently omit it: {:?}",
-            lines[0]
-        );
-        assert!(
-            lines[0].contains("prod"),
-            "a value whose key names no secret stays readable: {:?}",
-            lines[0]
+            whole.contains("ssh_k8s_create_secret {from_literal}"),
+            "{whole}"
         );
     }
 
@@ -7522,6 +7646,93 @@ rbac:
         );
     }
 
+    /// **Every writing facade claims before it logs, as source text.**
+    ///
+    /// The runtime test above observes ONE facade. This one covers all of
+    /// them, and the two together are what round 2 asked for: without it the
+    /// other five release sites could each sink below their own `log()`, and
+    /// a SEVENTH facade added with no claim at all would redden nothing.
+    ///
+    /// Two assertions, and the second is the one that catches an addition:
+    /// the number of claim sites equals the number of facades that write
+    /// about a call somebody else made, and in each of those facades the
+    /// claim's index is below its `audit_logger.log(` index.
+    ///
+    /// `log_interrupted` is excluded by name and must be: it IS the
+    /// shutdown's write, and a claim there would count the shutdown's own
+    /// line against the call it is reporting.
+    #[test]
+    fn every_writing_facade_claims_before_it_logs() {
+        let src = include_str!("../domain/use_cases/execute_command.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // The facades that write about somebody else's call. `log_success`
+        // and `process_success` share `record_success_redacted`, which is
+        // where their claim lives, so the bodies to slice are these five.
+        let writers = [
+            "pub fn log_denied(",
+            "pub fn log_confirmed(",
+            "fn record_success_redacted(",
+            "pub fn log_state_change(",
+            "pub fn log_failure(",
+        ];
+
+        assert_eq!(
+            production.matches("self.claim_this_write();").count(),
+            writers.len(),
+            "one claim per writing facade, no more and no fewer: a facade added without \
+             one writes a line the shutdown will then report as never written"
+        );
+
+        for writer in writers {
+            let from = production
+                .find(writer)
+                .unwrap_or_else(|| panic!("{writer} must exist"));
+            let body = &production[from..];
+            // To the next `\n    pub fn ` / `\n    fn `, i.e. the end of this
+            // method. `find` on the body AFTER the signature so the
+            // signature itself is not the match.
+            let after_sig = body.find('\n').expect("a signature ends in a newline") + 1;
+            let end = body[after_sig..]
+                .find("\n    pub fn ")
+                .map_or(body.len(), |i| after_sig + i);
+            let body = &body[..end];
+
+            let claim = body.find("self.claim_this_write();").unwrap_or_else(|| {
+                panic!("{writer} writes an audit line, so it must claim this write")
+            });
+            // The RECEIVER, not the call: `rustfmt` folds
+            // `self.audit_logger.log(tool, ..)` onto two lines in
+            // `log_denied`, so a guard anchored on `self.audit_logger.log(`
+            // fails there for a formatting reason and says "must reach the
+            // audit logger", which is the misleading message wave 4 already
+            // paid for once.
+            let write = body
+                .find("self.audit_logger")
+                .unwrap_or_else(|| panic!("{writer} must reach the audit logger"));
+            assert!(
+                claim < write,
+                "{writer}: the claim must precede the write. Below it, a shutdown snapshot \
+                 landing between the two reports a call that has already written, with the \
+                 reason that says nothing was recorded"
+            );
+        }
+
+        assert!(
+            !production[production
+                .find("pub fn log_interrupted(")
+                .expect("log_interrupted must exist")..]
+                .split("\n    pub fn ")
+                .next()
+                .unwrap_or("")
+                .contains("self.claim_this_write();"),
+            "log_interrupted must NOT claim: it is the shutdown's own write, and claiming \
+             there would count it against the call it is reporting"
+        );
+    }
+
     /// The other half of the wiring: the FEED.
     ///
     /// Round 1 of the review made the point that could not be argued with:
@@ -7552,28 +7763,41 @@ rbac:
             .expect("the tasks-extension accessor must follow handle_tools_call");
         let sync_body = &sync_body[..to_next];
 
-        assert_eq!(
-            sync_body
-                .matches(".register(&tool_name, call_params.arguments.as_ref())")
-                .count(),
-            1,
-            "handle_tools_call must register the call exactly once"
-        );
+        // An INDEX QUADRUPLE, not three presence checks. Round 2 made the
+        // point: the previous third assertion was `contains(..)`, so moving
+        // the dispatch out from under the claim while leaving the claim's
+        // text anywhere in the function kept the guard green — the exact risk
+        // this guard was added for.
+        for literal in [
+            ".register(&tool_name, call_params.arguments.as_ref())",
+            "ctx.execute_use_case.with_claim(",
+            ".execute(&call_params.name, call_params.arguments, &ctx)",
+            "in_flight.finish();",
+        ] {
+            assert_eq!(
+                sync_body.matches(literal).count(),
+                1,
+                "handle_tools_call must contain `{literal}` exactly once"
+            );
+        }
         let register = sync_body
             .find(".register(&tool_name, call_params.arguments.as_ref())")
             .expect("just counted it");
+        let hand_over = sync_body
+            .find("ctx.execute_use_case.with_claim(")
+            .expect("just counted it");
         let dispatch = sync_body
             .find(".execute(&call_params.name, call_params.arguments, &ctx)")
-            .expect("handle_tools_call must dispatch to the registry");
+            .expect("just counted it");
+        let finish = sync_body
+            .find("in_flight.finish();")
+            .expect("just counted it");
         assert!(
-            register < dispatch,
-            "the call must be registered BEFORE it is dispatched: registered afterwards, \
-             nothing is in the registry while the command is actually running"
-        );
-        assert!(
-            sync_body.contains("IN_FLIGHT_CLAIM\n            .scope("),
-            "the claim must travel into `execute` as a task-local, or the handler's own \
-             audit write cannot hand the entry back before it logs"
+            register < hand_over && hand_over < dispatch && dispatch < finish,
+            "the order must be register -> hand the claim to the context's use case -> \
+             dispatch -> finish. Registered after the dispatch, nothing is in the registry \
+             while the command runs; handed over after the dispatch, the handler's own write \
+             cannot count the call before it logs."
         );
 
         // --- the tasks-extension worker ---
