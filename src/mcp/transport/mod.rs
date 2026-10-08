@@ -56,6 +56,22 @@ use super::protocol::{JsonRpcError, JsonRpcMessage, WriterMessage};
 /// If the `SIGTERM` handler cannot be registered the arm parks forever
 /// instead of resolving, so a registration failure cannot be mistaken for a
 /// shutdown request.
+///
+/// **What is NOT covered, and it is this function's own gap to declare:** no
+/// test raises a signal at this process. Raising one from a test reaches every
+/// other test in the same binary, and tokio's registration is process-wide,
+/// so a lost race would kill the whole test binary. What IS measured is one
+/// step further out — `bridge-mcp daemon start` plus `bridge-mcp daemon stop`
+/// against the real binary, which reaches here through `SIGTERM` and must end
+/// with the audit lines on disk and the process gone. That measurement lives
+/// in the T12 report, not in the suite; `SigCgt` on `/proc/<pid>/status` is
+/// what proves the handler is installed at all.
+///
+/// Gated on the two features that own the callers — `cli` for
+/// `crate::daemon::run_daemon`, `http` for the axum graceful-shutdown future.
+/// Without either, nothing calls this and `dead_code` fires on a
+/// `--no-default-features` build, which no CI job covers.
+#[cfg(any(feature = "cli", feature = "http"))]
 pub(crate) async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
 
@@ -112,6 +128,33 @@ pub trait Transport: Send + Sync + 'static {
     /// flush in-flight work, remove socket files, etc. Implementations
     /// should be idempotent.
     async fn shutdown(&self);
+
+    /// Whether [`Transport::accept`] returned `None` because the transport
+    /// was **asked to stop**, rather than because it has no further sessions
+    /// to hand out.
+    ///
+    /// The two readings of that `None` are genuinely different, and
+    /// [`crate::mcp::server::McpServer::serve`] has to tell them apart:
+    ///
+    /// - A **single-session** transport such as [`stdio::StdioTransport`]
+    ///   yields its one session and then `None` immediately. The session is
+    ///   the entire conversation and may run for hours; `serve` must wait for
+    ///   it without a bound. `false`.
+    /// - A **multi-session** transport such as
+    ///   [`unix_socket::UnixSocketTransport`] yields `None` only when its
+    ///   shutdown token fires. Every live session is then being torn down,
+    ///   and `serve` must bound the wait — a client that is connected and
+    ///   silent parks its session's reader for ever, which is how
+    ///   `bridge-mcp daemon stop` left a daemon alive that no signal could
+    ///   kill. `true`.
+    ///
+    /// Defaulted to `false` — the conservative reading, "wait for them" —
+    /// so an existing implementation keeps compiling and keeps its current
+    /// behaviour. Override it in any transport whose accept loop ends on a
+    /// shutdown request.
+    fn shutdown_requested(&self) -> bool {
+        false
+    }
 }
 
 /// A single client session, split into reader and writer halves so they

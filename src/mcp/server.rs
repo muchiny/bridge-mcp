@@ -74,6 +74,25 @@ pub(crate) struct DiscoveryPayload {
 /// channel per subscribed path over SSH, which the bridge does not do.
 const RESOURCE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long [`McpServer::serve`] waits for its in-flight sessions to end by
+/// themselves, once the transport has said it was ASKED to stop.
+///
+/// Only then, and only for such a transport: for stdio the accept loop ends
+/// after the first session is handed out, long before that session does, so
+/// bounding there would cut `bridge-mcp serve` off mid-conversation. See
+/// `Transport::shutdown_requested`.
+const SESSION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long [`McpServer::serve`] then waits after cancelling the sessions'
+/// reader loops, before aborting the tasks outright.
+///
+/// Longer than [`SESSION_DRAIN_GRACE`] on purpose: a cancelled reader loop
+/// still runs the session's OWN bounded teardown, which is 2 s for the
+/// natural drain of its writer plus 1 s after cancelling it (see
+/// `serve_session_with_context`). A shorter bound here would abort sessions
+/// that were about to finish flushing.
+const SESSION_BACKSTOP_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Decide which subscribed URIs get `notifications/resources/updated` on
 /// one tick of the watch loop.
 ///
@@ -1157,6 +1176,16 @@ impl McpServer {
     /// **An `abort()` on this future skips the whole block** — which is what
     /// the daemon's own integration tests do, so they measure no part of it.
     ///
+    /// **One event can still be lost after the close, and it is not the
+    /// transports':** the `io.modelcontextprotocol/tasks` worker in
+    /// `handle_tools_call_async` is a bare `tokio::spawn` holding its
+    /// own `ToolContext`, so it is in no vec and no `JoinSet`. A worker still
+    /// running when this function closes the channel logs to `tracing` and
+    /// not to the file. That is not a regression — before this drain existed,
+    /// the whole queue died with the process — but "the writer is drained on
+    /// shutdown" means the three transports' shutdown, not every task the
+    /// server ever spawned.
+    ///
     /// # Errors
     ///
     /// Returns an error only if the transport itself produces one.
@@ -1193,21 +1222,42 @@ impl McpServer {
         // the spawned `serve_session` task before it has read a single
         // byte from stdin.
         let mut sessions: JoinSet<()> = JoinSet::new();
+        // Backstop for the session reader loops. Not a cancellation of the
+        // sessions: nothing fires it unless the bounded drain below gives up.
+        let session_shutdown = tokio_util::sync::CancellationToken::new();
         while let Some(session) = transport.accept().await {
             let server = Arc::clone(&self);
+            let backstop = session_shutdown.clone();
             sessions.spawn(async move {
-                server.serve_session(session).await;
+                server.serve_session(session, backstop).await;
             });
         }
 
         info!("Transport accept loop ended, draining in-flight sessions");
 
-        while let Some(res) = sessions.join_next().await {
-            if let Err(e) = res
-                && !e.is_cancelled()
-            {
-                error!(error = %e, "session task failed");
-            }
+        // TWO shapes, because `accept()` returning `None` does not mean the
+        // same thing on both transports, and conflating them breaks one or
+        // the other.
+        //
+        // On the daemon socket it means "you were asked to stop", and a
+        // session whose client is connected and silent parks on
+        // `reader.recv()` for ever — so an unbounded join here let
+        // `daemon stop` leave a daemon that NO signal could then kill:
+        // measured on the real binary, `Daemon stopped.` printed, the log
+        // stopping at the line above, the process still alive 16 s later, a
+        // second `daemon stop` with no effect. It was invisible before this
+        // wave only because SIGTERM was unhandled and killed the process
+        // outright — and tokio's SIGTERM handler is permanent ("the default
+        // platform behavior will NOT be reset"), so that escape is gone for
+        // good.
+        //
+        // On stdio it means "there is only ever one session", and that
+        // session is the whole conversation: bounding it would end
+        // `bridge-mcp serve` a couple of seconds after start-up.
+        if transport.shutdown_requested() {
+            Self::drain_sessions_bounded(&mut sessions, &session_shutdown).await;
+        } else {
+            Self::drain_sessions(&mut sessions).await;
         }
 
         info!("All sessions drained, shutting down");
@@ -1237,6 +1287,64 @@ impl McpServer {
         crate::security::drain_audit_writer(audit_writer).await;
 
         Ok(())
+    }
+
+    /// Join every in-flight session task, logging the ones that panicked.
+    ///
+    /// Cancel-safe, because `JoinSet::join_next` is: the bounded caller drops
+    /// this future on a timeout and calls it again afterwards, and no session
+    /// is lost between the two.
+    async fn drain_sessions(sessions: &mut JoinSet<()>) {
+        while let Some(res) = sessions.join_next().await {
+            if let Err(e) = res
+                && !e.is_cancelled()
+            {
+                error!(error = %e, "session task failed");
+            }
+        }
+    }
+
+    /// [`Self::drain_sessions`] with a bound, for a transport that said it
+    /// was asked to stop.
+    ///
+    /// Same three steps, same reasoning and in the same order as the
+    /// per-session writer backstop in [`Self::serve_session_with_context`]:
+    /// wait for the natural drain FIRST, because a client that is still
+    /// reading its replies should get them; only then cancel the reader
+    /// loops; and bound that too, because a session must not be able to hang
+    /// teardown by ignoring the cancellation either.
+    ///
+    /// `JoinSet::shutdown` is the last resort, and it is an `abort` — which
+    /// is acceptable here and nowhere near the audit writer: a session task
+    /// owns no `spawn_blocking` and no rotation, and the audit drain still
+    /// runs afterwards, in `serve`.
+    async fn drain_sessions_bounded(
+        sessions: &mut JoinSet<()>,
+        backstop: &tokio_util::sync::CancellationToken,
+    ) {
+        if tokio::time::timeout(SESSION_DRAIN_GRACE, Self::drain_sessions(sessions))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+
+        warn!(
+            grace_s = SESSION_DRAIN_GRACE.as_secs(),
+            "Sessions did not end on their own; cancelling their reader loops"
+        );
+        backstop.cancel();
+
+        if tokio::time::timeout(SESSION_BACKSTOP_GRACE, Self::drain_sessions(sessions))
+            .await
+            .is_err()
+        {
+            warn!(
+                grace_s = SESSION_BACKSTOP_GRACE.as_secs(),
+                "Sessions ignored cancellation, aborting them"
+            );
+            sessions.shutdown().await;
+        }
     }
 
     /// Close this server's audit channel so its writer task can be joined.
@@ -1407,10 +1515,18 @@ impl McpServer {
     /// [`Self::serve_session_with_context`], which is the whole of the
     /// behaviour. The split exists so a test can hold a handle on that bundle;
     /// see that function's docs.
-    async fn serve_session(self: Arc<Self>, session: Session) {
+    ///
+    /// `backstop` is [`Self::serve`]'s session-shutdown token: it is only
+    /// cancelled if the bounded drain there gives up, and it is the ONLY way
+    /// out of the reader loop other than the client closing its end.
+    async fn serve_session(
+        self: Arc<Self>,
+        session: Session,
+        backstop: tokio_util::sync::CancellationToken,
+    ) {
         let (tx, rx) = mpsc::channel::<WriterMessage>(100);
         let session_ctx = SessionContext::new(tx);
-        self.serve_session_with_context(session, session_ctx, rx)
+        self.serve_session_with_context(session, session_ctx, rx, backstop)
             .await;
     }
 
@@ -1445,6 +1561,7 @@ impl McpServer {
         session: Session,
         session_ctx: SessionContext,
         mut rx: mpsc::Receiver<WriterMessage>,
+        backstop: tokio_util::sync::CancellationToken,
     ) {
         let tx = session_ctx.notification_tx.clone();
 
@@ -1487,7 +1604,25 @@ impl McpServer {
         let mut reader = session.reader;
         info!("MCP session started");
 
-        while let Some(msg_result) = reader.recv().await {
+        // `reader.recv()` had exactly ONE exit: the client closing its end.
+        // A client that stays connected and says nothing parks this loop for
+        // ever, and `serve`'s drain waits on it — which is how `daemon stop`
+        // could leave a daemon alive that no signal would then kill. The
+        // token is a second exit, used only as a backstop: `serve` waits for
+        // the natural end first, exactly as this function's own writer
+        // teardown does, and cancels only if that wait runs out.
+        //
+        // `biased;` with the token first: once teardown has decided to stop,
+        // a client that keeps writing must not be able to keep the loop
+        // alive by starving the other branch.
+        while let Some(msg_result) = tokio::select! {
+            biased;
+            () = backstop.cancelled() => {
+                info!("Session reader cancelled by shutdown backstop");
+                None
+            }
+            msg = reader.recv() => msg,
+        } {
             let message = match msg_result {
                 Ok(m) => m,
                 Err(e) => {
@@ -4032,7 +4167,9 @@ mod tests {
         }
 
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         let mut expected_ids: std::collections::HashSet<Option<Value>> =
             std::collections::HashSet::new();
@@ -8711,7 +8848,9 @@ rbac:
     async fn test_accepted_listen_writes_no_response_to_the_transport() {
         let server = Arc::new(create_test_server());
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         client_tx
             .send(client_request(
@@ -8817,8 +8956,12 @@ rbac:
         // `notification_tx` clone and push teardown onto its 2s path.
         let active = session_ctx.active_requests.clone();
 
-        let serve =
-            tokio::spawn(Arc::clone(&server).serve_session_with_context(session, session_ctx, rx));
+        let serve = tokio::spawn(Arc::clone(&server).serve_session_with_context(
+            session,
+            session_ctx,
+            rx,
+            tokio_util::sync::CancellationToken::new(),
+        ));
 
         client_tx
             .send(client_request(
@@ -8900,7 +9043,9 @@ rbac:
     async fn a_transport_drop_closes_a_subscription_without_a_response() {
         let server = Arc::new(create_test_server());
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         client_tx
             .send(client_request(
@@ -10702,7 +10847,9 @@ rbac:
     async fn test_serve_session_sweeps_subscriptions_before_awaiting_the_writer() {
         let server = Arc::new(create_test_server());
         let (session, client_tx, mut server_rx) = in_memory_session();
-        let serve = tokio::spawn(Arc::clone(&server).serve_session(session));
+        let serve = tokio::spawn(
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
+        );
 
         client_tx
             .send(client_request(
@@ -10803,7 +10950,7 @@ rbac:
         let started = std::time::Instant::now();
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            Arc::clone(&server).serve_session(session),
+            Arc::clone(&server).serve_session(session, tokio_util::sync::CancellationToken::new()),
         )
         .await
         .expect("serve_session must return on EOF, not hang");

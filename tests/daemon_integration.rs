@@ -379,24 +379,48 @@ async fn test_daemon_parse_error_response_sent_for_bad_json() {
 // T12 (audit-integrity wave) — the drain at the end of `McpServer::serve`
 // ============================================================================
 
-/// How many pipelined tool calls the drain test issues, and the number is
-/// measured rather than chosen.
+/// How many tool calls the drain test issues.
 ///
-/// ONE call does not reliably catch the defect. With the
-/// `self.close_audit(); drain_audit_writer(..)` pair at the end of
-/// `McpServer::serve` commented out, measured on this machine:
+/// Five, and the smallness is the point: **volume was measured and it does
+/// not work.** Round 1 of this test tried to make the producer outrun the
+/// writer by pipelining, on the theory that one event's backlog clears on its
+/// own during teardown. With the `self.close_audit(); drain_audit_writer(..)`
+/// pair at the end of `McpServer::serve` commented out, measured on this
+/// machine, on the test as it stands (first-response handshake included):
 ///
-/// - `DRAIN_TEST_CALLS = 1`: red in **6 runs of 8** (`got 0 of 1`), GREEN in
-///   the other 2. A detector that misses a quarter of the time is not one.
-/// - `DRAIN_TEST_CALLS = 200`: red in **8 runs of 8**, with 0, 0, 157, 160,
-///   164, 167, 168 and 175 of the 200 lines on disk — so between 25 and 200
-///   events lost, never fewer than 25.
+/// - 200 calls: red in **7 runs of 8** (36, 36, 162, 103, 151, 194, 105 of
+///   200 on disk) — and GREEN once.
+/// - 600 calls: **worse**, red in 5 of 8 (596, 420, 372, 332, 519 of 600).
+///   More calls give the writer MORE time to keep up, because the session
+///   takes longer to dispatch them; the backlog never becomes durable.
 ///
-/// The volume is what makes the producer outrun the writer (one
-/// `spawn_blocking` round trip per event), and the pipelining is what makes
-/// it arrive faster than one request/response round trip at a time. With the
-/// drain in place: 200 of 200, every run.
-const DRAIN_TEST_CALLS: usize = 200;
+/// A first table, in the round-0 report, claimed 8 of 8 at 200 — it was taken
+/// on a version of this test whose cancel raced the accept, which compressed
+/// the timeline. That table was wrong and this note replaces it.
+///
+/// So the discriminator is not volume, it is [`BLOCKING_HOLD`]: the writer is
+/// made unable to finish on its own, deterministically. See there.
+const DRAIN_TEST_CALLS: usize = 5;
+
+/// How long the test holds the runtime's ONLY blocking thread.
+///
+/// This is what makes the drain observable instead of raced. `AuditWriterTask`
+/// writes each event from a `tokio::task::spawn_blocking`; the runtime this
+/// test builds has `max_blocking_threads(1)`, and the test occupies that one
+/// thread before the first tool call. So the writer cannot write anything
+/// until this sleep ends, whatever the scheduler does.
+///
+/// - **With the drain**, `serve` is parked in its bounded join when the thread
+///   frees, the writer then writes all five lines, and `serve` returns at
+///   ~`BLOCKING_HOLD` with the file complete.
+/// - **Without it**, `serve` returns as soon as the session ends — measured at
+///   tens of milliseconds — and the file is read while the writer is still
+///   queued behind this sleep. Zero lines, every run.
+///
+/// Sized between the two: an order of magnitude above the teardown it has to
+/// outlast, and well under the drain's own 2 s bound, which it has to fit
+/// inside.
+const BLOCKING_HOLD: Duration = Duration::from_millis(400);
 
 /// One `tools/call` frame for `ssh_session_close` on a session id that
 /// matches nothing.
@@ -475,16 +499,31 @@ fn drain_responses(
 ///
 /// **What it does NOT pin**, measured and said out loud: it does not
 /// distinguish `AuditLogger::close()` from the "drop every owner" form. With
-/// `close_audit()` removed and the bounded join kept, this test stays GREEN
-/// and the run goes from ~0.5 s to ~2.5 s (3 runs: 2.51, 2.44, 2.81) — the
-/// join waits out the whole 2 s timeout, warns, and the writer finishes
-/// inside that window anyway. So the cost of the drop form here is two
-/// seconds on every shutdown plus a warning that is not true, not lost
-/// events. `close()`'s own semantics are pinned deterministically in
+/// `close_audit()` removed and the bounded join kept, this test stays GREEN,
+/// because the join then waits out its whole 2 s and the writer finishes
+/// inside that window. So the cost of the drop form here is two seconds on
+/// every shutdown plus a warning that is not true, not lost events.
+/// `close()`'s own semantics are pinned deterministically in
 /// `src/security/audit.rs` by
 /// `close_ends_the_writer_while_a_clone_of_the_logger_survives`.
-#[tokio::test(flavor = "multi_thread")]
-async fn serve_returns_only_after_the_audit_lines_are_on_disk() {
+///
+/// The runtime is built by hand rather than taken from `#[tokio::test]`, for
+/// one reason: `max_blocking_threads(1)`. See [`BLOCKING_HOLD`] — without it
+/// this test is a coin flip, with it the assertion is a happens-before edge.
+#[test]
+fn serve_returns_only_after_the_audit_lines_are_on_disk() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        // ONE blocking thread, and the test takes it. That is the whole
+        // mechanism; see `BLOCKING_HOLD`.
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("build the drain-test runtime")
+        .block_on(the_audit_lines_are_on_disk_when_serve_returns());
+}
+
+async fn the_audit_lines_are_on_disk_when_serve_returns() {
     use bridge_mcp::mcp::McpServer;
     use bridge_mcp::mcp::transport::unix_socket::UnixSocketTransport;
 
@@ -519,6 +558,14 @@ async fn serve_returns_only_after_the_audit_lines_are_on_disk() {
         "the server did not accept a connection within 5s"
     );
 
+    // Take the runtime's only blocking thread BEFORE the first tool call, so
+    // the writer's first `spawn_blocking` is queued behind this sleep and
+    // cannot run until it ends. Nothing else in this scenario uses the
+    // blocking pool: the config watcher is off (`config_path: None`), the
+    // pools are empty, and `transport.shutdown()` removes the socket file
+    // with a plain `std::fs` call.
+    let hold = tokio::task::spawn_blocking(|| std::thread::sleep(BLOCKING_HOLD));
+
     let client = UnixStream::connect(&socket).await.expect("connect");
     let (read_half, mut write_half) = client.into_split();
 
@@ -537,18 +584,18 @@ async fn serve_returns_only_after_the_audit_lines_are_on_disk() {
     write_half
         .write_all(frames.as_bytes())
         .await
-        .expect("write the pipelined calls");
+        .expect("write the calls");
     write_half.flush().await.expect("flush");
     // Half-close so the session's reader hits EOF once it has consumed them
     // all; that is what lets `serve` finish draining its `JoinSet`.
     drop(write_half);
 
-    // One response, then cancel. Waiting for ONE is what makes the test
-    // deterministic (the session exists, so the accept-loop race is gone);
-    // not waiting for the other 199 is what keeps it decisive. Cancelling
-    // the token only ends the ACCEPT loop — the session already in the
-    // `JoinSet` is drained by `serve`, so all 200 calls are still served,
-    // with the writer running behind them the whole time.
+    // One response, then cancel. Waiting for ONE closes the accept-loop race
+    // (the session provably exists); not waiting for the rest keeps the
+    // window short, well inside `BLOCKING_HOLD`. Cancelling the token only
+    // ends the ACCEPT loop — the session already in the `JoinSet` is drained
+    // by `serve`, so every call is still served, with the writer stuck behind
+    // the held blocking thread the whole time.
     tokio::time::timeout(Duration::from_secs(10), first_rx)
         .await
         .expect("the server must answer the first call within 10s")
@@ -616,4 +663,121 @@ async fn serve_returns_only_after_the_audit_lines_are_on_disk() {
         "the server must have answered every call it audited (notifications seen: {})",
         notifications.len()
     );
+
+    hold.await.expect("the blocking hold must not panic");
+}
+
+/// Round 1 of the T12 review, found on the real binary and the gravest thing
+/// the wave turned up: **a client that is connected and silent could hold
+/// `daemon stop` for ever.**
+///
+/// `serve`'s drain joined its session tasks without a bound, and a session's
+/// reader loop parked on `reader.recv()` with no second exit. That predates
+/// T12 — but before it, `SIGTERM` was unhandled and killed the process
+/// outright, so the wait was never reached. Handling the signal exposed it,
+/// and tokio's `SIGTERM` registration is permanent ("the default platform
+/// behavior will NOT be reset"), so the escape hatch is gone for good.
+///
+/// Measured on `target/debug/bridge-mcp` before the fix: `daemon stop`
+/// printed `Daemon stopped.` and returned 0, the daemon log stopped at
+/// `Transport accept loop ended, draining in-flight sessions` and never
+/// reached `All sessions drained`, the process was **still alive 16.3 s
+/// later**, and a second `daemon stop` printed `Daemon stopped.` again with
+/// no effect. `kill -9` was the only way out. The same scenario after the
+/// fix, same binary, is in the T12 report.
+///
+/// In-process the analogue of "the process dies" is "`serve` returns", which
+/// is also what releases the audit drain — so this test asserts both: the
+/// return, and the line on disk afterwards. The client's socket is held open
+/// deliberately, past every assertion, so the server never sees EOF.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_connected_client_cannot_hold_the_shutdown() {
+    use bridge_mcp::mcp::McpServer;
+    use bridge_mcp::mcp::transport::unix_socket::UnixSocketTransport;
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let socket = tmp.path().join("silent.sock");
+    let audit_path = tmp.path().join("audit.log");
+
+    let config = Config {
+        audit: AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 0,
+            retain_days: 0,
+        },
+        ..test_config()
+    };
+
+    let (server, audit_task) = McpServer::new(config);
+    let audit_task = audit_task.expect("audit is enabled, so a writer task must be produced");
+    let server = Arc::new(server);
+
+    let transport = UnixSocketTransport::bind(&socket).expect("bind the daemon socket");
+    let shutdown = transport.shutdown_token();
+
+    let serving =
+        tokio::spawn(async move { server.serve(transport, Some(audit_task), None).await });
+
+    assert!(
+        wait_until_accepting(&socket).await,
+        "the server did not accept a connection within 5s"
+    );
+
+    let mut client = UnixStream::connect(&socket).await.expect("connect");
+    client
+        .write_all(session_close_frame(0).as_bytes())
+        .await
+        .expect("write one call");
+    client.flush().await.expect("flush");
+
+    // Read until the response for id 0 comes back, so the session is
+    // provably live and its event provably in the channel.
+    let (read_half, write_half) = client.into_split();
+    let mut reader = BufReader::new(read_half);
+    let mut answered = false;
+    for _ in 0..10 {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("the server must answer within 5s")
+            .expect("read ok");
+        assert!(n > 0, "the server closed the socket instead of answering");
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim())
+            && v.get("id").is_some()
+        {
+            answered = true;
+            break;
+        }
+    }
+    assert!(answered, "no response carried an id");
+
+    // NOT dropped, and that is the whole test: no EOF ever reaches the
+    // session's reader. Before the fix, `serve` parked here for ever.
+    shutdown.cancel();
+
+    tokio::time::timeout(Duration::from_secs(20), serving)
+        .await
+        .expect(
+            "serve must return although the client never closed its socket \
+             (bounded drain: 2s natural + 4s after the backstop fires)",
+        )
+        .expect("the serve task must not panic")
+        .expect("serve must not error");
+
+    let contents = std::fs::read_to_string(&audit_path).expect("the audit file must exist");
+    assert_eq!(
+        contents.lines().count(),
+        1,
+        "the served call's line must be on disk once serve returned; got: {contents}"
+    );
+    assert!(
+        contents.contains("session_id=t12-0"),
+        "wrong line on disk: {contents}"
+    );
+
+    // Held to here on purpose: dropping it earlier would give the server the
+    // EOF this test exists to withhold.
+    drop(reader);
+    drop(write_half);
 }

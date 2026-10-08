@@ -1950,6 +1950,92 @@ mod tests {
         }
     }
 
+    /// The reason the shutdown JOINS the writer and never `abort()`s it,
+    /// pinned on the only configuration where it can be observed: rotation
+    /// ON.
+    ///
+    /// The review of round 1 was right that nothing covered this. The claim
+    /// is that an abort would lose the event in its `spawn_blocking` **and**
+    /// the rotation that follows it in the same loop iteration — but
+    /// `close_ends_the_writer_while_a_clone_of_the_logger_survives` and the
+    /// two integration tests all run with `max_size_mb: 0`, which disables
+    /// rotation outright, so the second half of that claim had no witness.
+    ///
+    /// Sized so the LAST event is the one that rotates: `max_size_mb: 1` is
+    /// 1 048 576 bytes and each line is ~64 KiB of command plus ~150 bytes
+    /// of envelope, so the counter crosses the bound on the 16th. The
+    /// rotation therefore happens after `close()` has already been called —
+    /// inside the drain — which is exactly the window an `abort()` would cut.
+    ///
+    /// Counter-proof, measured: replacing the join with `handle.abort()`
+    /// leaves no archive at all and the live file at ~1 MiB. See the T12
+    /// report.
+    #[tokio::test]
+    async fn the_drain_lets_the_last_event_rotate_the_log() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_path = temp_dir.path().join("audit.log");
+
+        let config = AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 1,
+            retain_days: 7,
+        };
+
+        let (logger, task) = AuditLogger::new(&config).unwrap();
+        let writer = tokio::spawn(task.expect("enabled audit must yield a writer task").run());
+
+        let big_command = "x".repeat(64 * 1024);
+        for i in 0..16 {
+            logger.log(
+                "test_tool",
+                AuditEvent::new(
+                    "rotate-host",
+                    &format!("{big_command} marker-{i}"),
+                    CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
+        }
+
+        logger.close();
+        drain_audit_writer(Some(writer)).await;
+
+        let archives: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("audit.log."))
+            .collect();
+        assert_eq!(
+            archives.len(),
+            1,
+            "the drain must have let the rotation complete: expected exactly              one archive beside the live file"
+        );
+
+        let rotated_out = std::fs::read_to_string(archives[0].path()).unwrap();
+        assert_eq!(
+            rotated_out.lines().count(),
+            16,
+            "every event must be in the archive the rotation created"
+        );
+        assert!(
+            rotated_out.contains("marker-15"),
+            "the event that TRIGGERED the rotation must be in the archive,              not lost with the write that was in flight"
+        );
+
+        // Reopened, not left pointing at the renamed inode: that is the other
+        // half of what `rotate_if_needed` does after the write, and the half
+        // an abort would also cut.
+        assert!(audit_path.exists(), "the live log must have been reopened");
+        assert_eq!(
+            std::fs::metadata(&audit_path).unwrap().len(),
+            0,
+            "the reopened live log starts empty"
+        );
+    }
+
     /// Why `close()` exists rather than "drop the logger and let the channel
     /// close itself".
     ///

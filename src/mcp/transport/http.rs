@@ -2673,12 +2673,27 @@ mod tests {
 
     /// How many pipelined POSTs the shutdown test issues.
     ///
-    /// Kept at the same figure as its daemon twin so the two read alike, and
-    /// because it also exercises hyper answering a pipelined burst on one
-    /// connection — but unlike the twin it is **not** what makes this test
-    /// decisive, since this one waits for every response before signalling.
-    /// See half 2 of the doc comment on the test.
-    const DRAIN_TEST_CALLS: usize = 200;
+    /// Five, same as the daemon twin and for the same measured reason:
+    /// volume does not make this kind of test a detector (see
+    /// `DRAIN_TEST_CALLS` in `tests/daemon_integration.rs`). Small enough
+    /// that the whole client exchange finishes well inside
+    /// [`BLOCKING_HOLD`], which is what does.
+    const DRAIN_TEST_CALLS: usize = 5;
+
+    /// How long the test holds the runtime's ONLY blocking thread.
+    ///
+    /// Round 0 of this test waited for every response before signalling the
+    /// shutdown, and by then the audit writer had caught up on its own — so
+    /// removing the drain left the test GREEN and it pinned only the
+    /// graceful-shutdown half. Round 1 of the review called that out, and
+    /// this is the fix: `AuditWriterTask` writes from a `spawn_blocking`, the
+    /// runtime here has `max_blocking_threads(1)`, and the test takes that
+    /// thread before the first POST. The writer then cannot write at all
+    /// until this sleep ends, whatever the scheduler does.
+    ///
+    /// Measured, with the `close_audit()` + `drain_audit_writer(..)` pair
+    /// removed: `0 of 5` lines, ten runs out of ten.
+    const BLOCKING_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
 
     fn audited_config(path: std::path::PathBuf) -> crate::config::Config {
         crate::config::Config {
@@ -2752,19 +2767,29 @@ mod tests {
     ///    (`Elapsed(())`), because `serve` never comes back.
     /// 2. **When it has returned, the audit lines are on disk** — read
     ///    synchronously, no sleep and no retry loop, which is the guarantee
-    ///    `tests/http_audit_trail.rs` has to poll for (up to 5 s). This half
-    ///    is **not** decisive here: it waits for all 200 responses before
-    ///    signalling, and by then the writer has caught up on its own, so
-    ///    removing the drain still left this test green. Waiting is
-    ///    deliberate anyway — signalling earlier made the test race the
-    ///    accept (measured: green alone, `0 of 200` in the full `--lib` run,
-    ///    because the shutdown landed before axum had accepted the
-    ///    connection at all). What pins the drain is the twin test,
-    ///    `serve_returns_only_after_the_audit_lines_are_on_disk` in
-    ///    `tests/daemon_integration.rs`, over the same
-    ///    `close_audit()` + `drain_audit_writer(..)` pair.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn http_serve_stops_on_shutdown_with_its_audit_lines_on_disk() {
+    ///    `tests/http_audit_trail.rs` has to poll for (up to 5 s). Decisive
+    ///    too, since round 1: `0 of 5` lines with the drain removed, ten runs
+    ///    of ten. What makes it decisive is [`BLOCKING_HOLD`], not the call
+    ///    count — see there for what round 0 got wrong.
+    ///
+    /// Every response is still read before the shutdown is signalled, and
+    /// that part is deliberate: signalling earlier made the test race axum's
+    /// accept (measured, green alone and `0 of 200` inside the full `--lib`
+    /// run, because the shutdown landed before the connection was accepted
+    /// at all). With the blocking thread held, waiting costs nothing.
+    #[test]
+    fn http_serve_stops_on_shutdown_with_its_audit_lines_on_disk() {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            // ONE blocking thread, and the test takes it. See `BLOCKING_HOLD`.
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("build the drain-test runtime")
+            .block_on(http_shutdown_leaves_its_audit_lines_on_disk());
+    }
+
+    async fn http_shutdown_leaves_its_audit_lines_on_disk() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let dir = tempfile::tempdir().unwrap();
@@ -2793,6 +2818,12 @@ mod tests {
 
         let addr = bound_rx.await.expect("serve must report the bound address");
 
+        // Take the runtime's only blocking thread BEFORE the first POST, so
+        // the writer's first `spawn_blocking` queues behind this sleep.
+        // Nothing else here uses the blocking pool: hyper does not for plain
+        // HTTP/1, and this server has no cleanup loops on the HTTP path.
+        let hold = tokio::task::spawn_blocking(|| std::thread::sleep(BLOCKING_HOLD));
+
         let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let (mut read_half, mut write_half) = stream.into_split();
 
@@ -2816,8 +2847,8 @@ mod tests {
             .expect("write the pipelined POSTs");
         write_half.flush().await.expect("flush");
 
-        // Every response first: see half 2 of the doc comment. Signalling
-        // before this point made the test race axum's accept.
+        // Every response first: see the doc comment. Signalling before this
+        // point made the test race axum's accept.
         let answered = tokio::time::timeout(std::time::Duration::from_secs(20), answered)
             .await
             .expect("the server must answer every POST within 20s")
@@ -2862,5 +2893,7 @@ mod tests {
             .expect("the line for call 0 must be on disk");
         assert_eq!(first["tool_name"], "ssh_session_close");
         assert_eq!(first["host"], crate::security::NO_HOST);
+
+        hold.await.expect("the blocking hold must not panic");
     }
 }

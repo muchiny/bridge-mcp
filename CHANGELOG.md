@@ -841,8 +841,8 @@ tests and a serialisation test.
 
 ### Fixed
 
-- **The audit writer is drained at shutdown on all three MCP surfaces, and
-  `SIGTERM` is handled at all.** `McpServer::serve` and
+- **The audit writer is drained when any of the three MCP transports shuts
+  down, and `SIGTERM` is handled at all.** `McpServer::serve` and
   `mcp::transport::http::serve` each spawned the `AuditWriterTask` and threw
   the `JoinHandle` away. The writer's loop ends only when its channel closes,
   and the channel closes only when the last sender is dropped — which never
@@ -856,13 +856,24 @@ tests and a serialisation test.
   Joined and never `abort()`ed, which is why the handle is not in `serve`'s
   `cleanup_handles` vec: the write runs in a `tokio::task::spawn_blocking`
   followed by `rotate_if_needed`, so an abort would lose the event in flight
-  **and** the rotation it was about to trigger.
+  **and** the rotation it was about to trigger. Both halves are pinned, the
+  rotation one on the only configuration where it can be seen (`max_size_mb:
+  1`, the last of 16 events crossing the bound inside the drain): with the
+  join replaced by an abort, no archive is created at all.
 
-  **Measured**, on a test that serves 200 pipelined `tools/call` requests over
-  the daemon socket and reads the audit file on the statement after `serve`
-  returns: without the drain, 8 runs out of 8 were short — between 12 and 37
-  of the 200 lines never reached the disk (163, 164, 174, 176, 179, 183, 184
-  and 188 of 200). With it, 200 of 200.
+  **"The three transports' shutdown" is the exact scope, and it is narrower
+  than "no event can be lost".** The `io.modelcontextprotocol/tasks` worker is
+  a bare `tokio::spawn` holding its own `ToolContext`, in no vec and no
+  `JoinSet`; one still running when the channel closes logs to `tracing` and
+  not to the file. Not a regression — that queue used to die with the process
+  — but not covered either.
+
+  **Measured**, on a test that serves five `tools/call` requests over the
+  daemon socket and reads the audit file on the statement after `serve`
+  returns, with the runtime's single blocking thread held so the writer cannot
+  finish on its own: without the drain, **0 of 5** lines on disk, ten runs out
+  of ten. With it, 5 of 5. The twin test on the HTTP transport measures the
+  same, the same way.
 
   **`mcp::transport::http::serve` had no shutdown block at all** — plain
   `axum::serve(listener, router).await`, no `with_graceful_shutdown`, no
@@ -883,18 +894,55 @@ tests and a serialisation test.
   handler**: its session ends on EOF of stdin, which is what a parent closing
   the pipe already provides.
 
-  **Cost.** The shutdown of the daemon and of `serve-http` can now take up to
-  2 s longer, and only when the writer is genuinely behind — a drained writer
-  joins at once. Measured: the 200-call test takes ~0.5 s end to end with the
-  drain in place. The hot path pays one uncontended `std::sync::Mutex`
-  lock/unlock per audited event (see "Added").
+  **`daemon stop` now bounds its session drain, which is the other half of
+  handling the signal.** `serve` joined its session tasks with no bound, and a
+  session's reader loop parked on `reader.recv()` with no second exit — so a
+  client that was connected and silent held the shutdown for ever. That
+  predates this release, but SIGTERM used to kill the process before it could
+  matter, and tokio's SIGTERM handler is permanent ("the default platform
+  behavior will NOT be reset"), so handling the signal removed the escape.
+  Measured on the built binary, one client connected without EOF:
+  `daemon stop` printed `Daemon stopped.` and returned 0, the log stopped at
+  `Transport accept loop ended, draining in-flight sessions`, the process was
+  **still alive 16.3 s later**, a second `daemon stop` printed
+  `Daemon stopped.` again with no effect, and `kill -9` was the only way out.
+  The drain now waits 2 s for the sessions to end on their own, then cancels
+  their reader loops, then waits 4 s more, then aborts the tasks — the same
+  three steps, in the same order, as the per-session writer backstop beside
+  it. Same scenario after the fix: the process is gone **2.3 s** after
+  `daemon stop`, the log reaches `All sessions drained` and `Daemon stopped`,
+  and the second `daemon stop` correctly reports no PID file.
 
-  **What is NOT fixed, and it is not an oversight here:** no test runs a real
-  `bridge-mcp` process, sends it a SIGTERM and inspects the file afterwards,
-  so the signal wiring itself rests on compilation and on reading
-  `tokio::signal`. The in-process tests cancel the transport's shutdown token
-  / resolve the shutdown future directly, because raising a process signal
-  from one test reaches every other test in the same binary.
+  Only for a transport that says it was asked to stop
+  (`Transport::shutdown_requested`, new, defaulted to `false`). **Stdio says
+  `false` and must**: its accept loop ends after the one session is handed
+  out, long before that session does, so bounding there would end
+  `bridge-mcp serve` a couple of seconds after start-up. Measured, with the
+  bound made unconditional: the binary answers the first request and then
+  stops answering with stdin still open.
+
+  **Cost, and the earlier figure in this entry was wrong.** It said "up to 2 s
+  longer", which is the audit drain alone. On the `daemon stop` path the whole
+  of `serve`'s teardown is new — it never ran there at all — so the real
+  bound is, in order: **up to 2 s** waiting for sessions to end, **up to 4 s**
+  more after their reader loops are cancelled, then `tunnel_manager`,
+  `session_manager` and `connection_pool` closed **sequentially**, each
+  connection with its own **5 s** timeout (`SshClient::close`), and only then
+  **up to 2 s** for the audit writer. It is therefore bounded by
+  `6 s + 5 s x (persistent sessions + pooled connections) + 2 s`, and
+  **not** by a constant. Measured end to end on the built binary, no SSH host
+  reachable so no connection to close: **368 ms** when the client closed its
+  socket (nothing to wait for), **2.3 s** when it did not. The hot path pays
+  one uncontended `std::sync::Mutex` lock/unlock per audited event (see
+  "Added").
+
+  **What is NOT covered by a test:** the signal wiring itself. No test raises
+  a signal at the process — doing so from one test reaches every other test in
+  the same binary, and tokio's registration is process-wide — so the in-process
+  tests cancel the transport's shutdown token or resolve the shutdown future
+  directly. What stands in for it is a measurement on the built binary
+  (`daemon start`, a tool call, `daemon stop`, then the audit file and the
+  pid), recorded in the T12 report with `SigCgt` from `/proc/<pid>/status`.
 
 - **A slow command no longer destroys its session.** Every `Err` from reading a
   session's output evicted and closed the session, under a comment asserting
@@ -1094,6 +1142,16 @@ tests and a serialisation test.
   silently stopped stopping. The code also survives the MCP `summarize=true`
   round trip (`SealedResult`). Pinned at `print_daemon_response` on a response
   built by the real serializer; no test spawns a daemon process.
+
+- **(lib API) `Transport::shutdown_requested(&self) -> bool`**, with a
+  default of `false`. Says whether `accept()` returned `None` because the
+  transport was ASKED to stop or merely because it has no further sessions to
+  hand out — two readings of the same `None` that `McpServer::serve` has to
+  tell apart, since one calls for a bounded drain and the other forbids it.
+  `UnixSocketTransport` overrides it (its `accept` returns `None` only when
+  its token fires); `StdioTransport` keeps the default. A defaulted method, so
+  an out-of-tree `Transport` keeps compiling and keeps today's behaviour, and
+  the default is the conservative one ("wait for them").
 
 - **(lib API) `AuditLogger::close(&self)`.** `AuditLogger` is re-exported from
   `src/lib.rs` **without** `#[doc(hidden)]`, so this enters the documented

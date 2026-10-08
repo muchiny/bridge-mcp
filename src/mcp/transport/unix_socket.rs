@@ -106,6 +106,12 @@ impl Transport for UnixSocketTransport {
         // we're exiting.
         let _ = std::fs::remove_file(&self.socket_path);
     }
+
+    /// `accept()` here returns `None` for exactly one reason: the token
+    /// fired. So reading the token IS reading "was I asked to stop".
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
 }
 
 /// Reader half of a Unix socket session: line-delimited JSON-RPC.
