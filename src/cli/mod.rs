@@ -88,7 +88,13 @@ pub struct Cli {
     /// which is what a script or a CI job needs; the choice is recorded in the
     /// audit log — `command_confirmed`, naming `--yes` or the prompt that
     /// answered, when the call goes through, and `command_denied` when it is
-    /// refused.
+    /// refused. The line carries the tool and its arguments, with any value
+    /// over 256 characters replaced by its length, so a file passed as
+    /// `content=` is never copied into the trail.
+    ///
+    /// Recorded only while audit logging is on (`audit.enabled`, default
+    /// true): with it off there is no trail to write to, and a run whose
+    /// audit file cannot be opened says so on stderr.
     #[arg(long, global = true)]
     pub yes: bool,
 

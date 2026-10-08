@@ -127,19 +127,60 @@ tests and a serialisation test.
   operator declined) returned `CommandDenied` with no audit call either.
   Structural, not a missing line: the gate ran 28 lines before the
   `ToolContext` was built, so at the moment of the decision no `AuditLogger`
-  existed. `run_tool` now creates **one** logger and **one** writer task per
-  invocation *above* the gate, and every path — the gate's two refusals, the
-  daemon fast path, the in-process path — drains it through `finish_audit`
-  before returning. The gate itself did **not** move down to the context:
-  the daemon branch ends in a `return`, so a gate placed after it would
-  never be reached by a call a live daemon serves, which is exactly the
-  2026-08-31 regression this release fixed.
+  existed. The gate now **decides without writing** — `decide_destructive`
+  returns a `GateDecision` value, and `apply_gate_decision` records it and
+  turns a refusal into an error — so the decision is taken at the top of
+  `run_tool`, before every branch, while the logger is created only for a
+  call that produced a decision to record. A decision that is taken and not
+  recorded is no longer expressible: the `match` is exhaustive and `NotGated`
+  is the only arm that writes nothing. The gate itself did **not** move down
+  to where the context is built: the daemon branch ends in a `return`, so a
+  gate placed after it would never be reached by a call a live daemon serves,
+  which is exactly the 2026-08-31 regression this release fixed. That
+  ordering is now pinned by a test that stands up a stub daemon on
+  `$XDG_RUNTIME_DIR/bridge-mcp.sock` and checks the gate still refuses.
 
-  Two accepted costs of that ordering: `bridge-mcp tool` now opens the audit
-  file even when a daemon serves the call (so the CLI process and the daemon
-  can both append to it, one line each, as they already could), and a
-  refusal waits for the writer to drain — bounded by `finish_audit`'s
-  existing 2 s timeout.
+  **All five of the gate's exits are covered**, including the one this change
+  found: a prompt whose answer cannot be read off stdin returns
+  `BridgeError::Io` and used to refuse without writing anything. It is now
+  recorded as a denial while keeping its own error kind, so an unreadable
+  stdin does not report as a security denial's exit code.
+
+  **The line carries the call's arguments, bounded, and the bound is
+  visible.** Any single argument value over `GATE_AUDIT_MAX_VALUE_CHARS`
+  (256 characters) is replaced by `<elided: N chars>`, and the whole
+  operation string is cut at `GATE_AUDIT_MAX_OPERATION_CHARS` (2048) with
+  `<truncated: N chars total>`. Without it,
+  `--yes tool ssh_file_write … content=<400 KB>` wrote a 400 KB
+  `command_confirmed` line carrying the whole file — 250 such calls fill a
+  100 MB archive, any JSONL consumer with a line-length bound breaks, and it
+  defeated a deliberate exclusion, since that handler's own event is
+  `SFTP_WRITE <path>` with no content at all. The rule is a size rule rather
+  than a list of content-bearing field names on purpose: the gate sees an
+  opaque JSON object for any of 476 tools, so a name list would leak in
+  silence the first time a payload was called something else.
+
+  Costs, and one that was measured and then removed: the audit wiring is
+  built before the daemon branch only for a call the gate decided about. Built
+  for every call it cost the daemon fast path **391 ms in debug** (74 ms ->
+  465 ms; ~332 ms of it two `Sanitizer`s at 70 patterns, measured by rerunning
+  with `security.sanitize.enabled: false` at 133 ms) — on a path that exists
+  to save a ~95 ms handshake, for the 431 of 476 tools that are not
+  destructive and can never produce a gate line. What remains: a destructive
+  call now opens the audit file even when a daemon serves it, and its refusal
+  waits for the writer to drain, bounded by the existing 2 s timeout.
+
+  **Two processes now append to one `audit.log` on a destructive call** (the
+  CLI writes the gate line, the daemon writes the execution line). Appends of
+  one line interleave cleanly; **rotation does not** — two writers that
+  rename the live file race, and `audit.max_size_mb` is what triggers that.
+  The CLI's writer rotates on its own byte counter, seeded from the file's
+  length at open.
+
+  `--yes`'s decision also **changed `tracing` level, from WARN to INFO**: it
+  is now emitted by the audit sink like every other audit line. The CLI's
+  default filter is `info`, so it is still on stderr, but `RUST_LOG=warn` no
+  longer shows it.
 
   One reading consequence, from a limitation that is unchanged: the gate runs
   **before** the blacklist, so a blacklisted destructive command is confirmed
@@ -155,17 +196,39 @@ tests and a serialisation test.
   mechanism. A trail of refusals alone cannot distinguish a destructive call
   that ran *after* the gate from one that ran without ever meeting it, and
   the second is precisely what the CLI did before 2026-08-31 on the default
-  configuration; with this line, its absence is the signal. Like
-  `log_denied`, it writes **no history entry**: nothing ran, and
-  `HistoryEntry::exit_code` is a non-optional `u32`. `host` is the call's
-  `host` argument when it has one and `NO_HOST` otherwise — at the gate the
-  host is an unresolved JSON argument, and some destructive tools take none.
+  configuration. Like `log_denied`, it writes **no history entry**: nothing
+  ran, and `HistoryEntry::exit_code` is a non-optional `u32`. `host` is the
+  call's `host` argument when it has one and `NO_HOST` otherwise — at the
+  gate the host is an unresolved JSON argument, and 3 of the 45 destructive
+  tools declare no `host` at all.
 
-  **Not covered by a test:** the arm where an operator types something other
-  than `y` at the prompt. It needs a TTY on stdin, which no test in this
-  repo has; the three branches that decide without asking — `--yes`, no
-  terminal, policy off — are pinned, in `cli::runner`'s unit tests on the
-  channel and in `tests/cli_exit_code.rs` on the file a real process wrote.
+  **A missing `command_confirmed` line does not mean a bypassed gate.** The
+  MCP server's own destructive gate writes **no** audit event today, and the
+  CLI, the daemon and the MCP server all append to the same file, so on a
+  shared trail the absence only means "this call did not come through the CLI
+  gate". The inference holds for CLI-served calls and nowhere else.
+
+  **Recorded only while audit logging is on.** With `audit.enabled: false`
+  there is no trail; and a run whose `audit.path` cannot be opened used to
+  fall back to no audit **in silence**, so it looked exactly like a run that
+  was audited. It now warns on stderr ("THIS RUN IS NOT AUDITED").
+
+  **(lib API, same entry) `ExecuteCommandUseCase::log_denied` now redacts
+  `command` before logging**, like the five entry points beside it. It was
+  the only one that did not, and the asymmetry leaked: the use case's
+  sanitizer carries the legacy `security.sanitize_patterns` while the audit
+  logger's own sanitizer is built from `security.sanitize` alone, so a token
+  matched **only** by a legacy pattern reached the denial line in clear next
+  to a masked confirmation line. Visible only with a non-empty
+  `sanitize_patterns` (empty by default). The root asymmetry — the audit
+  sink's sanitizer not being legacy-aware, which still affects the 16
+  handlers that call `AuditLogger::log` directly — is left alone here.
+
+  **Not covered by a test:** nothing now, for the gate's own branches. The
+  prompt's answer is mapped by a pure `decision_from_prompt_answer`, which is
+  tested for both answers, so the human-confirmation line is pinned without a
+  TTY; what no test exercises is `IsTerminal` returning true, i.e. the prompt
+  being printed and read at all.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
@@ -377,9 +440,12 @@ tests and a serialisation test.
   result body and no `outputSchema` changes; the server separately copies the
   code into `_meta` (see "Added").
 
-- **`ExecuteCommandUseCase::process_success_for_tool` takes a new
+- **`ExecuteCommandUseCase::process_success` takes a new
   `reduction: &[&'static str]` parameter.** Existing callers must pass the
-  reduction params actually used, or `&[]`.
+  reduction params actually used, or `&[]`. (This entry named a
+  `process_success_for_tool`; no such function exists in any tagged release —
+  checked, `git show v3.0.0` has zero occurrences — so the migration
+  instruction pointed at a symbol a caller could not find.)
 
 - **`ssh_session_exec` refuses a command whose top-level word is `exit`**,
   returning an invalid-request error (CLI exit 1) instead of running it. It used

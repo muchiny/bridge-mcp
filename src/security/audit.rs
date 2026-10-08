@@ -93,8 +93,16 @@ pub enum CommandResult {
     /// point of the variant.** A trail that recorded refusals alone could not
     /// tell a destructive call that ran *after* the gate from one that ran
     /// without ever meeting it — which is precisely what the CLI did until
-    /// 2026-08-31, on the default configuration. With this line present, its
-    /// absence on a destructive call is itself the signal.
+    /// 2026-08-31, on the default configuration.
+    ///
+    /// **It does not follow that a missing line means a bypassed gate**, and
+    /// the bound belongs here because this doc-comment opens by saying the
+    /// writer is the CLI: the MCP server's own destructive gate
+    /// (`check_destructive_elicitation`) writes no audit event at all today,
+    /// and the CLI, the daemon and the MCP server append to the **same**
+    /// `audit.log`. On a shared trail, a destructive line with no
+    /// `command_confirmed` beside it means "this call did not come through
+    /// the CLI gate". The inference is sound for CLI-served calls only.
     Confirmed { by: String },
 }
 

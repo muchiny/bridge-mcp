@@ -199,8 +199,19 @@ impl ExecuteCommandUseCase {
     /// at all. An absent name proved nothing; it only meant a caller had
     /// not bothered.
     pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
+        // Same redaction as `process_success`, `log_failure`, `log_state_change`
+        // and `log_confirmed` — see `process_success`'s comment. This was the
+        // one entry point that did NOT pre-redact, and the asymmetry leaked:
+        // `self.sanitizer` carries the legacy `security.sanitize_patterns`
+        // while the logger's own sanitizer is built from `security.sanitize`
+        // alone, so a token matched only by a legacy pattern reached the
+        // denial line in clear while the confirmation line next to it was
+        // masked. A refusal is the line this gate exists to write; it must not
+        // be the one that leaks.
+        let redacted = self.sanitizer.sanitize(command);
+
         self.audit_logger
-            .log(tool, AuditEvent::denied(host, command, reason));
+            .log(tool, AuditEvent::denied(host, &redacted, reason));
     }
 
     /// Log a confirmation gate letting a destructive call through, recording
@@ -215,10 +226,19 @@ impl ExecuteCommandUseCase {
     /// asked for**: a trail of refusals alone cannot distinguish a
     /// destructive call that ran *after* a confirmation from one that ran
     /// without ever meeting the gate, and the second is exactly what the CLI
-    /// did until 2026-08-31 under the default configuration. Recording the
-    /// decision makes its absence on a destructive call the signal, and it is
-    /// what `--yes`'s own help text promises ("the choice is recorded in the
-    /// audit log").
+    /// did until 2026-08-31 under the default configuration. It is also what
+    /// `--yes`'s own help text promises ("the choice is recorded in the audit
+    /// log").
+    ///
+    /// **The absence of such a line proves nothing on its own, and the bound
+    /// is worth stating because the obvious reading is wrong.** Only the
+    /// CLI's gate (`cli::runner::decide_destructive`) calls this. The MCP
+    /// server's own destructive gate (`check_destructive_elicitation`) writes
+    /// **no** audit event today, and the CLI, the daemon and the MCP server
+    /// all append to the same `audit.log` — so on a shared trail a
+    /// destructive line with no `command_confirmed` beside it means "this
+    /// call did not come through the CLI gate", not "the gate was bypassed".
+    /// The inference holds for CLI-served calls and for nothing else.
     ///
     /// **No history entry**, for the reason given at length on
     /// [`Self::log_state_change`]: `HistoryEntry::exit_code` is a

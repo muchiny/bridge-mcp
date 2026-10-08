@@ -741,6 +741,40 @@ pub async fn run_config_diff(config: Arc<Config>, json_output: bool) -> Result<(
 /// before the process exits, or every event sent through the returned
 /// context's audit logger is silently dropped when it goes out of scope.
 fn create_context_with_audit(config: Arc<Config>) -> (ToolContext, Option<AuditWriterTask>) {
+    let (wiring, audit_task) = create_audit_wiring(&config);
+    (create_context_from_wiring(config, &wiring), audit_task)
+}
+
+/// The audit half of a CLI invocation: the single [`AuditLogger`] and the
+/// pieces needed to write through it, and nothing else.
+///
+/// It is split out of [`create_context_with_audit`] because the destructive
+/// gate has to record its decision **before** the daemon branch, and building
+/// the whole [`ToolContext`] there made every call pay for parts only the
+/// in-process path uses. Measured on the daemon fast path, debug: 74 ms before
+/// the gate was audited, 465 ms with the full context built up front, of which
+/// ~332 ms is the two `Sanitizer`s at 70 patterns each (the same run with
+/// `security.sanitize.enabled: false` takes 133 ms). The fast path exists to
+/// save a ~95 ms handshake, so `run_tool` builds this only for a call the gate
+/// actually decided about.
+///
+/// Every field is handed to [`create_context_from_wiring`] afterwards, so a
+/// gated call that falls through to the in-process path builds each of them
+/// exactly once — there is never a second `AuditLogger`, and never a second
+/// writer task opening the same file.
+struct AuditWiring {
+    logger: Arc<AuditLogger>,
+    use_case: Arc<ExecuteCommandUseCase>,
+    validator: Arc<CommandValidator>,
+    sanitizer: Arc<Sanitizer>,
+    history: Arc<CommandHistory>,
+}
+
+/// Build the [`AuditWiring`] and the writer task it sends to.
+///
+/// The caller must drain the writer — see [`finish_audit_wiring`] — or every
+/// event is dropped when the process exits.
+fn create_audit_wiring(config: &Arc<Config>) -> (AuditWiring, Option<AuditWriterTask>) {
     let validator = Arc::new(CommandValidator::new(&config.security));
     let known_secrets = config.collect_secret_values();
     let sanitizer = Arc::new(
@@ -755,12 +789,21 @@ fn create_context_with_audit(config: Arc<Config>) -> (ToolContext, Option<AuditW
     let audit_sanitizer =
         Sanitizer::from_config(&config.security.sanitize).with_known_secrets(&known_secrets);
     let (audit_logger, audit_task) =
-        AuditLogger::new_with_sanitizer(&config.audit, audit_sanitizer)
-            .unwrap_or_else(|_| (AuditLogger::disabled(), None));
+        AuditLogger::new_with_sanitizer(&config.audit, audit_sanitizer).unwrap_or_else(|e| {
+            // This used to fall back in silence, so a run whose audit file
+            // could not be opened looked exactly like a run that was audited
+            // — including the destructive gate's decision, which the `--yes`
+            // help text promises is recorded. An unwritable trail is itself
+            // worth a line on stderr.
+            warn!(
+                path = %config.audit.path.display(),
+                error = %e,
+                "audit log could not be opened; THIS RUN IS NOT AUDITED"
+            );
+            (AuditLogger::disabled(), None)
+        });
     let audit_logger = Arc::new(audit_logger);
     let history = Arc::new(CommandHistory::new(&HistoryConfig::default()));
-    let connection_pool = Arc::new(ExecutorRouter::with_defaults());
-    let rate_limiter = Arc::new(RateLimiter::new(config.limits.rate_limit_per_second));
 
     let execute_use_case = Arc::new(ExecuteCommandUseCase::new(
         Arc::clone(&validator),
@@ -769,21 +812,36 @@ fn create_context_with_audit(config: Arc<Config>) -> (ToolContext, Option<AuditW
         Arc::clone(&history),
     ));
 
+    (
+        AuditWiring {
+            logger: audit_logger,
+            use_case: execute_use_case,
+            validator,
+            sanitizer,
+            history,
+        },
+        audit_task,
+    )
+}
+
+/// Finish the [`ToolContext`] from an [`AuditWiring`] already built, reusing
+/// every piece rather than constructing a second one.
+fn create_context_from_wiring(config: Arc<Config>, wiring: &AuditWiring) -> ToolContext {
+    let connection_pool = Arc::new(ExecutorRouter::with_defaults());
+    let rate_limiter = Arc::new(RateLimiter::new(config.limits.rate_limit_per_second));
     let session_manager = Arc::new(SessionManager::new(config.sessions.clone()));
 
-    let ctx = ToolContext::new(
+    ToolContext::new(
         config,
-        validator,
-        sanitizer,
-        audit_logger,
-        history,
+        Arc::clone(&wiring.validator),
+        Arc::clone(&wiring.sanitizer),
+        Arc::clone(&wiring.logger),
+        Arc::clone(&wiring.history),
         connection_pool,
-        execute_use_case,
+        Arc::clone(&wiring.use_case),
         rate_limiter,
         session_manager,
-    );
-
-    (ctx, audit_task)
+    )
 }
 
 /// Test helper: the production entry points use `create_context_with_audit`.
@@ -799,6 +857,19 @@ fn create_context(config: Arc<Config>) -> ToolContext {
 /// abandoned with a warning rather than hanging the CLI.
 async fn finish_audit(ctx: ToolContext, writer: Option<tokio::task::JoinHandle<()>>) {
     drop(ctx);
+    drain_audit_writer(writer).await;
+}
+
+/// [`finish_audit`] for the gated path, where the senders are held by an
+/// [`AuditWiring`] instead of a [`ToolContext`]. Any context built from the
+/// wiring must already have been dropped, or its own clone of the logger keeps
+/// the writer alive until the timeout.
+async fn finish_audit_wiring(wiring: AuditWiring, writer: Option<tokio::task::JoinHandle<()>>) {
+    drop(wiring);
+    drain_audit_writer(writer).await;
+}
+
+async fn drain_audit_writer(writer: Option<tokio::task::JoinHandle<()>>) {
     if let Some(handle) = writer
         && tokio::time::timeout(std::time::Duration::from_secs(2), handle)
             .await
@@ -1724,91 +1795,146 @@ pub async fn run_tool(
         ))
     };
 
-    // One audit logger and one writer task per invocation, created here —
-    // ABOVE the destructive gate, and therefore above the daemon branch. The
-    // gate records the decision it takes (`--yes`, a prompt, a refusal), and
-    // it had no logger to record it with: it ran 28 lines before the context
-    // was built, so `--yes`'s promise that "the choice is recorded in the
-    // audit log" was kept by a `tracing::warn!` on stderr, which is not
-    // `audit.path`.
+    // THE DESTRUCTIVE GATE'S DECISION IS TAKEN HERE, before every branch
+    // below, because which path serves a call is an accident of whether a
+    // daemon happens to be up — and that used to decide whether a destructive
+    // tool was refused or ran unchallenged. The daemon path is refused
+    // server-side (the CLI declares `clientCapabilities: {}`, fail-closed);
+    // the direct path called the registry and never met the gate at all. Same
+    // config, same command, opposite outcome, with the default being the
+    // unguarded one. That was the 2026-08-31 regression, and nothing below
+    // may be allowed to reopen it.
     //
-    // Hoisting the logger rather than lowering the gate is the whole point:
-    // see the gate's own comment below for what moving it would reopen. The
-    // cost is accepted — the CLI now opens the audit file even when a daemon
-    // serves the call, and a refusal waits for the writer to drain.
-    let (ctx, audit_task) = create_context_with_audit(Arc::clone(&config));
+    // `decide_destructive` only *decides*. It writes nothing, which is why it
+    // can run before any logger exists: the decision is a value, and the
+    // caller records it. A decision taken and not recorded is therefore not
+    // expressible here — the `match` in `apply_gate_decision` is exhaustive,
+    // and `NotGated` is the only arm that writes nothing.
+    let decision = decide_destructive(tool_name, args.as_ref(), assume_yes, &config);
+
+    if matches!(decision, GateDecision::NotGated) {
+        // Nothing to record before the daemon branch, so this keeps the shape
+        // the CLI had before the gate was audited: no audit wiring until the
+        // in-process path actually needs it. It matters because 431 of the 476
+        // tools are not destructive and can never produce a gate line, while
+        // building the wiring up front cost them 391 ms on the daemon fast
+        // path (measured, debug: 74 ms -> 465 ms) — a path that exists to save
+        // a ~95 ms handshake. 85% of that is two `Sanitizer`s at 70 patterns.
+        return run_ungated_tool(&registry, tool_name, args, &config, json_output).await;
+    }
+
+    // One audit logger and one writer task for this invocation, created above
+    // the daemon branch because the decision above has to be recorded and
+    // `AuditLogger::log` ends in `let _ = sender.send(event)` — the writer
+    // task dies with the process, so every path has to reach `finish_audit`.
+    // Only the 45 destructive tools pay for this.
+    let (wiring, audit_task) = create_audit_wiring(&config);
     let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
-    let outcome =
-        gate_then_run_tool(&registry, tool_name, args, assume_yes, &ctx, json_output).await;
-    finish_audit(ctx, audit_writer).await;
+    let outcome = run_gated_tool(
+        &registry,
+        tool_name,
+        args,
+        decision,
+        &config,
+        &wiring,
+        json_output,
+    )
+    .await;
+    finish_audit_wiring(wiring, audit_writer).await;
     outcome
 }
 
-/// The gate and both execution paths, split out of `run_tool` so that every
-/// early return — a refusal by the gate, a response served by the daemon —
-/// passes through `finish_audit` and the gate's audit line survives the
-/// process exit.
+/// Forward to a running daemon, if there is one.
 ///
-/// Without this split the refusal arms would `?` straight out of `run_tool`,
-/// and `AuditLogger::log` ends in `let _ = sender.send(event)`: the writer
-/// task dies with the process and the event is lost.
-async fn gate_then_run_tool(
+/// `Ok(Some(code))` means a daemon answered and its response has been printed.
+/// `Ok(None)` means no daemon was reachable and the caller must run the tool
+/// in-process.
+///
+/// The fast path exists because it reuses the daemon's shared SSH connection
+/// pool and saves the ~95 ms handshake on every invocation after the first.
+///
+/// The fallback is narrower than it looks: only a failure to REACH the daemon
+/// (absent socket, connection refused) returns `Ok(None)` and drops to the
+/// stateless path. A daemon that answers with a JSON-RPC *error* answers
+/// `Ok(Some(..))`, and that error is what the user sees. That is deliberate —
+/// a tool that failed on the daemon would fail in-process too, and silently
+/// re-running it would hide the first failure — but it is why a malformed
+/// request envelope surfaced as every `bridge-mcp tool …` returning `-32602`
+/// rather than as a quiet fallback.
+///
+/// # Errors
+///
+/// Propagates a failure to talk to a daemon that *was* reachable.
+async fn forward_to_daemon(
+    tool_name: &str,
+    args: Option<&serde_json::Value>,
+    json_output: bool,
+) -> Result<Option<i32>> {
+    let daemon_socket = crate::daemon::default_socket_path();
+    if !daemon_socket.exists() {
+        return Ok(None);
+    }
+    let forwarded = try_forward_to_daemon(
+        &daemon_socket,
+        tool_name,
+        args.cloned().unwrap_or(serde_json::Value::Null),
+    )
+    .await?;
+    match forwarded {
+        Some(response) => print_daemon_response(&response, json_output).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// A call the gate took a decision about: the decision is recorded first, and
+/// every early return below still passes through the caller's `finish_audit_
+/// wiring`, so the line survives the process exit.
+async fn run_gated_tool(
     registry: &crate::mcp::registry::ToolRegistry,
     tool_name: &str,
     args: Option<serde_json::Value>,
-    assume_yes: bool,
-    ctx: &ToolContext,
+    decision: GateDecision,
+    config: &Arc<Config>,
+    wiring: &AuditWiring,
     json_output: bool,
 ) -> Result<i32> {
-    // The destructive gate. This runs before either execution path, because
-    // which one serves a call is an accident of whether a daemon happens to be
-    // up — and that decided whether a destructive tool was refused or ran
-    // unchallenged. The daemon path is refused server-side (the CLI declares
-    // `clientCapabilities: {}`, and the check is fail-closed); the direct path
-    // called the registry and never met the gate at all. Same config, same
-    // command, opposite outcome, with the default being the unguarded one.
-    //
-    // So the gate does NOT move down to where the context is built: the
-    // daemon branch a few lines below ends in a `return`, and a gate placed
-    // after it would never be reached by a call a live daemon serves — the
-    // 2026-08-31 regression, restored. The logger comes up to the gate
-    // instead; `run_tool` creates it and `ctx.execute_use_case` carries it
-    // here.
-    confirm_destructive(
+    apply_gate_decision(
+        decision,
+        &wiring.use_case,
         tool_name,
-        args.as_ref(),
-        assume_yes,
-        &ctx.config,
-        &ctx.execute_use_case,
+        gate_host(args.as_ref()),
+        &audited_operation(tool_name, args.as_ref()),
     )?;
 
-    // Fast path: if the local daemon is running, forward this tool call
-    // to it over the Unix socket. This reuses the daemon's shared SSH
-    // connection pool and saves the ~95 ms handshake on every invocation
-    // after the first.
-    //
-    // The fallback is narrower than it looks: only a failure to REACH the
-    // daemon (absent socket, connection refused) returns `Ok(None)` and drops
-    // to the stateless path. A daemon that answers with a JSON-RPC *error*
-    // answers `Ok(Some(..))`, and that error is what the user sees. That is
-    // deliberate — a tool that failed on the daemon would fail in-process too,
-    // and silently re-running it would hide the first failure — but it is why
-    // a malformed request envelope surfaced as every `bridge-mcp tool …`
-    // returning `-32602` rather than as a quiet fallback.
-    let daemon_socket = crate::daemon::default_socket_path();
-    if daemon_socket.exists()
-        && let Some(forwarded) = try_forward_to_daemon(
-            &daemon_socket,
-            tool_name,
-            args.clone().unwrap_or(serde_json::Value::Null),
-        )
-        .await?
-    {
-        return print_daemon_response(&forwarded, json_output);
+    if let Some(code) = forward_to_daemon(tool_name, args.as_ref(), json_output).await? {
+        return Ok(code);
     }
 
-    // Slow path: stateless in-process execution.
-    run_tool_in_context(registry, tool_name, args, ctx, json_output).await
+    // Slow path: stateless in-process execution, reusing the logger that
+    // already recorded the gate decision — exactly one per invocation.
+    let ctx = create_context_from_wiring(Arc::clone(config), wiring);
+    run_tool_in_context(registry, tool_name, args, &ctx, json_output).await
+}
+
+/// A call the gate took no decision about, so there is nothing to record
+/// before the daemon branch and the audit wiring is built only if the
+/// in-process path is reached.
+async fn run_ungated_tool(
+    registry: &crate::mcp::registry::ToolRegistry,
+    tool_name: &str,
+    args: Option<serde_json::Value>,
+    config: &Arc<Config>,
+    json_output: bool,
+) -> Result<i32> {
+    if let Some(code) = forward_to_daemon(tool_name, args.as_ref(), json_output).await? {
+        return Ok(code);
+    }
+
+    let (ctx, audit_task) = create_context_with_audit(Arc::clone(config));
+    let audit_writer = audit_task.map(|task| tokio::spawn(task.run()));
+    let outcome = run_tool_in_context(registry, tool_name, args, &ctx, json_output).await;
+    finish_audit(ctx, audit_writer).await;
+    outcome
 }
 
 /// The in-process execution `run_tool` used to inline, split out so every
@@ -1854,6 +1980,134 @@ async fn run_tool_in_context(
     Ok(exit_code)
 }
 
+/// `by` on the `command_confirmed` line when the `--yes` flag answered.
+///
+/// A constant rather than a literal at the call site because this value and
+/// [`CONFIRMED_BY_PROMPT`] are the whole point of
+/// [`crate::security::CommandResult::Confirmed`]: they are what tells "a
+/// script flag confirmed this" from "a human at a terminal confirmed this",
+/// and a free-form `String` at two call sites would let the two drift.
+const CONFIRMED_BY_FLAG: &str = "--yes";
+
+/// `by` on the `command_confirmed` line when a human answered the prompt.
+/// See [`CONFIRMED_BY_FLAG`].
+const CONFIRMED_BY_PROMPT: &str = "terminal prompt";
+
+/// Longest a single argument value may be before [`audited_operation`]
+/// replaces it with its length.
+///
+/// **This exists because the gate's audit line would otherwise persist the
+/// call's arguments in full.** `--yes tool ssh_file_write … content=<400 KB>`
+/// wrote a 400 KB `command_confirmed` line carrying the whole file, which 250
+/// calls turn into a 100 MB archive and which breaks any JSONL consumer with a
+/// line-length bound. Worse, it defeated a deliberate exclusion: the handler's
+/// own audit event for that write is `SFTP_WRITE <path>` and carries no
+/// content at all, precisely so the trail does not become a copy of the files
+/// it records.
+///
+/// 256 characters leaves every host alias, path, id, unit name and ordinary
+/// shell command intact — the values that make a line worth reading — while no
+/// file body survives it. A value over the bound is replaced by
+/// `<elided: N chars>`, which states what was dropped: a silent truncation
+/// would be another half-true line, which is the fault this whole change
+/// exists to remove.
+const GATE_AUDIT_MAX_VALUE_CHARS: usize = 256;
+
+/// Hard ceiling on the whole operation string, after per-value elision.
+///
+/// Per-value elision alone does not bound the line: a call with hundreds of
+/// short arguments stays under [`GATE_AUDIT_MAX_VALUE_CHARS`] on every one of
+/// them. What goes past this is cut and marked `<truncated: N chars total>`.
+const GATE_AUDIT_MAX_OPERATION_CHARS: usize = 2048;
+
+/// What the destructive gate decided. **A value, not an effect** — see
+/// [`decide_destructive`] for why that matters.
+#[derive(Debug)]
+enum GateDecision {
+    /// The gate took no decision: the policy is off, or the tool is not
+    /// annotated destructive. Nothing is recorded, and nothing should be.
+    NotGated,
+    /// The call may proceed. `by` names what answered:
+    /// [`CONFIRMED_BY_FLAG`] or [`CONFIRMED_BY_PROMPT`].
+    Confirmed { by: &'static str },
+    /// The call is refused. `reason` is both the audit line's reason and the
+    /// text the caller sees on stderr — one string, so the two cannot differ.
+    Denied { reason: String },
+    /// The prompt was shown but its answer could not be read. Refused, and
+    /// recorded as a refusal, but the error keeps its I/O kind so the exit
+    /// code is not silently reclassified as a security denial.
+    Unreadable {
+        reason: String,
+        error: std::io::Error,
+    },
+}
+
+/// The host to put on a gate event: the call's `host` argument when it has
+/// one, [`crate::security::NO_HOST`] otherwise.
+///
+/// At the gate the host is an unresolved JSON argument and nothing more — the
+/// alias is not looked up until the handler runs, which is why the gate can
+/// refuse a call naming a host that does not exist. Three of the 45
+/// destructive tools (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`,
+/// `ssh_awx_workflow_cancel`) declare no `host` at all, and none declares a
+/// plural `hosts`, so the sentinel is the exact answer here and not a
+/// fallback for a case that cannot happen.
+fn gate_host(args: Option<&serde_json::Value>) -> &str {
+    args.and_then(|a| a.get("host"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(crate::security::NO_HOST)
+}
+
+/// The `command` field for a gate event: the tool and its arguments, bounded.
+///
+/// No command has been built yet — the handler does that — so the line
+/// carries the *operation*, in the shape `AuditEvent::tagged` documents for an
+/// event that ran nothing. The bounds are
+/// [`GATE_AUDIT_MAX_VALUE_CHARS`] per value and
+/// [`GATE_AUDIT_MAX_OPERATION_CHARS`] overall, both marked where they bite.
+///
+/// The rule is a size rule on purpose, not a list of content-bearing field
+/// names: the gate sees an opaque JSON object for any of 476 tools, so a name
+/// list (`content`, `body`, `script`, `playbook`, …) would have to be kept in
+/// step with every tool added and would leak in silence the first time a
+/// payload was called something else. A size rule cannot rot that way.
+fn audited_operation(tool_name: &str, args: Option<&serde_json::Value>) -> String {
+    let bounded = match args {
+        None => serde_json::Value::Object(serde_json::Map::new()),
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), elide_oversized(v)))
+                .collect(),
+        ),
+        Some(other) => elide_oversized(other),
+    };
+    let rendered = serde_json::to_string(&bounded).unwrap_or_else(|_| "{}".to_string());
+    let operation = format!("{tool_name} {rendered}");
+    let total = operation.chars().count();
+    if total <= GATE_AUDIT_MAX_OPERATION_CHARS {
+        return operation;
+    }
+    let kept: String = operation
+        .chars()
+        .take(GATE_AUDIT_MAX_OPERATION_CHARS)
+        .collect();
+    format!("{kept} <truncated: {total} chars total>")
+}
+
+/// Replace one argument value with its length when it is over
+/// [`GATE_AUDIT_MAX_VALUE_CHARS`]. Applies to arrays and objects too, by their
+/// serialized length, so a nested payload is bounded like a flat one.
+fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
+    let len = match value {
+        serde_json::Value::String(s) => s.chars().count(),
+        other => serde_json::to_string(other).map_or(0, |s| s.chars().count()),
+    };
+    if len <= GATE_AUDIT_MAX_VALUE_CHARS {
+        return value.clone();
+    }
+    serde_json::Value::String(format!("<elided: {len} chars>"))
+}
+
 /// Ask before running a tool annotated `destructiveHint`.
 ///
 /// `security.require_elicitation_on_destructive` is enforced by the MCP server
@@ -1867,95 +2121,139 @@ async fn run_tool_in_context(
 /// advance that it is intended. Refusing by default matches the server's
 /// fail-closed posture; `--yes` keeps the scripted case possible and explicit.
 ///
-/// **Every decision this function takes is written to `audit.path`**, through
-/// `audit` — `command_confirmed` when it lets the call through, naming what
-/// answered, and `command_denied` when it refuses, with the same reason the
-/// caller is about to read on stderr. That is what `--yes`'s help text
-/// promises, and until this had a logger the promise was kept by a
-/// `tracing::warn!` that reaches stderr and never the audit file. The two
-/// early returns above the first decision — the policy switched off, a tool
-/// that is not destructive — write nothing, on purpose: the gate took no
-/// decision, and a destructive call with no `command_confirmed` line is how a
-/// reader sees that it never met the gate.
+/// **This function decides and returns; it does not log and does not error.**
+/// That is deliberate, and it is what lets the decision be taken before any
+/// `AuditLogger` exists — hence before the daemon branch, which is the
+/// placement the 2026-08-31 regression turned on. [`apply_gate_decision`]
+/// records the decision and turns a refusal into an error, and its `match` is
+/// exhaustive, so a new outcome cannot be added here and silently go
+/// unrecorded. [`GateDecision::NotGated`] is the only outcome that writes
+/// nothing, and it is not a decision.
 ///
-/// `audit` is created by `run_tool` **before** this is called, which is also
-/// why the gate itself does not move: see the comment at the call site.
-///
-/// `host` on the event is the call's `host` argument when it has one, and
-/// [`crate::security::NO_HOST`] otherwise — at this point the host is only a
-/// JSON argument, unresolved, and some destructive tools take none at all.
-///
-/// # Errors
-///
-/// Returns [`BridgeError::CommandDenied`] when the operator declines, or when
-/// stdin is not a terminal and `--yes` was not given.
-fn confirm_destructive(
+/// All five exits are covered: the policy off and a non-destructive tool (both
+/// `NotGated`), `--yes`, a prompt answered, a prompt declined, and a prompt
+/// whose answer could not be read.
+fn decide_destructive(
     tool_name: &str,
     args: Option<&serde_json::Value>,
     assume_yes: bool,
     config: &Config,
-    audit: &ExecuteCommandUseCase,
-) -> Result<()> {
+) -> GateDecision {
     use std::io::{IsTerminal, Write};
 
     if !config.security.require_elicitation_on_destructive {
-        return Ok(());
+        return GateDecision::NotGated;
     }
     if crate::mcp::registry::tool_annotations(tool_name).destructive_hint != Some(true) {
-        return Ok(());
+        return GateDecision::NotGated;
     }
-
-    // Rendered for both the prompt and the refusal: whoever has to decide, or
-    // has to read why a script stopped, needs to see what would have run.
-    let rendered = args
-        .and_then(|a| serde_json::to_string(a).ok())
-        .unwrap_or_else(|| "{}".to_string());
-    // The operation the gate was asked about. No command has been built yet —
-    // the handler does that — so the audit line carries the tool and the
-    // arguments, in the shape `AuditEvent::tagged` documents for an event
-    // that ran nothing. The logger sanitizes it before either sink.
-    let operation = format!("{tool_name} {rendered}");
-    // Unresolved: at the gate the host is a JSON argument and nothing more.
-    let host = args
-        .and_then(|a| a.get("host"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(crate::security::NO_HOST);
 
     if assume_yes {
         // Recorded, not merely allowed: `--yes` is the point at which a human
         // delegated the decision, and the trail now carries it.
-        audit.log_confirmed(tool_name, host, &operation, "--yes");
-        return Ok(());
+        return GateDecision::Confirmed {
+            by: CONFIRMED_BY_FLAG,
+        };
     }
 
     if !std::io::stdin().is_terminal() {
-        let reason = format!(
-            "`{tool_name}` is annotated destructive and stdin is not a terminal, \
-             so there is nobody to confirm with. Pass --yes to confirm in advance, \
-             or set security.require_elicitation_on_destructive: false to disable \
-             this gate entirely."
-        );
-        audit.log_denied(tool_name, host, &operation, &reason);
-        return Err(BridgeError::CommandDenied { reason });
+        return GateDecision::Denied {
+            reason: format!(
+                "`{tool_name}` is annotated destructive and stdin is not a terminal, \
+                 so there is nobody to confirm with. Pass --yes to confirm in advance, \
+                 or set security.require_elicitation_on_destructive: false to disable \
+                 this gate entirely."
+            ),
+        };
     }
 
+    // The prompt shows the arguments in full, unlike the audit line: a
+    // terminal is ephemeral and the person deciding needs to see exactly what
+    // would run. `audited_operation` is what gets persisted.
+    let rendered = args
+        .and_then(|a| serde_json::to_string(a).ok())
+        .unwrap_or_else(|| "{}".to_string());
     eprintln!("\n  DESTRUCTIVE: {tool_name}");
     eprintln!("  {rendered}");
     eprint!("  Proceed? [y/N] ");
     let _ = std::io::stderr().flush();
 
     let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(BridgeError::Io)?;
+    match std::io::stdin().read_line(&mut answer) {
+        // Refused, like a declined prompt — but the error keeps its own kind,
+        // so the exit code of an unreadable stdin does not become a security
+        // denial's.
+        Err(error) => GateDecision::Unreadable {
+            reason: format!(
+                "`{tool_name}` was not confirmed: the answer could not be read from stdin ({error})"
+            ),
+            error,
+        },
+        Ok(_) => decision_from_prompt_answer(tool_name, &answer),
+    }
+}
 
+/// The prompt's answer, mapped to a decision. Split out of
+/// [`decide_destructive`] because that function needs a terminal on stdin and
+/// no test in this repo has one, while this mapping — which is what decides
+/// whether a human confirmed — is pure and testable.
+fn decision_from_prompt_answer(tool_name: &str, answer: &str) -> GateDecision {
     if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
-        audit.log_confirmed(tool_name, host, &operation, "terminal prompt");
-        Ok(())
+        GateDecision::Confirmed {
+            by: CONFIRMED_BY_PROMPT,
+        }
     } else {
-        let reason = format!("`{tool_name}` was not confirmed");
-        audit.log_denied(tool_name, host, &operation, &reason);
-        Err(BridgeError::CommandDenied { reason })
+        GateDecision::Denied {
+            reason: format!("`{tool_name}` was not confirmed"),
+        }
+    }
+}
+
+/// Record the gate's decision, then turn a refusal into the caller's error.
+///
+/// **Every decision is written to `audit.path`** through `audit` —
+/// `command_confirmed` when the call goes through, naming what answered, and
+/// `command_denied` when it is refused, carrying the same reason the caller is
+/// about to read on stderr. That is what `--yes`'s help text promises, and
+/// until the gate had a logger the promise was kept by a `tracing::warn!`,
+/// which reaches stderr and never the audit file.
+///
+/// It is written **only when audit logging is enabled and its file could be
+/// opened**; `create_audit_wiring` warns when it could not, because a run
+/// whose gate decision was not written must not look like one that was.
+///
+/// `host` is the call's `host` argument when it has one and
+/// [`crate::security::NO_HOST`] otherwise — see [`gate_host`]. `operation` is
+/// the bounded rendering from [`audited_operation`], never the raw arguments.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] when the gate refused, or
+/// [`BridgeError::Io`] when the prompt's answer could not be read.
+fn apply_gate_decision(
+    decision: GateDecision,
+    audit: &ExecuteCommandUseCase,
+    tool_name: &str,
+    host: &str,
+    operation: &str,
+) -> Result<()> {
+    match decision {
+        // Not a decision: the policy is off, or the tool is not destructive.
+        // A destructive call with no `command_confirmed` line in the CLI's own
+        // trail is how a reader sees that it never met this gate.
+        GateDecision::NotGated => Ok(()),
+        GateDecision::Confirmed { by } => {
+            audit.log_confirmed(tool_name, host, operation, by);
+            Ok(())
+        }
+        GateDecision::Denied { reason } => {
+            audit.log_denied(tool_name, host, operation, &reason);
+            Err(BridgeError::CommandDenied { reason })
+        }
+        GateDecision::Unreadable { reason, error } => {
+            audit.log_denied(tool_name, host, operation, &reason);
+            Err(BridgeError::Io(error))
+        }
     }
 }
 
@@ -2237,15 +2535,33 @@ mod tests {
         )
         .await;
         let log = std::fs::read_to_string(&audit_path).expect("audit.log exists");
-        let run_line = log
-            .lines()
-            .find(|l| l.contains(r#""event_type":"ssh_exec""#))
-            .unwrap_or_else(|| panic!("the CLI run must persist its audit event, got {log:?}"));
+        let lines: Vec<&str> = log.lines().collect();
+        // Exactly two, in this order: the gate's decision (`--yes` above) and
+        // then the run's own event. Asserting the pair is what makes this
+        // unsatisfiable by either event alone — a single `log.contains(…)`
+        // over the whole file was satisfied by the gate line, which carries
+        // the same tool name and the same host.
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected the gate line and the run line, got {log:?}"
+        );
+        assert!(
+            lines[0].contains(r#""event_type":"command_confirmed""#),
+            "the gate decides first, so its line comes first: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains(r#""event_type":"ssh_exec""#),
+            "the CLI run must persist its own audit event: {:?}",
+            lines[1]
+        );
         // Pin that line to the host this test configured: the `event_type`
         // literal alone would match any command event from any tool.
         assert!(
-            run_line.contains(r#""host":"h""#),
-            "the audit event must record this run's host, got {run_line:?}"
+            lines[1].contains(r#""host":"h""#),
+            "the audit event must record this run's host, got {:?}",
+            lines[1]
         );
     }
 
@@ -3944,11 +4260,12 @@ mod tests {
 
     // ============== destructive gate Tests ==============
     //
-    // The prompt branch needs a terminal on stdin, which a test harness does
-    // not have. Under `cargo test` stdin is never a TTY, so these exercise the
-    // three branches that decide without asking — which are also the three
-    // that decide what a script gets. The fourth, an operator typing `n`, is
-    // stated as untested rather than faked: nothing here can reach it.
+    // Under `cargo test` stdin is never a TTY, so `decide_destructive` can
+    // only reach the branches that decide without asking. The prompt's own
+    // decision is reachable anyway, because mapping the answer is a pure
+    // function (`decision_from_prompt_answer`) and these tests call it: what
+    // stays untested is `IsTerminal` returning true, i.e. the prompt being
+    // printed and read at all.
 
     fn gate_config(require: bool) -> Config {
         let mut config = Config::default();
@@ -3957,25 +4274,51 @@ mod tests {
     }
 
     /// A use case whose audit logger keeps every event it is handed, so these
-    /// tests read the line the gate actually wrote — `event_type`,
+    /// tests read the line that was actually written — `event_type`,
     /// `tool_name`, `host`, the result variant — instead of asserting that
     /// some logging function was called.
+    ///
+    /// The sanitizer is built exactly as `create_audit_wiring` builds it,
+    /// legacy `sanitize_patterns` included: a test whose sanitizer is weaker
+    /// than production's cannot see a leak that production has.
     fn gate_audit(config: &Config) -> (Arc<AuditLogger>, ExecuteCommandUseCase) {
         let logger = Arc::new(AuditLogger::for_test());
         let use_case = ExecuteCommandUseCase::new(
             Arc::new(CommandValidator::new(&config.security)),
-            Arc::new(Sanitizer::from_config(&config.security.sanitize)),
+            Arc::new(Sanitizer::from_config_with_legacy(
+                &config.security.sanitize,
+                &config.security.sanitize_patterns,
+            )),
             Arc::clone(&logger),
             Arc::new(CommandHistory::new(&HistoryConfig::default())),
         );
         (logger, use_case)
     }
 
+    /// Decide, then record, exactly as `run_gated_tool` does — so these tests
+    /// exercise the production pairing of the two halves, not one of them.
+    fn gate(
+        tool_name: &str,
+        args: Option<&serde_json::Value>,
+        assume_yes: bool,
+        config: &Config,
+        audit: &ExecuteCommandUseCase,
+    ) -> Result<()> {
+        let decision = decide_destructive(tool_name, args, assume_yes, config);
+        apply_gate_decision(
+            decision,
+            audit,
+            tool_name,
+            gate_host(args),
+            &audited_operation(tool_name, args),
+        )
+    }
+
     #[test]
     fn destructive_gate_refuses_without_a_terminal() {
         let config = gate_config(true);
         let (_logger, audit) = gate_audit(&config);
-        let err = confirm_destructive(
+        let err = gate(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi", "command": "echo hi"})),
             false,
@@ -3998,7 +4341,7 @@ mod tests {
     fn a_refusal_without_a_terminal_is_written_to_the_audit_trail() {
         let config = gate_config(true);
         let (logger, audit) = gate_audit(&config);
-        let err = confirm_destructive(
+        let err = gate(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi", "command": "rm -rf /tmp/x"})),
             false,
@@ -4032,7 +4375,7 @@ mod tests {
     fn destructive_gate_lets_yes_through() {
         let config = gate_config(true);
         let (_logger, audit) = gate_audit(&config);
-        confirm_destructive(
+        gate(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi"})),
             true,
@@ -4050,7 +4393,7 @@ mod tests {
     fn yes_writes_a_confirmation_naming_the_flag() {
         let config = gate_config(true);
         let (logger, audit) = gate_audit(&config);
-        confirm_destructive(
+        gate(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi", "command": "echo hi"})),
             true,
@@ -4067,12 +4410,112 @@ mod tests {
         assert_eq!(e.host, "pi");
         match &e.result {
             CommandResult::Confirmed { by } => assert_eq!(
-                by, "--yes",
+                by, CONFIRMED_BY_FLAG,
                 "the line must name what answered, so a script flag is not read \
                  as a human at a prompt"
             ),
             r => panic!("a confirmation must audit as Confirmed, got {r:?}"),
         }
+    }
+
+    /// The distinction the `Confirmed` variant exists to carry: a human at a
+    /// prompt is not a script flag. Reached through the pure answer mapping,
+    /// because `decide_destructive` would need a TTY and this is the half
+    /// that decides.
+    #[test]
+    fn a_prompt_answered_yes_writes_a_confirmation_naming_the_prompt() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let decision = decision_from_prompt_answer("ssh_exec", "y\n");
+        apply_gate_decision(decision, &audit, "ssh_exec", "pi", "ssh_exec {}")
+            .expect("`y` confirms");
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert_eq!(events[0].event_type, "command_confirmed");
+        match &events[0].result {
+            CommandResult::Confirmed { by } => {
+                assert_eq!(by, CONFIRMED_BY_PROMPT);
+                assert_ne!(
+                    by, CONFIRMED_BY_FLAG,
+                    "a human answer must not be recorded as the script flag"
+                );
+            }
+            r => panic!("expected Confirmed, got {r:?}"),
+        }
+    }
+
+    /// The fourth outcome, and the one the first round could not reach at
+    /// all: the operator declined.
+    #[test]
+    fn a_prompt_answered_no_writes_a_denial() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let decision = decision_from_prompt_answer("ssh_exec", "n\n");
+        let err = apply_gate_decision(decision, &audit, "ssh_exec", "pi", "ssh_exec {}")
+            .expect_err("anything but yes refuses");
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert_eq!(events[0].event_type, "command_denied");
+        match &events[0].result {
+            CommandResult::Denied { reason } => assert!(
+                err.to_string().contains(reason.as_str()),
+                "the audited reason must be the one the caller is shown: \
+                 audit {reason:?} vs error {err}"
+            ),
+            r => panic!("expected Denied, got {r:?}"),
+        }
+    }
+
+    /// Anything that is not an affirmative is a refusal — including an empty
+    /// line, which is what a bare Enter at `[y/N]` sends.
+    #[test]
+    fn only_an_affirmative_answer_confirms() {
+        for yes in ["y", "Y", "yes", "Yes", " y \n"] {
+            assert!(
+                matches!(
+                    decision_from_prompt_answer("t", yes),
+                    GateDecision::Confirmed {
+                        by: CONFIRMED_BY_PROMPT
+                    }
+                ),
+                "{yes:?} must confirm"
+            );
+        }
+        for no in ["", "\n", "n", "N", "no", "YES PLEASE", "yolo"] {
+            assert!(
+                matches!(
+                    decision_from_prompt_answer("t", no),
+                    GateDecision::Denied { .. }
+                ),
+                "{no:?} must refuse"
+            );
+        }
+    }
+
+    /// The fifth exit, found in review: the prompt was shown but its answer
+    /// could not be read. It refuses — and used to refuse writing nothing —
+    /// while keeping its own error kind, so an unreadable stdin is not
+    /// reported with a security denial's exit code.
+    #[test]
+    fn an_unreadable_answer_is_recorded_as_a_refusal_but_keeps_its_error_kind() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let decision = GateDecision::Unreadable {
+            reason: "`ssh_exec` was not confirmed: the answer could not be read".to_string(),
+            error: std::io::Error::other("stdin went away"),
+        };
+        let err = apply_gate_decision(decision, &audit, "ssh_exec", "pi", "ssh_exec {}")
+            .expect_err("an unread answer must not confirm");
+        assert!(
+            matches!(err, BridgeError::Io(_)),
+            "the error must stay an I/O error, got {err:?}"
+        );
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        assert_eq!(events[0].event_type, "command_denied");
     }
 
     /// The host is only a JSON argument at the gate — unresolved, and absent
@@ -4082,11 +4525,110 @@ mod tests {
     fn a_call_with_no_host_argument_audits_the_no_host_sentinel() {
         let config = gate_config(true);
         let (logger, audit) = gate_audit(&config);
-        let _ = confirm_destructive("ssh_exec", None, false, &config, &audit);
+        let _ = gate("ssh_exec", None, false, &config, &audit);
 
         let events = logger.drain_for_test();
         assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
         assert_eq!(events[0].host, crate::security::NO_HOST);
+    }
+
+    /// A file handed to a destructive tool must not be copied into the trail.
+    /// `ssh_file_write`'s own event is `SFTP_WRITE <path>` for exactly this
+    /// reason, and a gate line carrying the raw arguments defeated it.
+    #[test]
+    fn a_large_argument_value_is_elided_from_the_gate_line() {
+        let config = gate_config(true);
+        let (logger, audit) = gate_audit(&config);
+        let content = "S".repeat(400 * 1024);
+        let args = serde_json::json!({
+            "host": "pi",
+            "path": "/etc/motd",
+            "content": content,
+        });
+        gate("ssh_file_write", Some(&args), true, &config, &audit)
+            .expect("--yes confirms the write");
+
+        let events = logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected exactly one event: {events:?}");
+        let line = &events[0].command;
+        assert!(
+            !line.contains(&content),
+            "the file's content must not reach the trail ({} chars logged)",
+            line.chars().count()
+        );
+        assert!(
+            line.contains("<elided: 409600 chars>"),
+            "the elision must say what was dropped, got {line:?}"
+        );
+        // The values worth reading survive: this is a bound, not a blanket.
+        assert!(
+            line.contains("ssh_file_write") && line.contains("/etc/motd"),
+            "the line must still identify the call, got {line:?}"
+        );
+        assert!(
+            line.chars().count() <= GATE_AUDIT_MAX_OPERATION_CHARS,
+            "the whole line must stay bounded, got {} chars",
+            line.chars().count()
+        );
+    }
+
+    /// Per-value elision alone does not bound the line: many short values
+    /// each pass the per-value test. The overall ceiling is what catches it,
+    /// and it marks where it cut.
+    #[test]
+    fn many_small_values_are_truncated_under_the_overall_ceiling() {
+        let mut map = serde_json::Map::new();
+        for i in 0..500 {
+            map.insert(format!("k{i}"), serde_json::json!("v"));
+        }
+        let args = serde_json::Value::Object(map);
+        let line = audited_operation("ssh_exec", Some(&args));
+        assert!(
+            line.contains("<truncated:") && line.contains("chars total>"),
+            "the truncation must say how much there was, got the tail {:?}",
+            &line[line.len().saturating_sub(60)..]
+        );
+    }
+
+    /// M4: `log_denied` was the one audit entry point that did not pre-redact,
+    /// so a secret matched ONLY by a legacy `sanitize_patterns` entry reached
+    /// the refusal line in clear while the confirmation line beside it was
+    /// masked. The refusal is the line this gate exists to write.
+    ///
+    /// **The bound, measured while writing this test:** `Sanitizer::sanitize`
+    /// skips the whole regex tier when `literal_detector` finds none of the
+    /// built-in `secret_keywords()` in the text — custom and legacy patterns
+    /// included. So the same secret with no keyword near it (`--key WIDGETKEY
+    /// -4242`) is masked on **neither** line, before this fix or after. That
+    /// is a sanitizer limitation, not this gate's, and it is why the payload
+    /// below says `--token`.
+    #[test]
+    fn a_legacy_only_secret_is_masked_in_both_gate_lines() {
+        let mut config = gate_config(true);
+        // Deliberately not a builtin pattern: only the legacy list covers it.
+        config.security.sanitize_patterns = vec!["WIDGETKEY-[0-9]{4}".to_string()];
+        let args = serde_json::json!({"host": "pi", "command": "deploy --token WIDGETKEY-4242"});
+
+        let (denied_logger, denied_audit) = gate_audit(&config);
+        let _ = gate("ssh_exec", Some(&args), false, &config, &denied_audit)
+            .expect_err("no terminal, so refused");
+        let denied = denied_logger.drain_for_test();
+        assert_eq!(denied.len(), 1);
+        assert!(
+            !denied[0].command.contains("WIDGETKEY-4242"),
+            "a refusal must not leak what a confirmation masks, got {:?}",
+            denied[0].command
+        );
+
+        let (confirmed_logger, confirmed_audit) = gate_audit(&config);
+        gate("ssh_exec", Some(&args), true, &config, &confirmed_audit).expect("--yes confirms");
+        let confirmed = confirmed_logger.drain_for_test();
+        assert_eq!(confirmed.len(), 1);
+        assert!(
+            !confirmed[0].command.contains("WIDGETKEY-4242"),
+            "got {:?}",
+            confirmed[0].command
+        );
     }
 
     /// The gate is the CLI's half of `require_elicitation_on_destructive`, so
@@ -4096,7 +4638,7 @@ mod tests {
     fn destructive_gate_honours_the_policy_switch() {
         let config = gate_config(false);
         let (logger, audit) = gate_audit(&config);
-        confirm_destructive(
+        gate(
             "ssh_exec",
             Some(&serde_json::json!({"host": "pi"})),
             false,
@@ -4104,20 +4646,29 @@ mod tests {
             &audit,
         )
         .expect("with the policy off, nothing should be gated");
-        // The negative half of the two assertions above: a gate that wrote a
-        // line unconditionally would satisfy them both. No decision was
-        // taken here, so there is nothing to record.
+        // The negative half of the assertions above: a gate that wrote a line
+        // unconditionally would satisfy them all. No decision was taken here,
+        // so there is nothing to record.
         assert!(
             logger.drain_for_test().is_empty(),
             "a gate that took no decision must write no line"
         );
+        assert!(matches!(
+            decide_destructive(
+                "ssh_exec",
+                Some(&serde_json::json!({"host": "pi"})),
+                false,
+                &config
+            ),
+            GateDecision::NotGated
+        ));
     }
 
     #[test]
     fn destructive_gate_ignores_non_destructive_tools() {
         let config = gate_config(true);
         let (logger, audit) = gate_audit(&config);
-        confirm_destructive(
+        gate(
             "ssh_metrics",
             Some(&serde_json::json!({"host": "pi"})),
             false,
@@ -4129,6 +4680,39 @@ mod tests {
             logger.drain_for_test().is_empty(),
             "an ungated tool must write no gate line"
         );
+        assert!(matches!(
+            decide_destructive(
+                "ssh_metrics",
+                Some(&serde_json::json!({"host": "pi"})),
+                false,
+                &config
+            ),
+            GateDecision::NotGated
+        ));
+    }
+
+    /// `run_tool` builds the audit wiring only for a call that produced a
+    /// decision, so `NotGated` has to be exactly the set of calls that write
+    /// nothing. Pinning it here keeps the two from drifting apart silently.
+    #[test]
+    fn not_gated_is_exactly_the_set_that_records_nothing() {
+        let on = gate_config(true);
+        let off = gate_config(false);
+        let args = serde_json::json!({"host": "pi"});
+        // Destructive + policy on, under --yes: a decision, so NOT NotGated.
+        assert!(!matches!(
+            decide_destructive("ssh_exec", Some(&args), true, &on),
+            GateDecision::NotGated
+        ));
+        // Either knob off: no decision.
+        assert!(matches!(
+            decide_destructive("ssh_exec", Some(&args), true, &off),
+            GateDecision::NotGated
+        ));
+        assert!(matches!(
+            decide_destructive("ssh_metrics", Some(&args), true, &on),
+            GateDecision::NotGated
+        ));
     }
 
     // ============== coerce_value Tests ==============
