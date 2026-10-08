@@ -114,15 +114,27 @@ tests and a serialisation test.
   that never ran, the `ssh_file_write`/`SessionExecResult` trap — or a variant
   that does not carry a code. The absence is the information, which is the
   doctrine `ToolCallResult::remote_exit_code` already states for its `None`.
-  Two more additions come with it: `AuditEvent::tagged(event_type, host,
+  Three more additions come with it: `AuditEvent::tagged(event_type, host,
   command, result)`, the first constructor that lets code outside
   `src/security/audit.rs` choose **either** of those two (`new` hard-codes
   `event_type: "ssh_exec"`, `denied` hard-codes `"command_denied"`, and both
-  pin the result), and `ExecuteCommandUseCase::log_state_change(tool, host,
+  pin the result); `ExecuteCommandUseCase::log_state_change(tool, host,
   operation, duration_ms)`, a fifth entry point beside the four that take a
   mandatory `tool` — and the named, typed facade the seven tools actually
   call, since `tagged` alone would let a caller pair any type with any
-  result. Those seven lines read `{"event_type":"state_change",
+  result; and **`mcp::tool_handlers::utils::elapsed_ms(start: Instant) ->
+  u64`**, which is how those seven fill `duration_ms`, since no
+  `CommandOutput` brings a duration back for an operation that ran no
+  process. `mcp` is not a `#[doc(hidden)]` re-export, so `elapsed_ms` is
+  published API. **Migration: none**, it is an addition — an explicit `use`
+  or a local definition of the same name shadows a glob import, so only a
+  crate that globs `bridge_mcp::mcp::tool_handlers::utils::*` *and* globs
+  another module exporting `elapsed_ms` has to disambiguate, at the point of
+  use. It saturates (`u64::try_from(..).unwrap_or(u64::MAX)`). Counted: six
+  `fn elapsed_ms` in the tree, this being the only public one;
+  `ssh_exec_multi.rs` and `ssh_metrics_multi.rs` are a bare `as u64` that
+  wraps and are untouched by this, so the six do not agree.
+  Those seven lines read `{"event_type":"state_change",
   "host":"raspberry","command":"ssh_session_close session_id=…",
   "tool_name":"ssh_session_close","result":{"StateChanged":{"duration_ms":2}}}`
   — no `exit_code` key anywhere.
@@ -133,7 +145,24 @@ tests and a serialisation test.
   When the state-changing call itself returns `Err` they go through
   `log_failure`, which writes audit and history both — so `ssh_history` and
   `history://recent` show **some** failures of these seven tools and never a
-  success. Anything refused *before* that call writes nothing to either sink:
+  success.
+
+  **Which is also why `event_type` is the wrong key to select these seven
+  by.** `log_failure` builds `AuditEvent::new`, and `new` hard-codes
+  `event_type: "ssh_exec"`, so the failure lines these seven write are
+  spelled exactly like an ordinary command event, and
+  `jq 'select(.event_type == "state_change")'` returns their **successes
+  only**. Those failure lines are new in this release — the
+  `inspect_err(log_failure)` that writes them is part of this change — so the
+  omission is not inherited. Pinned by test:
+  `a_refused_session_writes_one_line_naming_this_tool` and
+  `the_line_shapes_this_tool_writes` both assert `event_type == "ssh_exec"`
+  on the failure line of a state tool. **Select on `tool_name`** when you
+  want everything one of the seven did, and on `result` when you want the
+  kind of outcome — this selector was run against rows of each shape:
+  `jq 'select(.tool_name | test("^ssh_(session|tunnel|recording)_|^ssh_config_set$"))'`.
+
+  Anything refused *before* that call writes nothing to either sink:
   bad arguments, an unknown host, a rate-limit refusal, a disabled recorder,
   and in `ssh_tunnel_create` a failed bind or a failed SSH connection
   (measured: `local_port=80`, zero new lines). `ssh_config_set` never reaches
@@ -142,14 +171,35 @@ tests and a serialisation test.
   command history is not, and neither is a count of attempts.
 
 - **(wire) `"host":"<no-host>"` is a new, reserved host value in
-  `audit.log`.** The constant `bridge_mcp::security::NO_HOST`, used by
-  `ssh_config_set` — which changes a limit of the bridge process and has no
-  host parameter at all — and by the failure paths of the `*_close` /
-  `*_stop` state tools, where the id handed in matched nothing so no host was
-  ever resolved. Any consumer that assumes `host` is a `config.yaml` alias
-  must tolerate it. The angle brackets are what make it impossible to
-  confuse with a real alias and trivial to grep; no such convention existed
-  before (checked: every non-test caller passed a real alias).
+  `audit.log`.** The constant `bridge_mcp::security::NO_HOST`, with **five**
+  production callers: `ssh_config_set` — which changes a limit of the bridge
+  process and has no host parameter at all — the failure paths of
+  `ssh_session_close`, `ssh_tunnel_close` and `ssh_recording_stop`, where the
+  id handed in matched nothing so no host was ever resolved, and the CLI's
+  destructive gate (`cli::runner::gate_host`). The gate's case is the broad
+  one and it is not the `*_close` case: it runs before schema validation, so
+  **any** destructive call that simply omits `host` lands on the sentinel,
+  not only the three AWX tools whose schema has none. Pinned by test: a call
+  to `ssh_service_stop`, which requires a host, writes
+  `{"host":"<no-host>","event_type":"command_denied", …}` when the argument is
+  left out. Any consumer that assumes `host` is a `config.yaml` alias must
+  tolerate it. The angle brackets are what make it impossible to confuse with
+  a real alias and trivial to grep; no such convention existed before
+  (checked: every non-test caller passed a real alias).
+
+  **And the brackets are the writer's, not the caller's**, which the first
+  version of the gate did not enforce: `host` arrived there as an unresolved
+  JSON argument and was written verbatim, so `--yes tool ssh_file_write
+  'host=<no-host>' …` produced a line indistinguishable from a genuinely
+  hostless one and `grep '<no-host>'` stopped enumerating what it claims to.
+  A caller's `<` and `>` are now escaped to `\u{3c}` / `\u{3e}`
+  (`cli::runner::audited_host`); so are control characters, because `host`
+  reached the `tracing` sink as `Display` with no rendering, and a newline
+  inside it added a complete, well-formed `Audit: command denied …` record to
+  the journal journald and syslog capture while `audit.log` stayed one line.
+  A real alias is untouched — letters, digits, dots, dashes, colons and
+  non-ASCII all pass through, because the sanitizer is deliberately not
+  applied to this field.
 
   **It reaches the command history too**, not only `audit.log`: those failure
   paths go through `log_failure`, which writes a `HistoryEntry` as well, so
@@ -208,7 +258,14 @@ tests and a serialisation test.
   line carrying that whole file. **Through `argv` the ceiling is
   `MAX_ARG_STRLEN` — 32 pages, 128 KB per argument, and `ARG_MAX` for the
   whole line; past that `execve` fails with `E2BIG` and the binary never
-  starts** (measured in `tests/cli_exit_code.rs`). That ceiling is the real
+  starts.** Measured by hand, not by a test: `fork` + `execv("/bin/true",
+  [prog, "A" × n])` succeeds for n = 131071 and fails with `E2BIG` (errno 7)
+  for n = 131072, `getconf PAGESIZE` = 4096. No test in the repository
+  establishes it —
+  `tests/cli_exit_code.rs` asserts it in a docstring to justify passing the
+  100 KB that *succeeds*, and the 400 KB figure is an in-memory unit test
+  that calls no `execve`. The number was right and the citation was not.
+  That ceiling is the real
   one for this line, and it is worth saying why: the gate is CLI-only, and its
   arguments come from `argv` even when the call is then forwarded to a daemon,
   because the forwarding happens after the gate. An MCP-served call never
@@ -288,8 +345,13 @@ tests and a serialisation test.
   matched **only** by a legacy pattern reached the denial line in clear next
   to a masked confirmation line. Visible only with a non-empty
   `sanitize_patterns` (empty by default). The root asymmetry — the audit
-  sink's sanitizer not being legacy-aware, which still affects the 16
-  handlers that call `AuditLogger::log` directly — is left alone here.
+  sink's sanitizer not being legacy-aware, which still affects the **11
+  `AuditLogger::log` call sites in six handlers** (`ssh_ls`, `ssh_upload`,
+  `ssh_sync`, `ssh_file_write`, `ssh_files_write`, `ssh_download`), plus four
+  in `src/cli/runner.rs` that are not handlers — is left alone here. The
+  "sixteen" above is the count of sites that were *anonymous before* this
+  release, which is a different quantity and one short of today's fifteen
+  anyway: `ssh_download` merged its two calls into one.
 
   **Not covered by a test:** nothing now, for the gate's own branches. The
   prompt's answer is mapped by a pure `decision_from_prompt_answer`, which is

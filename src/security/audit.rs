@@ -12,11 +12,23 @@ use crate::config::AuditConfig;
 
 /// Host value for an audited operation that has no target host at all.
 ///
-/// Exactly one production caller: `ssh_config_set`, which changes a limit of
-/// the bridge process itself ("not a remote host (there is no host param)",
-/// its own description) — plus the failure paths of the `*_close` / `*_stop`
-/// state tools, where the id handed in matched nothing, so no host was ever
-/// resolved to name.
+/// **Five production callers**, counted in the tree; an earlier version of
+/// this sentence said "exactly one" and was out of date the day a second one
+/// was added without reopening it:
+///
+/// - `ssh_config_set`, which changes a limit of the bridge process itself
+///   ("not a remote host (there is no host param)", its own description);
+/// - the failure paths of `ssh_session_close`, `ssh_tunnel_close` and
+///   `ssh_recording_stop`, where the id handed in matched nothing, so no host
+///   was ever resolved to name;
+/// - and `cli::runner::gate_host`, the CLI's destructive gate, which is
+///   neither of those: it fires for **any** destructive call that carries no
+///   `host` argument. The gate runs before schema validation, so this is not
+///   limited to the three tools whose schema has no `host`: a call to
+///   `ssh_service_stop`, which requires one, writes
+///   `{"host":"<no-host>","event_type":"command_denied", …}` when the
+///   argument is simply left out
+///   (`a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event`).
 ///
 /// The angle brackets are the point: no host alias in a `config.yaml` can
 /// contain them, so `"host":"<no-host>"` can never be confused with a real
@@ -24,6 +36,14 @@ use crate::config::AuditConfig;
 /// hostless events. It is the single convention for the whole crate — before
 /// it there was none, every non-test caller passed a real alias, and the
 /// alternative was the empty string, which reads like a bug in the writer.
+///
+/// **That enumeration holds because the brackets are the writer's, not the
+/// caller's.** The gate is the one sink whose `host` is an unresolved
+/// argument rather than a resolved alias, and it used to pass it through
+/// verbatim: `--yes tool ssh_file_write 'host=<no-host>' …` produced a line
+/// no reader could tell from a genuinely hostless one. `cli::runner::
+/// audited_host` now escapes a caller's `<` and `>`, so the grep means again
+/// what this paragraph says it means.
 ///
 /// **It reaches the command history too, not only `audit.log`.** The failure
 /// paths named above go through `ExecuteCommandUseCase::log_failure`, which
@@ -80,9 +100,29 @@ pub enum CommandResult {
     /// `src/cli/runner.rs`) through
     /// `ExecuteCommandUseCase::log_confirmed`, at the moment the decision is
     /// taken — before the call is dispatched, and before it is even settled
-    /// which path (a running daemon, or in-process) will serve it. Whatever
-    /// the call then does writes its own, later event; this one records only
-    /// the decision.
+    /// which path (a running daemon, or in-process) will serve it. This line
+    /// records the decision and nothing else.
+    ///
+    /// **A later event follows only if something RAN**, and the earlier
+    /// wording ("whatever the call then does writes its own, later event")
+    /// promised more than the code does. `run_gated_tool` records the
+    /// decision and *then* calls `forward_to_daemon`. A daemon that answers
+    /// at all — with a result, with an `isError` refusal, or with a JSON-RPC
+    /// error — has answered, so the CLI prints that answer and returns
+    /// without falling back to the in-process path. When the answer is a
+    /// refusal, nothing executed anywhere, nothing wrote a second event, and
+    /// this gate line is the only one. The in-process path is the same
+    /// whenever the call is refused before it reaches a sink.
+    ///
+    /// And on a daemon-served *success* the second line is written by the
+    /// **daemon process**, not by this one — so what this process's own trail
+    /// carries is the gate line, which is what
+    /// `a_daemon_served_call_still_drains_the_gate_line_to_disk`
+    /// (`tests/cli_exit_code.rs`) reads back after the daemon served the
+    /// call.
+    ///
+    /// So `command_confirmed` with nothing after it reads "the gate let it
+    /// past and then it did not run", not "the trail is truncated".
     ///
     /// **It carries neither an exit code nor a duration, for the reason
     /// [`Self::StateChanged`] carries no code: nothing ran.** `by` names what
@@ -130,6 +170,17 @@ pub struct AuditEvent {
     /// not as a parse error — and a caller must keep passing a kind of
     /// outcome, which is the contract the field's name carries and the only
     /// thing stopping it from drifting into a second, unreliable `tool_name`.
+    ///
+    /// **`"state_change"` is narrower than the operations it names, and that
+    /// trips the obvious query.** It is written on the *success* path of the
+    /// seven state-changing tools only. When one of them fails it goes
+    /// through `ExecuteCommandUseCase::log_failure`, which builds
+    /// [`AuditEvent::new`] — and `new` hard-codes `"ssh_exec"`. So
+    /// `select(.event_type == "state_change")` enumerates the successful
+    /// session, tunnel, recording and limit changes and **none of the failed
+    /// ones**, which are spelled exactly like an ordinary command event.
+    /// `tool_name` is the field that selects everything one of the seven did;
+    /// `result` is the field that distinguishes the outcomes.
     pub event_type: String,
     /// Target host alias, or [`NO_HOST`] when the operation had no target.
     pub host: String,

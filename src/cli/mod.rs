@@ -89,8 +89,19 @@ pub struct Cli {
     /// audit log — `command_confirmed`, naming `--yes` or the prompt that
     /// answered, when the call goes through, and `command_denied` when it is
     /// refused. The line carries the tool and its arguments, with any value
-    /// over 256 characters replaced by its length, so a file passed as
-    /// `content=` is never copied into the trail.
+    /// over 256 characters replaced by its length and the whole rendering cut
+    /// at 2048, so a file passed as `content=` cannot be copied into the
+    /// trail whole.
+    ///
+    /// **A value that fits in 256 characters is written as it stands**, after
+    /// the same redaction every audit line gets. With `security.sanitize` at
+    /// its defaults that redaction is strong against the obvious case:
+    /// entropy detection is on (4.5 bits per character, 16 characters
+    /// minimum), so a random base64 token is masked. What it does not
+    /// separate goes through — a hexadecimal token (4.0 bits per character at
+    /// most, and `entropy_hex_threshold` is off by default), a passphrase, an
+    /// excerpt of a configuration file, an internal host name. So: nothing on
+    /// a destructive call's command line that does not belong in `audit.log`.
     ///
     /// Recorded only while audit logging is on (`audit.enabled`, default
     /// true): with it off there is no trail to write to, and a run whose
