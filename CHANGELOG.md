@@ -1013,8 +1013,8 @@ tests and a serialisation test.
   `download` in `src/cli/runner.rs`
   (`grep -rn 'AuditEvent::new\|AuditEvent::denied\|AuditEvent::tagged' src/`).
 
-- **A refused `ssh_tunnel_create` leaked the bound local port and the SSH
-  connection.** `TunnelManager::register` takes the forwarding task's
+- **A refused `ssh_tunnel_create` leaked the bound local port — and, very
+  likely, the SSH connection with it.** `TunnelManager::register` takes the forwarding task's
   `JoinHandle` by value and drops it when it refuses (`max_tunnels` reached);
   dropping a tokio handle **detaches** the task rather than cancelling it, so
   the listener kept running for the life of the process, holding
@@ -1023,10 +1023,14 @@ tests and a serialisation test.
   never reach, since it looks the tunnel up by id in the manager. `execute`
   now takes an `AbortHandle` before the move and cancels on that path.
   Predates the audit work and was found while bounding a docstring that
-  claimed more than the code did. The port release is pinned by a test that
-  fails without the `abort()`; the SSH half rests on dropping the last
-  `Arc<SshClient>`, which is the same RAII the `jump_client` field documents,
-  and is not separately measured.
+  claimed more than the code did. The port release is **established**: a test
+  fails without the `abort()`. The SSH half is **not** — it rests on dropping
+  the last `Arc<SshClient>`, which is the same RAII the `jump_client` field
+  documents, but russh does not state that the socket closes with the
+  `Handle` it hands out, and `SshClient` has no `impl Drop` of its own. So the
+  cancellation is known to release that `Arc`; that the TCP connection goes
+  with it is very likely and unmeasured. An `ss -tnp` on the bridge host
+  across a `max_tunnels` refusal would settle it.
 
 - **`ssh_metrics_multi` audited a fabricated `exit_code: 0` for every host it
   reached, and nothing at all for the hosts it did not.** The worse of the two

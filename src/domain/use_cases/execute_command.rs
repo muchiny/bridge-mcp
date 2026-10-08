@@ -188,8 +188,9 @@ impl ExecuteCommandUseCase {
     /// a different tool. A field that is right by accident for one tool out
     /// of 476 is worse than one that is always wrong, because it invites the
     /// inference. Without `tool`, then, an audit line could not say whether a
-    /// denial came from `ssh_exec` itself or from `ssh_file_write`. `tool_name` has existed on the event since it was
-    /// added, but as long as carrying it was optional nothing in
+    /// denial came from `ssh_exec` itself or from `ssh_file_write`.
+    /// `tool_name` has existed on the event since it was added, but as long
+    /// as carrying it was optional nothing in
     /// production ever set it: a 2026-09 measurement found 25% of 3,686
     /// audit lines with no `tool_name`, and `ssh_exec` — the escape hatch
     /// every free-form write goes through — never appeared as a tool name
