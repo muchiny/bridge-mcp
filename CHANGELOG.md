@@ -80,11 +80,16 @@ tests and a serialisation test.
   On their **success** path they write **no history entry**:
   `HistoryEntry::exit_code` is a non-optional `u32` whose `0` means success,
   so the history cannot express "no code", and it is a history of commands.
-  Their **failure** path still goes through `log_failure`, which writes audit
-  and history both — so `ssh_history` and `history://recent` show these seven
-  tools' failures and never their successes. That asymmetry is deliberate and
-  documented on `log_state_change`; `audit.log` is the complete record for
-  them, the command history is not.
+  When the state-changing call itself returns `Err` they go through
+  `log_failure`, which writes audit and history both — so `ssh_history` and
+  `history://recent` show **some** failures of these seven tools and never a
+  success. Anything refused *before* that call writes nothing to either sink:
+  bad arguments, an unknown host, a rate-limit refusal, a disabled recorder,
+  and in `ssh_tunnel_create` a failed bind or a failed SSH connection
+  (measured: `local_port=80`, zero new lines). `ssh_config_set` never reaches
+  `log_failure` at all. That asymmetry is deliberate and documented on
+  `log_state_change`; `audit.log` is the fuller record for these seven, the
+  command history is not, and neither is a count of attempts.
 
 - **(wire) `"host":"<no-host>"` is a new, reserved host value in
   `audit.log`.** The constant `bridge_mcp::security::NO_HOST`, used by
@@ -1007,6 +1012,21 @@ tests and a serialisation test.
   subcommand does — and the four SFTP sites of `bridge-mcp upload` /
   `download` in `src/cli/runner.rs`
   (`grep -rn 'AuditEvent::new\|AuditEvent::denied\|AuditEvent::tagged' src/`).
+
+- **A refused `ssh_tunnel_create` leaked the bound local port and the SSH
+  connection.** `TunnelManager::register` takes the forwarding task's
+  `JoinHandle` by value and drops it when it refuses (`max_tunnels` reached);
+  dropping a tokio handle **detaches** the task rather than cancelling it, so
+  the listener kept running for the life of the process, holding
+  `127.0.0.1:<local_port>` bound and the only `Arc<SshClient>` alive, for a
+  tunnel that was never registered — and so one that `ssh_tunnel_close` could
+  never reach, since it looks the tunnel up by id in the manager. `execute`
+  now takes an `AbortHandle` before the move and cancels on that path.
+  Predates the audit work and was found while bounding a docstring that
+  claimed more than the code did. The port release is pinned by a test that
+  fails without the `abort()`; the SSH half rests on dropping the last
+  `Arc<SshClient>`, which is the same RAII the `jump_client` field documents,
+  and is not separately measured.
 
 - **`ssh_metrics_multi` audited a fabricated `exit_code: 0` for every host it
   reached, and nothing at all for the hosts it did not.** The worse of the two

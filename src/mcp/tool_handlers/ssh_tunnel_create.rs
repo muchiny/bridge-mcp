@@ -133,10 +133,15 @@ impl ToolHandler for SshTunnelCreateHandler {
         // included), the spawn of the forwarding task, and the registration.
         // What it excludes, all of it local and before any state could
         // change: argument parsing, the host-config lookup and the
-        // rate-limit check. What it is never reported for: a failed bind or a
-        // failed connection, which return early and write no event at all —
-        // so this duration only ever appears beside a tunnel that exists, or
-        // beside a registration that was refused.
+        // rate-limit check. What it is never reported for: anything but a
+        // tunnel that exists. `started` is read in exactly one place,
+        // `log_state_change` on the success path: a failed bind or a failed
+        // connection return early and write no event at all, and a refused
+        // registration writes a `CommandResult::Error` line, which has no
+        // duration field to put it in. An earlier version of this comment
+        // claimed the duration also appeared "beside a registration that was
+        // refused" — it does not, and that sentence widened the scope of its
+        // own measurement.
         let started = Instant::now();
 
         // Bind the local TCP listener first (fail fast if port is in use)
@@ -187,6 +192,17 @@ impl ToolHandler for SshTunnelCreateHandler {
             tunnel_id.clone(),
         );
 
+        // `register` takes the handle BY VALUE and drops it when it refuses
+        // (`max_tunnels` reached). Dropping a tokio `JoinHandle` detaches the
+        // task, it does not cancel it — so before this, a refused
+        // registration left the listener task running for the life of the
+        // process, holding the bound local port and the only
+        // `Arc<SshClient>`, for a tunnel that does not exist and that
+        // `ssh_tunnel_close` cannot reach because it was never registered.
+        // `abort_handle` survives the move into `register`, so the refusal
+        // can cancel what it declined to own.
+        let aborter = handle.abort_handle();
+
         // Register in the tunnel manager, then audit as a state change and
         // not as a command: a forwarded port is opened here and no process
         // runs on the host, so the event carries a duration and no exit code.
@@ -195,6 +211,7 @@ impl ToolHandler for SshTunnelCreateHandler {
             .register(tunnel_info.clone(), handle)
             .await
             .inspect_err(|e| {
+                aborter.abort();
                 ctx.execute_use_case.log_failure(
                     self.name(),
                     &args.host,
@@ -221,8 +238,18 @@ impl ToolHandler for SshTunnelCreateHandler {
 /// through `client`.
 ///
 /// Extracted from `execute` for its length alone — the loop is unchanged.
-/// It owns the listener, so the tunnel's lifetime is the task's: aborting the
-/// handle (what `TunnelManager::close` does) drops the bound port with it.
+///
+/// The task **owns** the listener and the `Arc<SshClient>`, so the tunnel's
+/// lifetime is the task's: cancelling it drops the future, which closes the
+/// bound local port and releases that `Arc`. Two callers cancel it —
+/// `TunnelManager::close`, through the handle it stored, and `execute`'s own
+/// error path, through an `AbortHandle` taken before the move.
+///
+/// Dropping the handle *without* cancelling does **not** stop the task, which
+/// is why that error path exists at all. And cancellation is not a close
+/// receipt: the port is released when the runtime drops the future, not when
+/// `abort` returns, and any per-connection subtask already spawned holds its
+/// own `Arc` clone and is not cancelled with its parent.
 fn spawn_forwarding_task(
     listener: TcpListener,
     client: Arc<SshClient>,
@@ -260,8 +287,82 @@ fn spawn_forwarding_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::TunnelManager;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    /// A refused registration must not leave the bound port behind.
+    ///
+    /// `TunnelManager::register` takes the `JoinHandle` by value and drops it
+    /// when it refuses; dropping a tokio handle **detaches** the task, so the
+    /// listener kept running and the local port kept being bound, for a
+    /// tunnel that was never registered and that `ssh_tunnel_close` could
+    /// therefore never reach. `execute` now takes an `AbortHandle` before the
+    /// move and cancels on that path.
+    ///
+    /// This drives the mechanism rather than the handler: the handler reaches
+    /// its `register` call only after a real SSH handshake, which no fixture
+    /// can supply. Everything else here is real — a real `TcpListener` owned
+    /// by a real spawned task, a real `TunnelManager` refusal (`max_tunnels:
+    /// 0` refuses every call, since `len() >= 0`), and a real rebind on the
+    /// same port as the assertion. Without the `abort()` the rebind fails,
+    /// which is the whole point.
+    #[tokio::test]
+    async fn a_refused_registration_releases_the_bound_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let aborter = handle.abort_handle();
+
+        // The port is held while the task lives: the premise, not the claim.
+        assert!(
+            TcpListener::bind(addr).await.is_err(),
+            "the spawned task must hold {addr} for this test to mean anything"
+        );
+
+        let info = TunnelInfo {
+            id: "tunnel-test-0-0".to_string(),
+            host: "test-server".to_string(),
+            local_port: addr.port(),
+            remote_host: "localhost".to_string(),
+            remote_port: 80,
+            direction: TunnelDirection::Local,
+            created_at: Instant::now(),
+            age_seconds: 0,
+        };
+        let manager = TunnelManager::new(0);
+        assert!(
+            manager.register(info, handle).await.is_err(),
+            "max_tunnels: 0 must refuse, and the handle is consumed by the call"
+        );
+
+        // What `execute`'s error path now does.
+        aborter.abort();
+
+        // `abort` is not a close receipt — the port is released when the
+        // runtime drops the future. Wait for that, bounded, then rebind.
+        for _ in 0..10_000 {
+            if aborter.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            aborter.is_finished(),
+            "the cancelled task never finished; the rest of this test cannot conclude"
+        );
+        assert!(
+            TcpListener::bind(addr).await.is_ok(),
+            "the refused registration must leave {addr} free"
+        );
+    }
 
     #[test]
     fn test_schema() {

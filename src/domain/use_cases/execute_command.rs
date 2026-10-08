@@ -169,17 +169,26 @@ impl ExecuteCommandUseCase {
     /// Log a denied command, recording which tool asked for it.
     ///
     /// `tool` is mandatory, and the criterion is this: **`event_type` names a
-    /// kind of outcome, never the tool that produced it.** No entry point on
-    /// this type can make it name a tool — `AuditEvent::denied`, which this
-    /// one uses, hard-codes `"command_denied"`; `AuditEvent::new`, which the
-    /// others use, hard-codes `"ssh_exec"`; and the one constructor that
-    /// takes the value, `AuditEvent::tagged`, is reached only through a facade
-    /// here that passes a kind of its own (`"state_change"`). The criterion
-    /// holds for every entry point present and for any entry point added, as
-    /// long as that stays true — which is its bound, and the only thing a
-    /// later reader has to re-check. Without `tool`, then, an audit line could
-    /// not say whether a denial came from `ssh_exec` itself or from
-    /// `ssh_file_write`. `tool_name` has existed on the event since it was
+    /// kind of outcome, and no reader may take it for the tool that produced
+    /// it.** No entry point on this type can make it name the tool —
+    /// `AuditEvent::denied`, which this one uses, hard-codes
+    /// `"command_denied"`; `AuditEvent::new`, which the others use,
+    /// hard-codes `"ssh_exec"`; and the one constructor that takes the value,
+    /// `AuditEvent::tagged`, is reached only through a facade here that passes
+    /// a kind of its own (`"state_change"`). The criterion holds for every
+    /// entry point present and for any entry point added, as long as that
+    /// stays true — which is its bound, and the only thing a later reader has
+    /// to re-check.
+    ///
+    /// **One of those three values is also a tool name, and that is the
+    /// point, not an exception to it.** `"ssh_exec"` is a kind of outcome
+    /// here — "a command ran on a host" — but it is spelled exactly like the
+    /// tool `ssh_exec`, so for that one tool `event_type == tool_name`
+    /// coincidentally, and for the 475 others it reads the same while naming
+    /// a different tool. A field that is right by accident for one tool out
+    /// of 476 is worse than one that is always wrong, because it invites the
+    /// inference. Without `tool`, then, an audit line could not say whether a
+    /// denial came from `ssh_exec` itself or from `ssh_file_write`. `tool_name` has existed on the event since it was
     /// added, but as long as carrying it was optional nothing in
     /// production ever set it: a 2026-09 measurement found 25% of 3,686
     /// audit lines with no `tool_name`, and `ssh_exec` — the escape hatch
@@ -337,16 +346,30 @@ impl ExecuteCommandUseCase {
     /// it at all, and it is a history of *commands*.
     ///
     /// **The asymmetry that follows, written down because it reads like an
-    /// oversight and is not one:** the seven tools that call this *do* write
-    /// a history entry when they fail, because their failure path goes
+    /// oversight and is not one:** when the state-changing call itself
+    /// returns `Err` — `SessionManager::close`, `TunnelManager::register`,
+    /// `SessionRecorder::stop_session` and their siblings — the handler goes
     /// through [`Self::log_failure`], which writes audit **and** history. So
-    /// `ssh_history` and `history://recent` show the failures of
-    /// `ssh_session_create`, `ssh_tunnel_close` and the rest, and never their
-    /// successes. That is more misleading than a clean absence, and it is
-    /// deliberate: the alternative is either a fabricated `exit_code` on the
-    /// success path or dropping failure lines that exist today. `audit.log`
-    /// is the complete record for these seven; the command history is not,
-    /// and no reader should take it for one.
+    /// `ssh_history` and `history://recent` show *some* failures of these
+    /// seven tools and **never** a success. That is more misleading than a
+    /// clean absence, and it is deliberate: the alternative is either a
+    /// fabricated `exit_code` on the success path or dropping failure lines
+    /// that exist today.
+    ///
+    /// *Some*, and the bound matters, because an earlier version of this
+    /// paragraph said the seven write history "when they fail" flatly and
+    /// that was measured false. Everything refused **before** that call
+    /// writes nothing at all, to either sink: malformed arguments, an unknown
+    /// host, a rate-limit refusal, a disabled recorder or a missing runtime
+    /// handle — and, in `ssh_tunnel_create`, a failed `TcpListener::bind` or
+    /// a failed SSH connection, measured with `local_port=80` as zero new
+    /// lines in the journal. `ssh_config_set` has no such call at all: both
+    /// of its non-success outcomes are refusals that changed nothing, so it
+    /// never reaches `log_failure`.
+    ///
+    /// `audit.log` is therefore the fuller record for these seven, and the
+    /// command history is not — but neither is complete, and no reader should
+    /// take either for a count of attempts.
     pub fn log_state_change(&self, tool: &str, host: &str, operation: &str, duration_ms: u64) {
         // Same redaction as `process_success` — see its comment. An operation
         // string is built from tool arguments, and `ssh_config_set` passes a
