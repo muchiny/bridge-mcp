@@ -4511,8 +4511,9 @@ mod tests {
     /// **two**, so a future "while we are here" addition has to argue for
     /// itself in a failing test rather than slip in.
     ///
-    /// **This paragraph said "the one named entry" until the final review**,
-    /// and it had said so since `vault_password_file` was added in the round
+    /// **This paragraph claimed a single named entry until the final
+    /// review**, and had done so since `vault_password_file` was added in
+    /// the round
     /// that overruled its exclusion: the assertion below was edited to pin
     /// two and the prose above it was not. Sixth relapse of the stale-number
     /// family in this release, in the test whose own round had just edited

@@ -569,10 +569,11 @@ impl ExecuteCommandUseCase {
     /// appears in none of that module's `use audit::{…}` re-export lists.
     ///
     /// **No grep backs that, and the first correction shows why.** It cited
-    /// `grep -c "audited_argument_names" src/security/mod.rs` as returning
-    /// 0; the correcting round then added a doc comment to `mod.rs` naming
-    /// the function, and the count became 1 — the citation was falsified by
-    /// the same wave that wrote it. The claim is structural and the compiler
+    /// a `grep -c` of this function's name over `src/security/mod.rs` as
+    /// returning 0; the correcting round then added a doc comment to
+    /// `mod.rs` naming the function, and the count became 1 — the citation
+    /// was falsified by the same wave that wrote it. The command is
+    /// described and not reproduced, for exactly that reason. The claim is structural and the compiler
     /// is its proof: write `crate::security::audited_argument_names`
     /// anywhere in the crate and `cargo check` fails. Plain backticks and
     /// not an intra-doc link, so rustdoc never flagged the broken path; the

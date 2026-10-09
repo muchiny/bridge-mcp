@@ -2245,11 +2245,12 @@ fn decision_from_prompt_answer(tool_name: &str, answer: &str) -> GateDecision {
 /// `host` is the bounded rendering of the call's `host` argument when it has
 /// one and [`crate::security::NO_HOST`] otherwise — see
 /// [`audited_host_from_args`] and `audited_host` (`src/security/audit.rs`),
-/// never the raw argument. The second is named by file because
-/// `crate::security::audited_host` — what this line said until the final
-/// review — does not resolve: `audited_host` is `pub(crate)` inside the
-/// private module `audit` and is not re-exported, so only its own module
-/// and `audited_host_from_args` reach it. `operation` is the bounded rendering from
+/// never the raw argument. The second is named by file because the
+/// `crate::security::…` form this line used until the final review does not
+/// resolve: `audited_host` is `pub(crate)` inside the private module `audit`
+/// and is not re-exported, so only its own module and
+/// `audited_host_from_args` reach it. The broken path is described rather
+/// than quoted, so a grep for it does not find this sentence. `operation` is the bounded rendering from
 /// [`audited_operation`], never the raw arguments either.
 ///
 /// # Errors
