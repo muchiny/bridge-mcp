@@ -3322,13 +3322,16 @@ mod tests {
     /// own reason.**
     ///
     /// **The name says what is checked and not what is wanted**, which took a
-    /// round: it was
-    /// `every_line_of_a_batch_is_written_before_any_of_them_is_closed`, and
-    /// this test closes **nothing** — three tuples, no session, no
+    /// round: it used to end `..._is_written_before_any_of_them_is_closed`,
+    /// and this test closes **nothing** — three tuples, no session, no
     /// `client.close()` anywhere near it. The docstring said so honestly,
     /// but the name is the only text a reader of `N passed` ever sees. Same
-    /// class as `a_reordering_or_hiding_character_cannot_reach_either_sink`,
-    /// renamed in this same round for exactly this reason.
+    /// class as the test that used to end `..._cannot_reach_either_sink`,
+    /// renamed one round earlier for exactly this reason.
+    ///
+    /// Both old names are quoted by their TAIL only, so a grep for either
+    /// full identifier does not land on this paragraph — the same discipline
+    /// the rest of this release applies to commands and module paths.
     ///
     /// The defect: both batch sites used to interleave, writing one line and
     /// then awaiting that session's `client.close()` — bounded at 5 s by
