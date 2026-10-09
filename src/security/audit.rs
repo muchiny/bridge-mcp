@@ -4893,7 +4893,8 @@ mod tests {
                 let ch = char::from_u32(cp).unwrap_or_else(|| panic!("U+{cp:04X} is a char"));
                 assert!(
                     reorders_or_hides(ch),
-                    "U+{cp:04X} is in the Cf/Zl/Zp cohort and must be covered: a hand-picked                      subset is what missed U+061C and the whole tag block"
+                    "U+{cp:04X} is in the Cf/Zl/Zp cohort and must be covered: a \
+                     hand-picked subset is what missed U+061C and the whole tag block"
                 );
                 // And it must actually be escaped by the one caller, not
                 // merely recognised here.
@@ -4907,7 +4908,8 @@ mod tests {
         }
         assert_eq!(
             counted, 172,
-            "the cohort is 172 code points at Unicode 16.0.0; a different number means the              ranges above were edited without re-running the command in the docstring"
+            "the cohort is 172 code points at Unicode 16.0.0; a different number means \
+             the ranges above were edited without re-running the command in the docstring"
         );
 
         // Cc stays OUT of this function on purpose: `char::is_control()`

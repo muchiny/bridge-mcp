@@ -113,10 +113,17 @@ pub struct SessionManager {
     /// same branch added three more test fixtures and it was 139, then this
     /// round's own tests took it to 141. A census of a literal, taken in a
     /// tree that keeps acquiring the literal, measures the probe. The same
-    /// trap caught the sibling sentence: it said
-    /// `grep -rn "with_audit_logger("` returns "those 2 plus 3 in tests",
-    /// and every test added since has moved the second number. What does not
-    /// move is the shape: **2 production call sites**
+    /// trap caught the sibling sentence twice. First it quoted a count of
+    /// the setter's own call sites as "those 2 plus 3 in tests", and every
+    /// test added since moved the second number. Then the correction for
+    /// that **reproduced the command**, so the sentence became one of its
+    /// own matches: 11 results for 10 call sites. Fifth recurrence of a
+    /// self-counting citation in this release, inside the fix for the entry
+    /// about it.
+    ///
+    /// So the command is described and not written: a recursive grep of this
+    /// setter's name over `src` and `tests`, minus its definition. What does
+    /// not move is the shape: **2 production call sites**
     /// (`src/mcp/server.rs`, `src/cli/runner.rs`), and as many test sites as
     /// the suite needs.
     ///
@@ -256,7 +263,7 @@ impl SessionManager {
     ///
     /// Takes the FACTS and not the sessions: `ShellSession` is private and
     /// has no test constructor, so a tuple iterator is what lets
-    /// `every_line_of_a_batch_is_written_before_any_of_them_is_closed` drive
+    /// `a_batch_of_three_leaves_three_lines_each_with_its_own_id_and_reason` drive
     /// this with three entries and no SSH at all.
     fn audit_all_destroyed<'a>(
         &self,
@@ -3311,7 +3318,17 @@ mod tests {
         );
     }
 
-    /// **Every line of a batch is written before any of them is closed.**
+    /// **A batch of three leaves three lines, each with its own id and its
+    /// own reason.**
+    ///
+    /// **The name says what is checked and not what is wanted**, which took a
+    /// round: it was
+    /// `every_line_of_a_batch_is_written_before_any_of_them_is_closed`, and
+    /// this test closes **nothing** — three tuples, no session, no
+    /// `client.close()` anywhere near it. The docstring said so honestly,
+    /// but the name is the only text a reader of `N passed` ever sees. Same
+    /// class as `a_reordering_or_hiding_character_cannot_reach_either_sink`,
+    /// renamed in this same round for exactly this reason.
     ///
     /// The defect: both batch sites used to interleave, writing one line and
     /// then awaiting that session's `client.close()` — bounded at 5 s by
@@ -3326,15 +3343,20 @@ mod tests {
     /// placement, because making a real `client.close()` slow enough to be
     /// abandoned needs an unresponsive peer that the in-process mock cannot
     /// be; that half is
+    /// `each_removal_site_audits_from_the_right_place`, which is the guard
+    /// that slices each method and asserts `self.audit_destroyed(` appears
+    /// **zero** times in either batch body. (This named
     /// `every_silent_removal_site_now_audits_except_the_explicit_close`,
-    /// which asserts `self.audit_destroyed(` appears **zero** times in
-    /// either batch body.
+    /// which is the sibling: it counts the three call sites over the whole
+    /// file and has no per-body assertion at all. The protection was real
+    /// either way — a batch call takes the file-wide count from 2 to 3, and
+    /// CP-A1 measured both guards red — but the name was wrong.)
     ///
     /// And the pass has no `.await` in it at all, so no timer can fire
     /// part-way through: that is the property that makes "all lines first"
     /// free rather than a trade.
     #[tokio::test]
-    async fn every_line_of_a_batch_is_written_before_any_of_them_is_closed() {
+    async fn a_batch_of_three_leaves_three_lines_each_with_its_own_id_and_reason() {
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.log");
         let (logger, writer) = audited_logger(audit_path.clone());

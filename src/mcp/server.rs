@@ -98,11 +98,20 @@ const SESSION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// Unbounded, it was not merely slow but **open-ended**:
 /// `SessionManager::close_all` starts by taking the same lock that
 /// `SessionManager::exec` holds for the whole of a remote command, and
-/// `sessions.timeout_secs` defaults to **1800 s**. Measured against a real
-/// host, one session running `sleep 45` whose client had closed its socket:
-/// the bounded session drain finished in 1.7 s and then `close_all` parked
-/// **42.0 s** on that lock, `Daemon stopped.` having already been printed
-/// with exit 0. With `timeout_secs` at its default that is half an hour.
+/// `limits.command_timeout_seconds` defaults to **1800 s**
+/// (`default_command_timeout`). Measured against a real host, one session
+/// running `sleep 45` whose client had closed its socket: the bounded session
+/// drain finished in 1.7 s and then `close_all` parked **42.0 s** on that
+/// lock, `Daemon stopped.` having already been printed with exit 0. With that
+/// key at its default, half an hour.
+///
+/// **These lines used to name a `sessions.*` key for that bound, and no such
+/// key exists**: `SessionConfig` is `max_sessions` / `idle_timeout_seconds` /
+/// `max_age_seconds` under `#[serde(deny_unknown_fields)]`, so an operator
+/// who copied the old name out of this paragraph got a **load error** rather
+/// than the bound it described. The wrong name is not reproduced here — a
+/// config key is the one kind of string a reader may paste straight into
+/// their YAML, so naming it even to disown it is a trap.
 ///
 /// Two seconds, so the whole teardown is bounded by a CONSTANT rather than
 /// by `5 s x connections`: a healthy disconnect is a single packet, and
@@ -7095,7 +7104,9 @@ rbac:
     /// daemon still could not be stopped, because
     /// `SessionManager::close_all` starts by taking the lock that
     /// `SessionManager::exec` holds for the WHOLE of a remote command, and
-    /// `sessions.timeout_secs` defaults to 1800 s.
+    /// `limits.command_timeout_seconds` defaults to 1800 s. (This named a
+    /// `sessions.*` key that no schema accepts; see `RESOURCE_CLOSE_GRACE`,
+    /// which states the measurement and why the old name is not repeated.)
     ///
     /// Measured against a real host before the bound, one session running
     /// `sleep 45` whose client had already closed its socket: the session
@@ -8035,9 +8046,23 @@ rbac:
     /// Inverted, in other words — and a guard that is wrong in that
     /// direction is worse than none, because it is believed. The list is now
     /// **discovered from the source**: every method in the production half
-    /// whose body reaches `self.audit_logger` is a writing facade, so a new
-    /// one is in scope the moment it is written, and the count it is compared
-    /// against comes from the same walk.
+    /// whose body reaches `self.audit_logger` is a writing facade, and the
+    /// count it is compared against comes from the same walk.
+    ///
+    /// **Two shapes escape that discovery, and the promise is narrowed
+    /// rather than the rule widened.** An earlier version of this paragraph
+    /// said "a new one is in scope the moment it is written", which the rule
+    /// does not hold: a facade that binds the logger first
+    /// (`let l = &self.audit_logger; l.log(..)`) passes the `ends_with('&')`
+    /// test and reads as a clone site, and a facade declared
+    /// `pub async fn` / `pub const fn` / `pub(super) fn` is not one of the
+    /// three signature markers the walk looks for, so its body is absorbed
+    /// into the previous method's slice. Both are green-on-the-defect.
+    /// Widening the rule means parsing Rust in a test; what it buys is
+    /// coverage of two shapes that no facade in this module uses, so the
+    /// promise is corrected instead: **every facade written in the three
+    /// shapes this module uses is in scope**, and a facade written in
+    /// another shape is not.
     ///
     /// `log_interrupted` is excluded **by name**, and that is the one
     /// hard-coded element left, deliberately: it IS the shutdown's write, so
@@ -8276,6 +8301,18 @@ rbac:
     /// It checks each site's PRECEDING text rather than counting, because a
     /// count is satisfied by eleven claims in the wrong places. The claim
     /// must be the nearest statement above the write.
+    ///
+    /// **Four direct writes sit outside this walk and are deliberately left
+    /// unclaimed**: `src/cli/runner.rs` has its own
+    /// `ctx.audit_logger.log(..)` calls, and they are not a live defect.
+    /// `ExecuteCommandUseCase::with_claim` is reached only from
+    /// `McpServer::handle_tools_call` and the tasks worker (both in this
+    /// file), so a call served by the CLI holds **no** claim: its
+    /// `in_flight` is `None`, `claim_this_write` is a no-op, and no
+    /// `command_interrupted` line is ever written about it. There is no
+    /// counter for them to be wrong about. If the CLI ever gains an
+    /// in-flight registry, those four join the rule — and the walk already
+    /// covers the directory they would have to move into.
     #[test]
     fn every_direct_audit_write_claims_itself_first() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tool_handlers");

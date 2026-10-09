@@ -938,7 +938,8 @@ tests and a serialisation test.
      `RESOURCE_CLOSE_GRACE` (2 s) with nothing written for that session.
      Moving the snapshot to the caller does **not** fix it: the caller would
      ask for the same tokio mutex and restore the unbounded wait —
-     up to `sessions.timeout_secs`, **1800 s** by default — that bounding
+     up to `limits.command_timeout_seconds`, **1800 s** by default — that
+     bounding
      `close_all` was added to close, which is the `daemon stop` that printed
      `Daemon stopped.` over a daemon that lived on. `McpServer::serve`
      already documents the bound as a deliberate choice of a bounded
@@ -1605,8 +1606,11 @@ tests and a serialisation test.
   **The three `close_all` calls are bounded too, and without that the
   un-killable daemon came back through them.** `SessionManager::close_all`
   begins by taking the lock that `SessionManager::exec` holds for the WHOLE
-  of a remote command, and `sessions.timeout_secs` defaults to **1800 s**
-  (schema ceiling 3600). Measured against a real host, one session running
+  of a remote command, and `limits.command_timeout_seconds` defaults to
+  **1800 s**. (A tool's own `timeout_seconds` ARGUMENT is a different knob,
+  capped at 3600 by the per-tool schemas; it bounds one call, not the config
+  default, and there is no validation ceiling on the config key itself.)
+  Measured against a real host, one session running
   `sleep 45` whose client had already closed its socket: the bounded session
   drain finished in **1.7 s**, then `close_all` parked **42.0 s** on that
   lock — with `Daemon stopped.` already printed and exit 0 already returned,

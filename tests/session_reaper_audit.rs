@@ -273,8 +273,12 @@ async fn a_real_session_closed_by_the_shutdown_lands_one_line_naming_shutdown() 
 /// too. What this case does add is the N-sessions-N-lines property against
 /// real sessions, with each line carrying its own id; the placement is
 /// pinned as source text by
-/// `every_silent_removal_site_now_audits_except_the_explicit_close`, which
-/// asserts the per-session helper appears zero times in either batch body.
+/// `each_removal_site_audits_from_the_right_place`, which slices each method
+/// and asserts the per-session helper appears zero times in either batch
+/// body. (Its sibling
+/// `every_silent_removal_site_now_audits_except_the_explicit_close` counts
+/// the call sites over the whole file instead; this line named that one,
+/// which has no per-body assertion.)
 #[tokio::test]
 async fn two_real_sessions_reaped_together_leave_one_line_each() {
     tokio::time::timeout(TEST_BOUND, async {
