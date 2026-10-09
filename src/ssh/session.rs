@@ -254,13 +254,15 @@ impl SessionManager {
     /// is the only place in this file where a double line could be born, and
     /// it would be born of exactly the factoring that looks tidiest.
     ///
-    /// Not `async`, and that matters at two of the call sites:
-    /// `AuditLogger::log` writes to `tracing` and pushes onto an unbounded
-    /// mpsc, so it never awaits and never blocks. `close_all` and `cleanup`
-    /// can therefore call it without widening the window their
-    /// `#[allow(clippy::significant_drop_tightening)]` already covers, and
-    /// `close_all`'s lines stay inside `RESOURCE_CLOSE_GRACE` without
-    /// spending any of it.
+    /// **Not `async`, and that is what makes
+    /// [`Self::audit_all_destroyed`] possible** — see there for why batching
+    /// matters. `AuditLogger::log` writes to `tracing` and pushes onto an
+    /// unbounded mpsc, so it never awaits and never blocks.
+    ///
+    /// **Called for ONE session only**, from `Self::remove_dead_session`.
+    /// `close_all` and `cleanup` destroy a batch and go through
+    /// [`Self::audit_all_destroyed`]; calling this one from inside their
+    /// close loops is the defect the batch helper exists to prevent.
     ///
     /// Silent when no logger was wired (see the `audit` field) — which is
     /// every test and every embedder that builds the manager with
@@ -271,6 +273,41 @@ impl SessionManager {
                 RESOURCE_REAPER_TOOL,
                 reaped_event(reason.as_str(), "session_id", id, host, lifetime),
             );
+        }
+    }
+
+    /// Write the line for EVERY session in a batch, in one synchronous pass,
+    /// **before any of them is closed**.
+    ///
+    /// **The defect this exists to remove loses lines 2..N.** Both batch
+    /// sites used to interleave: for each session, write its line, then
+    /// `client.close().await` it. That close is bounded by
+    /// `SshClient::close`'s own 5 s, and `close_all` runs inside
+    /// `McpServer::close_bounded`'s 2 s — so against a dead peer the FIRST
+    /// session got its line and sessions 2..N got neither a line nor a
+    /// DISCONNECT, because `close_bounded` abandons the future mid-flight.
+    /// `cleanup` had the same shape with a different abandoner: it removes
+    /// every expired session from the map before writing the first line, and
+    /// `McpServer::serve` aborts the cleanup loop **unbounded**, so an abort
+    /// between two iterations lost the lines of sessions already removed
+    /// from the map — sessions no later pass can find.
+    ///
+    /// **The fix costs nothing**, which is why it is the right one:
+    /// [`Self::audit_destroyed`] is not `async`, so N lines are N pushes
+    /// onto an unbounded channel with no await between them. The batch pass
+    /// cannot be abandoned part-way by a timeout, because no timer can fire
+    /// inside it.
+    ///
+    /// Takes the FACTS and not the sessions: `ShellSession` is private and
+    /// has no test constructor, so a tuple iterator is what lets
+    /// `every_line_of_a_batch_is_written_before_any_of_them_is_closed` drive
+    /// this with three entries and no SSH at all.
+    fn audit_all_destroyed<'a>(
+        &self,
+        destroyed: impl IntoIterator<Item = (&'a str, &'a str, Duration, ReapReason)>,
+    ) {
+        for (id, host, lifetime, reason) in destroyed {
+            self.audit_destroyed(reason, id, host, lifetime);
         }
     }
 
@@ -637,13 +674,20 @@ impl SessionManager {
         let count = sessions.len();
         let drained: Vec<_> = sessions.drain().collect();
         drop(sessions); // Release lock before closing connections
-        for (_, session) in drained {
-            self.audit_destroyed(
-                ReapReason::Shutdown,
-                &session.id,
-                &session.host,
+
+        // EVERY line first, in one synchronous pass. Interleaving them with
+        // the closes below lost sessions 2..N whenever the bound fired — see
+        // `audit_all_destroyed`.
+        self.audit_all_destroyed(drained.iter().map(|(_, session)| {
+            (
+                session.id.as_str(),
+                session.host.as_str(),
                 session.created_at.elapsed(),
-            );
+                ReapReason::Shutdown,
+            )
+        }));
+
+        for (_, session) in drained {
             let _ = session.client.close().await;
         }
         if count > 0 {
@@ -691,14 +735,20 @@ impl SessionManager {
         let remaining = sessions.len();
         drop(sessions); // Release lock before closing connections
 
-        // Close SSH connections properly (sends SSH DISCONNECT)
-        for (session, reason) in expired {
-            self.audit_destroyed(
-                reason,
-                &session.id,
-                &session.host,
+        // EVERY line first, same reason as `close_all`: these sessions are
+        // already out of the map, so a loop abandoned between two closes
+        // loses the lines of sessions no later pass can find.
+        self.audit_all_destroyed(expired.iter().map(|(session, reason)| {
+            (
+                session.id.as_str(),
+                session.host.as_str(),
                 session.created_at.elapsed(),
-            );
+                *reason,
+            )
+        }));
+
+        // Close SSH connections properly (sends SSH DISCONNECT)
+        for (session, _) in expired {
             if let Err(e) = session.client.close().await {
                 warn!(session_id = %session.id, error = %e, "Failed to close expired session");
             }
@@ -711,10 +761,17 @@ impl SessionManager {
         );
     }
 
-    /// Build the shell initialization command that disables echo and prompts.
     /// Initialize a shell session: open channel, disable echo/prompts, get CWD.
     ///
     /// Extracted to allow the caller to close the SSH client on error.
+    ///
+    /// (A stray copy of `build_init_command`'s own first doc line used to sit
+    /// above this one, so this function's first sentence described something
+    /// it does not do. It is deleted rather than quoted here: quoting it
+    /// would keep the duplicate that made `build_init_command`'s doc line a
+    /// non-unique slice anchor, which is the very defect being removed — and
+    /// the first draft of this paragraph did exactly that. The guard below
+    /// now asserts the uniqueness of both ends of every slice.)
     async fn init_shell(
         client: &SshClient,
         host_config: &HostConfig,
@@ -3295,6 +3352,98 @@ mod tests {
         );
     }
 
+    /// **Every line of a batch is written before any of them is closed.**
+    ///
+    /// The defect: both batch sites used to interleave, writing one line and
+    /// then awaiting that session's `client.close()` — bounded at 5 s by
+    /// `SshClient::close` and wrapped in `McpServer::close_bounded`'s 2 s —
+    /// so against a dead peer the FIRST session got a line and 2..N got
+    /// nothing. Three sessions here, one pass, three lines.
+    ///
+    /// **What this proves and what it does not.** It proves that
+    /// `audit_all_destroyed` writes N lines for N inputs, each with its own
+    /// id and its own reason — which no single-session test can show, and
+    /// which the batch sites now go through. It does **not** prove the
+    /// placement, because making a real `client.close()` slow enough to be
+    /// abandoned needs an unresponsive peer that the in-process mock cannot
+    /// be; that half is
+    /// `every_silent_removal_site_now_audits_except_the_explicit_close`,
+    /// which asserts `self.audit_destroyed(` appears **zero** times in
+    /// either batch body.
+    ///
+    /// And the pass has no `.await` in it at all, so no timer can fire
+    /// part-way through: that is the property that makes "all lines first"
+    /// free rather than a trade.
+    #[tokio::test]
+    async fn every_line_of_a_batch_is_written_before_any_of_them_is_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (logger, writer) = audited_logger(audit_path.clone());
+        let logger = Arc::new(logger);
+
+        let manager =
+            SessionManager::new(SessionConfig::default()).with_audit_logger(Arc::clone(&logger));
+        manager.audit_all_destroyed([
+            (
+                "s-1",
+                "raspberry",
+                Duration::from_millis(1),
+                ReapReason::Shutdown,
+            ),
+            (
+                "s-2",
+                "pi-two",
+                Duration::from_millis(2),
+                ReapReason::IdleTimeout,
+            ),
+            (
+                "s-3",
+                "pi-three",
+                Duration::from_millis(3),
+                ReapReason::MaxAge,
+            ),
+        ]);
+
+        logger.close();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            3,
+            "three destroyed sessions must leave three lines, not just the first; got {lines:?}"
+        );
+        let commands: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value =
+                    serde_json::from_str(l).expect("audit line must be JSONL");
+                v["command"]
+                    .as_str()
+                    .expect("command is a string")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "<resource-reaper> reason=shutdown session_id=s-1",
+                "<resource-reaper> reason=idle_timeout session_id=s-2",
+                "<resource-reaper> reason=max_age session_id=s-3",
+            ],
+            "each session keeps its OWN id and its OWN reason, in order"
+        );
+        let hosts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value =
+                    serde_json::from_str(l).expect("audit line must be JSONL");
+                v["host"].as_str().expect("host is a string").to_string()
+            })
+            .collect();
+        assert_eq!(hosts, ["raspberry", "pi-two", "pi-three"]);
+    }
+
     /// **Nothing destroyed, nothing written** — and this is a contract, not
     /// an optimisation.
     ///
@@ -3386,9 +3535,17 @@ mod tests {
 
         assert_eq!(
             production.matches("self.audit_destroyed(").count(),
-            3,
-            "the single audit helper has three callers: `remove_dead_session` (which is how \
-             `exec`'s four branches reach it), `close_all` and `cleanup`. NOT `close`"
+            2,
+            "the single-session audit helper has two callers: `remove_dead_session` (which is \
+             how `exec`'s four branches reach it) and `audit_all_destroyed`'s own loop. NOT \
+             `close`, and NOT a batch site: a batch that calls it directly is the interleaving \
+             that lost sessions 2..N"
+        );
+        assert_eq!(
+            production.matches("self.audit_all_destroyed(").count(),
+            2,
+            "the two batch sites — `close_all` and `cleanup` — each write every line in one \
+             synchronous pass before closing anything"
         );
         assert_eq!(
             production.matches("self.remove_dead_session(").count(),
@@ -3399,7 +3556,42 @@ mod tests {
 
         // Slice each method's body between consecutive signatures, in file
         // order, so no body can be read as another's.
+    }
+
+    /// The per-method half of the guard above, split out because the two
+    /// together passed `clippy::too_many_lines` (121/100) and because they
+    /// assert different things: that one counts call sites across the file,
+    /// this one checks WHICH method each site is in.
+    #[test]
+    fn each_removal_site_audits_from_the_right_place() {
+        let src = include_str!("session.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // Both ends of every slice must be UNIQUE in the production half, or
+        // the slice is not the one the assertion names. Measured: the
+        // previous version ended `cleanup`'s slice on
+        // `"/// Build the shell initialization command"`, which occurred
+        // TWICE in the production half — a stray copy of
+        // `build_init_command`'s doc sat on `init_shell`, and `find` takes
+        // the first. That stray copy came AFTER `cleanup`, so the slice was
+        // too BIG (it swallowed part of `init_shell`) rather than too small,
+        // and the count assertions could not go false from it. The defect was
+        // therefore in what the guard analysed, not yet in what it reported —
+        // which is exactly the state in which such a guard is believed and
+        // then breaks. The stray line is gone and both ends are checked.
         let slice = |from: &str, to: &str| -> &str {
+            assert_eq!(
+                production.matches(from).count(),
+                1,
+                "slice anchor {from:?} must be unique in the production half"
+            );
+            assert_eq!(
+                production.matches(to).count(),
+                1,
+                "slice anchor {to:?} must be unique in the production half"
+            );
             let start = production
                 .find(from)
                 .unwrap_or_else(|| panic!("{from} must exist in production code"));
@@ -3437,16 +3629,32 @@ mod tests {
             (
                 "pub async fn close_all(",
                 "/// Clean up expired sessions",
-                "self.audit_destroyed(",
+                "self.audit_all_destroyed(",
                 1,
-                "one line per session actually closed by the shutdown",
+                "the shutdown writes every line in one batch pass",
+            ),
+            (
+                "pub async fn close_all(",
+                "/// Clean up expired sessions",
+                "self.audit_destroyed(",
+                0,
+                "and NOT one at a time inside the close loop: that is the interleaving whose \
+                 first `client.close().await` ate the 2 s bound and lost sessions 2..N",
             ),
             (
                 "pub async fn cleanup(",
-                "/// Build the shell initialization command",
-                "self.audit_destroyed(",
+                "async fn init_shell(",
+                "self.audit_all_destroyed(",
                 1,
-                "one line per session the reaper took",
+                "the reaper writes every line in one batch pass",
+            ),
+            (
+                "pub async fn cleanup(",
+                "async fn init_shell(",
+                "self.audit_destroyed(",
+                0,
+                "and NOT one at a time: `serve` aborts the cleanup loop unbounded, and these \
+                 sessions are already out of the map",
             ),
         ] {
             let body = slice(from, to);
@@ -3456,6 +3664,17 @@ mod tests {
                 "{from} must contain {expected} occurrence(s) of `{needle}`: {why}"
             );
         }
+    }
+
+    /// The shared predicate and the security half, split from the two guards
+    /// above for `clippy::too_many_lines` and because they are properties of
+    /// the FILE rather than of one method.
+    #[test]
+    fn the_expiry_predicate_is_shared_and_no_removal_drops_a_client() {
+        let src = include_str!("session.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
 
         // And the predicate is shared rather than duplicated: two call sites
         // in production, one in `exec`'s prologue and one in `cleanup`.

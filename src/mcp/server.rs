@@ -7974,18 +7974,52 @@ rbac:
     /// **Every writing facade claims before it logs, as source text.**
     ///
     /// The runtime test above observes ONE facade. This one covers all of
-    /// them, and the two together are what round 2 asked for: without it the
-    /// other five release sites could each sink below their own `log()`, and
-    /// a SEVENTH facade added with no claim at all would redden nothing.
+    /// them.
     ///
-    /// Two assertions, and the second is the one that catches an addition:
-    /// the number of claim sites equals the number of facades that write
-    /// about a call somebody else made, and in each of those facades the
-    /// claim's index is below its `audit_logger.log(` index.
+    /// **It used to promise the opposite of what it did, and the final review
+    /// is what established that.** The previous version held a hard-coded
+    /// list of five writer signatures and asserted
+    /// `count("self.claim_this_write();") == 5`. Walk the two cases it claims
+    /// to separate:
     ///
-    /// `log_interrupted` is excluded by name and must be: it IS the
-    /// shutdown's write, and a claim there would count the shutdown's own
-    /// line against the call it is reporting.
+    /// - a sixth facade added **with** a correct claim → the count becomes 6,
+    ///   the assertion fails, and its message says "no more and no fewer". So
+    ///   the guard **reddened on the correct addition**;
+    /// - a sixth facade added **with no claim at all** → the count stays 5,
+    ///   the hard-coded list does not mention the new facade, nothing looks
+    ///   at it. So the guard **passed on the defect**, which is exactly the
+    ///   case its own docstring named as the reason it exists.
+    ///
+    /// Inverted, in other words — and a guard that is wrong in that
+    /// direction is worse than none, because it is believed. The list is now
+    /// **discovered from the source**: every method in the production half
+    /// whose body reaches `self.audit_logger` is a writing facade, so a new
+    /// one is in scope the moment it is written, and the count it is compared
+    /// against comes from the same walk.
+    ///
+    /// `log_interrupted` is excluded **by name**, and that is the one
+    /// hard-coded element left, deliberately: it IS the shutdown's write, so
+    /// a claim there would count the shutdown's own line against the call it
+    /// is reporting. Excluding it by name means a reader can see the single
+    /// exception rather than infer it.
+    ///
+    /// **What it does now, stated exactly, because the previous docstring did
+    /// not.** It reddens on **any** change to the set of writing facades,
+    /// claimed or not, and the message says which case you are in. Adding
+    /// one is then a deliberate two-step: put the claim in, add the name to
+    /// the census. Skip the claim and the per-facade assertion below fires
+    /// instead, with "writes an audit line, so it must claim this write" —
+    /// so an unclaimed facade cannot be landed either way. A facade
+    /// *disappearing* reddens too, which is how a handler moving onto the
+    /// facades gets noticed rather than silently shrinking the count.
+    ///
+    /// Counter-proof, run isolated, with the old guard's arithmetic measured
+    /// beside it. Adding a sixth facade `log_nothing` that writes and does
+    /// **not** claim: this test fails naming `log_nothing`, while the old
+    /// assertion was `count("self.claim_this_write();") == 5` and the count
+    /// **stayed 5** — measured — so it passed. Giving `log_nothing` its
+    /// claim takes the count to 6, which made the **old** assertion fail on
+    /// the correct addition. Both halves measured; that is the inversion.
     #[test]
     fn every_writing_facade_claims_before_it_logs() {
         let src = include_str!("../domain/use_cases/execute_command.rs");
@@ -7993,47 +8027,96 @@ rbac:
             "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
         );
 
-        // The facades that write about somebody else's call. `log_success`
-        // and `process_success` share `record_success_redacted`, which is
-        // where their claim lives, so the bodies to slice are these five.
-        let writers = [
-            "pub fn log_denied(",
-            "pub fn log_confirmed(",
-            "fn record_success_redacted(",
-            "pub fn log_state_change(",
-            "pub fn log_failure(",
-        ];
+        // Every method of the production half, sliced between consecutive
+        // signatures at method indentation. Both `pub fn` and `fn`, because
+        // `record_success_redacted` — where `log_success` and
+        // `process_success` keep their shared claim — is private.
+        let mut starts: Vec<usize> = Vec::new();
+        for marker in ["\n    pub fn ", "\n    pub(crate) fn ", "\n    fn "] {
+            let mut from = 0_usize;
+            while let Some(at) = production[from..].find(marker) {
+                starts.push(from + at + 1);
+                from = from + at + 1;
+            }
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        assert!(
+            starts.len() > 5,
+            "the method walk found {} signatures, which cannot be right",
+            starts.len()
+        );
 
+        let name_of = |body: &str| -> String {
+            body.split_once("fn ")
+                .and_then(|(_, rest)| rest.split_once('('))
+                .map_or_else(|| "<unnamed>".to_string(), |(n, _)| n.trim().to_string())
+        };
+
+        // A writing facade is any method that reaches the audit logger to
+        // WRITE. `&self.audit_logger` is a clone site, not a write — that is
+        // how `with_claim` got into the first version of this list — and the
+        // test for it is the preceding byte rather than `.log(`, because
+        // `rustfmt` leaves `self.audit_logger` alone on its line in
+        // `log_denied` and anchoring on `.log(` misses it. The two shapes
+        // together are the reason this is a predicate and not a literal.
+        let writes_to_the_logger = |body: &str| -> bool {
+            let mut from = 0_usize;
+            while let Some(at) = body[from..].find("self.audit_logger") {
+                let at = from + at;
+                if !body[..at].ends_with('&') {
+                    return true;
+                }
+                from = at + 1;
+            }
+            false
+        };
+
+        let mut writers: Vec<String> = Vec::new();
+        let mut bodies: Vec<(String, &str)> = Vec::new();
+        for (i, start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).copied().unwrap_or(production.len());
+            let body = &production[*start..end];
+            if !writes_to_the_logger(body) {
+                continue;
+            }
+            let name = name_of(body);
+            if name == "log_interrupted" {
+                continue;
+            }
+            writers.push(name.clone());
+            bodies.push((name, body));
+        }
+
+        writers.sort();
+        assert_eq!(
+            writers,
+            [
+                "log_confirmed",
+                "log_denied",
+                "log_failure",
+                "log_state_change",
+                "record_success_redacted",
+            ],
+            "the census this guard was written against. A NEW writing facade is not a \
+             failure — give it a claim, then add it here. This list is checked so that a \
+             facade DISAPPEARING is noticed too."
+        );
         assert_eq!(
             production.matches("self.claim_this_write();").count(),
             writers.len(),
-            "one claim per writing facade, no more and no fewer: a facade added without \
-             one writes a line the shutdown will then report as never written"
+            "one claim per discovered writing facade, no more and no fewer"
         );
 
-        for writer in writers {
-            let from = production
-                .find(writer)
-                .unwrap_or_else(|| panic!("{writer} must exist"));
-            let body = &production[from..];
-            // To the next `\n    pub fn ` / `\n    fn `, i.e. the end of this
-            // method. `find` on the body AFTER the signature so the
-            // signature itself is not the match.
-            let after_sig = body.find('\n').expect("a signature ends in a newline") + 1;
-            let end = body[after_sig..]
-                .find("\n    pub fn ")
-                .map_or(body.len(), |i| after_sig + i);
-            let body = &body[..end];
-
+        for (writer, body) in bodies {
             let claim = body.find("self.claim_this_write();").unwrap_or_else(|| {
                 panic!("{writer} writes an audit line, so it must claim this write")
             });
-            // The RECEIVER, not the call: `rustfmt` folds
-            // `self.audit_logger.log(tool, ..)` onto two lines in
-            // `log_denied`, so a guard anchored on `self.audit_logger.log(`
-            // fails there for a formatting reason and says "must reach the
-            // audit logger", which is the misleading message wave 4 already
-            // paid for once.
+            // The RECEIVER, not the call: `rustfmt` leaves
+            // `self.audit_logger` alone on its line in `log_denied`, so a
+            // guard anchored on `self.audit_logger.log(` fails there for a
+            // formatting reason and says "must reach the audit logger",
+            // which is the misleading message wave 4 already paid for once.
             let write = body
                 .find("self.audit_logger")
                 .unwrap_or_else(|| panic!("{writer} must reach the audit logger"));
@@ -8055,6 +8138,172 @@ rbac:
                 .contains("self.claim_this_write();"),
             "log_interrupted must NOT claim: it is the shutdown's own write, and claiming \
              there would count it against the call it is reporting"
+        );
+    }
+
+    /// **A handler that writes its OWN events is reported with their count,
+    /// not with zero.**
+    ///
+    /// The sibling test above drives the facades. This one drives the path
+    /// the six file-transfer handlers actually take: build their own
+    /// `AuditEvent` and hand it straight to `ctx.audit_logger.log(..)`,
+    /// which reaches no facade. Before the fix that left the counter at 0,
+    /// so a `daemon stop` during `ssh_files_write` at file 21 of 50 put 20
+    /// lines on disk **and** a line saying none had been recorded.
+    ///
+    /// Shaped as `ssh_files_write`'s loop — two files written, then the
+    /// shutdown — because that is the materially reachable case: the other
+    /// five handlers write once per call on mutually exclusive branches.
+    ///
+    /// Counter-proof: delete the `claim_this_write()` line above either
+    /// `ctx.audit_logger.log(` in `ssh_files_write.rs` and
+    /// `events_recorded` reads 1 instead of 2.
+    #[tokio::test]
+    async fn a_handler_writing_its_own_events_is_not_reported_as_having_written_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        let claim = Arc::new(server.in_flight.register(
+            "ssh_files_write",
+            Some(&json!({"host": "raspberry", "files": ["a", "b", "c"]})),
+        ));
+        let per_call = server.execute_use_case.with_claim(Arc::clone(&claim));
+
+        // Two of the three files written, each exactly as the handler does
+        // it: claim, then a hand-built event straight to the logger.
+        for path in ["/tmp/a", "/tmp/b"] {
+            per_call.claim_this_write();
+            server.audit_logger.log(
+                "ssh_files_write",
+                crate::security::AuditEvent::new(
+                    "raspberry",
+                    &format!("SFTP_WRITE {path}"),
+                    crate::security::CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
+        }
+
+        server.audit_interrupted_in_flight();
+        drop(claim);
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            3,
+            "two file writes plus the shutdown's line; got {lines:?}"
+        );
+        let shutdown: Value = serde_json::from_str(&lines[2])
+            .unwrap_or_else(|e| panic!("audit line must be JSONL: {e}"));
+        assert_eq!(shutdown["tool_name"], crate::security::SHUTDOWN_TOOL);
+        assert_eq!(
+            shutdown["result"]["Interrupted"]["events_recorded"], 2,
+            "the two lines above it are on disk, so `0` here would be a false line about a \
+             true one: {lines:?}"
+        );
+    }
+
+    /// **Every direct `audit_logger.log` in a handler claims itself first.**
+    ///
+    /// The sibling guard above covers the facades in
+    /// `ExecuteCommandUseCase`. This one covers the handlers that bypass
+    /// them: eleven production writes in six file-transfer handlers build
+    /// their own `AuditEvent` and call `ctx.audit_logger.log(..)` directly,
+    /// so `claim_this_write` was never reached and the shutdown line printed
+    /// `events_recorded: 0` beside lines those calls had already written.
+    ///
+    /// **A directory walk and not `include_str!`, deliberately.** The
+    /// defect's whole shape is "a write that nobody remembered to count", so
+    /// a guard listing the six known files would have the same shape: the
+    /// seventh handler to grow a direct write would be invisible to it. This
+    /// walks every `.rs` under `src/mcp/tool_handlers/` and checks each
+    /// occurrence, so a new one is covered the day it is written.
+    /// `CARGO_MANIFEST_DIR` is absolute, so the walk does not depend on the
+    /// working directory.
+    ///
+    /// It checks each site's PRECEDING text rather than counting, because a
+    /// count is satisfied by eleven claims in the wrong places. The claim
+    /// must be the nearest statement above the write.
+    #[test]
+    fn every_direct_audit_write_claims_itself_first() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tool_handlers");
+        let mut sites = 0_usize;
+        let mut files_with_sites: Vec<String> = Vec::new();
+
+        for entry in std::fs::read_dir(&dir).expect("the handler directory must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("handler must be readable");
+            // Production half only: a test that asserts on a handler's own
+            // audit event is not a write about somebody else's call.
+            let production = src
+                .split_once("#[cfg(test)]\nmod tests {")
+                .map_or(src.as_str(), |(before, _)| before);
+
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let mut from = 0_usize;
+            let mut in_this_file = 0_usize;
+            while let Some(at) = production[from..].find("ctx.audit_logger.log(") {
+                let at = from + at;
+                sites += 1;
+                in_this_file += 1;
+                // The three lines above this one must contain the claim. Three
+                // and not one, because `rustfmt` may put the comment that
+                // explains it in between.
+                let window_start = production[..at]
+                    .char_indices()
+                    .rev()
+                    .filter(|(_, c)| *c == '\n')
+                    .nth(2)
+                    .map_or(0, |(i, _)| i);
+                assert!(
+                    production[window_start..at].contains("claim_this_write()"),
+                    "{name}: the direct `audit_logger.log` at byte {at} must be immediately \
+                     preceded by `ctx.execute_use_case.claim_this_write();`, or the shutdown \
+                     reports this call as having recorded nothing while its line is on disk"
+                );
+                from = at + 1;
+            }
+            if in_this_file > 0 {
+                files_with_sites.push(format!("{name}:{in_this_file}"));
+            }
+        }
+
+        files_with_sites.sort();
+        assert_eq!(
+            sites, 11,
+            "the census the fix was measured against: eleven direct writes in six handlers, \
+             found {files_with_sites:?}. A new one is not a failure — add the claim, then this \
+             number. A DISAPPEARING one means a handler moved onto the facades, which is better; \
+             lower the number and say so."
+        );
+        assert_eq!(
+            files_with_sites,
+            [
+                "ssh_download.rs:1",
+                "ssh_file_write.rs:2",
+                "ssh_files_write.rs:2",
+                "ssh_ls.rs:2",
+                "ssh_sync.rs:2",
+                "ssh_upload.rs:2",
+            ],
+            "and they are in these six handlers only"
         );
     }
 

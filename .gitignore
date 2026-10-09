@@ -2,6 +2,7 @@
 /target/
 # `make lint-stable` builds here so it does not evict target/'s MSRV artifacts
 /target-stable/
+/target-no-default/
 *.rs.bk
 
 # Build artifacts

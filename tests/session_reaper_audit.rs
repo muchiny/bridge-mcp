@@ -256,6 +256,102 @@ async fn a_real_session_closed_by_the_shutdown_lands_one_line_naming_shutdown() 
     .expect("the shutdown path must TERMINATE: a hang here is a mock regression");
 }
 
+/// **Two real sessions reaped together leave two lines, not one.**
+///
+/// Every other test in this file and in `src/ssh/session.rs` drives a single
+/// session, so none of them could see the defect the final review found:
+/// `cleanup` and `close_all` used to interleave each session's audit line
+/// with that session's `client.close().await`, so a bound firing after the
+/// first close left sessions 2..N with no line at all. Both sites now write
+/// every line in one synchronous pass first.
+///
+/// **This case does not reproduce the abandonment**, and the reason is
+/// worth stating rather than implying: making a real `client.close()` slow
+/// enough to eat the bound needs a peer that accepts the TCP connection and
+/// then never answers the SSH DISCONNECT, which the in-process mock is not —
+/// it answers immediately, so the interleaved form would have passed this
+/// too. What this case does add is the N-sessions-N-lines property against
+/// real sessions, with each line carrying its own id; the placement is
+/// pinned as source text by
+/// `every_silent_removal_site_now_audits_except_the_explicit_close`, which
+/// asserts the per-session helper appears zero times in either batch body.
+#[tokio::test]
+async fn two_real_sessions_reaped_together_leave_one_line_each() {
+    tokio::time::timeout(TEST_BOUND, async {
+        let (addr, _server, _root) = start_default_server().await;
+        let audit = audited();
+
+        let manager = SessionManager::new(SessionConfig {
+            max_sessions: 10,
+            idle_timeout_seconds: 0,
+            max_age_seconds: 3600,
+        })
+        .with_audit_logger(Arc::clone(&audit.logger));
+
+        let host = mock_host_config(addr, "tester", "testpass");
+        let limits = mock_limits();
+        let first = manager
+            .create("mock-host", &host, &limits, None)
+            .await
+            .expect("the mock must serve a shell session");
+        let second = manager
+            .create("mock-host", &host, &limits, None)
+            .await
+            .expect("and a second one");
+        assert_ne!(
+            first.id, second.id,
+            "two distinct sessions, or this proves nothing"
+        );
+        assert_eq!(manager.list().await.len(), 2);
+
+        manager.cleanup().await;
+        assert!(
+            manager.list().await.is_empty(),
+            "both must have been reaped"
+        );
+
+        audit.logger.close();
+        let _ = tokio::time::timeout(Duration::from_secs(5), audit.writer).await;
+
+        let written = lines(&audit.path);
+        assert_eq!(
+            written.len(),
+            2,
+            "two reaped sessions must leave TWO lines, not just the first; got {written:?}"
+        );
+        let mut commands: Vec<String> = written
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value =
+                    serde_json::from_str(l).expect("audit line must be JSONL");
+                v["command"]
+                    .as_str()
+                    .expect("command is a string")
+                    .to_string()
+            })
+            .collect();
+        commands.sort();
+        let mut expected = vec![
+            format!(
+                "<resource-reaper> reason=idle_timeout session_id={}",
+                first.id
+            ),
+            format!(
+                "<resource-reaper> reason=idle_timeout session_id={}",
+                second.id
+            ),
+        ];
+        expected.sort();
+        assert_eq!(
+            commands, expected,
+            "each line must name its own session: a batch that wrote the first id twice, or \
+             only once, would be a different defect with the same count"
+        );
+    })
+    .await
+    .expect("the two-session reap must TERMINATE: a hang here is a mock regression");
+}
+
 /// **No double line on the explicit close**, driven through a real session.
 ///
 /// `SessionManager::close` is the one removal site that must not audit: its

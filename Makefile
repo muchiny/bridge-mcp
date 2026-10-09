@@ -1,6 +1,6 @@
 # MCP SSH Bridge - Development Makefile
 
-.PHONY: all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install lint-stable markdownlint
+.PHONY: lint-no-default all build release check test test-otel test-daemon daemon-start daemon-stop daemon-status lint fmt fmt-check doc-check audit deny clean install setup help typos machete outdated quality mutants mutants-db mutants-file mutants-full security-audit zeroize-check geiger sbom security-tests semver-checks hack release-all release-target docker-build docker-scan deps-check deps-update ci-full release-pipeline careful bench bench-save bench-compare coverage coverage-check e2e-mock e2e-docker e2e-docker-up e2e-docker-down dxt sync-server-json registry-publish probe-install verify-install lint-stable markdownlint
 
 # ---------------------------------------------------------------------------
 # Guards around optional tooling.
@@ -100,6 +100,31 @@ daemon-status:
 # Run clippy linter (MSRV toolchain — rust-toolchain.toml pins 1.98.0)
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings
+
+# Clippy with the DEFAULT features turned off — the third gate, and the one
+# nothing used to run.
+#
+# `lint` and `lint-stable` both pass `--all-features`, so every item whose
+# only consumer sits behind a feature flag is live in both. Measured on this
+# branch: `audited_operation`, `elide_oversized`, `redact_secret_values`,
+# `key_names_a_secret` and `REDACTION_EXEMPT_KEYS` became `dead_code` errors
+# the moment the audit-honesty wave moved them out of `src/cli/runner.rs`
+# (whose module is `#[cfg(feature = "cli")]`) into unconditionally-compiled
+# `src/security/audit.rs` — six errors under `-D warnings`, in a
+# configuration no `make` target and no CI job ran. The breakage shipped
+# inside a release whose own gates were green.
+#
+# `--lib` and not `--all-targets`: `tests/daemon_integration.rs` imports
+# `bridge_mcp::daemon`, which is `cfg(feature = "cli")`, so the wide form is
+# red for a reason that predates this target and belongs to a task of its
+# own. A narrow gate that runs beats a wide one that does not.
+#
+# Its own CARGO_TARGET_DIR, same reasoning as `lint-stable`: a different
+# feature set evicts the default profile's fingerprints, so sharing the
+# directory makes every other target rebuild from scratch.
+lint-no-default:
+	CARGO_TARGET_DIR=target-no-default \
+		cargo clippy --lib --no-default-features -- -D warnings
 
 # Run clippy on real stable, which is what the CI Clippy gate uses.
 # rust-toolchain.toml outranks `rustup default`, so `make lint` alone can stay
@@ -324,10 +349,10 @@ quality: fmt-check lint typos machete
 # stale local target/debug, so a `build.rs` regression that makes
 # BRIDGE_MCP_BUILD_REV fall back to `unknown` passes `make ci` and fails the
 # required Tests context on the PR. `make ci` is not the whole of CI.
-ci: fmt-check lint lint-stable test doc-check audit deny typos markdownlint
+ci: fmt-check lint lint-stable lint-no-default test doc-check audit deny typos markdownlint
 
 # Full CI check (comprehensive - replaces GitHub Actions)
-ci-full: fmt-check lint lint-stable test audit typos markdownlint hack geiger doc-check
+ci-full: fmt-check lint lint-stable lint-no-default test audit typos markdownlint hack geiger doc-check
 	@echo "Full CI complete."
 
 # Setup development environment
@@ -624,6 +649,7 @@ help:
 	@echo "  test             - Run tests"
 	@echo "  lint             - Run clippy (MSRV toolchain)"
 	@echo "  lint-stable      - Run clippy on real stable (what CI gates on)"
+	@echo "  lint-no-default  - Run clippy with default features OFF (no CI job does)"
 	@echo "  fmt              - Format code"
 	@echo "  fmt-check        - Check formatting"
 	@echo "  typos            - Check for typos"

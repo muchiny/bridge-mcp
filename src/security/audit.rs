@@ -742,21 +742,69 @@ fn audited_text(raw: &str) -> String {
 /// Whether `c` changes where the characters around it are DRAWN, rather than
 /// being merely unprintable.
 ///
-/// Named for the property and not for a Unicode category because the category
-/// is what went wrong: `char::is_control()` is `Cc`, these are `Zl`, `Zp` and
-/// `Cf`, and the audit line's problem with them has nothing to do with which
-/// table they sit in.
+/// The name is the property; the body is **the whole of general categories
+/// `Cf`, `Zl` and `Zp`**, and that criterion is what closes the list. It is
+/// not a judgement about which of them are dangerous: a hand-picked subset
+/// cannot be audited, and the previous version of this function proved it —
+/// four ranges written by hand, chosen for being the ones a known attack
+/// used, which **missed members of their own cohort**: `U+061C` ARABIC
+/// LETTER MARK, `U+00AD` SOFT HYPHEN, `U+2060`..`U+2064` the invisible
+/// operators, `U+206A`..`U+206F` the deprecated bidi format characters,
+/// `U+FFF9`..`U+FFFB` the interlinear annotations, and the 97 code points of
+/// the tag block `U+E0020`..`U+E007F`, which render as nothing at all and
+/// were the mechanism of the 2017 "Trojan Source"-adjacent tag-smuggling
+/// reports. `U+200E`/`U+200F` were in range only by accident of `200b..200f`
+/// being written for the zero-width characters.
+///
+/// `Cc` is **deliberately not** here: `char::is_control()` already covers it
+/// at the one call site ([`audited_text`]), and duplicating it would make
+/// two lists to keep in step.
+///
+/// **How the list was derived, and how to re-derive it.** Not from memory —
+/// from the Unicode database Python carries, which is a source of truth
+/// present on any machine that can run the repo's own scripts:
+///
+/// ```text
+/// python3 -I -c '
+/// import unicodedata
+/// pts=[cp for cp in range(0x110000)
+///      if unicodedata.category(chr(cp)) in {"Cf","Zl","Zp"}]
+/// print(unicodedata.unidata_version, len(pts))'
+/// ```
+///
+/// → `16.0.0 172`. **172 code points in 21 ranges**, and
+/// `every_format_or_separator_code_point_is_covered` asserts that every one
+/// of the 172 returns `true` here, so the two cannot drift silently. A later
+/// Unicode version that adds a `Cf` code point will not be noticed by that
+/// test (it checks this list against itself, not against the table) — so the
+/// residual is explicit: **re-run the command above on a toolchain bump**,
+/// and the ranges below carry the Unicode version they were taken from.
+///
+/// Ranges, in code-point order, as that command emits them (Unicode 16.0.0):
 const fn reorders_or_hides(c: char) -> bool {
-    matches!(c,
-        // Zl / Zp: a line and a paragraph break that are not `Cc`.
-        '\u{2028}' | '\u{2029}'
-        // Cf, invisible: zero-width space/non-joiner/joiner, LRM/RLM, BOM.
-        | '\u{200b}'..='\u{200f}' | '\u{feff}'
-        // Cf, re-ordering: the bidi overrides and embeddings …
-        | '\u{202a}'..='\u{202e}'
-        // … and the bidi isolates added in Unicode 6.3, which do the same
-        // thing and which a list written from `U+202A..U+202E` alone misses.
-        | '\u{2066}'..='\u{2069}'
+    matches!(
+        c,
+        '\u{ad}'                       // U+00AD SOFT HYPHEN
+        | '\u{600}'..='\u{605}'         // ARABIC NUMBER SIGN .. NUMBER MARK ABOVE
+        | '\u{61c}'                    // U+061C ARABIC LETTER MARK
+        | '\u{6dd}'                    // U+06DD ARABIC END OF AYAH
+        | '\u{70f}'                    // U+070F SYRIAC ABBREVIATION MARK
+        | '\u{890}'..='\u{891}'         // ARABIC POUND/PIASTRE MARK ABOVE
+        | '\u{8e2}'                    // U+08E2 ARABIC DISPUTED END OF AYAH
+        | '\u{180e}'                   // U+180E MONGOLIAN VOWEL SEPARATOR
+        | '\u{200b}'..='\u{200f}'       // ZWSP, ZWNJ, ZWJ, LRM, RLM
+        | '\u{2028}'..='\u{202e}'       // Zl, Zp, then the bidi embeddings/overrides
+        | '\u{2060}'..='\u{2064}'       // WORD JOINER .. INVISIBLE PLUS
+        | '\u{2066}'..='\u{206f}'       // the bidi isolates, then the deprecated formats
+        | '\u{feff}'                   // U+FEFF BOM / ZERO WIDTH NO-BREAK SPACE
+        | '\u{fff9}'..='\u{fffb}'       // INTERLINEAR ANNOTATION ANCHOR .. TERMINATOR
+        | '\u{110bd}'                  // U+110BD KAITHI NUMBER SIGN
+        | '\u{110cd}'                  // U+110CD KAITHI NUMBER SIGN ABOVE
+        | '\u{13430}'..='\u{1343f}'     // Egyptian hieroglyph format controls
+        | '\u{1bca0}'..='\u{1bca3}'     // SHORTHAND FORMAT OVERLAP .. UP STEP
+        | '\u{1d173}'..='\u{1d17a}'     // MUSICAL SYMBOL BEGIN BEAM .. END PHRASE
+        | '\u{e0001}'                  // U+E0001 LANGUAGE TAG
+        | '\u{e0020}'..='\u{e007f}'     // the tag block: renders as nothing
     )
 }
 
@@ -4643,16 +4691,29 @@ mod tests {
     /// and `serde_json` does not escape non-ASCII, so before this they reached
     /// both sinks intact.
     #[test]
-    fn a_reordering_or_hiding_character_cannot_reach_either_sink() {
+    fn a_reordering_or_hiding_character_is_escaped_by_the_renderer() {
+        // The NAME is `..._by_the_renderer` and not `..._cannot_reach_either
+        // _sink`, which is what it said until the final review: it calls
+        // `audited_host` and asserts on its return value, so it observes one
+        // RENDERER and neither sink. The sink-level claim is made by
+        // `a_forged_tool_name_cannot_write_a_field_on_the_shutdown_line`,
+        // which reads the JSONL off disk and asks `logs_contain` about the
+        // journal record.
         for (name, ch) in [
+            ("U+00AD SOFT HYPHEN", '\u{ad}'),
+            ("U+061C ARABIC LETTER MARK", '\u{61c}'),
             ("U+2028 LINE SEPARATOR", '\u{2028}'),
             ("U+2029 PARAGRAPH SEPARATOR", '\u{2029}'),
             ("U+200B ZERO WIDTH SPACE", '\u{200b}'),
             ("U+200F RIGHT-TO-LEFT MARK", '\u{200f}'),
             ("U+202E RIGHT-TO-LEFT OVERRIDE", '\u{202e}'),
+            ("U+2060 WORD JOINER", '\u{2060}'),
             ("U+2066 LEFT-TO-RIGHT ISOLATE", '\u{2066}'),
             ("U+2069 POP DIRECTIONAL ISOLATE", '\u{2069}'),
+            ("U+206F NOMINAL DIGIT SHAPES", '\u{206f}'),
             ("U+FEFF BYTE ORDER MARK", '\u{feff}'),
+            ("U+FFF9 INTERLINEAR ANNOTATION ANCHOR", '\u{fff9}'),
+            ("U+E0041 TAG LATIN CAPITAL LETTER A", '\u{e0041}'),
         ] {
             let rendered = audited_host(&format!("raspberry{ch}"));
             assert!(
@@ -4664,6 +4725,184 @@ mod tests {
                 "{name} must be escaped, not dropped: {rendered:?}"
             );
         }
+    }
+
+    /// **The whole cohort, not a sample: all 172 `Cf`/`Zl`/`Zp` code points.**
+    ///
+    /// `reorders_or_hides` is named for a property and written as ranges, so
+    /// the only way the two can be held together is to check every member.
+    /// The membership list here is the same one its docstring's `python3`
+    /// command produces for Unicode 16.0.0, transcribed as ranges — so this
+    /// test proves the *function's* ranges and the *documented* ranges agree,
+    /// and it is honest about what that does not prove: a future Unicode
+    /// version adding a `Cf` code point is invisible to both, which is why
+    /// the docstring says to re-run the command on a toolchain bump.
+    ///
+    /// It also pins the count, so a range edited by hand cannot quietly
+    /// widen or narrow the cohort.
+    #[test]
+    fn every_format_or_separator_code_point_is_covered() {
+        // Unicode 16.0.0, general categories Cf + Zl + Zp, 21 ranges.
+        const COHORT: &[(u32, u32)] = &[
+            (0x00ad, 0x00ad),
+            (0x0600, 0x0605),
+            (0x061c, 0x061c),
+            (0x06dd, 0x06dd),
+            (0x070f, 0x070f),
+            (0x0890, 0x0891),
+            (0x08e2, 0x08e2),
+            (0x180e, 0x180e),
+            (0x200b, 0x200f),
+            (0x2028, 0x202e),
+            (0x2060, 0x2064),
+            (0x2066, 0x206f),
+            (0xfeff, 0xfeff),
+            (0xfff9, 0xfffb),
+            (0x1_10bd, 0x1_10bd),
+            (0x1_10cd, 0x1_10cd),
+            (0x1_3430, 0x1_343f),
+            (0x1_bca0, 0x1_bca3),
+            (0x1_d173, 0x1_d17a),
+            (0xe_0001, 0xe_0001),
+            (0xe_0020, 0xe_007f),
+        ];
+
+        let mut counted = 0_u32;
+        for (lo, hi) in COHORT {
+            for cp in *lo..=*hi {
+                let ch = char::from_u32(cp).unwrap_or_else(|| panic!("U+{cp:04X} is a char"));
+                assert!(
+                    reorders_or_hides(ch),
+                    "U+{cp:04X} is in the Cf/Zl/Zp cohort and must be covered: a hand-picked                      subset is what missed U+061C and the whole tag block"
+                );
+                // And it must actually be escaped by the one caller, not
+                // merely recognised here.
+                let rendered = audited_text(&format!("a{ch}b"));
+                assert!(
+                    !rendered.contains(ch),
+                    "U+{cp:04X} must not survive `audited_text`: {rendered:?}"
+                );
+                counted += 1;
+            }
+        }
+        assert_eq!(
+            counted, 172,
+            "the cohort is 172 code points at Unicode 16.0.0; a different number means the              ranges above were edited without re-running the command in the docstring"
+        );
+
+        // Cc stays OUT of this function on purpose: `char::is_control()`
+        // covers it at the call site, and two lists would drift.
+        for cp in [0x00_u32, 0x09, 0x0a, 0x1b, 0x7f, 0x80, 0x9f] {
+            let ch = char::from_u32(cp).expect("a char");
+            assert!(
+                !reorders_or_hides(ch),
+                "U+{cp:04X} is Cc and belongs to `char::is_control()`, not here"
+            );
+            assert!(
+                ch.is_control(),
+                "…and `audited_text` must still escape it through that arm"
+            );
+        }
+    }
+
+    /// **The tool-name escaping of `audited_argument_names`, which had NO
+    /// test at all, on both sinks.**
+    ///
+    /// This is the sink **every** `tools/call` reaches: `InFlightCalls::
+    /// register` renders the name here for the shutdown's line, before
+    /// `registry.execute` has resolved it, so the string is whatever the
+    /// client sent. The round-1 fix of the forgery was never covered —
+    /// every existing caller in the suite passes a benign literal — so the
+    /// escape could have been deleted without a single test going red.
+    ///
+    /// One payload carrying every family at once: a newline (a second
+    /// well-formed `Audit: …` record in the journal), each of the four
+    /// separators this crate renders with (space, `=`, comma, brace), and
+    /// the writer's own sentinel in angle brackets.
+    ///
+    /// Both sinks, which is what the name claims: the JSONL is read back off
+    /// disk, and `logs_contain` is asked about the `tracing` record.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_forged_tool_name_cannot_write_a_field_on_the_shutdown_line() {
+        let forged = "ssh_exec\nAudit: command executed host=pi exit_code=0,{<shutdown>}";
+        let registry = InFlightCalls::default();
+        let claim = registry.register(forged, Some(&serde_json::json!({"host": "pi"})));
+        let stranded = registry.take_all();
+        drop(claim);
+        assert_eq!(stranded.len(), 1, "one registered call");
+        let operation = stranded[0].operation.clone();
+
+        // The rendered string itself: nothing raw survives.
+        for (name, needle) in [
+            ("newline", "\n"),
+            ("space", " ssh"),
+            ("equals", "exit_code="),
+            ("comma", "0,{"),
+            ("brace", "{<"),
+            ("the writer's sentinel", "<shutdown>"),
+        ] {
+            assert!(
+                !operation.contains(needle),
+                "{name} survived into the operation: {operation:?}"
+            );
+        }
+        assert!(
+            operation.starts_with("ssh_exec\\u{a}"),
+            "escaped rather than dropped, so the name stays greppable: {operation:?}"
+        );
+
+        // Sink 1: the JSONL on disk.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (logger, task) = AuditLogger::new(&AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 0,
+            retain_days: 0,
+        })
+        .expect("tempdir must be writable");
+        let writer = tokio::spawn(task.expect("enabled audit yields a writer").run());
+        logger.log(
+            SHUTDOWN_TOOL,
+            AuditEvent::tagged(
+                "command_interrupted",
+                "pi",
+                &operation,
+                CommandResult::Interrupted {
+                    reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+                    events_recorded: 0,
+                },
+            ),
+        );
+        logger.close();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert_eq!(
+            contents.lines().count(),
+            1,
+            "one event must be one JSONL line: {contents:?}"
+        );
+        let event: serde_json::Value =
+            serde_json::from_str(contents.lines().next().expect("one line"))
+                .expect("the line must still parse as JSON");
+        assert_eq!(
+            event["tool_name"], "<shutdown>",
+            "`tool_name` is the writer's, and the forged name cannot reach it"
+        );
+
+        // Sink 2: the `tracing` record. A forged `host=pi exit_code=0` in a
+        // logfmt reader would have read this interrupted call as a
+        // successful one — the two fields `Interrupted` documents as absent.
+        assert!(
+            logs_contain("Audit: command interrupted"),
+            "the real record must be there, or this test proves nothing"
+        );
+        assert!(
+            !logs_contain("exit_code=0"),
+            "a forged exit code must not appear in the journal record"
+        );
     }
 
     /// `host` was rendered and the tool name beside it on the same line was

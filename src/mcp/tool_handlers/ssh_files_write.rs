@@ -253,6 +253,13 @@ impl ToolHandler for SshFilesWriteHandler {
 
             match result {
                 Ok(tr) => {
+                    // Claim BEFORE the write, the order every facade in
+                    // `ExecuteCommandUseCase` keeps: a shutdown snapshot landing
+                    // between the two would report this call as having recorded
+                    // nothing. This handler builds its own event and so reaches
+                    // no facade; without this line the shutdown printed
+                    // `events_recorded: 0` beside the lines it had written.
+                    ctx.execute_use_case.claim_this_write();
                     ctx.audit_logger.log(
                         self.name(),
                         AuditEvent::new(
@@ -277,6 +284,13 @@ impl ToolHandler for SshFilesWriteHandler {
                     );
                 }
                 Err(e) => {
+                    // Claim BEFORE the write, the order every facade in
+                    // `ExecuteCommandUseCase` keeps: a shutdown snapshot landing
+                    // between the two would report this call as having recorded
+                    // nothing. This handler builds its own event and so reaches
+                    // no facade; without this line the shutdown printed
+                    // `events_recorded: 0` beside the lines it had written.
+                    ctx.execute_use_case.claim_this_write();
                     ctx.audit_logger.log(
                         self.name(),
                         AuditEvent::new(

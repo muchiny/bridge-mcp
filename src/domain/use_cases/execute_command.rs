@@ -205,7 +205,23 @@ impl ExecuteCommandUseCase {
     /// write. See `crate::security::InFlightCall::events_recorded` for why it
     /// counts rather than removing — the removing version made a multi-event
     /// call unreportable from its first event on.
-    fn claim_this_write(&self) {
+    ///
+    /// **`pub(crate)` since the final review, and the reason is a false line
+    /// it found.** Eleven production writes in six file-transfer handlers
+    /// (`ssh_ls`, `ssh_files_write`, `ssh_file_write`, `ssh_download`,
+    /// `ssh_upload`, `ssh_sync`) build their own `AuditEvent` and go straight
+    /// to `ctx.audit_logger.log(..)`, so they reached no facade and this
+    /// counter stayed at 0. The shutdown line then printed
+    /// `events_recorded: 0` — defined as "the process stopped before any
+    /// result of this call was recorded" — **beside lines that call had
+    /// already written**. The reachable case is `ssh_files_write`, whose
+    /// writes are inside its per-file loop: a `daemon stop` at file 21 of 50
+    /// left 20 lines plus a line saying there were none. Those eleven sites
+    /// now call this directly, each immediately before its `log`, and
+    /// `every_direct_audit_write_claims_itself_first` pins both the count and
+    /// the order. The alternative — widening the field's definition until the
+    /// 0 was true — would have been the same defect from the other side.
+    pub(crate) fn claim_this_write(&self) {
         if let Some(ref claim) = self.in_flight {
             claim.record_event();
         }
