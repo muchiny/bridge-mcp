@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::config::{HostConfig, LimitsConfig, SessionConfig, ShellType};
 use crate::error::{BridgeError, Result};
-use crate::security::{AuditLogger, RESOURCE_REAPER_TOOL, reaped_event};
+use crate::security::{AuditLogger, RESOURCE_REAPER_TOOL, ReapReason, reaped_event};
 
 use super::client::SshClient;
 
@@ -91,59 +91,6 @@ pub struct SessionExecResult {
     pub cwd: String,
 }
 
-/// Why a session was destroyed without anybody asking for it.
-///
-/// A **closed** set, and that is what makes it safe to put in an audit line:
-/// `AuditLogger::log` sanitizes `event.command` and nothing else, and these
-/// strings are interpolated into `command` beside a `reason=` key. A `&str`
-/// parameter in their place would be a path for caller data to reach the
-/// line unescaped — the same constraint `INTERRUPTED_BY_SHUTDOWN` documents
-/// for `CommandResult::Interrupted`'s `reason`.
-///
-/// `ssh_session_close` is deliberately **not** a member. The explicit close
-/// is audited by its handler, through
-/// `ExecuteCommandUseCase::log_state_change`, and
-/// [`SessionManager::close`] — the method that handler calls — is the one
-/// removal site that must never reach `SessionManager::audit_destroyed`.
-/// Pinned by `every_silent_removal_site_now_audits_except_the_explicit_close`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReapReason {
-    /// `last_used` is older than `sessions.idle_timeout_seconds` (300 s by
-    /// default). Reached from the 60 s reaper **and** from `exec`'s prologue,
-    /// whichever gets there first.
-    IdleTimeout,
-    /// `created_at` is older than `sessions.max_age_seconds` (3600 s by
-    /// default). Reached from the same two places as `IdleTimeout`.
-    MaxAge,
-    /// `SessionManager::close_all`, i.e. the server is going down and the
-    /// session was still open.
-    Shutdown,
-    /// The shell closed while `exec` was discarding the output of an earlier
-    /// command that had overrun its deadline.
-    ShellClosedWhileDraining,
-    /// Writing the command into the shell's stdin failed: the channel is
-    /// dead and the session is a zombie.
-    ChannelWriteFailed,
-    /// Reading the command's output gave EOF or a closed channel — evidence
-    /// the shell itself is gone, as opposed to merely slow.
-    ShellGone,
-}
-
-impl ReapReason {
-    /// The literal that goes on the audit line. Stable: it is a wire value a
-    /// `jq` rule selects on, not a message.
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::IdleTimeout => "idle_timeout",
-            Self::MaxAge => "max_age",
-            Self::Shutdown => "shutdown",
-            Self::ShellClosedWhileDraining => "shell_closed_while_draining",
-            Self::ChannelWriteFailed => "channel_write_failed",
-            Self::ShellGone => "shell_gone",
-        }
-    }
-}
-
 /// Manages persistent SSH shell sessions
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, ShellSession>>,
@@ -153,16 +100,25 @@ pub struct SessionManager {
     ///
     /// `Option` and set by a **separate** constructor step rather than a
     /// parameter of [`Self::new`], and the reason is arithmetic.
-    /// `git grep -c "SessionManager::new(" <rev> -- 'src/*.rs' 'tests/*.rs'
-    /// 'benches/*.rs' 'examples/*.rs'`, summed, returns **131** at the
-    /// revision before this change and **136** after it — the five extra are
-    /// this file's own new tests, which is why the probe names a revision:
-    /// a count of a literal taken in the tree that now contains more of it
-    /// measures the probe, not the fact. Of the 131, **2** are production.
-    /// An added parameter — even an `Option` one — has to be written at
-    /// every one of them, because Rust has no default arguments; the setter
-    /// costs the 2, and `grep -rn "with_audit_logger("` outside its own
-    /// definition returns exactly those 2 plus 3 in tests.
+    /// `git grep -c "SessionManager::new(" 6e38c5e -- 'src/*.rs' 'tests/*.rs'
+    /// 'benches/*.rs' 'examples/*.rs'`, summed, returns **131** — and the
+    /// revision is the branch's **base**, pinned, because that is the only
+    /// form of this number that stays true. Of those 131, **2** are
+    /// production. An added parameter — even an `Option` one — has to be
+    /// written at every one of them, because Rust has no default arguments;
+    /// the setter costs the 2.
+    ///
+    /// **No count of the CURRENT tree is quoted here, and two attempts are
+    /// why.** The first said "136 after this change"; the next commit on the
+    /// same branch added three more test fixtures and it was 139, then this
+    /// round's own tests took it to 141. A census of a literal, taken in a
+    /// tree that keeps acquiring the literal, measures the probe. The same
+    /// trap caught the sibling sentence: it said
+    /// `grep -rn "with_audit_logger("` returns "those 2 plus 3 in tests",
+    /// and every test added since has moved the second number. What does not
+    /// move is the shape: **2 production call sites**
+    /// (`src/mcp/server.rs`, `src/cli/runner.rs`), and as many test sites as
+    /// the suite needs.
     ///
     /// `None` is therefore the shape every test and every embedder gets, and
     /// it must stay silent rather than panic: a manager with no logger simply
@@ -271,7 +227,7 @@ impl SessionManager {
         if let Some(logger) = self.audit.as_ref() {
             logger.log(
                 RESOURCE_REAPER_TOOL,
-                reaped_event(reason.as_str(), "session_id", id, host, lifetime),
+                reaped_event(reason, "session_id", id, host, lifetime),
             );
         }
     }
@@ -665,7 +621,7 @@ impl SessionManager {
     /// empty manager.** That is a contract rather than an optimisation: four
     /// assertions elsewhere count the lines in `audit.log` exactly after a
     /// teardown — two in `tests/daemon_integration.rs`, one in
-    /// `crate::mcp::transport::http`, one in `crate::cli::runner` — and in
+    /// `crate::mcp::transport::http`, one in `src/cli/runner.rs` — and in
     /// every one of them this manager is empty. An unconditional "closing all
     /// sessions" line would redden all four while proving nothing.
     #[allow(clippy::significant_drop_tightening)]
@@ -3347,8 +3303,11 @@ mod tests {
         let host_field = event["host"].as_str().expect("host is a string");
         assert!(
             !host_field.contains(' ') && !host_field.contains('<'),
-            "the `host` FIELD is escaped, because `log_to_tracing` renders it and a space \
-             forges a logfmt field while a `<` forges the writer's namespace: {host_field}"
+            "the `host` FIELD is escaped: a space would forge a logfmt field for any \
+             consumer reading the `tracing` record as logfmt, and a `<` would forge the \
+             writer's namespace. Defence in depth rather than the only line of defence — \
+             `log_to_tracing` passes `host` as `Debug`, which quotes it, since earlier in \
+             this same release: {host_field}"
         );
     }
 
@@ -3449,7 +3408,7 @@ mod tests {
     ///
     /// Four assertions elsewhere count the lines in `audit.log` exactly after
     /// a teardown (two in `tests/daemon_integration.rs`, one in
-    /// `crate::mcp::transport::http`, one in `crate::cli::runner`), and in
+    /// `crate::mcp::transport::http`, one in `src/cli/runner.rs`), and in
     /// all four this manager is empty. An unconditional line would redden all
     /// four while proving nothing.
     #[tokio::test]

@@ -17,7 +17,7 @@
 //! replies with neither `channel_success` nor `channel_failure`.
 //!
 //! **Measured, and it does not hang.** With the mock's shell support removed
-//! entirely, all four of these fail in ~10 s with
+//! entirely, every test in this file fails in ~10 s with
 //! `SshTimeout { seconds: 10 }` — `read_until_marker` is bounded by
 //! `limits.command_timeout_seconds`, which `mock_limits()` sets to 10. So
 //! the failure mode of a mock regression is a failing test, by the client's

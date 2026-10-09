@@ -24,16 +24,24 @@ pub use audit::{AuditEvent, AuditLogger, AuditWriterTask, CommandResult, NO_HOST
 /// error — same silent third gate as `audited_operation`'s own `cfg`.
 #[cfg(all(test, feature = "cli"))]
 pub(crate) use audit::{GATE_AUDIT_MAX_OPERATION_CHARS, GATE_AUDIT_MAX_VALUE_CHARS};
-/// Crate-internal: rendering a tool's RAW arguments into the `host` and
-/// `command` fields of an audit line, bounded. Two sinks need it — the CLI's
-/// destructive gate (`crate::cli`) and the MCP shutdown emitter
-/// (`crate::mcp`) — and neither layer can see the other, which is why these
-/// live here rather than beside the first caller that needed them. Not
-/// public: the bounds are this crate's own line-format policy, not a
-/// contract an embedder gets to depend on.
+/// Crate-internal: the shutdown's and the reaper's own vocabulary — the two
+/// reserved `tool_name` sentinels, the one stable `Interrupted` reason, the
+/// in-flight registry, and the reaped-line renderer with its closed set of
+/// reasons.
+///
+/// Here rather than beside the first caller that needed them because the
+/// callers are in layers that cannot see each other: `crate::cli`'s
+/// destructive gate, `crate::mcp`'s shutdown emitter and `crate::ssh`'s
+/// session reaper. Not public — these are this crate's own line-format
+/// policy, not a contract an embedder gets to depend on.
+///
+/// **This comment described a different set until the final review**: it was
+/// written for the two raw-argument renderers, which moved to the
+/// `#[cfg(feature = "cli")]` list below when round 1 gated them, and it was
+/// left sitting above the list it no longer describes.
 pub(crate) use audit::{
     INTERRUPTED_BY_SHUTDOWN, InFlightCall, InFlightCalls, InFlightClaim, RESOURCE_REAPER_TOOL,
-    SHUTDOWN_TOOL, reaped_event,
+    ReapReason, SHUTDOWN_TOOL, reaped_event,
 };
 /// The two renderers whose only consumer outside `audit.rs` is the CLI's
 /// destructive gate, hence the gate on the feature that compiles it.

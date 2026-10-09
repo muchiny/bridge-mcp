@@ -565,12 +565,18 @@ impl ExecuteCommandUseCase {
     /// (`src/security/audit.rs`) builds. **Named by file and not by module
     /// path**, because the `crate::security::…` form this sentence used until
     /// now does not resolve at all: the function is `pub(crate)` inside the
-    /// PRIVATE module `audit` (`mod audit;` in `src/security/mod.rs`) and is
-    /// not among that module's re-exports. Measured:
-    /// `grep -c "audited_argument_names" src/security/mod.rs` returns 0,
-    /// while `grep -c "fn audited_argument_names" src/security/audit.rs`
-    /// returns 1. Plain backticks and not an intra-doc link, so rustdoc
-    /// never flagged it — the file is the citation that stays true. (This named
+    /// PRIVATE module `audit` (`mod audit;` in `src/security/mod.rs`) and
+    /// appears in none of that module's `use audit::{…}` re-export lists.
+    ///
+    /// **No grep backs that, and the first correction shows why.** It cited
+    /// `grep -c "audited_argument_names" src/security/mod.rs` as returning
+    /// 0; the correcting round then added a doc comment to `mod.rs` naming
+    /// the function, and the count became 1 — the citation was falsified by
+    /// the same wave that wrote it. The claim is structural and the compiler
+    /// is its proof: write `crate::security::audited_argument_names`
+    /// anywhere in the crate and `cargo check` fails. Plain backticks and
+    /// not an intra-doc link, so rustdoc never flagged the broken path; the
+    /// file is the citation that stays true. (This named
     /// `audited_operation` until round 3; that is the renderer the CLI gate
     /// kept, and it carries argument VALUES, which this line no longer
     /// does.)

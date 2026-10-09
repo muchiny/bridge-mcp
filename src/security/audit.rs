@@ -707,10 +707,18 @@ pub(crate) fn audited_host(raw: &str) -> String {
 ///    `AuditLogger::log_to_tracing`
 ///    now passes `host` and `command` as `Debug`, which quotes them, so this
 ///    is defence in depth rather than the fix — but the measured attack was
-///    `host=raspberry exit_code=0 duration_ms=12
-///    event_type=command_executed`, 62 characters, under the cap, which made a
-///    logfmt consumer read an interrupted call as a **successful** one:
-///    exactly the two fields `CommandResult::Interrupted` documents as absent.
+///    the rendered line `host=raspberry exit_code=0 duration_ms=12
+///    event_type=command_executed`, **69 characters**, which made a logfmt
+///    consumer read an interrupted call as a **successful** one: exactly the
+///    two fields `CommandResult::Interrupted` documents as absent. The
+///    `host` ARGUMENT that produces it is the 64 characters after
+///    `host=`, well under the 256-character cap — the cap is on the
+///    argument, so that is the figure the cap applies to. (Both numbers said
+///    62 in five places until the final review, and
+///    `the_logfmt_separators_cannot_write_a_second_field` passed a
+///    36-character prefix of the payload while its title claimed the whole
+///    of it. Counted: `len("host=raspberry exit_code=0 duration_ms=12
+///    event_type=command_executed")` is 69.)
 ///    No real host alias, no registered tool name, contains either character.
 /// 4. The characters that **reorder or hide** the rendered text, which is a
 ///    different fault from the one `is_control()` covers. `char::is_control`
@@ -1125,6 +1133,68 @@ pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::String(format!("<elided: {len} chars>"))
 }
 
+/// Why a session or a tunnel was destroyed without anybody asking for it.
+///
+/// **Here and not in `src/ssh/session.rs`, and the final review is why.**
+/// It lived beside `SessionManager`, so the tunnel line in
+/// `McpServer::audit_tunnels_at_shutdown` could not reach it and passed the
+/// bare string `"shutdown"` instead — **one literal on the wire, two
+/// sources**, the same defect that renaming the sentinel's identifier
+/// alongside its value had removed one round earlier. The type is the
+/// single source now: [`reaped_event`] takes a `ReapReason` and not a
+/// `&str`, so no caller can spell a reason that is not in this enum.
+///
+/// A **closed** set, and that is what makes it safe to put in an audit line:
+/// `AuditLogger::log` sanitizes `event.command` and nothing else, and these
+/// strings are interpolated into `command` beside a `reason=` key. A `&str`
+/// parameter in their place would be a path for caller data to reach the
+/// line unescaped — the same constraint `INTERRUPTED_BY_SHUTDOWN` documents
+/// for `CommandResult::Interrupted`'s `reason`.
+///
+/// `ssh_session_close` is deliberately **not** a member. The explicit close
+/// is audited by its handler, through
+/// `ExecuteCommandUseCase::log_state_change`, and
+/// [`SessionManager::close`] — the method that handler calls — is the one
+/// removal site that must never reach `SessionManager::audit_destroyed`.
+/// Pinned by `every_silent_removal_site_now_audits_except_the_explicit_close`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReapReason {
+    /// `last_used` is older than `sessions.idle_timeout_seconds` (300 s by
+    /// default). Reached from the 60 s reaper **and** from `exec`'s prologue,
+    /// whichever gets there first.
+    IdleTimeout,
+    /// `created_at` is older than `sessions.max_age_seconds` (3600 s by
+    /// default). Reached from the same two places as `IdleTimeout`.
+    MaxAge,
+    /// `SessionManager::close_all`, i.e. the server is going down and the
+    /// session was still open.
+    Shutdown,
+    /// The shell closed while `exec` was discarding the output of an earlier
+    /// command that had overrun its deadline.
+    ShellClosedWhileDraining,
+    /// Writing the command into the shell's stdin failed: the channel is
+    /// dead and the session is a zombie.
+    ChannelWriteFailed,
+    /// Reading the command's output gave EOF or a closed channel — evidence
+    /// the shell itself is gone, as opposed to merely slow.
+    ShellGone,
+}
+
+impl ReapReason {
+    /// The literal that goes on the audit line. Stable: it is a wire value a
+    /// `jq` rule selects on, not a message.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleTimeout => "idle_timeout",
+            Self::MaxAge => "max_age",
+            Self::Shutdown => "shutdown",
+            Self::ShellClosedWhileDraining => "shell_closed_while_draining",
+            Self::ChannelWriteFailed => "channel_write_failed",
+            Self::ShellGone => "shell_gone",
+        }
+    }
+}
+
 /// The whole event for a session or a tunnel the bridge destroyed by itself:
 /// the idle reaper, the shutdown, or a dead channel.
 ///
@@ -1165,23 +1235,26 @@ pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
 /// **The separators are ` ` and `=`, and neither is new.** Both are already
 /// in [`audited_text`]'s family 3, so `id` — a UUID this crate minted, or a
 /// tunnel id built from a caller's host and ports — cannot forge a third
-/// field. `reason` and `id_key` are `&'static str` **on purpose**: they are
-/// the writer's own vocabulary out of a closed enum, so there is no path by
-/// which caller data reaches them unescaped, and a `&str` parameter would
-/// invite one.
+/// field. `reason` is a [`ReapReason`] and `id_key` a `&'static str` **on
+/// purpose**: they are the writer's own vocabulary, so there is no path by
+/// which caller data reaches them unescaped. `reason` was a `&'static str`
+/// until the final review found the cost — the tunnel caller, which could not
+/// see the enum from its own module, passed the bare literal `"shutdown"`,
+/// putting one wire value in two places. A type cannot be spelled wrong.
 ///
 /// The `u64::try_from(..).unwrap_or(u64::MAX)` is the same saturation
 /// `mcp::tool_handlers::utils::elapsed_ms` applies, open-coded rather than
 /// imported: `src/security/` must not depend on `src/mcp/`.
 pub(crate) fn reaped_event(
-    reason: &'static str,
+    reason: ReapReason,
     id_key: &'static str,
     id: &str,
     host: &str,
     lifetime: std::time::Duration,
 ) -> AuditEvent {
     let command = format!(
-        "{RESOURCE_REAPER_TOOL} reason={reason} {id_key}={}",
+        "{RESOURCE_REAPER_TOOL} reason={} {id_key}={}",
+        reason.as_str(),
         audited_text(id)
     );
     AuditEvent::tagged(
@@ -2121,7 +2194,8 @@ impl AuditLogger {
     /// formatting preference.** `tracing_subscriber`'s default visitor renders
     /// a `Display` field RAW into a logfmt-shaped record, so a caller-supplied
     /// value containing the format's own separators writes its own fields.
-    /// Measured attack, 62 characters and under every cap:
+    /// Measured attack, **69 characters** rendered (a 64-character `host`
+    /// argument, under the 256-character cap that applies to it):
     /// `host=raspberry exit_code=0 duration_ms=12 event_type=command_executed`
     /// — which made a logfmt consumer (journald `_MESSAGE` parsers, Vector,
     /// Promtail, Splunk `logfmt`) read an INTERRUPTED call as a successful
@@ -2146,7 +2220,7 @@ impl AuditLogger {
     /// interpolate it into their `reason`", a few lines above its `log_denied`
     /// — and `message` carries it through `BridgeError`'s `Display`
     /// (`Session not found: {session_id}`, `Unknown host: {host}`). So the
-    /// same 62-character input forged the same four fields again, through
+    /// same 69-character input forged the same four fields again, through
     /// `reason=` on a `command_denied` record.
     ///
     /// The rule is therefore mechanical and has no judgement in it: **every
@@ -4428,12 +4502,21 @@ mod tests {
     /// secret. If one ever both matches a secret keyword and declares an
     /// `enum`, this reddens until it is added to `REDACTION_EXEMPT_KEYS` —
     /// which is how the list stays structural instead of becoming a name
-    /// family. Measured today: **zero** such keys, so the whole list is the
-    /// one named entry.
+    /// family. Measured today: **zero** such keys, so the whole list is
+    /// name-based.
     ///
-    /// Criterion 2: `kubeconfig` is named, and this pins that it is the ONLY
-    /// name-based entry, so a future "while we are here" addition has to
-    /// argue for itself in a failing test rather than slip in.
+    /// Criterion 2: the name-based entries are `kubeconfig` **and**
+    /// `vault_password_file`, both on the same ground — they are PATHS, not
+    /// contents — and the assertion below pins that there are exactly those
+    /// **two**, so a future "while we are here" addition has to argue for
+    /// itself in a failing test rather than slip in.
+    ///
+    /// **This paragraph said "the one named entry" until the final review**,
+    /// and it had said so since `vault_password_file` was added in the round
+    /// that overruled its exclusion: the assertion below was edited to pin
+    /// two and the prose above it was not. Sixth relapse of the stale-number
+    /// family in this release, in the test whose own round had just edited
+    /// it.
     #[test]
     fn the_exemption_list_still_matches_its_structural_criterion() {
         let keywords: Vec<String> = crate::security::Sanitizer::secret_keywords()
@@ -4656,16 +4739,37 @@ mod tests {
         assert_eq!(audited_argument_names("ssh_exec", None), "ssh_exec {}");
     }
 
-    /// **The 62-character input that made an interrupted call read as a
-    /// successful one.**
+    /// **The input that made an interrupted call read as a successful one —
+    /// the whole of it, which this test did not carry.**
     ///
     /// `audited_host` escaped `\`, `<`, `>` and `Cc`, but neither of logfmt's
     /// two separators, and the `tracing` sink wrote the field raw. Defence in
     /// depth now: the sink quotes (see `AuditLogger::log_to_tracing`) AND the
     /// separators are escaped here.
+    ///
+    /// **The title used to say "62-character" and the body passed 36.** Two
+    /// errors in one place: the payload is 69 characters rendered (64 as the
+    /// `host` argument the cap applies to), and the literal here was a
+    /// prefix that stopped before `event_type=command_executed` — the field
+    /// that does the actual lying. Both are fixed: the argument below is the
+    /// real one, and its length is asserted so the next edit cannot shorten
+    /// it back without saying so.
     #[test]
     fn the_logfmt_separators_cannot_write_a_second_field() {
-        let forged = audited_host("raspberry exit_code=0 duration_ms=12");
+        // The full measured payload, not a prefix of it.
+        let argument = "raspberry exit_code=0 duration_ms=12 event_type=command_executed";
+        assert_eq!(
+            argument.chars().count(),
+            64,
+            "the host ARGUMENT of the measured attack; `host=` + this is the 69-character \
+             rendered line the docstring on `audited_text` quotes"
+        );
+        assert!(
+            argument.chars().count() <= GATE_AUDIT_MAX_VALUE_CHARS,
+            "and it is under the cap, which is the point: no size rule stops it"
+        );
+
+        let forged = audited_host(argument);
 
         assert!(
             !forged.contains(' ') && !forged.contains('='),
@@ -4674,6 +4778,21 @@ mod tests {
         assert!(
             forged.starts_with("raspberry\\u{20}exit_code\\u{3d}0"),
             "and they are escaped rather than dropped, so nothing is silently lost: {forged}"
+        );
+        // The word survives — it is not a separator, and a real alias may
+        // legitimately contain letters. What must not survive is the word
+        // followed by a RAW `=`, which is what makes it a field. (The first
+        // version of this assertion said `!contains("event_type")` and was
+        // false about what escaping does: the defect class this whole
+        // release is about, committed inside its own fix.)
+        assert!(
+            forged.contains("event_type"),
+            "the last field of the payload must still be reachable in the line: {forged}"
+        );
+        assert!(
+            !forged.contains("event_type="),
+            "but not as a FIELD — that is the one that made an interrupted call read as a \
+             successful one, and the old 36-character literal never reached it: {forged}"
         );
         assert_eq!(
             audited_host("raspberry"),
@@ -4929,7 +5048,7 @@ mod tests {
     /// carries caller text by design — `src/mcp/standard_tool.rs` says
     /// "validators interpolate it into their `reason`" a few lines above its
     /// `log_denied` — and `message` carries it through `BridgeError`'s
-    /// `Display`. So the same 62-character input forged the same four fields
+    /// `Display`. So the same 69-character input forged the same four fields
     /// again, on a `command_denied` record.
     ///
     /// **The payload is per case, and that is the whole correctness of this

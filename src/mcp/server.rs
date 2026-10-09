@@ -1514,7 +1514,7 @@ impl McpServer {
     /// than an optimisation.** Four assertions elsewhere count the lines in
     /// `audit.log` exactly after `serve` returns — two in
     /// `tests/daemon_integration.rs` (`DRAIN_TEST_CALLS`, then exactly 1),
-    /// one in `crate::mcp::transport::http`, one in `crate::cli::runner` —
+    /// one in `crate::mcp::transport::http`, one in `src/cli/runner.rs` —
     /// and an unconditional line would redden all four while proving
     /// nothing. An empty registry is also the normal case: the ordinary
     /// shutdown has nothing in flight and must stay silent.
@@ -1637,9 +1637,15 @@ impl McpServer {
     /// registered in between is aborted without a line — the accept loop has
     /// already ended, so the only writer left would be a handler still
     /// running inside an aborted cleanup task. And the HTTP transport calls
-    /// neither this nor `close_all` at all (`grep -c close_all
-    /// src/mcp/transport/http.rs` → 0), so a tunnel opened over HTTP is
-    /// destroyed by process exit with nothing recorded anywhere.
+    /// neither this nor the tunnel pool's teardown at all, so a tunnel
+    /// opened over HTTP is destroyed by process exit with nothing recorded
+    /// anywhere. **No grep is cited for that**, and the omission is the
+    /// point: the citation that used to be here counted a literal in a file
+    /// whose comments then contained it, which is the fourth recurrence of
+    /// that defect in this release. The re-derivable form, if you want one,
+    /// strips comments before counting — it is written out once, in
+    /// `crate::mcp::transport::http`'s own teardown comment, rather than
+    /// copied to every place that states the fact.
     pub(crate) fn audit_tunnels_at_shutdown(&self, tunnels: &[crate::domain::TunnelInfo]) {
         if tunnels.is_empty() {
             return;
@@ -1660,7 +1666,11 @@ impl McpServer {
             self.audit_logger.log(
                 crate::security::RESOURCE_REAPER_TOOL,
                 crate::security::reaped_event(
-                    "shutdown",
+                    // The ENUM, not the string `"shutdown"` this used to
+                    // pass: one wire literal, one source. The type is what
+                    // makes that enforceable from a module that cannot see
+                    // the reaper.
+                    crate::security::ReapReason::Shutdown,
                     "tunnel_id",
                     &tunnel.id,
                     &tunnel.host,
@@ -7294,6 +7304,31 @@ rbac:
             event["host"], "raspberry",
             "the host is captured before `registry.execute` consumes the arguments"
         );
+        // And the OTHER population on the same line shape, which this test
+        // did not show: a call that carries no `host` argument at all lands
+        // on the sentinel. `NO_HOST`'s own doc says the shutdown emitter is
+        // armed for every tool and that `ssh_exec_multi` declares `hosts`
+        // and no `host`, so this is the reachable case rather than a
+        // hypothetical one — and the one documented line above carries a
+        // host, so nothing pinned it.
+        let hostless = server
+            .in_flight
+            .register("ssh_exec_multi", Some(&json!({"hosts": ["pi-a", "pi-b"]})));
+        let calls = server.in_flight.take_all();
+        drop(hostless);
+        assert_eq!(calls.len(), 1, "one registered call");
+        assert_eq!(
+            calls[0].host,
+            crate::security::NO_HOST,
+            "a call that names several machines and no `host` argument writes the sentinel: \
+             the machines are inside `command`, which is {:?}",
+            calls[0].operation
+        );
+        assert!(
+            calls[0].operation.contains("hosts"),
+            "and `command` is where a reader finds them: {:?}",
+            calls[0].operation
+        );
         assert_eq!(
             event["command"]
                 .as_str()
@@ -7695,7 +7730,7 @@ rbac:
     ///
     /// Four assertions elsewhere count the lines in `audit.log` exactly
     /// after a teardown — `tests/daemon_integration.rs` twice,
-    /// `crate::mcp::transport::http` and `crate::cli::runner` once each —
+    /// `crate::mcp::transport::http` and `src/cli/runner.rs` once each —
     /// and every ordinary shutdown has an empty registry. An unconditional
     /// line would redden all four and tell an operator that something was
     /// abandoned on every clean stop.
@@ -7925,8 +7960,15 @@ rbac:
     /// `serve` needs a transport and an accept loop, so the test above calls
     /// the emitter directly and this pins that `serve` calls it, exactly
     /// once, **before** the bounded close that aborts the tasks it is about
-    /// to describe — and therefore long before `close_audit()`, after which
-    /// `AuditLogger::log` reaches `tracing` and never the file.
+    /// to describe.
+    ///
+    /// **It does NOT assert anything about `close_audit()`**, and the
+    /// previous version of this paragraph said "and therefore long before
+    /// `close_audit()`" as if it did. That ordering is pinned by a different
+    /// guard — `the_shutdown_emission_precedes_the_audit_close_on_both_teardowns`
+    /// — and the inference here would hold only because the tunnel close
+    /// precedes the audit close in the same body, which is a fact neither of
+    /// this test's three assertions looks at.
     ///
     /// Anchored on `let open_tunnels =` rather than on
     /// `self.tunnel_manager.list()`: the sibling guard

@@ -29,11 +29,16 @@
 //! - **Emulated:** opening an interactive shell, the init handshake, the
 //!   initial `pwd`. Enough for session *lifecycle* tests — create, list,
 //!   reap, close — which is what `session_reaper_audit.rs` needs.
-//! - **NOT emulated:** running a command. A `ssh_session_exec` against this
-//!   mock gets its end marker back with **no output, no exit-code line and
-//!   no cwd line**, so `parse_exec_output` sees an empty result rather than
-//!   a command that ran. Nothing here is a shell: there is no state, no
-//!   `cd`, no environment.
+//! - **NOT emulated:** running a command. `data` echoes back every marker it
+//!   is handed, and a command wrapper contains two of them, so
+//!   `parse_exec_output` is fed the mock's own echo lines — the stand-in
+//!   `pwd` line where the exit code belongs, and a marker where the cwd
+//!   belongs. **What it then returns has not been measured**, because no
+//!   test needs it; the earlier version of this paragraph asserted "no
+//!   output, no exit-code line and no cwd line", which is not what the echo
+//!   produces. Do not build a command test on this behaviour: extend `data`
+//!   deliberately first. Nothing here is a shell — no state, no `cd`, no
+//!   environment.
 //! - **Untouched:** `exec_request`'s one-shot channels. `data` returns early
 //!   unless the channel asked for a shell, so the pre-existing
 //!   `ssh_client_mock.rs` and `sftp_mock.rs` behaviour is unchanged.
@@ -514,10 +519,15 @@ impl ServerHandler for MockSession {
     /// `SshTimeout { seconds: 10 }` after ~10 s — `read_until_marker`'s own
     /// `limits.command_timeout_seconds` — because what the client then waits
     /// for is the init marker, and nothing was going to print it. Removing
-    /// only the `channel_success` call, keeping the rest, leaves all five
-    /// tests green. So the enabling piece is [`Self::data`] below; this
-    /// method is here because a mock that does not answer a request it
-    /// accepted is a lie about the protocol.
+    /// only the `channel_success` call, keeping the rest, left **every** test
+    /// in `session_reaper_audit.rs` green. So the enabling piece is
+    /// [`Self::data`] below; this method is here because a mock that does
+    /// not answer a request it accepted is a lie about the protocol.
+    ///
+    /// (This said "all five" and the header of that file said "all four" —
+    /// the same measurement, counted once with the mock binary's own smoke
+    /// test and once without, then both left behind as the file grew. Neither
+    /// number is quoted now: the claim is about the whole file.)
     async fn shell_request(
         &mut self,
         channel: ChannelId,

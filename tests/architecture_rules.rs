@@ -40,7 +40,7 @@ fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
 ///
 /// **Measured, and deliberately NOT fixed here.** Widening the filter to
 /// `trimmed.contains("crate::")` and the prefixes to bare paths was tried:
-/// the four `domain_*` rules and `ports_must_not_import_cli` stay green — so
+/// the five `domain_*` rules and `ports_must_not_import_cli` stay green — so
 /// the wave's own justification holds under the stronger check — and exactly
 /// one rule reddens, `ports_must_not_import_mcp_adapter`, on **14**
 /// pre-existing inline `crate::mcp::protocol` / `crate::mcp::logger` /

@@ -500,8 +500,11 @@ tests and a serialisation test.
     `tests/daemon_integration.rs` twice (`DRAIN_TEST_CALLS`, then exactly 1),
     `src/mcp/transport/http.rs` once, and `src/cli/runner.rs` once (the gate
     line plus the run line, exactly 2).
-  - *The HTTP transport has no `close_all` and no `spawn_global_tasks` at
-    all* (`grep -n "close_all" src/mcp/transport/http.rs` → nothing). The
+  - *The HTTP transport has no resource-pool teardown and no cleanup loops at
+    all* (stated without a grep: a citation that counts a literal in a file
+    whose comments then contain it falsifies itself, which happened to this
+    very sentence — see the `<resource-reaper>` entry's known gap 1 for the
+    comment-stripped probe). The
     emission is wired into its teardown too, so commands in flight are
     covered there — but a session or tunnel opened over HTTP is still
     destroyed only by process exit, with no line of any kind.
@@ -675,7 +678,9 @@ tests and a serialisation test.
     shape without anybody remembering to come back.
   - **Forged fields in the `tracing` sink, and the rule is now mechanical.**
     `host=raspberry exit_code=0 duration_ms=12 event_type=command_executed`
-    — 62 characters, under every cap — made a logfmt consumer read an
+    — **69 characters** rendered, from a 64-character `host` argument, well
+    under the 256-character cap that applies to the argument — made a logfmt
+    consumer read an
     interrupted call as a **successful** one, injecting precisely the two
     fields this variant documents as absent. The first fix quoted `host` and
     `command` and justified leaving the rest on the ground that they were
@@ -798,6 +803,21 @@ tests and a serialisation test.
   sources that can disagree, and `host` is the field every other event shape
   already puts it in.
 
+  **Every line of a batch is written before anything is closed**, and the
+  first version of this change got that wrong in both batch sites. They
+  interleaved: write one session's line, then `await` that session's
+  `client.close()` — bounded at 5 s by `SshClient::close`, and for the
+  shutdown wrapped in `McpServer::close_bounded`'s 2 s. Against a dead peer
+  the **first** session got its line and sessions 2..N got neither a line nor
+  a DISCONNECT, because the bound abandons the future mid-flight. `cleanup`
+  had the same shape with a different abandoner: it removes every expired
+  session from the map before the first write, and `McpServer::serve` aborts
+  the cleanup loop **unbounded**, so an abort between two iterations lost the
+  lines of sessions no later pass can find. Both now write every line in one
+  synchronous pass first, which costs nothing: the write is not `async`, so N
+  lines are N pushes onto an unbounded channel with no await between them for
+  a timer to fire inside.
+
   **The emission is conditional, and that is a contract.** Nothing
   destroyed, nothing written. Four assertions elsewhere count the lines in
   `audit.log` exactly after a teardown — two in
@@ -834,17 +854,52 @@ tests and a serialisation test.
   only reads lines beginning `use crate::`, so an inline
   `crate::security::…` path would have passed while violating it. Not taken.)
 
+  **(build, and this release INTRODUCED the breakage it fixes)
+  `cargo clippy --no-default-features` was red from the wave's first commit,
+  and `make ci` has a `lint-no-default` target now.** Six `dead_code` /
+  `unused_imports` errors under `-D warnings`: `audited_operation`,
+  `elide_oversized`, `redact_secret_values`, `key_names_a_secret`,
+  `REDACTION_EXEMPT_KEYS`, and two re-exports. All of them are now
+  `#[cfg(any(feature = "cli", test))]`, because their only consumer outside
+  `src/security/audit.rs` is the CLI's destructive gate and `src/cli` is
+  `#[cfg(feature = "cli")] pub mod cli;` in `src/lib.rs`.
+
+  **The provenance, stated precisely because an earlier commit message of
+  this branch got it backwards.** At the branch's base, `6e38c5e`,
+  `audited_operation` and `elide_oversized` were **private `fn`s of
+  `src/cli/runner.rs`** — `git show 6e38c5e:src/cli/runner.rs | grep -c "fn
+  audited_operation"` → 1, and the same probe on
+  `6e38c5e:src/security/audit.rs` → 0 — so they sat inside a module the
+  default-off build does not compile and **could not be dead**. `4dd213d`,
+  this wave's first commit, moved them into unconditionally-compiled
+  `src/security/audit.rs` (`4dd213d:src/security/audit.rs` → 1).
+  `redact_secret_values`, `key_names_a_secret` and `REDACTION_EXEMPT_KEYS`
+  were **created** by `53f5428` (absent at `4dd213d` and at the base; same
+  probe). **So the breakage is this wave's, not inherited**, and it shipped
+  under green gates for the one reason the new target exists: no `make`
+  target and no CI job ran that feature set, so nothing could see it.
+  `lint-no-default` is in `make ci` and `make ci-full`, with its own
+  `CARGO_TARGET_DIR` so it does not evict the default profile's
+  fingerprints. It runs `--lib` and not `--all-targets`: the wide form is red
+  on `tests/daemon_integration.rs`, which imports `bridge_mcp::daemon`
+  (`cfg(feature = "cli")`) without gating itself — that one **is**
+  pre-existing, measured by the same probes at the base, and is left for its
+  own task.
+
   **Known gaps, measured and not fixed here.**
   1. **Over HTTP nothing is reaped and nothing is recorded.**
      `src/mcp/transport/http.rs` calls neither `spawn_global_tasks` nor any
-     `close_all`. The probe has to exclude comments, and the reason is
-     instructive: the raw
-     `grep -c "close_all\|spawn_global_tasks" src/mcp/transport/http.rs`
-     returns **3**, all three of them inside a comment added by the previous
-     entry which itself asserts that the grep "returns nothing".
+     `close_all`. **The probe must exclude comments, and this entry got the
+     number wrong twice while saying so.** A raw
+     `grep -c "close_all\|spawn_global_tasks"` on that file counts the words
+     in the comments that discuss it — every revision of this paragraph has
+     cited a different figure for that count, and none of them was the figure
+     at the time of writing, because each edit changed what it was counting.
+     The re-derivable probe strips comments first and is stable:
      `sed -E 's@^[[:space:]]*//.*@@' src/mcp/transport/http.rs | grep -cE
-     "close_all|spawn_global_tasks"` returns **0**. So a session opened over
-     HTTP is never touched by the 60 s loop, and
+     "close_all|spawn_global_tasks"` → **0**. That is the only number in this
+     bullet. So a session opened over HTTP is never touched by the 60 s loop,
+     and
      both it and any HTTP tunnel are destroyed by process exit with no line
      from anywhere. That is a separate hole from the one this entry closes,
      and it is wider than wave 4's note about in-flight commands on the same
@@ -875,6 +930,47 @@ tests and a serialisation test.
      recording through this path, and an auditor correlating
      `ssh_recording_stop` with "the session ended" is reading two disjoint
      populations.
+  6. **A session whose own command holds the lock gets no line, and that is
+     an accepted trade rather than a placement defect.**
+     `SessionManager::close_all` takes the mutex that `SessionManager::exec`
+     holds for the whole of a remote command, so a `ssh_session_exec` in
+     flight makes the shutdown's `close_bounded` give up after
+     `RESOURCE_CLOSE_GRACE` (2 s) with nothing written for that session.
+     Moving the snapshot to the caller does **not** fix it: the caller would
+     ask for the same tokio mutex and restore the unbounded wait —
+     up to `sessions.timeout_secs`, **1800 s** by default — that bounding
+     `close_all` was added to close, which is the `daemon stop` that printed
+     `Daemon stopped.` over a daemon that lived on. `McpServer::serve`
+     already documents the bound as a deliberate choice of a bounded
+     shutdown over a complete trail; this gap is the audit-trail face of the
+     same choice. What *was* a placement defect — the line of each session
+     waiting behind the previous session's `client.close().await` — is fixed
+     above.
+
+- **(wire) `events_recorded` on a `command_interrupted` line is now true for
+  the six file-transfer handlers; it used to read `0` beside lines the call
+  had already written.** No shape change and **no migration**: the field, the
+  `event_type` and the variant are unchanged, and a consumer that read the
+  `0` as "nothing was recorded" was simply being told something false.
+
+  Why: `events_recorded` is defined as "the process stopped before any result
+  of this call was recorded", and it is incremented by
+  `ExecuteCommandUseCase::claim_this_write`, which every *facade* calls. But
+  **eleven production writes in six handlers bypass the facades** — `ssh_ls`
+  (2), `ssh_files_write` (2), `ssh_file_write` (2), `ssh_download` (1),
+  `ssh_upload` (2), `ssh_sync` (2) build their own `AuditEvent` and call
+  `ctx.audit_logger.log(..)` directly — so the counter never moved for them.
+  The materially reachable case is `ssh_files_write`, whose writes are inside
+  its per-file loop: a `daemon stop` at file 21 of 50 left **20 lines on
+  disk and a line saying there were none**. All eleven now claim immediately
+  before their write, in that order, because a claim taken *after* the write
+  reopens the window the count was introduced to close.
+
+  The definition of the field was deliberately **not** widened to make the
+  `0` true: that would have been the same false statement from the other
+  side. Pinned by `every_direct_audit_write_claims_itself_first`, which walks
+  `src/mcp/tool_handlers/` rather than listing the six files, so the seventh
+  handler to grow a direct write is covered the day it is written.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
