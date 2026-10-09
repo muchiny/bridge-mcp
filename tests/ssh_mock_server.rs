@@ -1,9 +1,9 @@
 //! In-process mock SSH server for integration tests.
 //!
 //! This file is intentionally NOT a test runner — it only exposes helper
-//! types used by `ssh_client_mock.rs` and `sftp_mock.rs`. The single
-//! `#[test]` at the bottom is just a smoke check so cargo doesn't warn
-//! that this binary contains zero tests.
+//! types used by `ssh_client_mock.rs`, `sftp_mock.rs` and
+//! `session_reaper_audit.rs`. The single `#[test]` at the bottom is just a
+//! smoke check so cargo doesn't warn that this binary contains zero tests.
 //!
 //! The server is built on `russh::server::Server` + `russh_sftp::server::run`
 //! and binds on `127.0.0.1:0` (ephemeral port) so concurrent tests do not
@@ -18,6 +18,28 @@
 //! - [`mock_host_config`] — `HostConfig` pointing at `127.0.0.1:<port>`
 //!   with `HostKeyVerification::Off`
 //! - [`mock_limits`] — short-timeout `LimitsConfig` for fast tests
+//!
+//! # The shell is PARTIAL — read this before using it
+//!
+//! `shell_request` + `data` make `SessionManager::create` succeed, and that
+//! is **all** they do. `data` answers a shell channel by echoing back every
+//! `---SSHB_…---` marker it is asked to `echo`, each preceded by one line
+//! standing in for `pwd`. So:
+//!
+//! - **Emulated:** opening an interactive shell, the init handshake, the
+//!   initial `pwd`. Enough for session *lifecycle* tests — create, list,
+//!   reap, close — which is what `session_reaper_audit.rs` needs.
+//! - **NOT emulated:** running a command. A `ssh_session_exec` against this
+//!   mock gets its end marker back with **no output, no exit-code line and
+//!   no cwd line**, so `parse_exec_output` sees an empty result rather than
+//!   a command that ran. Nothing here is a shell: there is no state, no
+//!   `cd`, no environment.
+//! - **Untouched:** `exec_request`'s one-shot channels. `data` returns early
+//!   unless the channel asked for a shell, so the pre-existing
+//!   `ssh_client_mock.rs` and `sftp_mock.rs` behaviour is unchanged.
+//!
+//! If you need a command to run, extend `data` deliberately and say so here;
+//! do not assume the shell already does it.
 //!
 //! # SFTP backend
 //!

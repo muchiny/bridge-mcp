@@ -1658,7 +1658,7 @@ impl McpServer {
             // `every_writing_facade_claims_before_it_logs` for a line the
             // in-flight registry has no business counting.
             self.audit_logger.log(
-                crate::security::SESSION_REAPER_TOOL,
+                crate::security::RESOURCE_REAPER_TOOL,
                 crate::security::reaped_event(
                     "shutdown",
                     "tunnel_id",
@@ -7884,13 +7884,13 @@ rbac:
             .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {:?}", lines[0]));
 
         assert_eq!(event["event_type"], "state_change");
-        assert_eq!(event["tool_name"], crate::security::SESSION_REAPER_TOOL);
+        assert_eq!(event["tool_name"], crate::security::RESOURCE_REAPER_TOOL);
         assert_eq!(event["host"], "raspberry");
         assert_eq!(
-            event["command"],
-            "<session-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80 host=raspberry",
+            event["command"], "<resource-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80",
             "`tunnel_id=` is what tells a tunnel line from a session one, since both carry \
-             the same `tool_name`"
+             the same `tool_name`; the host is in the `host` field, asserted above, and in \
+             `command` it would be a second source for one fact"
         );
         assert!(!lines[0].contains("exit_code"), "nothing ran: {}", lines[0]);
     }

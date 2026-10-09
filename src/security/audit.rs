@@ -142,13 +142,21 @@ pub(crate) const INTERRUPTED_BY_SHUTDOWN: &str = "the server stopped before this
 /// &'static str` body and every `const NAME` literal under `src/`, collected
 /// and deduplicated, is **503 names** of which **0** contain `<` or `>`.
 ///
-/// **It names the WRITER, not a kind of resource**, which is why one sentinel
-/// covers tunnels as well as sessions. A reader who wants one of the two
-/// populations selects on `command`, whose second and third fields are
-/// `reason=` and either `session_id=` or `tunnel_id=`; a reader who wants
+/// **`resource` and not `session`, which took a round to get right.** One
+/// sentinel covers tunnels as well as sessions, because it names the WRITER
+/// and not a kind of resource — and `<session-reaper>`, the first spelling,
+/// put the word "session" on a line about a tunnel. That `command` then
+/// begins `reason=… tunnel_id=…` does not repair it: it catches the reader
+/// after the fact, and the short form is the one that gets read. Same class
+/// of defect as `{"": "x"}` rendering as `ssh_exec {}` — see
+/// `audited_argument_names` — and this release exists to remove lines that
+/// read as something they are not.
+///
+/// A reader who wants one of the two populations selects on `command`, whose
+/// second field is either `session_id=` or `tunnel_id=`; a reader who wants
 /// "everything the bridge tore down by itself" selects on this field alone,
 /// and that is the query the release notes give.
-pub(crate) const SESSION_REAPER_TOOL: &str = "<session-reaper>";
+pub(crate) const RESOURCE_REAPER_TOOL: &str = "<resource-reaper>";
 
 /// Result of a command execution for audit purposes
 #[derive(Debug, Clone, Serialize)]
@@ -173,7 +181,7 @@ pub enum CommandResult {
     /// reaper (`SessionManager::cleanup`, every 60 s), the shutdown's
     /// `close_all` for sessions and for tunnels, and the four branches of
     /// `SessionManager::exec` that find a session expired or its channel
-    /// dead. Those lines carry `SESSION_REAPER_TOOL` in `tool_name` and a
+    /// dead. Those lines carry `RESOURCE_REAPER_TOOL` in `tool_name` and a
     /// `reason=` in `command`; `crate::security::reaped_event` builds them
     /// all.
     ///
@@ -190,7 +198,7 @@ pub enum CommandResult {
     ///
     /// Reading one of these lines: `event_type` says which kind of state
     /// change it is, `tool_name` says **who wrote it** — a tool's own name
-    /// when a tool did it, `SESSION_REAPER_TOOL` when the bridge destroyed
+    /// when a tool did it, `RESOURCE_REAPER_TOOL` when the bridge destroyed
     /// the thing by itself; always set either way, since `AuditLogger::log`
     /// is the only writer of that field — and `command` carries the
     /// *operation* rather than a shell command, in the form
@@ -203,7 +211,7 @@ pub enum CommandResult {
     /// **lifetime of the session or tunnel that was destroyed** — nobody
     /// timed the teardown, and the lifetime is the number that makes the
     /// field worth carrying at all. `tool_name` is what disambiguates: a
-    /// reaped line's is `SESSION_REAPER_TOOL`.
+    /// reaped line's is `RESOURCE_REAPER_TOOL`.
     StateChanged { duration_ms: u64 },
     /// A confirmation gate let a destructive call through, and **nothing has
     /// run yet** when this line is written.
@@ -362,7 +370,7 @@ pub struct AuditEvent {
     /// session or tunnel the bridge destroys by itself — the idle reaper, the
     /// shutdown's `close_all`, a dead channel found by
     /// `SessionManager::exec` — writes `"state_change"` too, with
-    /// `SESSION_REAPER_TOOL` in `tool_name` (see
+    /// `RESOURCE_REAPER_TOOL` in `tool_name` (see
     /// `crate::security::reaped_event`). That is deliberate: destruction of a
     /// session is one population and must answer to one query. The
     /// consequence for the sentence above is that `tool_name` selects
@@ -462,7 +470,7 @@ impl AuditEvent {
     ///
     /// The one caller inside this module is `reaped_event`, which is a
     /// renderer and not a facade: it takes no `tool` because its `tool_name`
-    /// can only ever be `SESSION_REAPER_TOOL`, exactly as
+    /// can only ever be `RESOURCE_REAPER_TOOL`, exactly as
     /// `log_interrupted` takes none for `SHUTDOWN_TOOL`. Its two call sites
     /// are in two adapters that cannot see each other, which is why the
     /// shape lives here.
@@ -821,6 +829,9 @@ const fn reorders_or_hides(c: char) -> bool {
 /// Recursive, because a secret one level down (`{"creds":{"password":"…"}}`)
 /// is reached by no top-level key. Depth is bounded by `serde_json`'s own
 /// parse recursion limit, so this cannot be driven deeper than the input was.
+///
+/// Reached only from `audited_operation`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
 fn redact_secret_values(value: &serde_json::Value) -> serde_json::Value {
     const REDACTED: &str = "[REDACTED]";
 
@@ -891,10 +902,16 @@ fn redact_secret_values(value: &serde_json::Value) -> serde_json::Value {
 ///    pins that there are exactly **two**, so a third has to argue for itself
 ///    in a failing assertion. Not a `*_file` family: `vault_password_file` is
 ///    in because it is a path, not because of its suffix.
+///
+/// Read only by `key_names_a_secret`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
 const REDACTION_EXEMPT_KEYS: &[&str] = &["kubeconfig", "vault_password_file"];
 
 /// Whether an argument's key name contains one of the sanitizer's secret
 /// keywords, case-insensitively — and is not on [`REDACTION_EXEMPT_KEYS`].
+///
+/// Reached only from `redact_secret_values`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
 fn key_names_a_secret(key: &str) -> bool {
     let lowered = key.to_ascii_lowercase();
     if REDACTION_EXEMPT_KEYS.contains(&lowered.as_str()) {
@@ -937,6 +954,17 @@ fn key_names_a_secret(key: &str) -> bool {
 /// contains a newline reached `log_to_tracing` and forged a second, well-formed
 /// `Audit: …` record. `host` was rendered and the tool name beside it on the
 /// same line was not; that asymmetry was the defect.
+/// **Gated on `cli` (or a test build), and that gate is a measurement.**
+/// Its only consumer outside this module is the CLI's destructive gate, and
+/// `src/cli` is compiled only with the `cli` feature — so under
+/// `--no-default-features` this and its three helpers below were
+/// `dead_code` errors under `-D warnings`. That configuration is the third
+/// clippy gate the constraints name and the one **no CI job runs**, so the
+/// breakage was silent; it predates this entry (identical six errors at the
+/// revision before it) and is fixed here rather than left, because a gate
+/// that nobody runs is a gate that rots. `test` is in the `cfg` because this
+/// module's own tests assert on it and they build without `cli`.
+#[cfg(any(feature = "cli", test))]
 pub(crate) fn audited_operation(tool_name: &str, args: Option<&serde_json::Value>) -> String {
     // Secrets BEFORE sizes, and on the whole value rather than per member:
     // the key that names the secret is the TOP-level one, so a per-member
@@ -1035,6 +1063,9 @@ pub(crate) fn audited_argument_names(tool_name: &str, args: Option<&serde_json::
 /// Replace one argument value with its length when it is over
 /// [`GATE_AUDIT_MAX_VALUE_CHARS`]. Applies to arrays and objects too, by their
 /// serialized length, so a nested payload is bounded like a flat one.
+///
+/// Reached only from `audited_operation`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
 pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
     let len = match value {
         serde_json::Value::String(s) => s.chars().count(),
@@ -1060,7 +1091,7 @@ pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
 /// `event_type` is **`"state_change"`**, the same value the seven
 /// state-changing tools write, and deliberately not a new one: an auditor
 /// asking "when was this session destroyed" must get one query, not two.
-/// What tells the two apart is `tool_name` — `SESSION_REAPER_TOOL` here, a
+/// What tells the two apart is `tool_name` — `RESOURCE_REAPER_TOOL` here, a
 /// real tool name there.
 ///
 /// `duration_ms` is the resource's **LIFETIME**, not the time the teardown
@@ -1072,11 +1103,22 @@ pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
 /// an `ssh_session_close` line would otherwise read the same field two ways
 /// without being told.
 ///
+/// **The host is in the `host` FIELD and nowhere else, which took a round to
+/// get right.** The first version also interpolated `host=` into `command`,
+/// on the reasoning that an auditor pairing a reaped line with an
+/// `ssh_session_create` one wants everything on the line. But two sources
+/// for one fact in a line-oriented format are two sources that can
+/// **disagree** — they are rendered by different functions, `audited_host`
+/// caps at [`GATE_AUDIT_MAX_VALUE_CHARS`] and `audited_text` does not — and
+/// the auditor filters on the field, which is the one every other event
+/// shape already uses. `command` carries what the `host` field cannot: the
+/// reason and the resource id.
+///
 /// **The separators are ` ` and `=`, and neither is new.** Both are already
-/// in [`audited_text`]'s family 3, so `id` and `host` — a UUID this crate
-/// minted and a host alias a caller named — cannot forge a fourth field.
-/// `reason` and `id_key` are `&'static str` **on purpose**: they are the
-/// writer's own vocabulary out of a closed enum, so there is no path by
+/// in [`audited_text`]'s family 3, so `id` — a UUID this crate minted, or a
+/// tunnel id built from a caller's host and ports — cannot forge a third
+/// field. `reason` and `id_key` are `&'static str` **on purpose**: they are
+/// the writer's own vocabulary out of a closed enum, so there is no path by
 /// which caller data reaches them unescaped, and a `&str` parameter would
 /// invite one.
 ///
@@ -1091,9 +1133,8 @@ pub(crate) fn reaped_event(
     lifetime: std::time::Duration,
 ) -> AuditEvent {
     let command = format!(
-        "{SESSION_REAPER_TOOL} reason={reason} {id_key}={} host={}",
-        audited_text(id),
-        audited_text(host)
+        "{RESOURCE_REAPER_TOOL} reason={reason} {id_key}={}",
+        audited_text(id)
     );
     AuditEvent::tagged(
         "state_change",

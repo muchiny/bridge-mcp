@@ -186,22 +186,22 @@ tests and a serialisation test.
   `ssh_session_exec`.
 
   **Amended a second time in this same cycle, and the hole is wider than the
-  first one: `"<session-reaper>"` is a THIRD value `tool_name` can take, and
+  first one: `"<resource-reaper>"` is a THIRD value `tool_name` can take, and
   it is the one the normal case lands on.** Under the default config a
   session idle for `sessions.idle_timeout_seconds` (300 s) is destroyed by a
   60 s loop that nobody asked, and a tunnel open at shutdown is aborted the
   same way; those lines are `event_type: "state_change"` with
-  `tool_name: "<session-reaper>"`, so neither the seven-name list nor the
+  `tool_name: "<resource-reaper>"`, so neither the seven-name list nor the
   `"<shutdown>"` clause above sees them. An MCP client rarely calls
   `ssh_session_close` at all, so for most sessions the reaped line is the
   *only* record of the destruction. To get every session and tunnel
   destruction — asked for or not — select the outcome and read the writer:
   `jq 'select(.event_type == "state_change") | {tool_name, host, command,
   ms: .result.StateChanged.duration_ms}'`. For the reaped ones alone,
-  `jq 'select(.tool_name == "<session-reaper>")'`, and the `reason=` field
+  `jq 'select(.tool_name == "<resource-reaper>")'`, and the `reason=` field
   of `command` says which bound or which failure fired. **Mind
   `duration_ms`**: on a tool's line it is how long the operation took, on a
-  `<session-reaper>` line it is the destroyed resource's **lifetime** —
+  `<resource-reaper>` line it is the destroyed resource's **lifetime** —
   `tool_name` is what tells the two apart.
 
   Anything refused *before* that call writes nothing to either sink:
@@ -729,7 +729,7 @@ tests and a serialisation test.
   is nothing to migrate. Listed because two entries above cite two of them by
   their old path, and those citations are corrected in place.
 
-- **(wire) `"<session-reaper>"` is a new, reserved `tool_name` in `audit.log`,
+- **(wire) `"<resource-reaper>"` is a new, reserved `tool_name` in `audit.log`,
   and `"state_change"` is no longer written only by the seven state-changing
   tools.** No new `event_type`, no new `CommandResult` variant, no new config
   key: a session or a tunnel the bridge destroys by itself writes
@@ -783,15 +783,20 @@ tests and a serialisation test.
   `a_tunnel_open_at_shutdown_leaves_one_line_naming_the_reaper`:
 
   ```json
-  {"timestamp":"2026-10-08T23:21:52.297949262Z","event_type":"state_change","host":"raspberry","command":"<session-reaper> reason=idle_timeout session_id=4f1c-session host=raspberry","tool_name":"<session-reaper>","result":{"StateChanged":{"duration_ms":43210}}}
-  {"timestamp":"2026-10-08T23:21:53.762836042Z","event_type":"state_change","host":"raspberry","command":"<session-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80 host=raspberry","tool_name":"<session-reaper>","result":{"StateChanged":{"duration_ms":0}}}
+  {"timestamp":"2026-10-09T00:30:57.622326106Z","event_type":"state_change","host":"raspberry","command":"<resource-reaper> reason=idle_timeout session_id=4f1c-session","tool_name":"<resource-reaper>","result":{"StateChanged":{"duration_ms":43210}}}
+  {"timestamp":"2026-10-09T00:30:58.790632740Z","event_type":"state_change","host":"raspberry","command":"<resource-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80","tool_name":"<resource-reaper>","result":{"StateChanged":{"duration_ms":0}}}
   ```
 
   **No `exit_code` key anywhere** — nothing ran — and `duration_ms` is the
   destroyed resource's **lifetime**, which is what finally makes that field
   mean something on a line nobody timed. `tunnel_id=` versus `session_id=` is
   what distinguishes the two populations, since both carry the same
-  `tool_name`: the sentinel names the **writer**, not a kind of resource.
+  `tool_name`: the sentinel names the **writer**, not a kind of resource —
+  which is why it is spelled `<resource-reaper>` and not `<session-reaper>`.
+  The host is in the `host` **field** and deliberately not repeated in
+  `command`: two sources for one fact in a line-oriented format are two
+  sources that can disagree, and `host` is the field every other event shape
+  already puts it in.
 
   **The emission is conditional, and that is a contract.** Nothing
   destroyed, nothing written. Four assertions elsewhere count the lines in

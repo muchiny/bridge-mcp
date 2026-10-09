@@ -545,10 +545,19 @@ impl ExecuteCommandUseCase {
     /// value that must never be passed — the name of the tool whose call this
     /// is about, which would make the line indistinguishable from one that
     /// tool wrote itself. The tool is still on the line: `operation` begins
-    /// with it, in the form `crate::security::audited_argument_names`
-    /// builds. (This named `audited_operation` until round 3; that is the
-    /// renderer the CLI gate kept, and it carries argument VALUES, which this
-    /// line no longer does.)
+    /// with it, in the form `audited_argument_names`
+    /// (`src/security/audit.rs`) builds. **Named by file and not by module
+    /// path**, because the `crate::security::…` form this sentence used until
+    /// now does not resolve at all: the function is `pub(crate)` inside the
+    /// PRIVATE module `audit` (`mod audit;` in `src/security/mod.rs`) and is
+    /// not among that module's re-exports. Measured:
+    /// `grep -c "audited_argument_names" src/security/mod.rs` returns 0,
+    /// while `grep -c "fn audited_argument_names" src/security/audit.rs`
+    /// returns 1. Plain backticks and not an intra-doc link, so rustdoc
+    /// never flagged it — the file is the citation that stays true. (This named
+    /// `audited_operation` until round 3; that is the renderer the CLI gate
+    /// kept, and it carries argument VALUES, which this line no longer
+    /// does.)
     ///
     /// **No history entry**, for the reason [`Self::log_state_change`]
     /// states and that applies here word for word: `HistoryEntry::exit_code`

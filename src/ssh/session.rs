@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::config::{HostConfig, LimitsConfig, SessionConfig, ShellType};
 use crate::error::{BridgeError, Result};
-use crate::security::{AuditLogger, SESSION_REAPER_TOOL, reaped_event};
+use crate::security::{AuditLogger, RESOURCE_REAPER_TOOL, reaped_event};
 
 use super::client::SshClient;
 
@@ -208,13 +208,21 @@ impl SessionManager {
     /// not arise: the caller reads `elapsed()` and this decides.
     ///
     /// **One function for the two sites that apply it**, and before this
-    /// change there were two single-`||` expressions — in
-    /// [`Self::cleanup`] and in [`Self::exec`]'s prologue — **in opposite
-    /// operand order**. With a single `||` that difference was unobservable;
-    /// naming the bound makes it a decision, so: **`max_age` wins a tie.**
-    /// A session in constant use is still destroyed when it reaches
-    /// `max_age_seconds`, so the age bound is the unconditional one, and it
-    /// is the stronger thing to say about a session that has passed both.
+    /// change there were two single-`||` expressions — in `Self::cleanup`
+    /// and in [`Self::exec`]'s prologue — **in opposite operand order**.
+    /// With a single `||` that difference was unobservable, which is why it
+    /// survived: an identical predicate written twice the other way round
+    /// was a defect waiting for someone to give it a voice. Naming the bound
+    /// is that voice, and it forces a tie-break.
+    ///
+    /// **`max_age` wins a tie, because it is the HARD bound.** A session past
+    /// `max_age_seconds` is reaped **even while it is actively in use**,
+    /// where `idle_timeout_seconds` only bites on inactivity — so when both
+    /// hold, the dominant fact is the one that would have sufficed alone. An
+    /// auditor counting reaps by reason has to find `max_age` on exactly the
+    /// sessions that were condemned whatever their traffic; reporting
+    /// `idle_timeout` there would say the session could have been saved by
+    /// using it, which is false.
     ///
     /// Note `idle <= age` always holds for a real session (`last_used` is set
     /// to `created_at` at creation), but the two bounds are independent
@@ -260,7 +268,7 @@ impl SessionManager {
     fn audit_destroyed(&self, reason: ReapReason, id: &str, host: &str, lifetime: Duration) {
         if let Some(logger) = self.audit.as_ref() {
             logger.log(
-                SESSION_REAPER_TOOL,
+                RESOURCE_REAPER_TOOL,
                 reaped_event(reason.as_str(), "session_id", id, host, lifetime),
             );
         }
@@ -3127,7 +3135,7 @@ mod tests {
             "two reasons sharing a literal would make the trail unreadable"
         );
         // No reason may spell a tool name: these go into `command` beside a
-        // `tool_name` of `<session-reaper>`, and a reader must not be able to
+        // `tool_name` of `<resource-reaper>`, and a reader must not be able to
         // mistake one for the explicit close.
         assert!(
             !rendered.contains(&"ssh_session_close"),
@@ -3208,14 +3216,14 @@ mod tests {
             "the same event_type as an explicit close, so destruction is ONE query"
         );
         assert_eq!(
-            event["tool_name"], "<session-reaper>",
+            event["tool_name"], "<resource-reaper>",
             "and NOT `ssh_session_close`, which would make it indistinguishable"
         );
         assert_eq!(event["host"], "raspberry");
         assert_eq!(
-            event["command"],
-            "<session-reaper> reason=idle_timeout session_id=4f1c-session host=raspberry",
-            "the reason and both identifiers are on the line a consumer greps"
+            event["command"], "<resource-reaper> reason=idle_timeout session_id=4f1c-session",
+            "the reason and the id are in `command`; the host is in the `host` FIELD, and \
+             putting it in both would be two sources for one fact"
         );
         assert_eq!(
             event["result"]["StateChanged"]["duration_ms"], 43_210,
@@ -3228,15 +3236,20 @@ mod tests {
         );
     }
 
-    /// The host and the session id are escaped, so neither can forge a field
+    /// The session id and the host are escaped, so neither can forge a field
     /// of the line it rides on.
     ///
     /// `command` is built with ` ` and `=` as separators — both already in
     /// `audited_text`'s set, which is why this change adds nothing to it —
-    /// and the angle brackets belong to the writer, so a host argument
-    /// cannot spell `<session-reaper>` or `<no-host>` either.
+    /// and the angle brackets belong to the writer, so neither value can
+    /// spell `<resource-reaper>` or `<no-host>`.
+    ///
+    /// The host no longer appears in `command` at all, so the forgery it
+    /// could attempt there is gone by construction; what is still checked is
+    /// the `host` FIELD, which reaches `log_to_tracing` and whose escaping is
+    /// the only thing standing between a caller and a second journal record.
     #[tokio::test]
-    async fn a_forged_host_cannot_add_a_field_to_a_reaped_line() {
+    async fn a_forged_id_or_host_cannot_add_a_field_to_a_reaped_line() {
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.log");
         let (logger, writer) = audited_logger(audit_path.clone());
@@ -3266,20 +3279,19 @@ mod tests {
             "a forged `reason=` in the session id must not become a second field: {command}"
         );
         assert_eq!(
-            command.matches(" host=").count(),
-            1,
-            "nor a second `host=`: {command}"
+            command.matches("host=").count(),
+            0,
+            "the host is not a field of `command` any more, forged or otherwise: {command}"
         );
         assert!(
             !command.contains("<no-host>"),
             "the angle brackets are the writer's namespace: {command}"
         );
+        let host_field = event["host"].as_str().expect("host is a string");
         assert!(
-            !event["host"]
-                .as_str()
-                .expect("host is a string")
-                .contains(' '),
-            "the `host` FIELD is escaped too, because `log_to_tracing` renders it"
+            !host_field.contains(' ') && !host_field.contains('<'),
+            "the `host` FIELD is escaped, because `log_to_tracing` renders it and a space \
+             forges a logfmt field while a `<` forges the writer's namespace: {host_field}"
         );
     }
 

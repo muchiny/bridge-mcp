@@ -469,11 +469,21 @@ where
     // `AuditLogger::log` reaches `tracing` and not the file.
     //
     // **The HTTP teardown is NOT `McpServer::serve`'s**, and the difference
-    // is wider than this line: `grep -n "close_all" src/mcp/transport/http.rs`
-    // returns nothing, and this function calls neither `close_all` nor
-    // `spawn_global_tasks`. So a session or tunnel opened over HTTP is
-    // destroyed only by process exit, with no line at all. This emission
-    // covers the commands that were running; it does not cover that.
+    // is wider than this line: nothing in this file closes a resource pool
+    // or starts the per-server cleanup loops, so a session or tunnel opened
+    // over HTTP is destroyed only by process exit, with no line at all.
+    // This emission covers the commands that were running; it does not
+    // cover that.
+    //
+    // **The fact is stated without a grep on purpose.** An earlier version
+    // of this comment said `grep -n "close_all" src/mcp/transport/http.rs`
+    // "returns nothing" — and its own text made that grep return 3. A
+    // citation that counts literals in the file containing it is fragile by
+    // construction, however the path is narrowed; this is the third
+    // recurrence of that defect in this release. If you want the measure
+    // rather than the claim, strip the comments first:
+    // `sed -E 's@^[[:space:]]*//.*@@' <this file> | grep -cE
+    // "close_all|spawn_global_tasks"` returns 0.
     audit_owner.audit_interrupted_in_flight();
     // Both steps run whatever `outcome` says: an error after the writer was
     // spawned is exactly when the queued events matter most.

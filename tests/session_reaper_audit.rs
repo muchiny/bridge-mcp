@@ -146,12 +146,12 @@ async fn a_reaped_session_names_its_bound(config: SessionConfig, expected_reason
         let event: serde_json::Value =
             serde_json::from_str(&written[0]).expect("audit line must be JSONL");
         assert_eq!(event["event_type"], "state_change");
-        assert_eq!(event["tool_name"], "<session-reaper>");
+        assert_eq!(event["tool_name"], "<resource-reaper>");
         assert_eq!(event["host"], "mock-host");
         assert_eq!(
             event["command"],
             format!(
-                "<session-reaper> reason={expected_reason} session_id={} host=mock-host",
+                "<resource-reaper> reason={expected_reason} session_id={}",
                 info.id
             ),
             "the line must name the bound that fired and the session the auditor saw created"
@@ -242,13 +242,14 @@ async fn a_real_session_closed_by_the_shutdown_lands_one_line_naming_shutdown() 
         );
         let event: serde_json::Value =
             serde_json::from_str(&written[0]).expect("audit line must be JSONL");
-        assert_eq!(event["tool_name"], "<session-reaper>");
+        assert_eq!(event["tool_name"], "<resource-reaper>");
+        assert_eq!(
+            event["host"], "mock-host",
+            "the host lives in this field and no longer in `command`"
+        );
         assert_eq!(
             event["command"],
-            format!(
-                "<session-reaper> reason=shutdown session_id={} host=mock-host",
-                info.id
-            )
+            format!("<resource-reaper> reason=shutdown session_id={}", info.id)
         );
     })
     .await
