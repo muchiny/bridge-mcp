@@ -1229,6 +1229,27 @@ tests and a serialisation test.
 
 ### Added
 
+- **`plugin-clair/` — a second Claude Code plugin, `mode-clair`, listed in the
+  repository's marketplace beside `bridge-mcp`.** A mod (function hooks, Claude
+  Code 2.1.296 or later) that only observes: a band above the prompt draws the
+  stage of a Superpowers session, the phases of an ultracode workflow, or the
+  bridge call in flight as one colored pipeline; each bridge call's result row
+  starts with the machine, what happened and the call's path through the bridge
+  (`✓ permission ── ○ accord ── ✓ validation ── ✗ liste noire ── ○ web-02`),
+  with "Rien n'est parti vers web-02." whenever nothing reached the host; `/clair`
+  opens a pane listing the machines touched and the pipeline of the last call on
+  the one picked; the status line holds one short entry. Every word it draws is
+  French, by design. **Basis:** 28 tests under `claude plugin test` (the
+  classification of the bridge's answers, Superpowers plans and agent calls,
+  workflow scripts and journals, and the band, result row and pane drawn by the
+  engine on the `terminal` and `desktop` surfaces), `claude plugin validate`, and
+  a strict `tsc` run. **It has never run in a live Claude Code session**, so the
+  two things the tests cannot show remain unobserved: whether a workflow agent's
+  confirmation form reaches the person, and whether the band stays visible while
+  a form is open. The path it draws follows the bridge's order today, the
+  destructive gate before the blacklist, so it shows a confirmed command being
+  refused when that happens. `typos.toml` excludes `plugin-clair/` for its French
+  strings, scoped to the folder like `scripts/live_probe/`.
 - **`tests/cli_exit_code.rs` — the first test that observes a real process's
   exit code.** It runs the built binary with no network and no SSH host and
   asserts 4 (destructive gate, no terminal), 3 (unknown host) and 5 (config that

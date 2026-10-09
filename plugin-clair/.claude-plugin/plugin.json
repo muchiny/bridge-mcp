@@ -1,0 +1,14 @@
+{
+  "name": "mode-clair",
+  "version": "0.1.0",
+  "description": "Mode clair : une bande au-dessus de la saisie, un pipeline coloré et un panneau /clair pour suivre Superpowers, les workflows ultracode et les appels à bridge-mcp sans brouillard.",
+  "author": {
+    "name": "muchiny",
+    "url": "https://github.com/muchiny"
+  },
+  "homepage": "https://github.com/muchiny/bridge-mcp",
+  "repository": "https://github.com/muchiny/bridge-mcp",
+  "license": "MIT",
+  "keywords": ["clarity", "accessibility", "superpowers", "workflow", "bridge-mcp", "ssh"],
+  "types": "./types/index.d.ts"
+}

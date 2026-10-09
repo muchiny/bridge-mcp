@@ -1,0 +1,5 @@
+# Laid by Claude Code each time it loads this plugin from a folder it watches
+# (--plugin-dir, CLAUDE_CODE_PLUGIN_DIRS): the API's declarations and a
+# tsconfig.json that extends them. Regenerated, never edited.
+.claude-plugin/types/
+tsconfig.json

@@ -17,6 +17,17 @@
         "name": "muchiny",
         "url": "https://github.com/muchiny"
       }
+    },
+    {
+      "name": "mode-clair",
+      "source": "./plugin-clair",
+      "description": "Mode clair : une bande au-dessus de la saisie, un pipeline coloré et un panneau /clair pour suivre Superpowers, les workflows ultracode et les appels à bridge-mcp sans brouillard.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "author": {
+        "name": "muchiny",
+        "url": "https://github.com/muchiny"
+      }
     }
   ]
 }

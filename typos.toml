@@ -78,4 +78,10 @@ extend-exclude = [
     # tool actually printed on a real host, so "correcting" a word inside one
     # would falsify the record. They are covered by this same directory entry.
     "scripts/live_probe/",
+    # The mode-clair plugin speaks French to the person by design: every
+    # word it draws (`toi`, `mesure`, `en cours`, `sur`) is a French string
+    # literal in hooks/, and its tests assert those exact strings. Adding the
+    # words to `extend-words` would disable those corrections repository-wide;
+    # scoping the exclusion to the plugin's folder keeps them everywhere else.
+    "plugin-clair/",
 ]
