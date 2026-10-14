@@ -244,8 +244,8 @@ security:
     # entropy_detection: true        # Enable/disable (default: true)
     # entropy_threshold: 4.5         # Shannon entropy bits threshold (default: 4.5)
     # entropy_min_length: 16         # Min token length to analyze (default: 16). The real
-    #                                # floor is max(this, 2^entropy_threshold) = 23 chars at
-    #                                # 4.5: nothing shorter is ever flagged. It binds only
+    #                                # floor is max(this, 2^entropy_threshold) = 23 bytes
+    #                                # (chars, for ASCII tokens) at 4.5: nothing shorter is ever flagged. It binds only
     #                                # hex tokens, if entropy_hex_threshold is set.
     # entropy_hex_threshold: 3.1    # Opt-in hex-charset threshold (default: disabled).
     #                               # Hex caps at 4.0 bits/char so the 4.5 default never

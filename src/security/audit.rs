@@ -828,7 +828,7 @@ const fn reorders_or_hides(c: char) -> bool {
 /// `db_password` **verbatim** to `audit.log`. (The prefixed quoted families
 /// added since now match that form too; this redaction does not rely on them.) The entropy backstop does not
 /// save it either: at the default threshold of 4.5 no token under 23
-/// characters can be flagged (see `entropy.rs::EntropyDetector::shannon_entropy`), and
+/// bytes can be flagged (see `entropy.rs::EntropyDetector::shannon_entropy`), and
 /// `entropy.rs::is_safe_token` skips path- and identifier-shaped tokens
 /// whatever their length.
 ///
@@ -1062,7 +1062,7 @@ pub(crate) fn audited_operation(tool_name: &str, args: Option<&serde_json::Value
 /// `from_literal: [{"key": …, "value": …}]` — whose own schema says "values
 /// are secret, never logged" — and neither member name matches a keyword, no
 /// sanitizer pattern anchors on `value`, and the entropy backstop flags
-/// nothing under 23 characters at its default threshold (see
+/// nothing under 23 bytes at its default threshold (see
 /// `entropy.rs::EntropyDetector::shannon_entropy`); and the value-type exemption was a choice the **caller** made,
 /// so `{"password": 12345678}` went through. `ssh_k8s_create_secret` is
 /// annotated `mutating`, not destructive, so the CLI gate had never rendered

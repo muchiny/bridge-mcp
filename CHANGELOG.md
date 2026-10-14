@@ -1954,9 +1954,9 @@ tests and a serialisation test.
 
 ### Changed
 
-- **The entropy tier's real floor is `2^threshold` characters, and the prose now
+- **The entropy tier's real floor is `2^threshold` bytes, and the prose now
   says so.** A token's Shannon entropy is at most `log2(len)`, so at the default
-  `entropy_threshold` of 4.5 nothing under 23 characters can ever be flagged
+  `entropy_threshold` of 4.5 nothing under 23 bytes (characters, for ASCII tokens) can ever be flagged
   (`2^4.5` is about 22.6), whatever `entropy_min_length` says. The default
   `entropy_min_length` **stays 16**: it is inert at the general threshold but it
   is the binding floor for the opt-in hex tier (`entropy_hex_threshold`, e.g.
