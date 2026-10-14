@@ -1547,8 +1547,12 @@ tests and a serialisation test.
   of tier 1 ever fails to build. At load, `security.sanitize.custom_patterns` now
   gets the per-pattern regex check that only the legacy
   `security.sanitize_patterns` had; errors name the key and the zero-based index
-  of the entry (for example `security.sanitize.custom_patterns[3]`) and no longer
-  echo the pattern, which may be a live secret. The runtime constructors still
+  of the entry (for example `security.sanitize.custom_patterns[3]`) and our own wrapper text no longer
+  echoes the pattern. This halves the exposure rather than ending it: the
+  `regex` error text is kept, and for a syntax error it embeds the pattern, so
+  `bridge-mcp --config bad.yaml validate` still prints it to stderr and the
+  same text reaches the journal. A literal secret used as a `custom_patterns`
+  value can still surface in a parse error. The runtime constructors still
   drop an over-512-byte pattern with a log line only, for callers that bypass
   the loader: the load-time refusal below does not cover every construction
   path. A reload that changes `security.sanitize` or `security.sanitize_patterns`
@@ -1954,26 +1958,35 @@ tests and a serialisation test.
 
 ### Changed
 
-- **`--vault-password-file <path>` is no longer redacted in tool output.** The
-  sanitizer had a dedicated pattern ("Ansible vault password file path") that
-  turned `--vault-password-file /root/.vault_pass` into
-  `--vault-password-file [REDACTED]`, while the audit log exempts the same name
-  (`vault_password_file`, with `kubeconfig`) because it is a path and not a
-  content, and `kubeconfig: /etc/rancher/k3s/k3s.yaml` already came out of the
-  sanitizer unchanged. The two now agree: a path to a secret is not the secret;
-  the control on the file is its filesystem permissions, and the path says which
-  vault a run used, which masking destroys. Measured on a 1724-input matrix
-  against the previous tree: the 700 inputs that changed are all
-  `--vault-password-file <value>` (flag followed by a space), all from masked to
-  clear, none anywhere else. **What to act on:** a value after that flag is now
-  shown as written, so a password typed there instead of a path is no longer
-  masked either. Keep the secret in the file, not on the command line. The
-  "Anthropic API Key" duplicate the same task looked into is not one: the two
-  patterns differ (shape `sk-ant-api…` versus the `ANTHROPIC_API_KEY=` /
-  `CLAUDE_API_KEY=` variable name), and removing the keyed one leaves
-  `ANTHROPIC_API_KEY=hunter2` in clear. Only their descriptions changed, to
-  "Anthropic API Key (sk-ant- shape)" and "Anthropic API Key (env variable
-  name)"; the built-in pattern count is unchanged.
+- **`--vault-password-file <path>` is no longer redacted when the value is a
+  path.** The sanitizer's "Ansible vault password file path" pattern turned
+  every value into `[REDACTED]`, `--vault-password-file /root/.vault_pass`
+  included, while the audit log exempts the same name (`vault_password_file`,
+  with `kubeconfig`) because it is a path and not a content, and
+  `kubeconfig: /etc/rancher/k3s/k3s.yaml` already came out of the sanitizer
+  unchanged. A path to a secret is not the secret: the control on the file is
+  its filesystem permissions, and the path says which vault a run used, which
+  masking destroys. The pattern stays, behind `Gate::Shape`
+  (`plausible_shape`): the sanitizer, unlike the audit log, sees only a token
+  after a flag and not a path-typed parameter, so `--vault-password-file
+  hunter2` (a real misuse) is still masked. **Clear:** values under `/etc/`,
+  `/var/`, `/usr/`, `/opt/`, `/home/`, `/root/`, `/srv/`, `/mnt/`, `/tmp/`,
+  `/boot/`, `/dev/`, `/proc/`, `/sys/`, `/run/`, `/media/`, `/lib/`, and `./`,
+  `../`, `~/`, UNC and Windows drive paths. **Still masked, deliberately:**
+  every other value, including a path under an unlisted root
+  (`/data/vault_pass`) and a bare filename (`vault_pass.txt`); that is the safe
+  direction, so keep the file under a listed root if you want to read it in the
+  output. Measured on a 2574-input matrix against the previous commit: 630
+  inputs changed, all `--vault-password-file <path-shaped value>` (flag followed
+  by a space), all from masked to clear; `docker login -p`, the Anthropic key
+  cases and every input without the flag are byte-identical. (The value `true`
+  is also clear, as `plausible_shape` treats it as a boolean.) The two
+  "Anthropic API Key" patterns are not duplicates: one matches the `sk-ant-api…`
+  shape, the other the `ANTHROPIC_API_KEY=` / `CLAUDE_API_KEY=` variable name,
+  and removing the keyed one leaves `ANTHROPIC_API_KEY=hunter2` in clear. Only
+  their descriptions changed, to "Anthropic API Key (sk-ant- shape)" and
+  "Anthropic API Key (env variable name)". The built-in pattern count is
+  unchanged.
 
 - **The entropy tier's real floor is `2^threshold` bytes, and the prose now
   says so.** A token's Shannon entropy is at most `log2(len)`, so at the default
@@ -2082,7 +2095,8 @@ tests and a serialisation test.
 - **The flag form `--password <value>` (and `--db-password <value>`) is not
   masked by the sanitizer.** No pattern in the `password` family targets a secret that follows a
   flag after a space; only `docker login -p` and `--vault-password-file` have
-  one. (Other flags do: `--api-key <v>` and `--auth-token <v>` are masked by
+  one, and the vault one masks only a value that is not shaped like a path
+  (see Changed). (Other flags do: `--api-key <v>` and `--auth-token <v>` are masked by
   the generic API-key pattern, whose key class accepts a space by design.) Accepting a space as separator for the `password` family would also
   mask `password required pam_unix.so` in PAM output, so it needs its own
   measurement (tracked as T66). Until then, do not pass a secret as a

@@ -1294,11 +1294,24 @@ impl Sanitizer {
                 secret_group: None,
                 gate: Gate::Plausible,
             },
-            // No pattern for `--vault-password-file <path>`: a path to a secret
-            // is not the secret. The control on that file is its filesystem
-            // permissions, and the path carries forensic value (which vault
-            // a run used) that masking destroys. `audit.rs` makes the same
-            // argument for `REDACTION_EXEMPT_KEYS`; the two now agree.
+            // `--vault-password-file <value>`: a path to a secret is not the
+            // secret (its control is the file's permissions, and the path says
+            // which vault a run used), so a PATH-shaped value stays in clear.
+            // But the sanitizer, unlike `audit.rs` which redacts by a
+            // structured, path-typed key, sees only a token after a flag, and
+            // `--vault-password-file hunter2` is a real misuse: hence
+            // `Gate::Shape`, which masks everything `plausible_shape` does not
+            // recognise as a path under a well-known root. A path under an
+            // unlisted root (`/data/vault_pass`) or a bare filename
+            // (`vault_pass.txt`) is therefore masked too: the safe direction.
+            PatternDef {
+                pattern: concat!(r#"(?i)(--vault-password-file[ \t]+)"#, scalar_value!()),
+                replacement: "${1}[REDACTED]",
+                description: "Ansible vault password file path",
+                category: "ansible",
+                secret_group: Some(2),
+                gate: Gate::Shape,
+            },
             PatternDef {
                 pattern: concat!(
                     r#"(?i)(ansible[_-]?ssh[_-]?pass[ \t]*[=:][ \t]*)"#,
@@ -3428,7 +3441,10 @@ users:
     /// used `\s` around the value, which matches a newline — on the K3s host
     /// `docker login -u bob -p` followed by a bare newline (password supplied
     /// on stdin) swallowed the next line of output as the "password", and
-    /// `--vault-password-file` did the same.
+    /// `--vault-password-file` did the same. Both patterns are line-local
+    /// now. The vault one is also gated by `Gate::Shape`, so the newline case
+    /// uses a NON-path next line (`hunter2`): a path-shaped one would stay in
+    /// clear through the gate alone and prove nothing about line-locality.
     #[test]
     fn docker_login_and_vault_file_stop_at_end_of_line() {
         let s = Sanitizer::with_defaults();
@@ -3437,8 +3453,8 @@ users:
             "docker login -u bob -p\nnext-line"
         );
         assert_eq!(
-            s.sanitize("--vault-password-file\n/etc/passwd").as_ref(),
-            "--vault-password-file\n/etc/passwd"
+            s.sanitize("--vault-password-file\nhunter2").as_ref(),
+            "--vault-password-file\nhunter2"
         );
         assert_eq!(
             s.sanitize("docker login -u bob -p hunter2").as_ref(),
@@ -3448,19 +3464,47 @@ users:
 
     /// A path to a secret is not the secret: the control on the file is its
     /// filesystem permissions, and the path carries forensic value (which
-    /// vault a run used) that masking destroys. `audit.rs` exempts
-    /// `vault_password_file` and `kubeconfig` on the same argument
-    /// (`REDACTION_EXEMPT_KEYS`); the sanitizer used to mask the former
-    /// through a dedicated pattern and now agrees.
+    /// vault a run used) that masking destroys. But the sanitizer sees only a
+    /// token after a flag, not a path-typed parameter as `audit.rs` does for
+    /// `REDACTION_EXEMPT_KEYS`, so a NON-path value there
+    /// (`--vault-password-file hunter2`, a real misuse) must still be masked.
+    /// Both halves in one test: that pairing is the decision. Paths under an
+    /// unlisted root or bare filenames are masked too (safe direction).
     #[test]
-    fn vault_password_file_path_stays_in_clear() {
+    fn vault_password_file_masks_values_but_not_paths() {
         let s = Sanitizer::with_defaults();
         for input in [
             "--vault-password-file /root/.vault",
             "ansible-playbook --vault-password-file /root/.vault_pass site.yml",
+            "--vault-password-file ./vault_pass.txt",
+            "--vault-password-file ~/.vault",
             "kubeconfig: /etc/rancher/k3s/k3s.yaml",
         ] {
-            assert_eq!(s.sanitize(input).as_ref(), input);
+            assert_eq!(s.sanitize(input).as_ref(), input, "path must stay clear");
+        }
+        for (input, want) in [
+            (
+                "--vault-password-file hunter2",
+                "--vault-password-file [REDACTED]",
+            ),
+            (
+                "ansible-playbook --vault-password-file Winter2026Office! site.yml",
+                "ansible-playbook --vault-password-file [REDACTED] site.yml",
+            ),
+            (
+                "--vault-password-file d41d8cd98f00b204e9800998ecf8427e",
+                "--vault-password-file [REDACTED]",
+            ),
+            (
+                "--vault-password-file /data/vault_pass",
+                "--vault-password-file [REDACTED]",
+            ),
+            (
+                "--vault-password-file vault_pass.txt",
+                "--vault-password-file [REDACTED]",
+            ),
+        ] {
+            assert_eq!(s.sanitize(input).as_ref(), want);
         }
     }
 
