@@ -4847,19 +4847,15 @@ mod tests {
     /// the refusal line in clear while the confirmation line beside it was
     /// masked. The refusal is the line this gate exists to write.
     ///
-    /// **The bound, measured while writing this test:** `Sanitizer::sanitize`
-    /// skips the whole regex tier when `literal_detector` finds none of the
-    /// built-in `secret_keywords()` in the text — custom and legacy patterns
-    /// included. So the same secret with no keyword near it (`--key WIDGETKEY
-    /// -4242`) is masked on **neither** line, before this fix or after. That
-    /// is a sanitizer limitation, not this gate's, and it is why the payload
-    /// below says `--token`.
+    /// The payload says `--key`, which no built-in keyword covers: the legacy
+    /// pattern must bite on its own, without a built-in keyword nearby.
+    /// (`Sanitizer::sanitize` used to skip the whole regex tier in that case.)
     #[test]
     fn a_legacy_only_secret_is_masked_in_both_gate_lines() {
         let mut config = gate_config(true);
         // Deliberately not a builtin pattern: only the legacy list covers it.
         config.security.sanitize_patterns = vec!["WIDGETKEY-[0-9]{4}".to_string()];
-        let args = serde_json::json!({"host": "pi", "command": "deploy --token WIDGETKEY-4242"});
+        let args = serde_json::json!({"host": "pi", "command": "deploy --key WIDGETKEY-4242"});
 
         let (denied_logger, denied_audit) = gate_audit(&config);
         let _ = gate("ssh_exec", Some(&args), false, &config, &denied_audit)

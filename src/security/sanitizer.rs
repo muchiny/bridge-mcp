@@ -63,6 +63,13 @@ pub struct Sanitizer {
     detection_set: RegexSet,
     /// Aho-Corasick automaton for literal patterns (keywords that indicate secrets)
     literal_detector: AhoCorasick,
+    /// Detection set over the operator's own patterns only (`None` when there
+    /// are none, which is the default configuration). Consulted when tier 1
+    /// misses, because an operator pattern need not contain any built-in
+    /// keyword; its indices are relative to `custom_start`.
+    custom_set: Option<RegexSet>,
+    /// Index in `patterns` of the first operator pattern
+    custom_start: usize,
     /// Whether sanitization is enabled
     enabled: bool,
     /// Whether ANSI escape code stripping is enabled
@@ -472,6 +479,8 @@ impl Sanitizer {
             patterns: Vec::new(),
             detection_set: RegexSet::empty(),
             literal_detector: empty_literal_detector(),
+            custom_set: None,
+            custom_start: 0,
             enabled: false,
             strip_ansi: false,
             entropy_detector: EntropyDetector::disabled(),
@@ -514,6 +523,8 @@ impl Sanitizer {
                 }
             }
         }
+
+        let custom_start = patterns.len();
 
         // Add custom patterns (with size limit to prevent expensive compilation)
         for custom_pattern in custom {
@@ -559,6 +570,16 @@ impl Sanitizer {
             }
         };
 
+        // Operator patterns get their own set so tier 1 can consult them
+        // without evaluating the full set; no operator pattern means no set.
+        let custom_set = if regex_patterns.len() > custom_start {
+            RegexSet::new(&regex_patterns[custom_start..])
+                .map_err(|e| error!(error = %e, "Failed to build custom RegexSet"))
+                .ok()
+        } else {
+            None
+        };
+
         // Build Aho-Corasick for literal keyword detection (fast pre-filter)
         let literal_keywords = Self::secret_keywords();
         let literal_detector = AhoCorasick::builder()
@@ -586,6 +607,8 @@ impl Sanitizer {
             patterns,
             detection_set,
             literal_detector,
+            custom_set,
+            custom_start,
             enabled,
             strip_ansi,
             entropy_detector,
@@ -1564,6 +1587,24 @@ impl Sanitizer {
                 len = text_ref.len(),
                 "No secret keywords detected, skipping regex"
             );
+            // Operator patterns do not depend on built-in keywords: apply
+            // those (and only those) before the entropy pass.
+            if let Some(ref set) = self.custom_set {
+                let hits: Vec<usize> = set
+                    .matches(text_ref)
+                    .into_iter()
+                    .map(|i| i + self.custom_start)
+                    .collect();
+                if !hits.is_empty() {
+                    let redacted = self.apply_patterns(text_ref, &hits);
+                    let result = if self.entropy_detector.is_enabled() {
+                        self.entropy_detector.redact(&redacted)
+                    } else {
+                        redacted
+                    };
+                    return Cow::Owned(result);
+                }
+            }
             // Still run entropy detection (catches secrets without known keywords)
             if self.entropy_detector.is_enabled() {
                 let result = self.entropy_detector.redact(text_ref);
@@ -1612,12 +1653,16 @@ impl Sanitizer {
 
     /// Sequential sanitization for smaller inputs
     fn sanitize_sequential(&self, text: &str) -> String {
-        let mut result = text.to_string();
-
         // Only apply patterns that actually matched (optimization)
         let matched_indices: Vec<usize> = self.detection_set.matches(text).into_iter().collect();
+        self.apply_patterns(text, &matched_indices)
+    }
 
-        for idx in matched_indices {
+    /// Apply the patterns at `indices` (in order) to `text`
+    fn apply_patterns(&self, text: &str, indices: &[usize]) -> String {
+        let mut result = text.to_string();
+
+        for &idx in indices {
             let Some(pattern) = self.patterns.get(idx) else {
                 continue;
             };
@@ -1822,6 +1867,66 @@ Done";
     /// must compose cleanly with builtin patterns — *both* fire against
     /// a single input, in one pass, with custom patterns taking their
     /// configured replacement label.
+    #[test]
+    fn test_custom_pattern_without_builtin_keyword_redacts() {
+        let sanitizer = Sanitizer::new(&[r"WIDGETKEY-\d+".to_string()]);
+        for input in [
+            "--key WIDGETKEY-4242",
+            "WIDGETKEY-4242",
+            "tok=WIDGETKEY-4242 end",
+        ] {
+            let output = sanitizer.sanitize(input);
+            assert!(
+                !output.contains("WIDGETKEY-4242"),
+                "custom pattern must bite on {input:?}, got {output:?}"
+            );
+        }
+        assert!(matches!(
+            sanitizer.sanitize("nothing to see here at all"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn test_legacy_pattern_without_builtin_keyword_redacts() {
+        let sanitizer = Sanitizer::from_config_with_legacy(
+            &SanitizeConfig::default(),
+            &[r"WIDGETKEY-\d+".to_string()],
+        );
+        let output = sanitizer.sanitize("--key WIDGETKEY-4242");
+        assert!(!output.contains("WIDGETKEY-4242"), "got {output:?}");
+        assert!(output.contains("[REDACTED]"), "got {output:?}");
+    }
+
+    #[test]
+    fn test_config_custom_pattern_without_builtin_keyword_redacts_with_label() {
+        let cfg = SanitizeConfig {
+            custom_patterns: vec![CustomSanitizePattern {
+                pattern: r"[A-Z]{8}-\d+".to_string(),
+                replacement: "[WIDGET]".to_string(),
+                description: None,
+            }],
+            ..SanitizeConfig::default()
+        };
+        let output = Sanitizer::from_config(&cfg).sanitize("--key WIDGETKY-4242");
+        assert_eq!(output, "--key [WIDGET]");
+    }
+
+    #[test]
+    fn test_custom_pattern_does_not_disable_or_widen_builtin_when_keyword_absent() {
+        // Text with no built-in keyword: the built-in tier must stay skipped,
+        // so a custom pattern that does not match changes nothing.
+        let with_custom = Sanitizer::new(&[r"WIDGETKEY-\d+".to_string()]);
+        let plain = Sanitizer::with_defaults();
+        for input in ["total 4 drwxr-xr-x root", "name: foo version: 1.2.3"] {
+            assert_eq!(with_custom.sanitize(input), plain.sanitize(input));
+        }
+        // A built-in secret still redacts when a custom pattern is present.
+        let out = with_custom.sanitize("password=hunter22 WIDGETKEY-4242");
+        assert!(!out.contains("hunter22"), "got {out:?}");
+        assert!(!out.contains("WIDGETKEY-4242"), "got {out:?}");
+    }
+
     #[test]
     fn test_custom_patterns_from_config_compose_with_builtin() {
         let cfg = SanitizeConfig {
