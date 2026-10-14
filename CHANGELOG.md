@@ -1526,14 +1526,14 @@ tests and a serialisation test.
   the closing quote must still follow the keyword, so `secretName`,
   `secretKeyRef`, `AccessKeyId`, `public_key`, `keyword`, `max_tokens`,
   `vault_password_file` and `"password_db"` are unchanged. The `password`,
-  `passwd` and `pwd` family accepts any prefix (`db_password`, `dbPassword`,
-  `keystore_password`) and masks the usual defaults (`changeit`, `postgres`,
+  `passwd` and `pwd` family accepts a prefix of letters, digits, `_`, `.` or `-` (`db_password`,
+  `dbPassword`, `keystore_password`) and masks the usual defaults (`changeit`, `postgres`,
   `hunter2`) as it does under the exact key, but leaves alone the shapes that
   are not passwords: `true`/`null`, the words `yes`, `no`, `on`, `off`,
   `auto`, `default`, `enabled`, `disabled`, `required`, `optional`, a number
   shorter than 8 digits, and a path under `/etc/`, `/var/`, `/usr/`, `/opt/`,
   `/home/`, `/root/`, `/srv/`, `/mnt/`, `/tmp/`, `/boot/`, `/dev/`, `/proc/`,
-  `/sys/`, `./`, `../`, `~/`, a drive letter or a UNC `\\` — so `usePassword: true`,
+  `/sys/`, `/run/`, `/media/`, `/lib/`, `./`, `../`, `~/`, a drive letter or a UNC `\\` — so `usePassword: true`,
   `MYSQL_ALLOW_EMPTY_PASSWORD: "yes"`, `OLDPWD: "/var/lib/rancher/k3s"` and
   `db_password: 90` are unchanged while `db_password: 12345678` is masked. A path
   under any other root is masked (the safe direction). The weak keys (`token`,
@@ -1555,7 +1555,9 @@ tests and a serialisation test.
   stays in clear — `botToken`, `jwtSecret`, `appSecret`, `webhookSecret`,
   `vaultToken`, `dbSecret`, `myApiKey`, `registryCredentials`, `adminToken` —
   none of them was masked before this change either. Note the asymmetry:
-  `dbPassword` is masked and `dbSecret` is not. Tracked in T69.
+  `dbPassword` is masked and `dbSecret` is not. A key name containing `/`, `:`
+  or a space (`app/db/password`, `mysql::server::root_password`,
+  `db password`) is not matched either. Both are tracked in T69.
 
 - **The audit writer is drained when any of the three MCP transports shuts
   down, and `SIGTERM` is handled at all.** `McpServer::serve` and

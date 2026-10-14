@@ -325,9 +325,10 @@ pub(crate) fn plausible_shape(candidate: &str) -> bool {
     const ENUM_WORDS: [&str; 10] = [
         "yes", "no", "on", "off", "auto", "default", "enabled", "disabled", "required", "optional",
     ];
-    const PATH_ROOTS: [&str; 17] = [
+    const PATH_ROOTS: [&str; 20] = [
         "/etc/", "/var/", "/usr/", "/opt/", "/home/", "/root/", "/srv/", "/mnt/", "/tmp/",
-        "/boot/", "/dev/", "/proc/", "/sys/", "./", "../", "~/", "\\\\",
+        "/boot/", "/dev/", "/proc/", "/sys/", "/run/", "/media/", "/lib/", "./", "../", "~/",
+        "\\\\",
     ];
     let s = candidate.trim_matches(|c| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | '<' | '>'));
     if s.is_empty() || matches!(s, "true" | "false" | "null" | "None" | "none" | "nil") {
@@ -3018,6 +3019,9 @@ users:
             "1234567",
             "/etc/gcp/sa.json",
             "/var/lib/rancher/k3s",
+            "/run/secrets/db_password",
+            "/media/usb/data",
+            "/lib/systemd/system",
             "./a",
             "~/.kube/config",
             "C:\\sa.json",

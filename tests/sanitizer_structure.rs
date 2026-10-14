@@ -258,6 +258,8 @@ fn prefixed_json_keys_are_redacted() {
         ),
         (r#"{"dbPassword":"changeit"}"#, "changeit"),
         (r#"{"db_password":12345678}"#, "12345678"),
+        // an unlisted root is masked: the safe direction of the path list
+        (r#"{"db_password":"/data/x/y"}"#, "/data/x/y"),
         // a path-shaped secret is not spared by a path-shaped GUESS: the entropy
         // tier skips tokens starting with `/`, so only the key can mask these
         (
@@ -327,6 +329,11 @@ fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
         r#"{"OLDPWD":"/var/lib/rancher/k3s"}"#,
         r#"{"db_password":90}"#,
         r#"{"db_password":"/etc/gcp/sa.json"}"#,
+        // the Docker / Kubernetes secret-file idiom: which file holds the
+        // credential is what the operator reads
+        r#"{"db_password":"/run/secrets/db_password"}"#,
+        r#"{"db_password":"/media/usb/data"}"#,
+        r#"{"db_password":"/lib/systemd/system"}"#,
         // The weak PREFIXED form refuses the same shapes (R-Z16: a surface
         // this change creates must not mask a path / boolean / number).
         r#"{"GOOGLE_APPLICATION_CREDENTIALS":"/etc/gcp/sa.json"}"#,
