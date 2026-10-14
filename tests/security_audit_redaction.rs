@@ -38,6 +38,46 @@ async fn audit_log_redacts_password_in_command() {
     );
 }
 
+/// A prefixed JSON key (`db_password`) in the command text, read back from
+/// the `audit.log` the writer task actually produced.
+#[tokio::test]
+async fn audit_log_redacts_prefixed_json_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.log");
+    let config = AuditConfig {
+        enabled: true,
+        path: path.clone(),
+        ..AuditConfig::default()
+    };
+    let sanitizer = Sanitizer::from_config(&SanitizeConfig::default());
+    let (logger, task) = AuditLogger::new_with_sanitizer(&config, sanitizer).unwrap();
+    let writer = tokio::spawn(task.unwrap().run());
+
+    logger.log(
+        "test_tool",
+        AuditEvent::new(
+            "prod-db",
+            r#"{"db_password":"S3cr3t!x","dbPassword":"S3cr3t!y","admin_token":"S3cr3t!xyz"}"#,
+            CommandResult::Success {
+                exit_code: 0,
+                duration_ms: 12,
+            },
+        ),
+    );
+
+    drop(logger);
+    writer.await.unwrap();
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        contents.contains("db_password"),
+        "the line must have been written, with its key:\n{contents}"
+    );
+    for secret in ["S3cr3t!x", "S3cr3t!y", "S3cr3t!xyz"] {
+        assert!(!contents.contains(secret), "{secret} leaked:\n{contents}");
+    }
+}
+
 #[tokio::test]
 async fn audit_log_redacts_bearer_token() {
     let dir = tempfile::tempdir().unwrap();

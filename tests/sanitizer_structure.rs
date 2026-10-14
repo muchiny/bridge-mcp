@@ -219,6 +219,81 @@ fn text_lines_false_positives_left_alone() {
     }
 }
 
+/// A key name that carries the keyword inside the quotes must not hide its
+/// value. The keyword may be prefixed (`_`, camelCase, `-`, `.`); the closing
+/// quote stays glued to it.
+#[test]
+fn prefixed_json_keys_are_redacted() {
+    let s = sanitizer();
+    let cases = [
+        // bare keyword, as before
+        (r#"{"password":"S3cr3t!x"}"#, "S3cr3t!x"),
+        // `_` prefix, strong and weak keys
+        (r#"{"db_password":"S3cr3t!x"}"#, "S3cr3t!x"),
+        (r#"{"db_password": "S3cr3t!x"}"#, "S3cr3t!x"),
+        (r#"{"admin_token":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        (r#"{"api_secret":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        // camelCase prefix: no separator
+        (r#"{"dbPassword":"S3cr3t!x"}"#, "S3cr3t!x"),
+        (r#"{"adminToken":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        // other separators
+        (r#"{"x-api-key":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        (r#"{"db.password":"S3cr3t!x"}"#, "S3cr3t!x"),
+        // single-quoted
+        ("{'db_password': 'S3cr3t!x'}", "S3cr3t!x"),
+        // YAML flow / bare-after-quoted-key
+        (r#""db_password": S3cr3t!x"#, "S3cr3t!x"),
+        // unquoted forms, caught by the bare families
+        ("db_password: S3cr3t!x", "S3cr3t!x"),
+        ("db_password=S3cr3t!x", "S3cr3t!x"),
+        ("dbPassword: S3cr3t!x", "S3cr3t!x"),
+    ];
+    for (input, secret) in cases {
+        let out = s.sanitize(input);
+        assert!(
+            !out.contains(secret),
+            "{input:?} must be redacted, got {out:?}"
+        );
+    }
+    // The structure survives: still valid JSON, key kept.
+    let out = s.sanitize(r#"{"db_password":"S3cr3t!x","host":"pi"}"#);
+    let v = parse_json(&out, "prefixed key");
+    assert_eq!(v["host"], "pi");
+    assert!(v.get("db_password").is_some(), "key must be kept: {out}");
+}
+
+/// The other direction: a name that merely CONTAINS a keyword, or carries a
+/// path / boolean / enum, is not a secret. The right anchor (closing quote
+/// glued to the keyword) is what keeps these alone.
+#[test]
+fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
+    let s = sanitizer();
+    let cases = [
+        r#"{"secretName":"tls-cert"}"#,
+        r#"{"secretKeyRef":{"name":"x"}}"#,
+        r#"{"AccessKeyId":"AKIAxxxx"}"#,
+        r#"{"key":"abc"}"#,
+        r#"{"public_key":"ssh-ed25519 AAAA"}"#,
+        r#"{"keyword":"nginx"}"#,
+        r#"{"max_tokens":4096}"#,
+        r#"{"summary_max_tokens":"2048"}"#,
+        r#"{"vault_password_file":"/root/.vault_pass"}"#,
+        r#"{"db_token":true}"#,
+        r#"{"admin_secret":{"a":1}}"#,
+        // Suffixed names (keyword NOT last) are out of scope: the right anchor
+        // is deliberately unchanged.
+        r#"{"password_db":"S3cr3t!x"}"#,
+        // Flag form `--password <value>`: no generic pattern, tracked as T66.
+        "--password S3cr3t!x",
+        "--db-password S3cr3t!x",
+        "docker login -u me --password-stdin reg.example",
+    ];
+    for input in cases {
+        let out = s.sanitize(input);
+        assert_eq!(out.as_ref(), input, "{input:?} must not be touched");
+    }
+}
+
 #[test]
 fn brace_wrapped_scalars_are_redacted_but_structures_are_not() {
     let s = sanitizer();

@@ -1159,10 +1159,15 @@ impl Sanitizer {
             // token, credential, api_key…) replace only a plausible secret
             // (`secret_group`), see `plausible_secret`.
             // ══════════════════════════════════════════════════════════════════
-            // Quoted JSON/YAML keys, strong: {"password": "…"}
+            // Quoted JSON/YAML keys, strong: {"password": "…"}. The keyword
+            // may be PREFIXED inside the quotes (`"db_password"`, `"dbPassword"`):
+            // `[A-Za-z0-9_.-]*` is tolerant on the LEFT only. The closing quote
+            // stays glued to the keyword, so `"secretName"`, `"secretKeyRef"`,
+            // `"AccessKeyId"`, `"max_tokens"`, `"password_file"` and
+            // `"public_key"` are still left alone. Do not add a suffix class.
             PatternDef {
                 pattern: concat!(
-                    r#"(["'](?i:password|passwd|pwd)["'][ \t]*[=:][ \t]*)"#,
+                    r#"(["'][A-Za-z0-9_.-]*(?i:password|passwd|pwd)["'][ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: r#"${1}"[REDACTED]""#,
@@ -1175,7 +1180,7 @@ impl Sanitizer {
             // {"secret": {…}} are left alone.
             PatternDef {
                 pattern: concat!(
-                    r#"(["'](?i:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)["'][ \t]*[=:][ \t]*)"#,
+                    r#"(["'][A-Za-z0-9_.-]*(?i:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)["'][ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: r#"${1}"[REDACTED]""#,

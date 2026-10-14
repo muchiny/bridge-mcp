@@ -1517,6 +1517,23 @@ tests and a serialisation test.
 
 ### Fixed
 
+- **The output sanitizer now masks a JSON key whose name carries the keyword
+  as a suffix: `{"db_password":"…"}`, `{"dbPassword":"…"}`, `{"admin_token":"…"}`,
+  `{"x-api-key":"…"}`.** The two quoted-key families required the opening
+  quote glued to the keyword, so `"password"` was masked and `"db_password"`
+  was not, in every output that passes the sanitizer (tool output, pagination,
+  `save_output`, the audit log). The prefix is tolerant on the **left only**: the
+  closing quote must still follow the keyword, so `secretName`, `secretKeyRef`,
+  `AccessKeyId`, `public_key`, `keyword`, `max_tokens` and
+  `vault_password_file` are unchanged. Measured on the 496 distinct key names
+  of the tool schemas and the sanitizer fixtures, with a boolean, a number, an
+  enum word and a path as value: no path-, boolean- or enum-valued key is newly
+  masked; the newly masked names are `db_password`, `docker_password` and
+  `ARGOCD_REDIS_PASSWORD`, all real secrets. A **weak** key (`token`, `secret`,
+  `credential`…) still masks only a value that looks like a secret. Still not
+  masked: a keyword that is not the last part of the name (`"password_db"`),
+  and the flag form `--password <value>`.
+
 - **The audit writer is drained when any of the three MCP transports shuts
   down, and `SIGTERM` is handled at all.** `McpServer::serve` and
   `mcp::transport::http::serve` each spawned the `AuditWriterTask` and threw
