@@ -738,7 +738,7 @@ pub struct SanitizeConfig {
     /// bytes: 23 at the default threshold of 4.5, so at the default
     /// this setting changes nothing for ordinary tokens. It is the binding
     /// floor only for hex tokens, once `entropy_hex_threshold` is set (a
-    /// threshold of 3.1 puts the mathematical floor near 9).
+    /// threshold of 3.1 puts the mathematical floor at about 8.6).
     #[serde(default = "default_entropy_min_length")]
     pub entropy_min_length: usize,
 
