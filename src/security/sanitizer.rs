@@ -59,15 +59,17 @@ const PARALLEL_THRESHOLD: usize = 512 * 1024; // 512 KB
 pub struct Sanitizer {
     /// Compiled regex patterns with their replacements
     patterns: Vec<SanitizePattern>,
-    /// `RegexSet` for fast detection (single-pass to check if ANY pattern matches)
-    detection_set: RegexSet,
+    /// `RegexSet` for fast detection (single-pass to check if ANY pattern matches).
+    /// `None` means the set could not be built: it is only a pre-filter, so the
+    /// sanitizer then applies every pattern instead of none (see
+    /// `Sanitizer::matched_indices`).
+    detection_set: Option<RegexSet>,
     /// Aho-Corasick automaton for literal patterns (keywords that indicate secrets)
     literal_detector: AhoCorasick,
-    /// Detection set over the operator's own patterns only (`None` when there
-    /// are none, which is the default configuration). Consulted when tier 1
-    /// misses, because an operator pattern need not contain any built-in
+    /// Detection set over the operator's own patterns only. Consulted when
+    /// tier 1 misses, because an operator pattern need not contain any built-in
     /// keyword; its indices are relative to `custom_start`.
-    custom_set: Option<RegexSet>,
+    custom_set: CustomSet,
     /// Index in `patterns` of the first operator pattern
     custom_start: usize,
     /// Whether sanitization is enabled
@@ -352,7 +354,66 @@ pub(crate) fn plausible_shape(candidate: &str) -> bool {
     !(drive || PATH_ROOTS.iter().any(|r| lower.starts_with(r)))
 }
 
+/// Maximum length for user-supplied custom sanitize patterns.
+pub const MAX_CUSTOM_PATTERN_LEN: usize = 512;
+
+/// Maximum number of operator patterns (`security.sanitize.custom_patterns`
+/// plus legacy `security.sanitize_patterns`, empty entries excluded).
+///
+/// Measured in a debug build against the full set (all built-ins plus the
+/// operator's patterns): 50 patterns of the shape `k000\w+\d{10,20}` build, 60
+/// do not; five patterns of the shape `k000_\w{40}` already do not. The count
+/// is therefore a coarse bound on compile cost and a fence far above any real
+/// deployment, not a guarantee: `Sanitizer::check_buildable` is the exact test.
+pub const MAX_OPERATOR_PATTERNS: usize = 50;
+
+/// State of the tier-1 detection set over the operator's patterns.
+///
+/// `Option<RegexSet>` conflated two opposite states: "no operator pattern"
+/// (the default configuration, which must pay nothing) and "the set failed to
+/// build" (which must not switch the operator's patterns off).
+enum CustomSet {
+    /// No operator pattern is configured.
+    Absent,
+    /// Operator patterns are configured and their set compiled.
+    Built(RegexSet),
+    /// Operator patterns are configured but their set did not compile: every
+    /// one of them is applied, since the individual regexes did compile.
+    Unbuilt,
+}
+
 impl Sanitizer {
+    /// Whether the full detection set (the built-ins left enabled plus every
+    /// operator pattern) compiles. `RegexSet` has a size limit that the
+    /// individual regexes do not hit, so a configuration whose every pattern is
+    /// valid can still fail here. Checked at load time so the operator hears
+    /// about it before any text is served.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `regex` error text when the set cannot be built.
+    pub fn check_buildable(
+        config: &SanitizeConfig,
+        legacy_patterns: &[String],
+    ) -> std::result::Result<(), String> {
+        let disabled: std::collections::HashSet<&str> =
+            config.disable_builtin.iter().map(String::as_str).collect();
+        let mut all: Vec<&str> = Self::default_pattern_defs()
+            .into_iter()
+            .filter(|d| !disabled.contains(d.category))
+            .map(|d| d.pattern)
+            .collect();
+        all.extend(
+            config
+                .custom_patterns
+                .iter()
+                .map(|c| c.pattern.as_str())
+                .chain(legacy_patterns.iter().map(String::as_str))
+                .filter(|p| !p.is_empty()),
+        );
+        RegexSet::new(&all).map(|_| ()).map_err(|e| e.to_string())
+    }
+
     /// Create a new sanitizer from advanced configuration
     #[must_use]
     pub fn from_config(config: &SanitizeConfig) -> Self {
@@ -477,9 +538,9 @@ impl Sanitizer {
     pub fn disabled() -> Self {
         Self {
             patterns: Vec::new(),
-            detection_set: RegexSet::empty(),
+            detection_set: Some(RegexSet::empty()),
             literal_detector: empty_literal_detector(),
-            custom_set: None,
+            custom_set: CustomSet::Absent,
             custom_start: 0,
             enabled: false,
             strip_ansi: false,
@@ -491,13 +552,20 @@ impl Sanitizer {
     /// Detection set over the operator's patterns only (`regex_patterns[start..]`),
     /// so tier 1 can consult them without evaluating the full set. No operator
     /// pattern means no set: the default configuration pays nothing.
-    fn custom_detection_set(regex_patterns: &[String], start: usize) -> Option<RegexSet> {
+    fn custom_detection_set(regex_patterns: &[String], start: usize) -> CustomSet {
         if regex_patterns.len() <= start {
-            return None;
+            return CustomSet::Absent;
         }
-        RegexSet::new(&regex_patterns[start..])
-            .map_err(|e| error!(error = %e, "Failed to build custom RegexSet"))
-            .ok()
+        match RegexSet::new(&regex_patterns[start..]) {
+            Ok(set) => CustomSet::Built(set),
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Failed to build custom RegexSet: applying every operator pattern"
+                );
+                CustomSet::Unbuilt
+            }
+        }
     }
 
     /// Build sanitizer from pattern definitions with custom patterns
@@ -507,9 +575,6 @@ impl Sanitizer {
         enabled: bool,
         entropy_detector: EntropyDetector,
     ) -> Self {
-        /// Maximum length for user-supplied custom sanitize patterns.
-        const MAX_CUSTOM_PATTERN_LEN: usize = 512;
-
         let mut patterns = Vec::with_capacity(defs.len() + custom.len());
         let mut regex_patterns = Vec::with_capacity(defs.len() + custom.len());
 
@@ -578,11 +643,16 @@ impl Sanitizer {
         }
 
         // Build RegexSet for fast detection
+        // It is only a pre-filter: when it cannot be built, every pattern is
+        // applied (slower, never weaker) rather than none.
         let detection_set = match RegexSet::new(&regex_patterns) {
-            Ok(set) => set,
+            Ok(set) => Some(set),
             Err(e) => {
-                error!(error = %e, "Failed to build RegexSet, falling back to empty set");
-                RegexSet::empty()
+                error!(
+                    error = %e,
+                    "Failed to build RegexSet: applying every pattern without the pre-filter"
+                );
+                None
             }
         };
 
@@ -1599,21 +1669,23 @@ impl Sanitizer {
             );
             // Operator patterns do not depend on built-in keywords: apply
             // those (and only those) before the entropy pass.
-            if let Some(ref set) = self.custom_set {
-                let hits: Vec<usize> = set
+            let hits: Vec<usize> = match self.custom_set {
+                CustomSet::Absent => Vec::new(),
+                CustomSet::Built(ref set) => set
                     .matches(text_ref)
                     .into_iter()
                     .map(|i| i + self.custom_start)
-                    .collect();
-                if !hits.is_empty() {
-                    let redacted = self.apply_patterns(text_ref, &hits);
-                    let result = if self.entropy_detector.is_enabled() {
-                        self.entropy_detector.redact(&redacted)
-                    } else {
-                        redacted
-                    };
-                    return Cow::Owned(result);
-                }
+                    .collect(),
+                CustomSet::Unbuilt => (self.custom_start..self.patterns.len()).collect(),
+            };
+            if !hits.is_empty() {
+                let redacted = self.apply_patterns(text_ref, &hits);
+                let result = if self.entropy_detector.is_enabled() {
+                    self.entropy_detector.redact(&redacted)
+                } else {
+                    redacted
+                };
+                return Cow::Owned(result);
             }
             // Still run entropy detection (catches secrets without known keywords)
             if self.entropy_detector.is_enabled() {
@@ -1626,7 +1698,11 @@ impl Sanitizer {
         }
 
         // Tier 2: Check if any regex pattern matches
-        if !self.detection_set.is_match(text_ref) {
+        if self
+            .detection_set
+            .as_ref()
+            .is_some_and(|set| !set.is_match(text_ref))
+        {
             debug!(len = text_ref.len(), "Keywords found but no regex matches");
             // Still run entropy detection
             if self.entropy_detector.is_enabled() {
@@ -1664,8 +1740,18 @@ impl Sanitizer {
     /// Sequential sanitization for smaller inputs
     fn sanitize_sequential(&self, text: &str) -> String {
         // Only apply patterns that actually matched (optimization)
-        let matched_indices: Vec<usize> = self.detection_set.matches(text).into_iter().collect();
+        let matched_indices = self.matched_indices(text);
         self.apply_patterns(text, &matched_indices)
+    }
+
+    /// Indices of the patterns worth applying to `text`. Without a detection
+    /// set (it failed to build) that is every pattern: the set only narrows
+    /// the work, it never decides whether masking happens.
+    fn matched_indices(&self, text: &str) -> Vec<usize> {
+        match self.detection_set {
+            Some(ref set) => set.matches(text).into_iter().collect(),
+            None => (0..self.patterns.len()).collect(),
+        }
     }
 
     /// Apply the patterns at `indices` (in order) to `text`
@@ -1717,7 +1803,7 @@ impl Sanitizer {
     fn sanitize_parallel(&self, text: &str) -> String {
         // Quick check: if no patterns match, return original text
         // This uses parallel regex matching for detection only
-        let matched_indices: Vec<usize> = self.detection_set.matches(text).into_iter().collect();
+        let matched_indices = self.matched_indices(text);
 
         if matched_indices.is_empty() {
             return text.to_string();
@@ -1896,9 +1982,15 @@ Done";
     #[test]
     fn test_default_config_has_no_operator_detection_set() {
         let default = Sanitizer::from_config(&SanitizeConfig::default());
-        assert!(default.custom_set.is_none());
-        assert!(Sanitizer::with_defaults().custom_set.is_none());
-        assert!(Sanitizer::new(&[r"x\d+".to_string()]).custom_set.is_some());
+        assert!(matches!(default.custom_set, CustomSet::Absent));
+        assert!(matches!(
+            Sanitizer::with_defaults().custom_set,
+            CustomSet::Absent
+        ));
+        assert!(matches!(
+            Sanitizer::new(&[r"x\d+".to_string()]).custom_set,
+            CustomSet::Built(_)
+        ));
     }
 
     #[test]
@@ -3717,5 +3809,72 @@ users:
                 "input {input:?}"
             );
         }
+    }
+
+    /// 25 operator patterns of a shape whose COMBINED `RegexSet` does not
+    /// compile (each regex compiles on its own), plus one real pattern. Measured:
+    /// the operator-only set of this fixture fails to build too, so it drives
+    /// both the main set and the tier-1 operator set into their failure state.
+    fn unbuildable_operator_patterns() -> Vec<String> {
+        let mut patterns: Vec<String> = (0..25).map(|i| format!(r"k{i:03}_\w{{40}}")).collect();
+        patterns.push(r"WIDGET-\d+".to_string());
+        patterns
+    }
+
+    /// A `RegexSet` that cannot be built must cost the pre-filter, not the
+    /// control. Against `23341f0` the set fell back to `RegexSet::empty()`,
+    /// tier 2 answered "nothing matches" and the password came out in clear.
+    #[test]
+    fn test_unbuildable_detection_set_still_masks_builtins() {
+        let sanitizer = Sanitizer::new(&unbuildable_operator_patterns());
+        assert!(
+            sanitizer.detection_set.is_none(),
+            "fixture no longer drives the failure path"
+        );
+        let pat = format!("ghp_{}", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6");
+        let input = format!("password=hunter22 and {pat}");
+        let out = sanitizer.sanitize(&input);
+        assert_eq!(out, "password=[REDACTED] and [GITHUB_PAT_REDACTED]");
+    }
+
+    /// Same failure, tier-1 path: no built-in keyword in the text, so only the
+    /// operator pattern can fire. `custom_set` used to be `None` here, which
+    /// meant "no operator pattern" and skipped it.
+    #[test]
+    fn test_unbuilt_operator_set_still_applies_operator_patterns() {
+        let sanitizer = Sanitizer::new(&unbuildable_operator_patterns());
+        assert!(
+            matches!(sanitizer.custom_set, CustomSet::Unbuilt),
+            "fixture no longer drives the failure path"
+        );
+        assert_eq!(sanitizer.sanitize("id WIDGET-1234 ok"), "id [REDACTED] ok");
+    }
+
+    /// The failure state must also work on text that crosses the parallel
+    /// threshold, and must leave clean text untouched.
+    #[test]
+    fn test_unbuildable_detection_set_large_input_and_clean_text() {
+        let sanitizer = Sanitizer::new(&unbuildable_operator_patterns());
+        assert!(sanitizer.detection_set.is_none());
+        let line = "password=hunter22 filler filler filler\n";
+        let big = line.repeat(PARALLEL_THRESHOLD / line.len() + 2);
+        assert!(big.len() >= PARALLEL_THRESHOLD);
+        let out = sanitizer.sanitize(&big);
+        assert!(!out.contains("hunter22"), "large input leaked");
+        let clean = "total 4 drwxr-xr-x 2 root root 4096 Sep 1 .\n";
+        assert_eq!(sanitizer.sanitize(clean), clean);
+    }
+
+    /// `check_buildable` is what the loader trusts: it must agree with the
+    /// constructor on the same fixture, in both directions.
+    #[test]
+    fn test_check_buildable_agrees_with_constructor() {
+        let bad = unbuildable_operator_patterns();
+        assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &bad).is_err());
+        assert!(Sanitizer::new(&bad).detection_set.is_none());
+        let ok = [r"WIDGET-\d+".to_string()];
+        assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &ok).is_ok());
+        assert!(Sanitizer::new(&ok).detection_set.is_some());
+        assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &[]).is_ok());
     }
 }

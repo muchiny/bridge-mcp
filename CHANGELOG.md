@@ -1517,6 +1517,26 @@ tests and a serialisation test.
 
 ### Fixed
 
+- **The sanitizer no longer stops masking when its detection `RegexSet` cannot be
+  built, and a configuration that would trigger that is refused at load.** The
+  set is only a pre-filter in front of the per-pattern replacements, but on a
+  build failure the code fell back to an empty set, and an empty set answers
+  "nothing matches": every built-in pattern was skipped, only the entropy pass
+  survived, and the only trace was an `error!` line. Measured with the
+  fixture of the new tests, `password=hunter22 and ghp_...` came out as
+  `password=hunter22 and [HIGH_ENTROPY_REDACTED]`; it is now
+  `password=[REDACTED] and [GITHUB_PAT_REDACTED]`. When a set fails to build the
+  sanitizer now applies every pattern (slower, never weaker), for the operator
+  patterns' own tier-1 set as well. At load, `security.sanitize.custom_patterns`
+  now gets the per-pattern regex check that only the legacy
+  `security.sanitize_patterns` had, both keys refuse a pattern longer than 512
+  bytes (it used to be dropped with a log line), at most 50 non-empty
+  operator patterns are accepted across the two keys, and the combined set must
+  compile (the check is `Sanitizer::check_buildable`; a handful of
+  `\w{40}`-shaped patterns fail it although each is valid alone). **If your config
+  now fails to load** with one of those messages, the patterns it named were
+  already not masking what you thought.
+
 - **Your own sanitizer patterns (`security.sanitize.custom_patterns` and the
   legacy `security.sanitize_patterns`) were inert whenever the text held none of the
   built-in secret keywords.** The sanitizer skipped its whole regex stage
