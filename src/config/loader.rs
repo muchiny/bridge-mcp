@@ -1222,18 +1222,18 @@ sessions:
     #[test]
     fn test_operator_pattern_count_cap_counts_both_keys() {
         let cap = MAX_OPERATOR_PATTERNS_FOR_TEST;
-        let lits = |range: std::ops::Range<usize>| -> Vec<String> {
+        let literals = |range: std::ops::Range<usize>| -> Vec<String> {
             range.map(|i| format!("lit{i:05}tok")).collect()
         };
-        assert!(load_sanitize(&lits(0..cap), &[]).is_ok());
-        assert!(load_sanitize(&[], &lits(0..cap)).is_ok());
-        let over = load_sanitize(&lits(0..cap), &lits(cap..cap + 1));
+        assert!(load_sanitize(&literals(0..cap), &[]).is_ok());
+        assert!(load_sanitize(&[], &literals(0..cap)).is_ok());
+        let over = load_sanitize(&literals(0..cap), &literals(cap..cap + 1));
         assert!(
             matches!(over, Err(BridgeError::ConfigInvalid { ref field, ref reason })
             if field == "security.sanitize.custom_patterns" && reason.contains("exceed the limit")),
             "got {over:?}"
         );
-        let over_legacy = load_sanitize(&[], &lits(0..cap + 1));
+        let over_legacy = load_sanitize(&[], &literals(0..cap + 1));
         assert!(matches!(
             over_legacy,
             Err(BridgeError::ConfigInvalid { .. })
