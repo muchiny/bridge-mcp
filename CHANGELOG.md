@@ -85,6 +85,23 @@ tests and a serialisation test.
 
 ### BREAKING
 
+- **Sanitizer patterns that used to degrade silently now stop the config from
+  loading.** Three conditions, on `security.sanitize.custom_patterns` and the
+  legacy `security.sanitize_patterns` alike: a pattern longer than 512 bytes
+  (it used to be dropped with a log line, leaving what it covered unmasked);
+  more than 50 non-empty operator patterns across the two keys; and a combined
+  detection set (built-ins plus yours) that will not compile. The binding
+  constraint is the compiled size of that combined set, not the count, and
+  `Sanitizer::check_buildable` is the real guard: measured in a debug build,
+  8 patterns of the shape `SECRET-NNN-\w{24}` are refused, while 60 of
+  `kNNN_[A-Za-z0-9]{32}` and 5000 plain literals are accepted. The 50 cap is a
+  coarse fence that bounds the work the check does. The usual cause is a bounded
+  repetition of a Unicode-aware class (`\w{24}`, `\d{8}`): write an explicit ASCII
+  class such as `[A-Za-z0-9]{32}` instead. This applies at process start **and
+  on hot reload** (`src/main.rs` and `src/config/watcher.rs` are the only
+  `load_config` call sites outside the config module, and both run
+  `validate_config`); a rejected reload keeps the previous working config.
+
 - **(lib API) `AuditLogger::log(&self, event)` is now `log(&self, tool: &str, event)`,
   and `tool` overwrites `event.tool_name`.** `AuditLogger` is a non-hidden
   re-export, so this breaks external callers. Migration: pass the name of the
@@ -1517,6 +1534,30 @@ tests and a serialisation test.
 
 ### Fixed
 
+- **The sanitizer no longer stops masking when its detection `RegexSet` cannot be
+  built.** The set is only a pre-filter in front of the per-pattern
+  replacements, but on a build failure the code fell back to an empty set, and
+  an empty set answers "nothing matches": every built-in pattern was skipped,
+  only the entropy pass survived, and the only trace was an `error!` line.
+  With the fixture of the new tests, `password=hunter22 and ghp_...` came out as
+  `password=hunter22 and [HIGH_ENTROPY_REDACTED]`; it is now
+  `password=[REDACTED] and [GITHUB_PAT_REDACTED]`. When a set fails to build the
+  sanitizer now applies every pattern (slower, never weaker), for the operator
+  patterns' own tier-1 set as well, and the same holds if the keyword automaton
+  of tier 1 ever fails to build. At load, `security.sanitize.custom_patterns` now
+  gets the per-pattern regex check that only the legacy
+  `security.sanitize_patterns` had; errors name the key and the zero-based index
+  of the entry (for example `security.sanitize.custom_patterns[3]`) and our own wrapper text no longer
+  echoes the pattern. This halves the exposure rather than ending it: the
+  `regex` error text is kept, and for a syntax error it embeds the pattern, so
+  `bridge-mcp --config bad.yaml validate` still prints it to stderr and the
+  same text reaches the journal. A literal secret used as a `custom_patterns`
+  value can still surface in a parse error. The runtime constructors still
+  drop an over-512-byte pattern with a log line only, for callers that bypass
+  the loader: the load-time refusal below does not cover every construction
+  path. A reload that changes `security.sanitize` or `security.sanitize_patterns`
+  now logs a warning that the running sanitizer is rebuilt only on restart.
+
 - **Your own sanitizer patterns (`security.sanitize.custom_patterns` and the
   legacy `security.sanitize_patterns`) were inert whenever the text held none of the
   built-in secret keywords.** The sanitizer skipped its whole regex stage
@@ -1917,6 +1958,47 @@ tests and a serialisation test.
 
 ### Changed
 
+- **`--vault-password-file <path>` is no longer redacted when the value is a
+  path.** The sanitizer's "Ansible vault password file path" pattern turned
+  every value into `[REDACTED]`, `--vault-password-file /root/.vault_pass`
+  included, while the audit log exempts the same name (`vault_password_file`,
+  with `kubeconfig`) because it is a path and not a content, and
+  `kubeconfig: /etc/rancher/k3s/k3s.yaml` already came out of the sanitizer
+  unchanged. A path to a secret is not the secret: the control on the file is
+  its filesystem permissions, and the path says which vault a run used, which
+  masking destroys. The pattern stays, behind `Gate::Shape`
+  (`plausible_shape`): the sanitizer, unlike the audit log, sees only a token
+  after a flag and not a path-typed parameter, so `--vault-password-file
+  hunter2` (a real misuse) is still masked. **Clear:** values under `/etc/`,
+  `/var/`, `/usr/`, `/opt/`, `/home/`, `/root/`, `/srv/`, `/mnt/`, `/tmp/`,
+  `/boot/`, `/dev/`, `/proc/`, `/sys/`, `/run/`, `/media/`, `/lib/`, and `./`,
+  `../`, `~/`, UNC and Windows drive paths. **Still masked, deliberately:**
+  every other value, including a path under an unlisted root
+  (`/data/vault_pass`) and a bare filename (`vault_pass.txt`); that is the safe
+  direction, so keep the file under a listed root if you want to read it in the
+  output. Measured on a 2574-input matrix against the previous commit: 630
+  inputs changed, all `--vault-password-file <path-shaped value>` (flag followed
+  by a space), all from masked to clear; `docker login -p`, the Anthropic key
+  cases and every input without the flag are byte-identical. (The value `true`
+  is also clear, as `plausible_shape` treats it as a boolean.) The two
+  "Anthropic API Key" patterns are not duplicates: one matches the `sk-ant-api…`
+  shape, the other the `ANTHROPIC_API_KEY=` / `CLAUDE_API_KEY=` variable name,
+  and removing the keyed one leaves `ANTHROPIC_API_KEY=hunter2` in clear. Only
+  their descriptions changed, to "Anthropic API Key (sk-ant- shape)" and
+  "Anthropic API Key (env variable name)". The built-in pattern count is
+  unchanged.
+
+- **The entropy tier's real floor is `2^threshold` bytes, and the prose now
+  says so.** A token's Shannon entropy is at most `log2(len)`, so at the default
+  `entropy_threshold` of 4.5 nothing under 23 bytes (characters, for ASCII
+  tokens) can ever be flagged (`2^4.5` is about 22.6), whatever `entropy_min_length` says. The default
+  `entropy_min_length` **stays 16**: it is inert at the general threshold but it
+  is the binding floor for the opt-in hex tier (`entropy_hex_threshold`, e.g.
+  3.1, whose mathematical floor is about 8.6), and raising it to 23 would stop
+  masking hex tokens of 16 to 22 characters. No behaviour changes. Documentation
+  and tests only: `audit.rs` had given 16 as the reason the entropy backstop
+  does not save a `db_password` argument, which was the wrong reason.
+
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
   Create envelope, so Windows grants the shell the disconnect capability it had been
   refusing — the whole `psrp-rs` disconnect/reconnect path had never run against a
@@ -2013,7 +2095,8 @@ tests and a serialisation test.
 - **The flag form `--password <value>` (and `--db-password <value>`) is not
   masked by the sanitizer.** No pattern in the `password` family targets a secret that follows a
   flag after a space; only `docker login -p` and `--vault-password-file` have
-  one. (Other flags do: `--api-key <v>` and `--auth-token <v>` are masked by
+  one, and the vault one masks only a value that is not shaped like a path
+  (see Changed). (Other flags do: `--api-key <v>` and `--auth-token <v>` are masked by
   the generic API-key pattern, whose key class accepts a space by design.) Accepting a space as separator for the `password` family would also
   mask `password required pam_unix.so` in PAM output, so it needs its own
   measurement (tracked as T66). Until then, do not pass a secret as a
