@@ -1517,6 +1517,19 @@ tests and a serialisation test.
 
 ### Fixed
 
+- **Your own sanitizer patterns (`sanitize.custom_patterns` and the legacy
+  `security.sanitize_patterns`) were inert whenever the text held none of the
+  built-in secret keywords.** The sanitizer skipped its whole regex stage
+  unless a built-in keyword (`password`, `token`, `secret`, ...; there is no bare
+  `key`) appeared somewhere in the text, and your patterns were not consulted
+  before that skip. A pattern such as `WIDGETKEY-\d+` masked `--token
+  WIDGETKEY-4242` but not `--key WIDGETKEY-4242`, nor the token alone on a line,
+  on every output (tool output, audit and history lines). It has been that way
+  since the first release (v1.0.0). Your patterns are now checked on their own
+  when the keyword stage finds nothing, and only they are applied there; the
+  built-in patterns still run only where they did before. With no custom or
+  legacy pattern configured, nothing changes.
+
 - **The output sanitizer now masks a JSON key whose name ENDS in the keyword:
   `{"db_password":"…"}`, `{"dbPassword":"…"}`, `{"admin_token":"…"}`,
   `{"x-api-key":"…"}`.** The two quoted-key families required the opening
