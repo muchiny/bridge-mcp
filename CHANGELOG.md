@@ -85,6 +85,23 @@ tests and a serialisation test.
 
 ### BREAKING
 
+- **Sanitizer patterns that used to degrade silently now stop the config from
+  loading.** Three conditions, on `security.sanitize.custom_patterns` and the
+  legacy `security.sanitize_patterns` alike: a pattern longer than 512 bytes
+  (it used to be dropped with a log line, leaving what it covered unmasked);
+  more than 50 non-empty operator patterns across the two keys; and a combined
+  detection set (built-ins plus yours) that will not compile. The binding
+  constraint is the compiled size of that combined set, not the count, and
+  `Sanitizer::check_buildable` is the real guard: measured in a debug build,
+  8 patterns of the shape `SECRET-NNN-\w{24}` are refused, while 60 of
+  `kNNN_[A-Za-z0-9]{32}` and 5000 plain literals are accepted. The 50 cap is a
+  coarse fence that bounds the work the check does. The usual cause is a bounded
+  repetition of a Unicode-aware class (`\w{24}`, `\d{8}`): write an explicit ASCII
+  class such as `[A-Za-z0-9]{32}` instead. This applies at process start **and
+  on hot reload** (`src/main.rs` and `src/config/watcher.rs` are the only
+  `load_config` call sites outside the config module, and both run
+  `validate_config`); a rejected reload keeps the previous working config.
+
 - **(lib API) `AuditLogger::log(&self, event)` is now `log(&self, tool: &str, event)`,
   and `tool` overwrites `event.tool_name`.** `AuditLogger` is a non-hidden
   re-export, so this breaks external callers. Migration: pass the name of the
@@ -1518,24 +1535,24 @@ tests and a serialisation test.
 ### Fixed
 
 - **The sanitizer no longer stops masking when its detection `RegexSet` cannot be
-  built, and a configuration that would trigger that is refused at load.** The
-  set is only a pre-filter in front of the per-pattern replacements, but on a
-  build failure the code fell back to an empty set, and an empty set answers
-  "nothing matches": every built-in pattern was skipped, only the entropy pass
-  survived, and the only trace was an `error!` line. Measured with the
-  fixture of the new tests, `password=hunter22 and ghp_...` came out as
+  built.** The set is only a pre-filter in front of the per-pattern
+  replacements, but on a build failure the code fell back to an empty set, and
+  an empty set answers "nothing matches": every built-in pattern was skipped,
+  only the entropy pass survived, and the only trace was an `error!` line.
+  With the fixture of the new tests, `password=hunter22 and ghp_...` came out as
   `password=hunter22 and [HIGH_ENTROPY_REDACTED]`; it is now
   `password=[REDACTED] and [GITHUB_PAT_REDACTED]`. When a set fails to build the
   sanitizer now applies every pattern (slower, never weaker), for the operator
-  patterns' own tier-1 set as well. At load, `security.sanitize.custom_patterns`
-  now gets the per-pattern regex check that only the legacy
-  `security.sanitize_patterns` had, both keys refuse a pattern longer than 512
-  bytes (it used to be dropped with a log line), at most 50 non-empty
-  operator patterns are accepted across the two keys, and the combined set must
-  compile (the check is `Sanitizer::check_buildable`; a handful of
-  `\w{40}`-shaped patterns fail it although each is valid alone). **If your config
-  now fails to load** with one of those messages, the patterns it named were
-  already not masking what you thought.
+  patterns' own tier-1 set as well, and the same holds if the keyword automaton
+  of tier 1 ever fails to build. At load, `security.sanitize.custom_patterns` now
+  gets the per-pattern regex check that only the legacy
+  `security.sanitize_patterns` had; errors name the key and the zero-based index
+  of the entry (for example `security.sanitize.custom_patterns[3]`) and no longer
+  echo the pattern, which may be a live secret. The runtime constructors still
+  drop an over-512-byte pattern with a log line only, for callers that bypass
+  the loader: the load-time refusal below does not cover every construction
+  path. A reload that changes `security.sanitize` or `security.sanitize_patterns`
+  now logs a warning that the running sanitizer is rebuilt only on restart.
 
 - **Your own sanitizer patterns (`security.sanitize.custom_patterns` and the
   legacy `security.sanitize_patterns`) were inert whenever the text held none of the

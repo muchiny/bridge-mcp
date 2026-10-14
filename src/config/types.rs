@@ -675,7 +675,7 @@ fn default_require_elicitation_on_destructive() -> bool {
 /// - Enable/disable sanitization
 /// - Disable specific builtin pattern categories
 /// - Add custom patterns with custom replacement text
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizeConfig {
     /// Enable/disable sanitization entirely (default: true)
@@ -772,7 +772,7 @@ const fn default_sanitize_enabled() -> bool {
 }
 
 /// Custom sanitization pattern with configurable replacement
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomSanitizePattern {
     /// Regex pattern to match sensitive data
@@ -1840,7 +1840,7 @@ hosts:
         let config = SanitizeConfig::default();
         assert!(config.enabled);
         assert_eq!(config.disable_builtin, [] as [std::string::String; 0]);
-        assert!(config.custom_patterns.is_empty());
+        assert_eq!(config.custom_patterns, [] as [CustomSanitizePattern; 0]);
     }
 
     #[test]

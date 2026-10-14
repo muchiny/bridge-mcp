@@ -65,7 +65,9 @@ pub struct Sanitizer {
     /// `Sanitizer::matched_indices`).
     detection_set: Option<RegexSet>,
     /// Aho-Corasick automaton for literal patterns (keywords that indicate secrets)
-    literal_detector: AhoCorasick,
+    /// `None` means the automaton could not be built: every text is then
+    /// treated as keyword-bearing so tiers 2 and 3 run (see `has_keyword`).
+    literal_detector: Option<AhoCorasick>,
     /// Detection set over the operator's own patterns only. Consulted when
     /// tier 1 misses, because an operator pattern need not contain any built-in
     /// keyword; its indices are relative to `custom_start`.
@@ -360,11 +362,14 @@ pub const MAX_CUSTOM_PATTERN_LEN: usize = 512;
 /// Maximum number of operator patterns (`security.sanitize.custom_patterns`
 /// plus legacy `security.sanitize_patterns`, empty entries excluded).
 ///
-/// Measured in a debug build against the full set (all built-ins plus the
-/// operator's patterns): 50 patterns of the shape `k000\w+\d{10,20}` build, 60
-/// do not; five patterns of the shape `k000_\w{40}` already do not. The count
-/// is therefore a coarse bound on compile cost and a fence far above any real
-/// deployment, not a guarantee: `Sanitizer::check_buildable` is the exact test.
+/// The count is NOT what makes a configuration unbuildable, in either
+/// direction. The binding constraint is the compiled size of the combined
+/// detection set (built-ins plus operator patterns), and
+/// `Sanitizer::check_buildable` is the real guard. Measured in a debug build:
+/// 8 patterns of the shape `SECRET-NNN-\w{24}` are refused, while 60 of
+/// `kNNN_[A-Za-z0-9]{32}` and even 5000 plain literals build. So this cap is
+/// neither necessary nor sufficient; it is a coarse fence whose job is to
+/// bound the work that validation and `check_buildable` themselves do.
 pub const MAX_OPERATOR_PATTERNS: usize = 50;
 
 /// State of the tier-1 detection set over the operator's patterns.
@@ -411,7 +416,13 @@ impl Sanitizer {
                 .chain(legacy_patterns.iter().map(String::as_str))
                 .filter(|p| !p.is_empty()),
         );
-        RegexSet::new(&all).map(|_| ()).map_err(|e| e.to_string())
+        RegexSet::new(&all).map(|_| ()).map_err(|e| {
+            format!(
+                "{e}. Any bounded repetition of a Unicode-aware class (`\\w{{24}}`, \
+                 `\\d{{8}}`) is expensive in a set: replace it with an explicit ASCII \
+                 class such as `[A-Za-z0-9]{{32}}`"
+            )
+        })
     }
 
     /// Create a new sanitizer from advanced configuration
@@ -539,7 +550,7 @@ impl Sanitizer {
         Self {
             patterns: Vec::new(),
             detection_set: Some(RegexSet::empty()),
-            literal_detector: empty_literal_detector(),
+            literal_detector: Some(empty_literal_detector()),
             custom_set: CustomSet::Absent,
             custom_start: 0,
             enabled: false,
@@ -566,6 +577,21 @@ impl Sanitizer {
                 CustomSet::Unbuilt
             }
         }
+    }
+
+    /// Aho-Corasick automaton over the keyword list (tier-1 pre-filter).
+    /// `None` on failure: see `Sanitizer::has_keyword`.
+    fn build_literal_detector() -> Option<AhoCorasick> {
+        AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(Self::secret_keywords())
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    "Failed to build Aho-Corasick: treating every text as keyword-bearing"
+                );
+            })
+            .ok()
     }
 
     /// Build sanitizer from pattern definitions with custom patterns
@@ -658,15 +684,7 @@ impl Sanitizer {
 
         let custom_set = Self::custom_detection_set(&regex_patterns, custom_start);
 
-        // Build Aho-Corasick for literal keyword detection (fast pre-filter)
-        let literal_keywords = Self::secret_keywords();
-        let literal_detector = AhoCorasick::builder()
-            .ascii_case_insensitive(true)
-            .build(&literal_keywords)
-            .unwrap_or_else(|e| {
-                error!(error = %e, "Failed to build Aho-Corasick, using empty");
-                empty_literal_detector()
-            });
+        let literal_detector = Self::build_literal_detector();
 
         info!(
             builtin_patterns = defs.len(),
@@ -1662,7 +1680,7 @@ impl Sanitizer {
 
         // Tier 1: Fast keyword detection with Aho-Corasick
         // If no keywords found, very likely no secrets present — but entropy may still catch some
-        if !self.literal_detector.is_match(text_ref) {
+        if !self.has_keyword(text_ref) {
             debug!(
                 len = text_ref.len(),
                 "No secret keywords detected, skipping regex"
@@ -1742,6 +1760,15 @@ impl Sanitizer {
         // Only apply patterns that actually matched (optimization)
         let matched_indices = self.matched_indices(text);
         self.apply_patterns(text, &matched_indices)
+    }
+
+    /// Tier-1 pre-filter. Without the automaton every text counts as
+    /// keyword-bearing: the pre-filter narrows work, it never decides whether
+    /// the built-in patterns run.
+    fn has_keyword(&self, text: &str) -> bool {
+        self.literal_detector
+            .as_ref()
+            .is_none_or(|ac| ac.is_match(text))
     }
 
     /// Indices of the patterns worth applying to `text`. Without a detection
@@ -3815,6 +3842,12 @@ users:
     /// compile (each regex compiles on its own), plus one real pattern. Measured:
     /// the operator-only set of this fixture fails to build too, so it drives
     /// both the main set and the tier-1 operator set into their failure state.
+    ///
+    /// Version-coupled: it relies on the `regex` crate's compiled-size limit. A
+    /// red here after a `regex` bump means raising the repeat count, not a
+    /// product defect. Audit measurements (debug build): `k{i:03}_\w{40}` first
+    /// fails at 6 patterns, `kNNN\w+\d{10,20}` at 69; both monotone, no larger
+    /// set ever builds again.
     fn unbuildable_operator_patterns() -> Vec<String> {
         let mut patterns: Vec<String> = (0..25).map(|i| format!(r"k{i:03}_\w{{40}}")).collect();
         patterns.push(r"WIDGET-\d+".to_string());
@@ -3876,5 +3909,18 @@ users:
         assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &ok).is_ok());
         assert!(Sanitizer::new(&ok).detection_set.is_some());
         assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &[]).is_ok());
+    }
+
+    /// If the keyword automaton is absent the built-ins must still run, not
+    /// be skipped for every text. The state is reached by clearing the field:
+    /// there is no input that makes `AhoCorasick` fail on the static list.
+    /// Against `23341f0` the field is not an `Option` (does not compile); the
+    /// old fallback was an empty automaton, which skips tiers 2 and 3.
+    #[test]
+    fn test_absent_keyword_automaton_still_masks_builtins() {
+        let mut sanitizer = Sanitizer::with_defaults();
+        sanitizer.literal_detector = None;
+        let out = sanitizer.sanitize("password=hunter22 ok");
+        assert_eq!(out, "password=[REDACTED] ok");
     }
 }

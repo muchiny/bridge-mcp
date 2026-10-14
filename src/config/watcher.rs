@@ -81,6 +81,14 @@ fn commit_reload(last_reload: &Mutex<Instant>, now: Instant) {
     *last = now;
 }
 
+/// Whether a reload changes the sanitizer settings. The sanitizer is built once
+/// at startup and never rebuilt by the watcher, so such a change is validated
+/// and stored but not in force until restart.
+fn sanitizer_settings_changed(old: &Config, new: &Config) -> bool {
+    old.security.sanitize != new.security.sanitize
+        || old.security.sanitize_patterns != new.security.sanitize_patterns
+}
+
 /// Build the notify callback shared by all constructors.
 fn make_reload_handler(
     path: PathBuf,
@@ -110,11 +118,20 @@ fn make_reload_handler(
                     // truncated or still world-readable.
                     commit_reload(&last_reload, now);
                     let security_config = new_config.security.clone();
+                    let sanitizer_changed;
                     {
                         // blocking_write: we're in a sync callback on the
                         // notify watcher thread, not a tokio task.
                         let mut guard = config.blocking_write();
+                        sanitizer_changed = sanitizer_settings_changed(&guard, &new_config);
                         *guard = new_config;
+                    }
+                    if sanitizer_changed {
+                        warn!(
+                            "security.sanitize or security.sanitize_patterns changed: the running \
+                             sanitizer is not rebuilt on reload, restart the process for the new \
+                             patterns to apply"
+                        );
                     }
                     if let Some(ref v) = validator {
                         v.reload(&security_config);
@@ -1434,5 +1451,20 @@ mod tests {
             validator.validate("pwd").is_ok(),
             "direct write should also trigger hot reload"
         );
+    }
+
+    /// Against `23341f0` the function does not exist (no warning was emitted).
+    #[test]
+    fn sanitizer_settings_change_is_detected_and_unrelated_is_not() {
+        let base = create_test_config();
+        let mut same = base.clone();
+        same.limits = LimitsConfig::default();
+        assert!(!sanitizer_settings_changed(&base, &same));
+        let mut legacy = base.clone();
+        legacy.security.sanitize_patterns.push("x".to_string());
+        assert!(sanitizer_settings_changed(&base, &legacy));
+        let mut custom = base.clone();
+        custom.security.sanitize.entropy_threshold = 3.0;
+        assert!(sanitizer_settings_changed(&base, &custom));
     }
 }
