@@ -499,14 +499,14 @@ mod tests {
         // reaches H = log2(len) exactly. If this fails, someone lowered the
         // default threshold, or `min_length` stopped being the weaker floor.
         let detector = EntropyDetector::default();
-        let alphabet: Vec<char> = "aZ9kQ2mFpLwBnYdRjGtHvXc7Sx3UeIo5NbMqVzTyKrDfAhJgCl1W8E4P6O0"
+        let alphabet: Vec<char> = "aZ9kQ2mFpLwBnYdRjGtHvXc7Sx3eUIo5NbMqVzTyKrDfAhJgCl1W8E4P6O0"
             .chars()
             .collect();
         for len in detector.min_length..=22 {
             let token: String = alphabet[..len].iter().collect();
             let h = EntropyDetector::shannon_entropy(&token);
             assert!(
-                (h - (len as f64).log2()).abs() < 1e-9,
+                (h - f64::from(u32::try_from(len).unwrap()).log2()).abs() < 1e-9,
                 "token of {len} is not maximally varied: H = {h}"
             );
             let input = format!("secret={token} end");
