@@ -327,6 +327,12 @@ fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
         r#"{"OLDPWD":"/var/lib/rancher/k3s"}"#,
         r#"{"db_password":90}"#,
         r#"{"db_password":"/etc/gcp/sa.json"}"#,
+        // The weak PREFIXED form refuses the same shapes (R-Z16: a surface
+        // this change creates must not mask a path / boolean / number).
+        r#"{"GOOGLE_APPLICATION_CREDENTIALS":"/etc/gcp/sa.json"}"#,
+        r#"{"db_token":"/etc/x.pem"}"#,
+        r#"{"db_secret":"C:\\sa.json"}"#,
+        r#"{"admin_token":true}"#,
         r#"{"db_password":"\\fs01\share\p.txt"}"#,
         // The weak family's prefix needs a separator: short pagination cursors
         // are camelCase, and `existingSecret` names a Secret object. (A long

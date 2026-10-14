@@ -82,7 +82,7 @@ struct SanitizePattern {
     regex: Regex,
     replacement: String,
     secret_group: Option<usize>,
-    reject_shapes: bool,
+    gate: Gate,
 }
 
 /// Pattern definition for easier initialization
@@ -98,12 +98,22 @@ struct PatternDef {
     /// `secret:` / `token:`, where `secret: {`, `credential: 5` and
     /// `secretName: tls` are the common false positives).
     secret_group: Option<usize>,
-    /// With `secret_group: Some(n)`: gate group `n` by [`plausible_shape`]
-    /// (REJECT booleans, enum words, short numbers and paths, mask the rest)
-    /// instead of [`plausible_secret`] (ACCEPT only what looks like a secret).
-    /// For a key that merely ENDS in the keyword, where `changeit` or
-    /// `postgres` must still be masked.
-    reject_shapes: bool,
+    /// Which predicate decides group `secret_group` (ignored when `None`).
+    gate: Gate,
+}
+
+/// The predicate that decides whether a gated capture is masked.
+#[derive(Clone, Copy)]
+enum Gate {
+    /// [`plausible_secret`]: ACCEPT only what looks like a secret.
+    Plausible,
+    /// [`plausible_shape`]: REJECT booleans, enum words, short numbers and
+    /// paths, mask the rest. For a strong key that merely ENDS in the keyword,
+    /// where `changeit` or `postgres` must still be masked.
+    Shape,
+    /// Both: a weak, prefixed key must look like a secret AND not be a
+    /// non-password shape.
+    PlausibleAndShape,
 }
 
 /// A double-quoted value, with NO capturing group of its own — every caller
@@ -265,6 +275,14 @@ macro_rules! scalar_value {
             r#"["']?[^\s"'{}\[\],;<](?:[^\s"{}]*[^\s"'{}\[\],;])?"#,
             ")"
         )
+    };
+}
+
+/// The weak keyword alternation shared by the exact and the prefixed quoted
+/// forms, so the two cannot drift apart.
+macro_rules! weak_key_words {
+    () => {
+        r#"(?i:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)"#
     };
 }
 
@@ -482,7 +500,7 @@ impl Sanitizer {
                         regex,
                         replacement: def.replacement.to_string(),
                         secret_group: def.secret_group,
-                        reject_shapes: def.reject_shapes,
+                        gate: def.gate,
                     });
                 }
                 Err(e) => {
@@ -513,7 +531,7 @@ impl Sanitizer {
                         regex,
                         replacement: custom_pattern.replacement.clone(),
                         secret_group: None,
-                        reject_shapes: false,
+                        gate: Gate::Plausible,
                     });
                     debug!(
                         pattern = %custom_pattern.pattern,
@@ -719,7 +737,7 @@ impl Sanitizer {
                 description: "GitHub Personal Access Token",
                 category: "github",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"gho_[A-Za-z0-9]{36}",
@@ -727,7 +745,7 @@ impl Sanitizer {
                 description: "GitHub OAuth Token",
                 category: "github",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"ghu_[A-Za-z0-9]{36}",
@@ -735,7 +753,7 @@ impl Sanitizer {
                 description: "GitHub User-to-Server Token",
                 category: "github",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"ghs_[A-Za-z0-9]{36}",
@@ -743,7 +761,7 @@ impl Sanitizer {
                 description: "GitHub Server-to-Server Token",
                 category: "github",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"ghr_[A-Za-z0-9]{36}",
@@ -751,7 +769,7 @@ impl Sanitizer {
                 description: "GitHub Refresh Token",
                 category: "github",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
@@ -759,7 +777,7 @@ impl Sanitizer {
                 description: "GitHub Fine-grained PAT",
                 category: "github",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // GitLab
             PatternDef {
@@ -768,7 +786,7 @@ impl Sanitizer {
                 description: "GitLab Personal Access Token",
                 category: "gitlab",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Slack tokens
             PatternDef {
@@ -777,7 +795,7 @@ impl Sanitizer {
                 description: "Slack token",
                 category: "slack",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
@@ -785,7 +803,7 @@ impl Sanitizer {
                 description: "Slack webhook URL",
                 category: "slack",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Discord
             PatternDef {
@@ -794,7 +812,7 @@ impl Sanitizer {
                 description: "Discord webhook URL",
                 category: "discord",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // OpenAI
             PatternDef {
@@ -803,7 +821,7 @@ impl Sanitizer {
                 description: "OpenAI API Key",
                 category: "openai",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // AWS Access Key ID (specific format AKIA...)
             PatternDef {
@@ -812,7 +830,7 @@ impl Sanitizer {
                 description: "AWS Access Key ID",
                 category: "aws",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // K3s tokens
             PatternDef {
@@ -821,7 +839,7 @@ impl Sanitizer {
                 description: "K3s server token",
                 category: "k3s",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"K[0-9a-f]{10,}::[a-z]+:[A-Za-z0-9]+",
@@ -829,7 +847,7 @@ impl Sanitizer {
                 description: "K3s node token",
                 category: "k3s",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // JWT tokens (generic format eyJ...)
             PatternDef {
@@ -838,7 +856,7 @@ impl Sanitizer {
                 description: "Generic JWT token",
                 category: "jwt",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Anthropic API keys (specific prefix sk-ant-*)
             PatternDef {
@@ -847,7 +865,7 @@ impl Sanitizer {
                 description: "Anthropic API Key",
                 category: "openai",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Stripe keys
             PatternDef {
@@ -856,7 +874,7 @@ impl Sanitizer {
                 description: "Stripe Secret Key",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"pk_live_[A-Za-z0-9]{24,}",
@@ -864,7 +882,7 @@ impl Sanitizer {
                 description: "Stripe Publishable Key",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"rk_live_[A-Za-z0-9]{24,}",
@@ -872,7 +890,7 @@ impl Sanitizer {
                 description: "Stripe Restricted Key",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // npm tokens (specific prefix npm_)
             PatternDef {
@@ -881,7 +899,7 @@ impl Sanitizer {
                 description: "npm Access Token",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // PyPI tokens (specific prefix pypi-)
             PatternDef {
@@ -890,7 +908,7 @@ impl Sanitizer {
                 description: "PyPI API Token",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // NVIDIA API Key
             PatternDef {
@@ -899,7 +917,7 @@ impl Sanitizer {
                 description: "NVIDIA API Key",
                 category: "openai",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 2: CERTIFICATES & KEYS (multi-line patterns)
@@ -910,7 +928,7 @@ impl Sanitizer {
                 description: "RSA Private Key",
                 category: "certificates",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"-----BEGIN[ \t]+OPENSSH[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+OPENSSH[ \t]+PRIVATE[ \t]+KEY-----",
@@ -918,7 +936,7 @@ impl Sanitizer {
                 description: "OpenSSH Private Key",
                 category: "certificates",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"-----BEGIN[ \t]+EC[ \t]+PRIVATE[ \t]+KEY-----[\s\S]*?-----END[ \t]+EC[ \t]+PRIVATE[ \t]+KEY-----",
@@ -926,7 +944,7 @@ impl Sanitizer {
                 description: "EC Private Key",
                 category: "certificates",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"-----BEGIN[ \t]+PGP[ \t]+PRIVATE[ \t]+KEY[ \t]+BLOCK-----[\s\S]*?-----END[ \t]+PGP[ \t]+PRIVATE[ \t]+KEY[ \t]+BLOCK-----",
@@ -934,7 +952,7 @@ impl Sanitizer {
                 description: "PGP Private Key",
                 category: "certificates",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // PKCS#8 Private Key (generic, covers DSA, ECDSA, Ed25519, etc.)
             PatternDef {
@@ -943,7 +961,7 @@ impl Sanitizer {
                 description: "PKCS#8 Private Key",
                 category: "certificates",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Ansible Vault encrypted content
             PatternDef {
@@ -952,7 +970,7 @@ impl Sanitizer {
                 description: "Ansible Vault encrypted content",
                 category: "ansible",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 3: TOOL-SPECIFIC PATTERNS (Kubeconfig, Docker, etc.)
@@ -965,7 +983,7 @@ impl Sanitizer {
                 description: "Kubeconfig client certificate",
                 category: "kubeconfig",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"(?i)client-key-data:[ \t]*[A-Za-z0-9+/=]+",
@@ -973,7 +991,7 @@ impl Sanitizer {
                 description: "Kubeconfig client key",
                 category: "kubeconfig",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"(?i)certificate-authority-data:[ \t]*[A-Za-z0-9+/=]+",
@@ -981,7 +999,7 @@ impl Sanitizer {
                 description: "Kubeconfig CA certificate",
                 category: "kubeconfig",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Docker
             PatternDef {
@@ -990,7 +1008,7 @@ impl Sanitizer {
                 description: "Docker config auth",
                 category: "docker",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1011,7 +1029,7 @@ impl Sanitizer {
                 description: "Docker login command with password",
                 category: "docker",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Database connection strings
             PatternDef {
@@ -1020,7 +1038,7 @@ impl Sanitizer {
                 description: "Database connection strings",
                 category: "database",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Generic scheme://user:password@ — covers git clone over HTTPS,
             // webhook URLs, any non-DB scheme (audit 2026-07-05 finding 6).
@@ -1031,7 +1049,7 @@ impl Sanitizer {
                 description: "Generic URL embedded credentials",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Terraform sensitive values
             PatternDef {
@@ -1040,7 +1058,7 @@ impl Sanitizer {
                 description: "Terraform sensitive values",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Vault KV tabular output (key followed by 2+ spaces and value)
             PatternDef {
@@ -1049,7 +1067,7 @@ impl Sanitizer {
                 description: "Vault KV tabular output secrets",
                 category: "hashicorp",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Redis CONFIG GET requirepass
             PatternDef {
@@ -1058,7 +1076,7 @@ impl Sanitizer {
                 description: "Redis CONFIG GET requirepass",
                 category: "database",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 4: VARIABLE-BASED PATTERNS (NAME=value format)
@@ -1075,7 +1093,7 @@ impl Sanitizer {
                 description: "AWS credentials",
                 category: "aws",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1086,7 +1104,7 @@ impl Sanitizer {
                 description: "AWS Session Token",
                 category: "aws",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Docker compose / environment variables (specific DB names)
             PatternDef {
@@ -1098,7 +1116,7 @@ impl Sanitizer {
                 description: "Docker compose database passwords",
                 category: "database",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Database URLs
             PatternDef {
@@ -1110,7 +1128,7 @@ impl Sanitizer {
                 description: "Database URL environment variables",
                 category: "database",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1121,7 +1139,7 @@ impl Sanitizer {
                 description: "Database password variables",
                 category: "database",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Ansible
             PatternDef {
@@ -1133,7 +1151,7 @@ impl Sanitizer {
                 description: "Ansible Vault password",
                 category: "ansible",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1144,7 +1162,7 @@ impl Sanitizer {
                 description: "Ansible become password",
                 category: "ansible",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(r#"(?i)(--vault-password-file[ \t]+)"#, scalar_value!()),
@@ -1152,7 +1170,7 @@ impl Sanitizer {
                 description: "Ansible vault password file path",
                 category: "ansible",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1163,7 +1181,7 @@ impl Sanitizer {
                 description: "Ansible SSH password",
                 category: "ansible",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // GitLab CI tokens
             PatternDef {
@@ -1175,7 +1193,7 @@ impl Sanitizer {
                 description: "GitLab CI tokens",
                 category: "gitlab",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Cloud providers
             PatternDef {
@@ -1187,7 +1205,7 @@ impl Sanitizer {
                 description: "Azure credentials",
                 category: "azure",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1198,7 +1216,7 @@ impl Sanitizer {
                 description: "GCP credentials",
                 category: "gcp",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // HashiCorp
             PatternDef {
@@ -1210,7 +1228,7 @@ impl Sanitizer {
                 description: "HashiCorp Vault token",
                 category: "hashicorp",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1221,7 +1239,7 @@ impl Sanitizer {
                 description: "Consul HTTP token",
                 category: "hashicorp",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Docker registry
             PatternDef {
@@ -1233,7 +1251,7 @@ impl Sanitizer {
                 description: "Docker registry password",
                 category: "docker",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // AI APIs
             PatternDef {
@@ -1245,7 +1263,7 @@ impl Sanitizer {
                 description: "Anthropic API Key",
                 category: "openai", // Grouped with AI APIs
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // ══════════════════════════════════════════════════════════════════
             // TIER 5: GENERIC PATTERNS (catch-all, must be last!)
@@ -1273,7 +1291,7 @@ impl Sanitizer {
                 description: "Quoted JSON/YAML password keys",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Quoted JSON/YAML keys, strong, PREFIXED keyword: {"db_password": "…"},
             // {"dbPassword": "…"}. The prefix is tolerant on the LEFT only (the
@@ -1294,24 +1312,43 @@ impl Sanitizer {
                 description: "Quoted JSON/YAML prefixed password keys",
                 category: "generic",
                 secret_group: Some(2),
-                reject_shapes: true,
+                gate: Gate::Shape,
             },
-            // Quoted JSON/YAML keys, weak: {"token": "…"} — the value must look
-            // like a secret, so {"token": true}, {"credential": 5} and
-            // {"secret": {…}} are left alone. A prefix is allowed only when it ends
-            // in a separator (`admin_token`, `x-api-key`, `api_secret`): pagination
-            // cursors are camelCase with none (`NextToken`, `nextPageToken`) and
-            // `existingSecret` names a Secret object, not its content.
+            // Quoted JSON/YAML keys, weak, EXACT keyword: {"token": "…"} — the value
+            // must look like a secret, so {"token": true}, {"credential": 5} and
+            // {"secret": {…}} are left alone.
             PatternDef {
                 pattern: concat!(
-                    r#"(["'](?:[A-Za-z0-9_.-]*[_.-])?(?i:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)["'][ \t]*[=:][ \t]*)"#,
+                    r#"(["']"#,
+                    weak_key_words!(),
+                    r#"["'][ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: r#"${1}"[REDACTED]""#,
                 description: "Quoted JSON/YAML secret keys",
                 category: "generic",
                 secret_group: Some(2),
-                reject_shapes: false,
+                gate: Gate::Plausible,
+            },
+            // Quoted JSON/YAML keys, weak, PREFIXED keyword: {"admin_token": "…"}.
+            // The prefix must end in a separator (`admin_token`, `x-api-key`,
+            // `api_secret`): pagination cursors are camelCase with none
+            // (`nextPageToken`) and `existingSecret` names a Secret object, not its
+            // content. A surface this widening CREATES also refuses the shapes that
+            // are not secrets (boolean, enum word, short number, path), on top of
+            // the base gate: `GOOGLE_APPLICATION_CREDENTIALS: "/etc/gcp/sa.json"`.
+            PatternDef {
+                pattern: concat!(
+                    r#"(["'][A-Za-z0-9_.-]*[_.-]"#,
+                    weak_key_words!(),
+                    r#"["'][ \t]*[=:][ \t]*)"#,
+                    scalar_value!()
+                ),
+                replacement: r#"${1}"[REDACTED]""#,
+                description: "Quoted JSON/YAML prefixed secret keys",
+                category: "generic",
+                secret_group: Some(2),
+                gate: Gate::PlausibleAndShape,
             },
             // Terraform HCL, strong key: password = "…" — any double-quoted
             // string goes (no plausibility gate).
@@ -1325,7 +1362,7 @@ impl Sanitizer {
                 description: "Terraform HCL secrets with quoted values (strong)",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Terraform HCL, weak key: token = "5" is a count, not a secret.
             PatternDef {
@@ -1338,7 +1375,7 @@ impl Sanitizer {
                 description: "Terraform HCL secrets with quoted values (weak)",
                 category: "generic",
                 secret_group: Some(2),
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Bare keys with quoted values, strong: password: "mon secret"
             PatternDef {
@@ -1351,7 +1388,7 @@ impl Sanitizer {
                 description: "Generic passwords with quoted values",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Bare keys with quoted values, weak: secret: "…"
             PatternDef {
@@ -1364,7 +1401,7 @@ impl Sanitizer {
                 description: "Generic secrets with quoted values",
                 category: "generic",
                 secret_group: Some(2),
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Bare keys with bare values, strong
             PatternDef {
@@ -1376,7 +1413,7 @@ impl Sanitizer {
                 description: "Generic password patterns",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1387,7 +1424,7 @@ impl Sanitizer {
                 description: "DigitalOcean token",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1398,7 +1435,7 @@ impl Sanitizer {
                 description: "SSH password/passphrase",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1409,7 +1446,7 @@ impl Sanitizer {
                 description: "SMTP/Mail password",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(r#"(?i)(npm[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
@@ -1417,7 +1454,7 @@ impl Sanitizer {
                 description: "NPM token",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(r#"(?i)(pypi[_-]?token[ \t]*[=:][ \t]*)"#, scalar_value!()),
@@ -1425,7 +1462,7 @@ impl Sanitizer {
                 description: "PyPI token",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // Bare keys with bare values, weak
             PatternDef {
@@ -1437,7 +1474,7 @@ impl Sanitizer {
                 description: "Generic API keys and auth tokens",
                 category: "generic",
                 secret_group: Some(2),
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: concat!(
@@ -1448,7 +1485,7 @@ impl Sanitizer {
                 description: "Generic secrets",
                 category: "generic",
                 secret_group: Some(2),
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             // HTTP auth headers — `[ \t]+`, a header never spans lines.
             // MUST stay AFTER the Tier 1 JWT pattern: with `entropy_detection:
@@ -1461,7 +1498,7 @@ impl Sanitizer {
                 description: "Opaque Authorization Bearer token",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
             PatternDef {
                 pattern: r"(?i)authorization:[ \t]*basic[ \t]+[A-Za-z0-9+/=]{8,}",
@@ -1469,7 +1506,7 @@ impl Sanitizer {
                 description: "HTTP Basic Authorization header",
                 category: "generic",
                 secret_group: None,
-                reject_shapes: false,
+                gate: Gate::Plausible,
             },
         ]
     }
@@ -1583,7 +1620,7 @@ impl Sanitizer {
             let Some(pattern) = self.patterns.get(idx) else {
                 continue;
             };
-            let reject_shapes = pattern.reject_shapes;
+            let gate = pattern.gate;
             result = match pattern.secret_group {
                 None => pattern
                     .regex
@@ -1593,10 +1630,12 @@ impl Sanitizer {
                     .regex
                     .replace_all(&result, |caps: &regex::Captures<'_>| {
                         let candidate = caps.get(group).map_or("", |m| m.as_str());
-                        let accepted = if reject_shapes {
-                            plausible_shape(candidate)
-                        } else {
-                            plausible_secret(candidate)
+                        let accepted = match gate {
+                            Gate::Plausible => plausible_secret(candidate),
+                            Gate::Shape => plausible_shape(candidate),
+                            Gate::PlausibleAndShape => {
+                                plausible_secret(candidate) && plausible_shape(candidate)
+                            }
                         };
                         if accepted {
                             let mut expanded = String::new();
@@ -3029,7 +3068,7 @@ users:
             description: "test gated",
             category: "generic",
             secret_group: Some(2),
-            reject_shapes: false,
+            gate: Gate::Plausible,
         }];
         let s =
             Sanitizer::from_pattern_defs_with_custom(&defs, &[], true, EntropyDetector::disabled());

@@ -1538,7 +1538,9 @@ tests and a serialisation test.
   `db_password: 90` are unchanged while `db_password: 12345678` is masked. A path
   under any other root is masked (the safe direction). The weak keys (`token`,
   `secret`, `credential`, `api_key`…) accept a prefix only if it ends in `_`,
-  `.` or `-` (`admin_token`, `api_secret`, `x-api-key`), which leaves short
+  `.` or `-` (`admin_token`, `api_secret`, `x-api-key`) and, like the password
+  family, leave a boolean, enum word, short number or known-root path unmasked
+  (`GOOGLE_APPLICATION_CREDENTIALS: "/etc/gcp/sa.json"`); this leaves short
   camelCase pagination cursors (`nextPageToken`, `pageToken`) and
   `existingSecret` alone. Long cursors such as `NextToken` are masked by the
   entropy tier, as before this change.
@@ -1546,10 +1548,9 @@ tests and a serialisation test.
   untouched. Measured by running the unmodified `849234c` sanitizer and this
   one on the same 3549 inputs (13 keywords, three key prefixings, 13 values,
   7 forms): none of the 1183 inputs with an unprefixed key differs, and all
-  306 that differ have a prefixed key and went from clear to masked. That is
-  not a guarantee on real outputs, and one class of those 306 is over-masking:
-  a weak, separator-prefixed key with a path value
-  (`GOOGLE_APPLICATION_CREDENTIALS: "/etc/gcp/sa.json"`) is now masked.
+  234 that differ have a prefixed key and went from clear to masked; none went
+  from masked to clear, and no path-valued input changed. That is a
+  measurement on a generated corpus, not a guarantee on real outputs.
   **Not covered, declared:** a camelCase weak key carrying a real secret
   stays in clear — `botToken`, `jwtSecret`, `appSecret`, `webhookSecret`,
   `vaultToken`, `dbSecret`, `myApiKey`, `registryCredentials`, `adminToken` —
