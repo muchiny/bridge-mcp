@@ -1954,6 +1954,27 @@ tests and a serialisation test.
 
 ### Changed
 
+- **`--vault-password-file <path>` is no longer redacted in tool output.** The
+  sanitizer had a dedicated pattern ("Ansible vault password file path") that
+  turned `--vault-password-file /root/.vault_pass` into
+  `--vault-password-file [REDACTED]`, while the audit log exempts the same name
+  (`vault_password_file`, with `kubeconfig`) because it is a path and not a
+  content, and `kubeconfig: /etc/rancher/k3s/k3s.yaml` already came out of the
+  sanitizer unchanged. The two now agree: a path to a secret is not the secret;
+  the control on the file is its filesystem permissions, and the path says which
+  vault a run used, which masking destroys. Measured on a 1724-input matrix
+  against the previous tree: the 700 inputs that changed are all
+  `--vault-password-file <value>` (flag followed by a space), all from masked to
+  clear, none anywhere else. **What to act on:** a value after that flag is now
+  shown as written, so a password typed there instead of a path is no longer
+  masked either. Keep the secret in the file, not on the command line. The
+  "Anthropic API Key" duplicate the same task looked into is not one: the two
+  patterns differ (shape `sk-ant-api…` versus the `ANTHROPIC_API_KEY=` /
+  `CLAUDE_API_KEY=` variable name), and removing the keyed one leaves
+  `ANTHROPIC_API_KEY=hunter2` in clear. Only their descriptions changed, to
+  "Anthropic API Key (sk-ant- shape)" and "Anthropic API Key (env variable
+  name)"; the built-in pattern count is unchanged.
+
 - **The entropy tier's real floor is `2^threshold` bytes, and the prose now
   says so.** A token's Shannon entropy is at most `log2(len)`, so at the default
   `entropy_threshold` of 4.5 nothing under 23 bytes (characters, for ASCII
