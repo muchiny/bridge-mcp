@@ -168,6 +168,42 @@ tests and a serialisation test.
   `event_type: "ssh_exec"`, so a prefix selector hands back every session
   command as if it were a state change.
 
+  **Amended later in this same cycle: that `IN(...)` list is no longer
+  exhaustive, and the reason is the sixth `CommandResult` variant below.**
+  When one of the seven is still running at shutdown, the line written about
+  it carries `tool_name: "<shutdown>"` — the shutdown is the writer, and
+  `AuditLogger::log` is the single writer of that field — so the seven-name
+  selector misses it. The tool is still on the line, as the first token of
+  `command`. To get everything one of the seven did, including the calls
+  whose outcome was never read, add the sentinel:
+  `jq 'select((.tool_name | IN("ssh_session_create","ssh_session_close",
+  "ssh_tunnel_create","ssh_tunnel_close","ssh_config_set",
+  "ssh_recording_start","ssh_recording_stop")) or (.tool_name == "<shutdown>"
+  and (.command | startswith("ssh_session_") or startswith("ssh_tunnel_")
+  or startswith("ssh_config_set") or startswith("ssh_recording_"))))'`.
+  The prefix warning above applies to that second clause too, and more
+  sharply: matched on `command` it also catches an interrupted
+  `ssh_session_exec`.
+
+  **Amended a second time in this same cycle, and the hole is wider than the
+  first one: `"<resource-reaper>"` is a THIRD value `tool_name` can take, and
+  it is the one the normal case lands on.** Under the default config a
+  session idle for `sessions.idle_timeout_seconds` (300 s) is destroyed by a
+  60 s loop that nobody asked, and a tunnel open at shutdown is aborted the
+  same way; those lines are `event_type: "state_change"` with
+  `tool_name: "<resource-reaper>"`, so neither the seven-name list nor the
+  `"<shutdown>"` clause above sees them. An MCP client rarely calls
+  `ssh_session_close` at all, so for most sessions the reaped line is the
+  *only* record of the destruction. To get every session and tunnel
+  destruction — asked for or not — select the outcome and read the writer:
+  `jq 'select(.event_type == "state_change") | {tool_name, host, command,
+  ms: .result.StateChanged.duration_ms}'`. For the reaped ones alone,
+  `jq 'select(.tool_name == "<resource-reaper>")'`, and the `reason=` field
+  of `command` says which bound or which failure fired. **Mind
+  `duration_ms`**: on a tool's line it is how long the operation took, on a
+  `<resource-reaper>` line it is the destroyed resource's **lifetime** —
+  `tool_name` is what tells the two apart.
+
   Anything refused *before* that call writes nothing to either sink:
   bad arguments, an unknown host, a rate-limit refusal, a disabled recorder,
   and in `ssh_tunnel_create` a failed bind or a failed SSH connection
@@ -182,7 +218,10 @@ tests and a serialisation test.
   process and has no host parameter at all — the failure paths of
   `ssh_session_close`, `ssh_tunnel_close` and `ssh_recording_stop`, where the
   id handed in matched nothing so no host was ever resolved, and the CLI's
-  destructive gate (`cli::runner::gate_host`). The gate's case is the broad
+  destructive gate (`audited_host_from_args` in `src/security/audit.rs`,
+  which was
+  `cli::runner::gate_host` when this entry was written — see the sixth
+  `CommandResult` variant below for why it moved). The gate's case is the broad
   one and it is not the `*_close` case: it runs before schema validation, so
   **any** destructive call that simply omits `host` lands on the sentinel,
   not only the three AWX tools whose schema has none. Pinned by test: a call
@@ -199,7 +238,8 @@ tests and a serialisation test.
   'host=<no-host>' …` produced a line indistinguishable from a genuinely
   hostless one and `grep '<no-host>'` stopped enumerating what it claims to.
   A caller's `<` and `>` are now escaped to `\u{3c}` / `\u{3e}`
-  (`cli::runner::audited_host`); so are control characters, because `host`
+  (`audited_host` in `src/security/audit.rs`; `cli::runner::audited_host` when this
+  entry was written); so are control characters, because `host`
   reached the `tracing` sink as `Display` with no rendering, and a newline
   inside it added a complete, well-formed `Audit: command denied …` record to
   the journal journald and syslog capture while `audit.log` stayed one line.
@@ -364,6 +404,574 @@ tests and a serialisation test.
   tested for both answers, so the human-confirmation line is pinned without a
   TTY; what no test exercises is `IsTerminal` returning true, i.e. the prompt
   being printed and read at all.
+
+- **(lib API + wire) `CommandResult` has a sixth variant,
+  `Interrupted { reason, events_recorded }`; `"command_interrupted"` is a new
+  `event_type` in `audit.log`; and `"<shutdown>"` is a new, reserved
+  `tool_name`.** Same
+  migration as the fourth and fifth: **add an arm to any exhaustive `match`**.
+  `CommandResult` is a `#[doc(hidden)]` re-export (`src/lib.rs`) and
+  `AuditEvent.result` serializes it, so both the Rust API and the JSONL shape
+  change. In-tree the compile cost is **one arm**: counted after the change
+  with a multi-line-aware probe, `src/` holds **17** `CommandResult::<V> =>`
+  arms, **6** of which are the arms of the only production `match` on it,
+  `AuditLogger::log_to_tracing`. The other 11 sit in `#[cfg(test)]` modules
+  behind catch-all arms that panic — which the build proves rather than the
+  grep: the crate compiles with the sixth variant and no warnings, so no
+  other exhaustive `match` existed. (A single-line regex returns 14 and is
+  wrong: `Interrupted`'s two-member pattern wraps onto three lines, so the
+  `=>` is not on the same line as the variant. The count did not change
+  between rounds; the probe did.)
+
+  The line, as written by
+  `a_call_still_in_flight_at_shutdown_leaves_one_line_with_no_exit_code` and
+  read back off disk:
+
+  ```json
+  {"timestamp":"2026-10-08T20:51:00.712312715Z","event_type":"command_interrupted","host":"raspberry","command":"ssh_session_exec {command,host,session_id}","tool_name":"<shutdown>","result":{"Interrupted":{"reason":"the server stopped before this call returned","events_recorded":0}}}
+  ```
+
+  **No `exit_code` key and no `duration_ms` key**, and both absences are
+  asserted on the raw text, not on a parsed field. `command` is the tool and
+  the NAMES of its arguments — no values; `reason` is one stable phrase with
+  no number in it; `events_recorded` is how many audit lines this call had
+  already written when the shutdown found it, as a **field**, so nothing has
+  to be parsed out of prose.
+
+  Select them with `jq 'select(.event_type == "command_interrupted")'`, and
+  read how far each got with
+  `jq 'select(.event_type == "command_interrupted") | {host, command, n: .result.Interrupted.events_recorded}'`:
+  `n == 0` means nothing of that call was recorded, `n > 0` means n lines
+  were and the call still had not returned, so those n lines are elsewhere in
+  the file. The equivalent `select(.tool_name == "<shutdown>")` works too and
+  is the weaker of the two: `event_type` is a kind of outcome by contract,
+  `tool_name` happens to be the sentinel because the shutdown is the
+  writer.
+
+  **Why: a bounded shutdown had started dropping the fact that a command was
+  running.** Bounding the teardown earlier in this cycle was measured in the
+  audit file as **two lines before and one after** — the lost one being
+  `ssh_session_exec` with `duration_ms: 45003`, which had landed only because
+  the daemon stayed alive 44 s for it. And the loss is not the one it looks
+  like: a tool call's audit event is **built after the command returns**
+  (step 12/13 of the `standard_tool` pipeline; step 8, "Log intent", is a
+  bare `info!` and constructs nothing), so an abandoned call never had an
+  event to lose. Holding the audit channel open longer would have recovered
+  exactly nothing. The server therefore keeps a registry of dispatched calls
+  and, immediately before closing the channel, writes one line per call still
+  in it. "A command started and nobody will ever know how it ended" is a
+  fact; a trail that omits it says instead that nothing happened.
+
+  **Why not reuse `Error { message }`**, whose own doc already covers "an
+  unread exit code" and which would have cost no migration at all: an auditor
+  selecting `.result.Error` is asking which commands FAILED, and answering
+  that with "and these, about which nothing is known" conflates a verdict
+  with the absence of one — the exact confusion this cycle's audit work
+  exists to remove.
+
+  **`tool_name` is no longer always a tool**, and that is the one reading
+  habit this breaks. `AuditLogger::log` is the single writer of the field and
+  the writer here is the shutdown, so a line *about* an `ssh_exec` call
+  carries `"tool_name":"<shutdown>"`. The tool is the first token of
+  `command`. Any rule that groups by `tool_name`, including the seven-name
+  `IN(...)` selector for the state-changing tools above, silently stops
+  seeing the interrupted calls; that entry now carries the amended selector.
+  The angle brackets are the same convention as `NO_HOST`: of the 503
+  `name()` / `const NAME` literals under `src/` (tools, prompts and resources
+  together), **0** contain `<` or `>`, so nothing can collide with it.
+
+  Three additions come with it, none of them published API. `ExecuteCommandUseCase::
+  log_interrupted(host, operation)` — a **seventh** entry point beside the six
+  that take a mandatory `tool`, and the only one that does **not**: the sole
+  honest value is the sentinel, and a parameter would invite the one value
+  that must never be passed. Like `log_state_change` and `log_confirmed` it
+  writes **no history entry**: `HistoryEntry::exit_code` is a non-optional
+  `u32` whose `0` means success, so the history could only record "it
+  succeeded". `McpServer::audit_interrupted_in_flight()` is `pub(crate)`.
+  `security::SHUTDOWN_TOOL` and `security::INTERRUPTED_BY_SHUTDOWN` are
+  `pub(crate)` too — the sentinel is pinned by test, not exported.
+  **Migration: none** for any of the three.
+
+  **Not covered, measured and left open rather than papered over:**
+
+  - *The emission is conditional on a non-empty registry*, so an ordinary
+    shutdown still writes nothing. That is a contract, not an optimisation:
+    four assertions count the lines in `audit.log` exactly after a teardown —
+    `tests/daemon_integration.rs` twice (`DRAIN_TEST_CALLS`, then exactly 1),
+    `src/mcp/transport/http.rs` once, and `src/cli/runner.rs` once (the gate
+    line plus the run line, exactly 2).
+  - *The HTTP transport has no resource-pool teardown and no cleanup loops at
+    all* (stated without a grep: a citation that counts a literal in a file
+    whose comments then contain it falsifies itself, which happened to this
+    very sentence — see the `<resource-reaper>` entry's known gap 1 for the
+    comment-stripped probe). The
+    emission is wired into its teardown too, so commands in flight are
+    covered there — but a session or tunnel opened over HTTP is still
+    destroyed only by process exit, with no line of any kind.
+  - *The five background loops are `abort()`ed unbounded and wordlessly* by
+    `McpServer::serve`. A handler running inside one is dropped by that
+    abort, which runs its claim's `Drop` before the snapshot, so it gets no
+    line by this mechanism either. Bounding that abort would reopen the
+    unbounded wait the teardown bound exists to close.
+  - *Two fragile anchors remain, both in the feed guard*: a prose sentence
+    (`/// Whether THIS request declared the tasks extension.`) as a slice
+    terminator in a file this release rewrote four times, and a long
+    `.execute(&call_params.name, call_params.arguments, &ctx)` literal that
+    `rustfmt` would fold if the line grew. Both fail noisily and both fail
+    with a misleading message.
+  - *The remaining double-write window.* If the snapshot reports a call and
+    the handler then finishes, the handler's own lines still go out — which
+    is correct now that the shutdown's line says how many results had been
+    recorded, and is in any case bounded by `close_audit()`, the next
+    statement. What is gone is the version where that second line claimed
+    nothing had been recorded.
+  - *The second abandonment path.* `session_manager.close_all()` runs
+    **before** the snapshot and closes the SSH session under a live handler;
+    that handler's `exec` then fails and it writes its own `Error` line, which
+    **counts** the write and leaves the entry in place. So that call gets a
+    `<shutdown>` line too, with `events_recorded: 1` beside its `Error` line,
+    and a reader sees both what failed and that the process stopped before the
+    call returned. (An earlier revision had the facade REMOVE the entry, so
+    this path wrote no `<shutdown>` line and this bullet said the nominal
+    `daemon stop` probably wrote zero of them. That mechanism is gone.) What
+    remains true: the five background loops are `abort()`ed before the
+    snapshot and a handler inside one is dropped without counting anything, so
+    **zero `<shutdown>` lines still does not prove zero abandoned calls.**
+  - *The tasks worker has no explicit `finish()`.* `handle_tools_call` calls
+    one after `execute` so a handler that parked a `ToolContext` clone in a
+    detached task cannot keep the entry alive; the
+    `io.modelcontextprotocol/tasks` worker relies on its claim being dropped
+    instead, so a clone it leaked would hold the entry to the end of the
+    process. No tool does that today.
+  - *`host` is the only path by which an argument VALUE still reaches the
+    line*, rendered but not sanitized — deliberately, so a real alias stays
+    greppable.
+  - *The wiring in both teardowns is pinned as source text*, not at runtime:
+    driving a real in-flight command through either needs a remote host. No
+    test crosses `serve` or `serve_with_shutdown` end to end.
+  - *A rotation can now run inside the 2 s audit-drain window.*
+    `AuditWriterTask` calls `rotate_if_needed()` after every event, and this
+    emission is the last write before the channel closes, so a teardown that
+    used to write nothing can now trigger a rotation **and its retention
+    sweep** (`read_dir` + `remove_file` per expired archive) inside
+    `DRAIN_TIMEOUT`. On a large or slow archive directory the sweep can
+    exceed it: the drain warns, returns, and the rotation in progress is
+    lost. New in kind, not in volume — the volume is at most
+    `max_concurrent_commands` lines once per process lifetime.
+
+  **The handler side of "claim then log" was backwards, and is fixed — in
+  the third shape, because the first two each broke something else.** The
+  entry used to survive until `registry.execute` RETURNED, while the
+  handler's own line goes out at step 13 **inside** that call, with steps 14
+  to 19 still to run — among them `truncate_output_with_cache(..).await`,
+  `save_output_to_file(..).await` (a real, awaited disk write of the whole
+  output) and `T::enrich(..).await`. A snapshot landing in that window wrote
+  a second, `Interrupted` line about a call that had already written its
+  `Success` one, and the window was as long as a file write, not "a few
+  instructions".
+
+  Shape two had each facade **remove** the entry before writing. That is the
+  literal "remove then log", and it made a multi-event call unreportable from
+  its first event on: a shutdown between host 1 and host 2 of an
+  `ssh_metrics_multi` — which audits **per host** in a plain `for` loop in
+  one task — found an empty registry and wrote **nothing**, while hosts 2..N
+  wrote into a channel `close_audit()` had closed. Nothing false, a line
+  **missing**, which is the defect this whole entry exists to remove.
+  (Suppressing instead — "write only if my remove won" — fails the same way
+  and worse: a one-shot claim cannot tell "I already reported this call" from
+  "the shutdown reported it", so hosts 2..N would have gone unaudited even
+  without a shutdown.)
+
+  Shape three, which is what ships: a write **transitions** the entry instead
+  of taking it. Each of the **six** `ExecuteCommandUseCase` facades
+  increments the call's event counter as its first statement, before writing
+  — `log_denied`, `log_confirmed`, `log_state_change`, `log_failure` and,
+  through `record_success_redacted`, `process_success` and `log_success`. Six,
+  not seven: `log_interrupted` is the shutdown's own write. The snapshot then
+  reports **every** remaining entry, carrying the count in
+  `events_recorded`: `0` reads "nothing of this call was recorded", `N`
+  reads "N were, and the call still had not returned". Both are true,
+  including for a call that had written everything and not yet left
+  `execute` — and the reader has those success lines beside this one. The
+  count is a **field** and the `reason` is one fixed phrase; an intermediate
+  revision interpolated the number into the sentence, which would have made a
+  `jq` consumer pull an integer out of prose the next commit could reword.
+
+  The claim reaches the facades through a **per-call
+  `ExecuteCommandUseCase`** placed in `ToolContext::execute_use_case`, not
+  through a `tokio::task_local` as an earlier revision had it. `ToolContext`
+  is built per request and already carries per-call state of this kind
+  (`mrtr`), and all **100** call sites of those six facades reach them
+  *through* `ctx.execute_use_case`, so the claim arrives with zero call-site
+  edits, sits in a visible struct field rather than a hidden channel, and —
+  unlike a task-local — **crosses `tokio::spawn`**, which is what brings
+  `ssh_exec_multi`'s per-host writes, issued inside `join_set.spawn`, under
+  the same rule as everything else.
+
+  **Four things a caller could put on this line, and could before this
+  release too — the new sink is simply the first path to disk for some of
+  them.**
+
+  - **Secrets, and the ruling is that this line carries argument NAMES and
+    no values at all.** Three measured ways a value reached the file:
+    `ssh_db_query` / `ssh_db_dump` / `ssh_db_restore` take a `db_password`,
+    and the `Sanitizer`'s key-anchored patterns do not match the JSON that
+    used to be rendered here — the quoted family needs the `"` glued to
+    `password` and the bare family needs `password` glued to the `:`, and
+    `{"db_password":…}` satisfies neither, with `entropy_min_length` at 16 as
+    the only backstop. A redaction keyed on the argument NAME fixed those and
+    was itself defeated twice: `ssh_k8s_create_secret` takes
+    `from_literal: [{"key": …, "value": …}]`, whose own schema says "values
+    are secret, never logged" and neither of whose member names matches any
+    keyword; and the exemption for `Number | Bool | Null` tested a type **the
+    caller chooses**, so `{"password": 12345678}` went through. Two of the
+    database tools and `ssh_k8s_create_secret` are **not** destructive, so
+    the CLI gate had never rendered any of them — this line was their first
+    path to disk. **A key cannot carry a secret and a keyword list can**, so
+    the shutdown's `command` is now `<tool> {name,name,name}`: sorted,
+    escaped, bounded, no values. That is enough for what the event has to
+    say — which tool, on which host, with which arguments present. **The CLI
+    gate keeps values**, because showing an operator what is about to run is
+    its purpose, so the two sinks no longer share one renderer.
+  - **Redaction by key name stays, for the gate, and loses its type
+    exemption**: if the key matches, the value goes whatever its type.
+    Census, over the 476 schema-bearing files in `src/mcp/tool_handlers/`:
+    **448** distinct property names, **11** matching a keyword — 3 real
+    secrets (`password`, `db_password`, `docker_password`), **2** exemptions
+    and **6** over-redactions. **The exemption's criterion is structural, not
+    a name family**: a key whose schema declares an `enum` cannot hide a
+    secret, plus two keys named explicitly because they are **paths** rather
+    than contents — `kubeconfig` (on **10** schemas; on a K3s host it is what
+    distinguishes "talked to the right cluster" from "talked to another one")
+    and `vault_password_file` (on **4**, the identical argument). A test
+    re-derives the `enum` criterion from the 476 schemas on every run, so the
+    list cannot drift away from it, and pins that there are exactly two
+    name-based entries.
+
+    Measured, and it refutes what that criterion was expected to cover:
+    **45** property names in the tree declare an `enum` and **none** of them
+    matches a secret keyword — including `secret_type`, whose four values live
+    in its *description* (`"Secret type: 'Opaque'/'generic' (default), 'tls',
+    or 'docker-registry'"`) and not in an `enum`. So `secret_type`,
+    `author`, `credential`, `credential_type`, `pass_credentials` and
+    `summary_max_tokens` stay redacted on gate lines — a documented loss of
+    **six** values, three of which (`secret_type`, `credential`,
+    `pass_credentials`) an auditor plausibly wants.
+    Parsing a description would be a rule that rots; the remedy for
+    `secret_type` is one line in `ssh_k8s_create_secret`'s schema — declare
+    the `enum` it already describes, and the list picks it up. An incomplete
+    exemption over-redacts, which is the safe direction to be wrong in.
+    **Not fixed here, and it goes to the plan:** the sanitizer's own pattern
+    family is narrower than its documentation implies for every JSON it is
+    handed, not only this line.
+  - **An annotation change can no longer put a secret on disk silently.** The
+    gate renders values, the key-name rule is what keeps a secret off those
+    lines, and that rule cannot see `ssh_k8s_create_secret`'s
+    `from_literal: [{"key": …, "value": …}]` — described "values are secret,
+    never logged", with neither member name matching a keyword. It was
+    harmless only because the tool is annotated `mutating`, so the gate never
+    arms for it, and **nothing pinned that**. A test now derives the set of
+    arguments described `never logged` from the schemas — exactly **2**, both
+    on that tool, and one of them (`docker_password`) is caught by the name
+    rule anyway — and fails if such a tool is annotated `destructive`, with a
+    message naming both remedies. It covers tools added later with the same
+    shape without anybody remembering to come back.
+  - **Forged fields in the `tracing` sink, and the rule is now mechanical.**
+    `host=raspberry exit_code=0 duration_ms=12 event_type=command_executed`
+    — **69 characters** rendered, from a 64-character `host` argument, well
+    under the 256-character cap that applies to the argument — made a logfmt
+    consumer read an
+    interrupted call as a **successful** one, injecting precisely the two
+    fields this variant documents as absent. The first fix quoted `host` and
+    `command` and justified leaving the rest on the ground that they were
+    "writer-chosen"; **that justification was false**, and the same input
+    forged the same fields again through `reason=`, which carries caller text
+    by design (`src/mcp/standard_tool.rs`: "validators interpolate it into
+    their `reason`"), and through `error=`, which carries it via
+    `BridgeError`'s `Display` (`Session not found: {session_id}`).
+    `AuditLogger::log_to_tracing` now emits **every string-valued field** as
+    `Debug`: `event_type`, `host`, `command`, `reason`, `error` and
+    `confirmed_by`. `exit_code` and `duration_ms` are integers and cannot
+    carry text. `tool_name` is the one field left bare, on a provenance
+    argument rather than an escaping one — every `log()` call site passes a
+    literal, a `handler.name()` or the shutdown sentinel. It also closes the
+    newline that `log_success` / `log_failure` have always been able to write
+    there. **`audit.log` itself was never affected** — serde quotes its
+    fields.
+  - **An unrendered tool name.** `register` runs before `registry.execute`
+    resolves the name, and the name was interpolated into `command` raw, so a
+    `tools/call` whose `name` contained a newline forged a second
+    well-formed `Audit: …` record. `host` was escaped and the tool name
+    beside it was not; one escaper now covers both.
+  - **Characters that reorder or hide the line.** `char::is_control()` is
+    category `Cc` only and neither sink escapes non-ASCII, so `U+2028`,
+    `U+2029`, `U+200B`..`U+200F`, `U+202A`..`U+202E`, `U+2066`..`U+2069` and
+    `U+FEFF` passed through: `host=raspberry\u{202E}` stays valid for `jq`
+    and **reverses the rest of the line for every human reader**. All four
+    families are escaped now, and the logfmt separators ` ` and `=` with
+    them, as defence in depth behind the sink fix.
+
+  **The CLI gate's own lines change shape, and nothing above says so
+  otherwise.** The two sinks still share `audited_host_from_args` and
+  `audited_host`, and the gate still shares `audited_operation`, so a
+  `command_confirmed` / `command_denied` line now (a) replaces the value of
+  any argument whose NAME matches a secret keyword with `[REDACTED]`,
+  whatever its type, and (b) escapes ` `, `=`, the bidi controls and the
+  zero-width characters **in the `host` argument** — the wave's earlier entry
+  covers only `<`, `>` and the `Cc` controls there. Argument **values** are
+  unchanged on that sink: they are serialized as before, so a command with
+  spaces still reads as a command. Checked: no test or documented behaviour
+  depended on the old form (`cli_exit_code` 10 passed, and the gate's own
+  assertions are on `event_type`, `tool_name`, `host` and
+  `command.contains(..)`).
+
+  **(internal, no API change) Six items moved from `src/cli/runner.rs` to
+  `src/security/audit.rs`**: `GATE_AUDIT_MAX_VALUE_CHARS`,
+  `GATE_AUDIT_MAX_OPERATION_CHARS`, `elide_oversized`, `audited_host`,
+  `audited_operation`, and `gate_host` — renamed `audited_host_from_args`,
+  since the gate is no longer its only caller. All were private items with no
+  re-export and are `pub(crate)` now, so nothing published changed and there
+  is nothing to migrate. Listed because two entries above cite two of them by
+  their old path, and those citations are corrected in place.
+
+- **(wire) `"<resource-reaper>"` is a new, reserved `tool_name` in `audit.log`,
+  and `"state_change"` is no longer written only by the seven state-changing
+  tools.** No new `event_type`, no new `CommandResult` variant, no new config
+  key: a session or a tunnel the bridge destroys by itself writes
+  `event_type: "state_change"` with `CommandResult::StateChanged`, the same
+  shape `ssh_session_close` writes, so destruction of a session is **one**
+  `jq` query and not two. **Migration: none** for Rust callers — nothing in
+  the public API changed. For a log consumer: a `state_change` line's
+  `tool_name` is no longer necessarily a tool, so any rule that groups by
+  `tool_name` or that assumes a `state_change` came from one of the seven
+  needs the sentinel added; the amended selector is in the fourth-variant
+  entry above.
+
+  Why: **under the default configuration every session idle for five minutes
+  is destroyed, and the trail said nothing.** `sessions.idle_timeout_seconds`
+  defaults to 300 and `sessions.max_age_seconds` to 3600
+  (`src/config/types.rs`, `default_session_idle_timeout` /
+  `default_session_max_age`), and `spawn_cleanup_tasks` runs
+  `SessionManager::cleanup` every 60 s. Wave 4 audited the *explicit* close
+  from `ssh_session_close`'s handler; every other destruction path was mute
+  on `audit.log`. An auditor pairing `ssh_session_create` with
+  `ssh_session_close` therefore concluded that any session not closed by hand
+  — the normal case, since an MCP client rarely closes one explicitly — had
+  stayed open indefinitely.
+
+  **Seven removal sites, not the three the fix was scoped to.** Counted with
+  `grep -n "sessions.remove(\|sessions.drain()\|client.close().await"
+  src/ssh/session.rs` over the production half of the file: `close`,
+  `close_all`, `cleanup`, and **four inside `SessionManager::exec`** — all
+  four silent on audit and three of them silent on `tracing` as well. Six of
+  the seven now write a line. The seventh is `close`, and it must not: its
+  handler already writes one, and a shared helper reached from there is
+  exactly how a double line would be born.
+
+  **One of those four is the idle timeout enforced a second time**, by `exec`
+  itself, with the same predicate as the reaper — so a session could be
+  destroyed "for inactivity" without the 60 s loop ever touching it, and an
+  acceptance test driving `cleanup()` would have gone green over a mute path
+  that a real client hits more often. Both sites now call one pure function,
+  `SessionManager::expiry_reason(idle, age, &config) -> Option<ReapReason>`,
+  which also makes the bound nameable: the single `||` they each used could
+  not say whether `idle_timeout` or `max_age` had fired. The two sites
+  disagreed on operand order before this; with the bound named that becomes a
+  decision, and **`max_age` wins a tie**, because the age bound is the
+  unconditional one.
+
+  Six reasons, each a stable wire literal in the `reason=` field of
+  `command`: `idle_timeout`, `max_age`, `shutdown`,
+  `shell_closed_while_draining`, `channel_write_failed`, `shell_gone`.
+  The lines, read back off disk by
+  `a_reaped_session_leaves_one_audit_line_naming_the_reason` and
+  `a_tunnel_open_at_shutdown_leaves_one_line_naming_the_reaper`:
+
+  ```json
+  {"timestamp":"2026-10-09T00:30:57.622326106Z","event_type":"state_change","host":"raspberry","command":"<resource-reaper> reason=idle_timeout session_id=4f1c-session","tool_name":"<resource-reaper>","result":{"StateChanged":{"duration_ms":43210}}}
+  {"timestamp":"2026-10-09T00:30:58.790632740Z","event_type":"state_change","host":"raspberry","command":"<resource-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80","tool_name":"<resource-reaper>","result":{"StateChanged":{"duration_ms":0}}}
+  ```
+
+  **No `exit_code` key anywhere** — nothing ran — and `duration_ms` is the
+  destroyed resource's **lifetime**, which is what finally makes that field
+  mean something on a line nobody timed. `tunnel_id=` versus `session_id=` is
+  what distinguishes the two populations, since both carry the same
+  `tool_name`: the sentinel names the **writer**, not a kind of resource —
+  which is why it is spelled `<resource-reaper>` and not `<session-reaper>`.
+  The host is in the `host` **field** and deliberately not repeated in
+  `command`: two sources for one fact in a line-oriented format are two
+  sources that can disagree, and `host` is the field every other event shape
+  already puts it in.
+
+  **Every line of a batch is written before anything is closed**, and the
+  first version of this change got that wrong in both batch sites. They
+  interleaved: write one session's line, then `await` that session's
+  `client.close()` — bounded at 5 s by `SshClient::close`, and for the
+  shutdown wrapped in `McpServer::close_bounded`'s 2 s. Against a dead peer
+  the **first** session got its line and sessions 2..N got neither a line nor
+  a DISCONNECT, because the bound abandons the future mid-flight. `cleanup`
+  had the same shape with a different abandoner: it removes every expired
+  session from the map before the first write, and `McpServer::serve` aborts
+  the cleanup loop **unbounded**, so an abort between two iterations lost the
+  lines of sessions no later pass can find. Both now write every line in one
+  synchronous pass first, which costs nothing: the write is not `async`, so N
+  lines are N pushes onto an unbounded channel with no await between them for
+  a timer to fire inside.
+
+  **The emission is conditional, and that is a contract.** Nothing
+  destroyed, nothing written. Four assertions elsewhere count the lines in
+  `audit.log` exactly after a teardown — two in
+  `tests/daemon_integration.rs`, one in `src/mcp/transport/http.rs`, one in
+  `src/cli/runner.rs` — and in all four both managers are empty; an
+  unconditional line would redden all four while proving nothing. The
+  ordinary shutdown of an idle server still writes nothing at all.
+
+  **(behaviour, security) An expired session now gets its SSH DISCONNECT.**
+  `exec`'s expiry branch was `sessions.remove(session_id);` as a bare
+  statement: the `ShellSession` was discarded and its `SshClient` dropped
+  without `close()`, where the other six removal sites in the file all send
+  `russh::Disconnect::ByApplication`. The server was left to notice the TCP
+  teardown by itself. All of `exec`'s four branches now go through one
+  `remove_dead_session` helper that removes, audits and closes in that
+  order, so none of them can forget again. Cost: that path can now spend up
+  to `SshClient::close`'s own 5 s timeout on a connection already in a bad
+  state, on a call that was returning `SessionExpired` anyway — the same cost
+  the other three branches have always paid.
+
+  **(internal, no API change) `SessionManager::with_audit_logger(self,
+  Arc<AuditLogger>) -> Self`**, an additive constructor step; `new` keeps its
+  signature. Measured reason: `git grep -c "SessionManager::new(" <rev>`
+  over `src`, `tests`, `benches` and `examples`, summed, is **131** at the
+  revision before this change, of which **2** are production — and Rust has
+  no default arguments, so a new parameter (even `Option`) would have to be
+  written at all 131. A manager built with `new` alone has no logger and
+  stays silent, exactly as before. `TunnelManager` is **not** changed at all:
+  it lives in `src/domain/use_cases/tunnel.rs`, and
+  `tests/architecture_rules.rs::domain_security_import_limited_to_execute_command`
+  allows `use crate::security::` in `execute_command.rs` only, so its lines
+  are written by its caller, `McpServer::audit_tunnels_at_shutdown`, from
+  `list()` taken immediately before the bounded close. (The rule's scanner
+  only reads lines beginning `use crate::`, so an inline
+  `crate::security::…` path would have passed while violating it. Not taken.)
+
+  **(build, and this release INTRODUCED the breakage it fixes)
+  `cargo clippy --no-default-features` was red from the wave's first commit,
+  and `make ci` has a `lint-no-default` target now.** Six `dead_code` /
+  `unused_imports` errors under `-D warnings`: `audited_operation`,
+  `elide_oversized`, `redact_secret_values`, `key_names_a_secret`,
+  `REDACTION_EXEMPT_KEYS`, and two re-exports. All of them are now
+  `#[cfg(any(feature = "cli", test))]`, because their only consumer outside
+  `src/security/audit.rs` is the CLI's destructive gate and `src/cli` is
+  `#[cfg(feature = "cli")] pub mod cli;` in `src/lib.rs`.
+
+  **The provenance, stated precisely because an earlier commit message of
+  this branch got it backwards.** At the branch's base, `6e38c5e`,
+  `audited_operation` and `elide_oversized` were **private `fn`s of
+  `src/cli/runner.rs`** — `git show 6e38c5e:src/cli/runner.rs | grep -c "fn
+  audited_operation"` → 1, and the same probe on
+  `6e38c5e:src/security/audit.rs` → 0 — so they sat inside a module the
+  default-off build does not compile and **could not be dead**. `4dd213d`,
+  this wave's first commit, moved them into unconditionally-compiled
+  `src/security/audit.rs` (`4dd213d:src/security/audit.rs` → 1).
+  `redact_secret_values`, `key_names_a_secret` and `REDACTION_EXEMPT_KEYS`
+  were **created** by `53f5428` (absent at `4dd213d` and at the base; same
+  probe). **So the breakage is this wave's, not inherited**, and it shipped
+  under green gates for the one reason the new target exists: no `make`
+  target and no CI job ran that feature set, so nothing could see it.
+  `lint-no-default` is in `make ci` and `make ci-full`, with its own
+  `CARGO_TARGET_DIR` so it does not evict the default profile's
+  fingerprints. It runs `--lib` and not `--all-targets`: the wide form is red
+  on `tests/daemon_integration.rs`, which imports `bridge_mcp::daemon`
+  (`cfg(feature = "cli")`) without gating itself — that one **is**
+  pre-existing, measured by the same probes at the base, and is left for its
+  own task.
+
+  **Known gaps, measured and not fixed here.**
+  1. **Over HTTP nothing is reaped and nothing is recorded.**
+     `src/mcp/transport/http.rs` calls neither `spawn_global_tasks` nor any
+     `close_all`. **The probe must exclude comments, and this entry got the
+     number wrong twice while saying so.** A raw
+     `grep -c "close_all\|spawn_global_tasks"` on that file counts the words
+     in the comments that discuss it — every revision of this paragraph has
+     cited a different figure for that count, and none of them was the figure
+     at the time of writing, because each edit changed what it was counting.
+     The re-derivable probe strips comments first and is stable:
+     `sed -E 's@^[[:space:]]*//.*@@' src/mcp/transport/http.rs | grep -cE
+     "close_all|spawn_global_tasks"` → **0**. That is the only number in this
+     bullet. So a session opened over HTTP is never touched by the 60 s loop,
+     and
+     both it and any HTTP tunnel are destroyed by process exit with no line
+     from anywhere. That is a separate hole from the one this entry closes,
+     and it is wider than wave 4's note about in-flight commands on the same
+     transport.
+  2. **The window between `list()` and the tunnel `close_all` is not
+     locked**, so a tunnel registered in between is aborted without a line.
+     The accept loop has already ended by then, so the only writer left
+     would be a handler still running inside an aborted cleanup task.
+  3. **A tunnel line records the decision, not a completed teardown.**
+     `close_all` is `drain()` + `abort()`, and `spawn_forwarding_task`'s own
+     doc states that the port is released when the runtime drops the future,
+     not when `abort` returns.
+  4. **`SessionManager::exec`'s four branches are pinned as source text
+     only.** No *unit* test can put a session into a `SessionManager` —
+     `ShellSession` is private and holds a live `russh::Channel` and an
+     `SshClient` with no `#[cfg(test)]` constructor — so the in-process mock
+     SSH server grew a `shell_request` handler and
+     `tests/session_reaper_audit.rs` now drives `cleanup` (both bounds, each
+     named), `close_all` and `close`'s silence end to end against a real
+     session. Reaching `exec`'s four branches needs a shell that accepts a
+     command and then dies mid-read, which the mock does not emulate; those
+     call sites are guarded by
+     `every_silent_removal_site_now_audits_except_the_explicit_close`
+     instead.
+  5. **`ssh_recording_*` lines still say nothing about a session's
+     lifetime.** `grep -c recording src/ssh/session.rs` → 0: the recorder and
+     the session manager share no code, so closing a session stops no
+     recording through this path, and an auditor correlating
+     `ssh_recording_stop` with "the session ended" is reading two disjoint
+     populations.
+  6. **A session whose own command holds the lock gets no line, and that is
+     an accepted trade rather than a placement defect.**
+     `SessionManager::close_all` takes the mutex that `SessionManager::exec`
+     holds for the whole of a remote command, so a `ssh_session_exec` in
+     flight makes the shutdown's `close_bounded` give up after
+     `RESOURCE_CLOSE_GRACE` (2 s) with nothing written for that session.
+     Moving the snapshot to the caller does **not** fix it: the caller would
+     ask for the same tokio mutex and restore the unbounded wait —
+     up to `limits.command_timeout_seconds`, **1800 s** by default — that
+     bounding
+     `close_all` was added to close, which is the `daemon stop` that printed
+     `Daemon stopped.` over a daemon that lived on. `McpServer::serve`
+     already documents the bound as a deliberate choice of a bounded
+     shutdown over a complete trail; this gap is the audit-trail face of the
+     same choice. What *was* a placement defect — the line of each session
+     waiting behind the previous session's `client.close().await` — is fixed
+     above.
+
+- **(wire) `events_recorded` on a `command_interrupted` line is now true for
+  the six file-transfer handlers; it used to read `0` beside lines the call
+  had already written.** No shape change and **no migration**: the field, the
+  `event_type` and the variant are unchanged, and a consumer that read the
+  `0` as "nothing was recorded" was simply being told something false.
+
+  Why: `events_recorded` is defined as "the process stopped before any result
+  of this call was recorded", and it is incremented by
+  `ExecuteCommandUseCase::claim_this_write`, which every *facade* calls. But
+  **eleven production writes in six handlers bypass the facades** — `ssh_ls`
+  (2), `ssh_files_write` (2), `ssh_file_write` (2), `ssh_download` (1),
+  `ssh_upload` (2), `ssh_sync` (2) build their own `AuditEvent` and call
+  `ctx.audit_logger.log(..)` directly — so the counter never moved for them.
+  The materially reachable case is `ssh_files_write`, whose writes are inside
+  its per-file loop: a `daemon stop` at file 21 of 50 left **20 lines on
+  disk and a line saying there were none**. All eleven now claim immediately
+  before their write, in that order, because a claim taken *after* the write
+  reopens the window the count was introduced to close.
+
+  The definition of the field was deliberately **not** widened to make the
+  `0` true: that would have been the same false statement from the other
+  side. Pinned by `every_direct_audit_write_claims_itself_first`, which walks
+  `src/mcp/tool_handlers/` rather than listing the six files, so the seventh
+  handler to grow a direct write is covered the day it is written.
 
 - **A config that fails to load now exits 5, not 1** (README promised 5; it
   failed inside `main` before `run_tool` and flattened through anyhow).
@@ -998,8 +1606,11 @@ tests and a serialisation test.
   **The three `close_all` calls are bounded too, and without that the
   un-killable daemon came back through them.** `SessionManager::close_all`
   begins by taking the lock that `SessionManager::exec` holds for the WHOLE
-  of a remote command, and `sessions.timeout_secs` defaults to **1800 s**
-  (schema ceiling 3600). Measured against a real host, one session running
+  of a remote command, and `limits.command_timeout_seconds` defaults to
+  **1800 s**. (A tool's own `timeout_seconds` ARGUMENT is a different knob,
+  capped at 3600 by the per-tool schemas; it bounds one call, not the config
+  default, and there is no validation ceiling on the config key itself.)
+  Measured against a real host, one session running
   `sleep 45` whose client had already closed its socket: the bounded session
   drain finished in **1.7 s**, then `close_all` parked **42.0 s** on that
   lock — with `Daemon stopped.` already printed and exit 0 already returned,

@@ -464,6 +464,30 @@ where
     }
     .await;
 
+    // Three steps now, and the new one is first: one audit line per tool
+    // call still in flight. Before `close_audit()`, because after it
+    // `AuditLogger::log` reaches `tracing` and not the file.
+    //
+    // **The HTTP teardown is NOT `McpServer::serve`'s**, and the difference
+    // is wider than this line: nothing in this file closes a resource pool
+    // or starts the per-server cleanup loops, so a session or tunnel opened
+    // over HTTP is destroyed only by process exit, with no line at all.
+    // This emission covers the commands that were running; it does not
+    // cover that.
+    //
+    // **The fact is stated without a grep on purpose.** An earlier version
+    // of this comment cited a bare `grep -n` over this very file as
+    // "returning nothing", and its own text then made that grep return
+    // matches. A citation that counts literals in the file containing it is
+    // fragile by construction, however the path is narrowed — and the
+    // replacement for it said "made that grep return 3" while the count was
+    // 2, so the correction inherited the disease. **No count of this file's
+    // own text appears here any more.** The re-derivable probe strips
+    // comments first, which makes it immune to its own presence:
+    // `sed -E 's@^[[:space:]]*//.*@@' <this file> | grep -cE
+    // "close_all|spawn_global_tasks"` → 0. That is the single place in the
+    // repository where this fact is backed by a command.
+    audit_owner.audit_interrupted_in_flight();
     // Both steps run whatever `outcome` says: an error after the writer was
     // spawned is exactly when the queued events matter most.
     audit_owner.close_audit();

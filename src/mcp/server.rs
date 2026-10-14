@@ -17,7 +17,10 @@ use crate::error::Result;
 use crate::mcp::instructions;
 use crate::ports::ExecutorRouter;
 use crate::ports::{MrtrSlot, ToolContext};
-use crate::security::{AuditLogger, AuditWriterTask, CommandValidator, RateLimiter, Sanitizer};
+use crate::security::{
+    AuditLogger, AuditWriterTask, CommandValidator, InFlightCall, InFlightCalls, RateLimiter,
+    Sanitizer,
+};
 use crate::ssh::SessionManager;
 
 use super::completion_provider::{DefaultCompletionProvider, MAX_COMPLETIONS};
@@ -95,11 +98,20 @@ const SESSION_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// Unbounded, it was not merely slow but **open-ended**:
 /// `SessionManager::close_all` starts by taking the same lock that
 /// `SessionManager::exec` holds for the whole of a remote command, and
-/// `sessions.timeout_secs` defaults to **1800 s**. Measured against a real
-/// host, one session running `sleep 45` whose client had closed its socket:
-/// the bounded session drain finished in 1.7 s and then `close_all` parked
-/// **42.0 s** on that lock, `Daemon stopped.` having already been printed
-/// with exit 0. With `timeout_secs` at its default that is half an hour.
+/// `limits.command_timeout_seconds` defaults to **1800 s**
+/// (`default_command_timeout`). Measured against a real host, one session
+/// running `sleep 45` whose client had closed its socket: the bounded session
+/// drain finished in 1.7 s and then `close_all` parked **42.0 s** on that
+/// lock, `Daemon stopped.` having already been printed with exit 0. With that
+/// key at its default, half an hour.
+///
+/// **These lines used to name a `sessions.*` key for that bound, and no such
+/// key exists**: `SessionConfig` is `max_sessions` / `idle_timeout_seconds` /
+/// `max_age_seconds` under `#[serde(deny_unknown_fields)]`, so an operator
+/// who copied the old name out of this paragraph got a **load error** rather
+/// than the bound it described. The wrong name is not reproduced here — a
+/// config key is the one kind of string a reader may paste straight into
+/// their YAML, so naming it even to disown it is a trap.
 ///
 /// Two seconds, so the whole teardown is bounded by a CONSTANT rather than
 /// by `5 s x connections`: a healthy disconnect is a single packet, and
@@ -365,6 +377,14 @@ pub struct McpServer {
     /// none: *"it allows servers to request additional information without
     /// maintaining any server-side state."*
     request_state: RequestStateSigner,
+    /// Tool calls dispatched and not yet finished, so the shutdown can say so.
+    ///
+    /// On the server and not on `SessionContext`, because the shutdown is the
+    /// reader and it has only `self: Arc<Self>`: `serve_session_with_context`
+    /// has dropped every `SessionContext` before [`Self::serve`] reaches the
+    /// close steps, and the tasks worker outlives its session anyway. See
+    /// [`InFlightCalls`].
+    in_flight: InFlightCalls,
 }
 
 /// Per-session map of in-flight JSON-RPC request ids to their
@@ -557,8 +577,16 @@ impl McpServer {
         // Create rate limiter (0 = disabled by default)
         let rate_limiter = Arc::new(RateLimiter::new(config.limits.rate_limit_per_second));
 
-        // Create session manager for persistent shells
-        let session_manager = Arc::new(SessionManager::new(config.sessions.clone()));
+        // Create session manager for persistent shells. The logger is handed
+        // in by a setter and not by `new`, because `new` has 129 test call
+        // sites and Rust has no default arguments; see
+        // `SessionManager::with_audit_logger`. Without it the idle reaper
+        // destroys a session every 300 s under the default config and the
+        // trail says nothing at all.
+        let session_manager = Arc::new(
+            SessionManager::new(config.sessions.clone())
+                .with_audit_logger(Arc::clone(&audit_logger)),
+        );
 
         // Create tunnel manager
         let tunnel_manager = Arc::new(TunnelManager::new(20));
@@ -611,6 +639,7 @@ impl McpServer {
                 }
                 signer
             },
+            in_flight: InFlightCalls::default(),
         };
 
         (server, audit_task)
@@ -1238,14 +1267,23 @@ impl McpServer {
     /// session waits on); the tasks worker is not waited on at all.
     ///
     /// Which leaves an asymmetry worth stating rather than discovering:
-    /// **`ssh_exec command='sleep 20'` is abandoned after a few seconds and
-    /// its audit event is lost, while `ssh_session_exec command='sleep 600'`
-    /// used to hold the whole shutdown for ten minutes** — because the
-    /// latter's handler holds `SessionManager`'s lock and `close_all` queued
-    /// behind it. The bound on `close_all` makes the two behave alike: both
-    /// are abandoned, and the in-flight event of either is lost. That is a
+    /// **`ssh_exec command='sleep 20'` is abandoned after a few seconds,
+    /// while `ssh_session_exec command='sleep 600'` used to hold the whole
+    /// shutdown for ten minutes** — because the latter's handler holds
+    /// `SessionManager`'s lock and `close_all` queued behind it. The bound on
+    /// `close_all` makes the two behave alike: both are abandoned. That is a
     /// deliberate choice of a bounded shutdown over a complete trail; see
     /// `RESOURCE_CLOSE_GRACE`.
+    ///
+    /// **What an abandoned call leaves behind is no longer nothing.** Its own
+    /// event is still lost, and that loss is not the one it looks like: the
+    /// event is built after the command returns, so an abandoned call never
+    /// constructed one. In its place this teardown writes a line of its own —
+    /// `event_type: "command_interrupted"`, `tool_name: "<shutdown>"`, no
+    /// exit code and no duration — one per call still registered, from
+    /// `Self::audit_interrupted_in_flight`, immediately before the channel is
+    /// closed. "A command started and we will never know how it finished" is
+    /// a fact, and a trail that drops it says instead that nothing happened.
     ///
     /// # Errors
     ///
@@ -1334,6 +1372,15 @@ impl McpServer {
         // the session drain above closes: `daemon stop` printing
         // `Daemon stopped.` with exit 0 over a daemon that then lived on for
         // the command's timeout.
+        // One line per tunnel still open, written from HERE and not from
+        // inside the manager: `TunnelManager` lives in `src/domain/`, which
+        // `tests/architecture_rules.rs::domain_security_import_limited_to_execute_command`
+        // forbids from importing `crate::security` — see
+        // `audit_tunnels_at_shutdown`. Sessions audit themselves, because
+        // `SessionManager` is an adapter and its reaper runs where no caller
+        // can see it.
+        let open_tunnels = self.tunnel_manager.list().await;
+        self.audit_tunnels_at_shutdown(&open_tunnels);
         Self::close_bounded("tunnels", self.tunnel_manager.close_all()).await;
         Self::close_bounded("sessions", self.session_manager.close_all()).await;
         Self::close_bounded("connection pool", self.connection_pool.close_all()).await;
@@ -1351,6 +1398,10 @@ impl McpServer {
         // followed by `rotate_if_needed`, so an abort loses the event in
         // flight and the rotation it was about to trigger. That is why this
         // handle is not in `cleanup_handles`.
+        // Last thing written before the channel closes: one line per tool
+        // call this teardown abandoned. It MUST be here and not one statement
+        // later — see `audit_interrupted_in_flight`.
+        self.audit_interrupted_in_flight();
         self.close_audit();
         crate::security::drain_audit_writer(audit_writer).await;
 
@@ -1448,6 +1499,194 @@ impl McpServer {
     /// a request handler may call.
     pub(crate) fn close_audit(&self) {
         self.audit_logger.close();
+    }
+
+    /// Write one audit line for every tool call still in flight, saying the
+    /// process stopped before it finished — no exit code, no duration.
+    ///
+    /// **This has to build the event, not merely flush one**, and that is the
+    /// measurement the obvious fix fails on. A tool call's audit event is
+    /// constructed at step 12 or 13 of the `standard_tool` pipeline, i.e.
+    /// strictly AFTER the remote command returns (step 8, "Log intent", is a
+    /// bare `info!` and no `AuditEvent` exists at that point). So a command
+    /// abandoned by the bounded teardown does not lose a queued event: it
+    /// never had one. Holding the audit channel open longer would recover
+    /// nothing at all.
+    ///
+    /// **Called immediately before `close_audit()`, on both of the teardowns
+    /// that have one**, and nowhere else: after the channel is closed
+    /// `AuditLogger::log` still writes its `tracing` line and the file sink
+    /// is gone, so a line emitted later is silently not in `audit.log` —
+    /// which is the exact failure mode this method exists to remove.
+    ///
+    /// **Conditional on there being something, and that is a contract rather
+    /// than an optimisation.** Four assertions elsewhere count the lines in
+    /// `audit.log` exactly after `serve` returns — two in
+    /// `tests/daemon_integration.rs` (`DRAIN_TEST_CALLS`, then exactly 1),
+    /// one in `crate::mcp::transport::http`, one in `src/cli/runner.rs` —
+    /// and an unconditional line would redden all four while proving
+    /// nothing. An empty registry is also the normal case: the ordinary
+    /// shutdown has nothing in flight and must stay silent.
+    ///
+    /// **ZERO `<shutdown>` LINES DOES NOT PROVE ZERO ABANDONED CALLS**, and
+    /// that is the inference this docstring exists to forbid. Two steps of
+    /// the teardown run BEFORE this snapshot and both can empty the registry
+    /// first:
+    ///
+    /// 1. `for h in cleanup_handles { h.abort(); }` kills the five background
+    ///    loops, unbounded and without a word. A handler running inside one
+    ///    of them is dropped by that abort, its claim's `Drop` removes the
+    ///    entry, and nothing is written by either mechanism. Bounding that
+    ///    abort would reopen the unbounded wait the teardown bound exists to
+    ///    close, so it stays as it is.
+    /// 2. `session_manager.close_all()` closes the SSH session **under a live
+    ///    handler**. That handler's `exec` then fails, it writes its own
+    ///    `Error` line through `log_failure`, which COUNTS the write and
+    ///    leaves the entry in place. So this call still gets a
+    ///    `<shutdown>` line, now with `events_recorded: 1` beside its own
+    ///    `Error` line — a reader sees both what failed and that the process
+    ///    stopped before the call returned. (Until round 2 the facade
+    ///    REMOVED the entry, so this path wrote no `<shutdown>` line at all
+    ///    and this paragraph said the nominal `daemon stop` probably wrote
+    ///    zero of them. That mechanism is gone; the sentence is not what it
+    ///    was.)
+    ///
+    /// So the population this line enumerates is "calls still registered at
+    /// the moment of the snapshot", which is narrower than "calls abandoned
+    /// by the shutdown". No test drives `serve` or `serve_with_shutdown` end
+    /// to end (that needs a slow command in a real handler, so a remote
+    /// host); the tests call this method directly and the ordering inside
+    /// both teardowns is pinned as source text.
+    ///
+    /// **A call that has already written some of its lines is still reported,
+    /// and round 2 is why that had to change.** For one revision the
+    /// handler's own audit write REMOVED the entry, which made a multi-event
+    /// call unreportable from its first event on: a shutdown between host 1
+    /// and host 2 of an `ssh_metrics_multi` found an empty registry and said
+    /// nothing, while hosts 2..N wrote into a channel `close_audit()` had
+    /// closed. Nothing false, a line **missing** — this task's own defect,
+    /// reintroduced by its own fix. A write now only increments
+    /// `InFlightCall::events_recorded`, and this method copies it onto the
+    /// line as a FIELD — one stable `reason` plus a count, which reads two
+    /// ways: nothing was recorded, or N were recorded and the call had not
+    /// returned. Both are true statements; a count inside the sentence (which
+    /// is what an earlier revision wrote) made a `jq` consumer regex an
+    /// integer out of prose.
+    ///
+    /// **One new availability risk, in kind and not in degree.**
+    /// `AuditWriterTask` calls `rotate_if_needed()` after EVERY event it
+    /// writes, and this emission is now the last write before
+    /// `close_audit()`. So a teardown that used to write nothing can now
+    /// trigger a rotation **and its retention sweep** — a `read_dir` plus a
+    /// `remove_file` per expired archive — inside `DRAIN_TIMEOUT`'s 2 s. On a
+    /// large or slow archive directory that sweep can exceed the budget:
+    /// `drain_audit_writer` warns and returns, and the rotation in progress
+    /// is lost. The volume itself is negligible (at most
+    /// `max_concurrent_commands` lines, once per process lifetime), so this
+    /// is about *when* a rotation can happen, not how often.
+    pub(crate) fn audit_interrupted_in_flight(&self) {
+        let stranded = self.in_flight.take_all();
+        if stranded.is_empty() {
+            return;
+        }
+
+        warn!(
+            count = stranded.len(),
+            "Stopping with tool calls still in flight; auditing each as interrupted"
+        );
+        for call in stranded {
+            // `self.execute_use_case`, not a per-call one: this write is the
+            // shutdown's own, so it must not count itself against anybody's
+            // claim. `log_interrupted` is the one facade that never claims.
+            self.execute_use_case.log_interrupted(
+                &call.host,
+                &call.operation,
+                call.events_recorded,
+            );
+        }
+    }
+
+    /// One audit line per tunnel the shutdown is about to abort.
+    ///
+    /// **Written from the adapter, by the caller, and that is a layering
+    /// decision rather than a convenience.** `TunnelManager` is in
+    /// `src/domain/use_cases/tunnel.rs`, and
+    /// `tests/architecture_rules.rs::domain_security_import_limited_to_execute_command`
+    /// allows `use crate::security::` in `execute_command.rs` only — so a
+    /// logger inside the manager would redden that test. The letter-of-the-law
+    /// escape exists (the rule's scanner only reads lines beginning
+    /// `use crate::`, so an inline `crate::security::…` path would pass while
+    /// violating it) and is not taken. `TunnelManager` is unchanged by this
+    /// wave, which also leaves wave 4's leak fix where it lives — on the
+    /// handler side of `ssh_tunnel_create`, whose `abort_handle` is what the
+    /// port-rebinding fixture depends on.
+    ///
+    /// `list()` rather than a return value from `close_all`: `close_all`'s
+    /// signature is pinned as source text by
+    /// `every_close_all_in_the_teardown_is_bounded`, which looks for the
+    /// literal `self.tunnel_manager.close_all()`.
+    ///
+    /// **Not wrapped in `close_bounded`, and it does not need to be.** The
+    /// session manager's lock is held for the whole of a remote command,
+    /// which is why its `close_all` is bounded; `TunnelManager`'s mutex is
+    /// never held across an `await` in any of `register` / `list` / `close` /
+    /// `close_all`, so `list()` cannot park on a live handler. A fourth
+    /// `Self::close_bounded(` in `serve` would also redden the guard named
+    /// above, which counts exactly three.
+    ///
+    /// **What the line claims is the decision, not a completed teardown.**
+    /// `close_all` is `drain()` + `abort()`, and `spawn_forwarding_task`'s
+    /// own doc states the semantics: the port is released when the runtime
+    /// drops the future, not when `abort` returns, and a per-connection
+    /// subtask already spawned holds its own. So this records "the shutdown
+    /// gave up this tunnel", which is what was true at that instant.
+    ///
+    /// Two things it does not cover, said rather than implied. The window
+    /// between `list()` and `close_all()` is not locked, so a tunnel
+    /// registered in between is aborted without a line — the accept loop has
+    /// already ended, so the only writer left would be a handler still
+    /// running inside an aborted cleanup task. And the HTTP transport calls
+    /// neither this nor the tunnel pool's teardown at all, so a tunnel
+    /// opened over HTTP is destroyed by process exit with nothing recorded
+    /// anywhere. **No grep is cited for that**, and the omission is the
+    /// point: the citation that used to be here counted a literal in a file
+    /// whose comments then contained it, which is the fourth recurrence of
+    /// that defect in this release. The re-derivable form, if you want one,
+    /// strips comments before counting — it is written out once, in
+    /// `crate::mcp::transport::http`'s own teardown comment, rather than
+    /// copied to every place that states the fact.
+    pub(crate) fn audit_tunnels_at_shutdown(&self, tunnels: &[crate::domain::TunnelInfo]) {
+        if tunnels.is_empty() {
+            return;
+        }
+
+        warn!(
+            count = tunnels.len(),
+            "Stopping with tunnels still open; auditing each as destroyed by the shutdown"
+        );
+        for tunnel in tunnels {
+            // Straight to the logger: `reaped_event` already fixes the
+            // `event_type`, the `result` and the `tool_name` this line can
+            // have, so there is nothing for a facade to decide. Going
+            // through `ExecuteCommandUseCase` would also add a sixth
+            // `claim_this_write()` and redden
+            // `every_writing_facade_claims_before_it_logs` for a line the
+            // in-flight registry has no business counting.
+            self.audit_logger.log(
+                crate::security::RESOURCE_REAPER_TOOL,
+                crate::security::reaped_event(
+                    // The ENUM, not the string `"shutdown"` this used to
+                    // pass: one wire literal, one source. The type is what
+                    // makes that enforceable from a module that cannot see
+                    // the reaper.
+                    crate::security::ReapReason::Shutdown,
+                    "tunnel_id",
+                    &tunnel.id,
+                    &tunnel.host,
+                    tunnel.created_at.elapsed(),
+                ),
+            );
+        }
     }
 
     /// Assemble every process-global background task: the cleanup loops
@@ -1876,8 +2115,12 @@ impl McpServer {
         // an `Arc`, and `SessionContext` derives `Clone` — so EVERY clone of
         // the bundle mints another sender. Per-request scoping
         // (`with_request_meta`), each dispatched request's
-        // `session_ctx_for_task`, each batch task, `spawn_fetch_roots`, and
-        // the detached task worker in `handle_tools_call_async` all hold one.
+        // `session_ctx_for_task`, each batch task, each request's
+        // `ProgressReporter` and `McpLogger`, and the detached task worker in
+        // `handle_tools_call_async` all hold one. (This list named
+        // `spawn_fetch_roots` until the audit-honesty wave; that function was
+        // deleted with the MRTR cut and `grep -rn spawn_fetch_roots src/`
+        // returned this comment and nothing else.)
         // The last of those is the longest-lived by far — it parks on
         // `concurrent_limit.acquire_owned()` BEFORE running the tool, so it
         // can outlive the client by the length of the queue ahead of it. It
@@ -2949,11 +3192,44 @@ impl McpServer {
             "name": call_params.name,
             "arguments": call_params.arguments,
         }));
-        match self
+
+        // Registered HERE and not at the dispatch `tokio::spawn`, for two
+        // measured reasons: that spawn has neither a tool name nor arguments
+        // to put on a line, and a request that dies before reaching this
+        // point writes no audit line in normal operation either — so a trail
+        // that says nothing about it stays consistent with itself.
+        //
+        // The host is derived again rather than reusing `host_for_metrics`
+        // above: that one falls back to `"local"`, which is the metrics
+        // convention, and the audit convention for "no host was named" is
+        // `NO_HOST`. Two derivations of one value is a drift risk, so it is
+        // worth being explicit that they answer different questions.
+        // The claim goes into the context's OWN use case, so the handler's
+        // audit write — six frames down, through `ExecuteCommandUseCase` —
+        // counts this call before it logs. A field and not a task-local: see
+        // `ExecuteCommandUseCase::in_flight` for the three measurements that
+        // made the field cheaper on every axis, including the one a
+        // task-local could not reach (a handler that writes from inside
+        // `tokio::spawn`).
+        let in_flight = Arc::new(
+            self.in_flight
+                .register(&tool_name, call_params.arguments.as_ref()),
+        );
+        ctx.execute_use_case = Arc::new(ctx.execute_use_case.with_claim(Arc::clone(&in_flight)));
+
+        let outcome = self
             .registry
             .execute(&call_params.name, call_params.arguments, &ctx)
-            .await
-        {
+            .await;
+
+        // The entry's life is exactly `execute`'s. `InFlightClaim::drop` would
+        // do this too, but only once every `Arc` is gone — and a handler that
+        // left a `ToolContext` clone in a detached task would hold one. This
+        // bounds it to the call whatever a handler did with its context.
+        in_flight.finish();
+        drop(in_flight);
+
+        match outcome {
             Ok(result) => {
                 let elapsed_ms = start.elapsed().as_millis();
 
@@ -3171,6 +3447,13 @@ impl McpServer {
             .create_tool_context(Some(cancel_token.clone()), None, session)
             .await;
 
+        // Rendered out here, where `arguments` is still readable, and
+        // REGISTERED inside the worker only once it holds a permit — see
+        // `InFlightCalls::register_rendered`. Two bounded strings cross into
+        // the future, not a clone of the arguments.
+        let in_flight = self.in_flight.clone();
+        let in_flight_call = InFlightCall::render(&tool_name, arguments.as_ref());
+
         // Spawn the background worker
         tokio::spawn(async move {
             // Wait for a concurrency slot before doing any remote work. A
@@ -3186,6 +3469,14 @@ impl McpServer {
                 },
                 () = cancel_token.cancelled() => return,
             };
+
+            // Now it is really in flight. The claim is held by this future
+            // and by the context's use case, so every path out of here drops
+            // the entry: the cancellation arm's `return`, a panic, or the
+            // runtime dropping the whole task.
+            let claim = Arc::new(in_flight.register_rendered(in_flight_call));
+            let mut ctx = ctx;
+            ctx.execute_use_case = Arc::new(ctx.execute_use_case.with_claim(Arc::clone(&claim)));
 
             let result = tokio::select! {
                 res = handler.execute(arguments, &ctx) => res,
@@ -6813,7 +7104,9 @@ rbac:
     /// daemon still could not be stopped, because
     /// `SessionManager::close_all` starts by taking the lock that
     /// `SessionManager::exec` holds for the WHOLE of a remote command, and
-    /// `sessions.timeout_secs` defaults to 1800 s.
+    /// `limits.command_timeout_seconds` defaults to 1800 s. (This named a
+    /// `sessions.*` key that no schema accepts; see `RESOURCE_CLOSE_GRACE`,
+    /// which states the measurement and why the old name is not repeated.)
     ///
     /// Measured against a real host before the bound, one session running
     /// `sleep 45` whose client had already closed its socket: the session
@@ -6909,6 +7202,1286 @@ rbac:
                  the un-killable daemon through this door"
             );
         }
+    }
+
+    // ====================================================================
+    // T45 (audit-honesty wave) — the shutdown's line for a call in flight
+    // ====================================================================
+
+    /// A config whose audit writer really writes, into a tempdir.
+    ///
+    /// `test_config()` above has `enabled: false`, so it produces no writer
+    /// task at all and these tests would read an empty string whatever the
+    /// code did. Rotation and retention are off because these tests read the
+    /// live file — same choice, same reason, as the HTTP drain test's
+    /// `audited_config`.
+    fn audited_shutdown_config(path: std::path::PathBuf) -> Config {
+        Config {
+            audit: AuditConfig {
+                enabled: true,
+                path,
+                max_size_mb: 0,
+                retain_days: 0,
+            },
+            ..test_config()
+        }
+    }
+
+    /// Read `audit.log` back, as a consumer would.
+    ///
+    /// `unwrap_or_default` and not `expect`: a disabled logger never creates
+    /// the file, and "no file" and "empty file" are the same answer to the
+    /// question these tests ask.
+    fn audit_lines(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// **The defect this wave closes, read off the file rather than asserted
+    /// about a return value.**
+    ///
+    /// Wave 4 bounded the MCP teardown and measured the price: two audit
+    /// lines before the bound, one after, the lost one being
+    /// `ssh_session_exec` with `duration_ms: 45003`. The cause is not a
+    /// closed writer — the event is built after the command returns, so an
+    /// abandoned call never had one — which is why the fix has to BUILD a
+    /// line from a registry rather than keep the channel open longer.
+    ///
+    /// So this asserts on the JSONL: one line, `command_interrupted`, the
+    /// shutdown sentinel in `tool_name`, the call's host, the tool and its
+    /// arguments in `command`, and **neither `exit_code` nor `duration_ms`
+    /// anywhere in the raw text**. The last two are the point of the
+    /// variant: a `0` there would be a verdict on a fact nobody established.
+    ///
+    /// What it does not cover, said rather than implied: the wiring inside
+    /// `serve` and `serve_with_shutdown`. Driving a real in-flight command
+    /// through either needs a remote host; the ordering of the two
+    /// statements is pinned as source text by
+    /// `the_shutdown_emission_precedes_the_audit_close_on_both_teardowns`.
+    #[tokio::test]
+    async fn a_call_still_in_flight_at_shutdown_leaves_one_line_with_no_exit_code() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        // A call that was handed to a handler and has not come back: the
+        // claim is still held when the shutdown snapshot runs.
+        let claim = server.in_flight.register(
+            "ssh_session_exec",
+            Some(&json!({
+                "host": "raspberry",
+                "session_id": "t45-0",
+                "command": "sleep 45",
+            })),
+        );
+        assert_eq!(
+            server.in_flight.len(),
+            1,
+            "the call must be registered before the snapshot, or this test proves nothing"
+        );
+
+        server.audit_interrupted_in_flight();
+        assert_eq!(
+            server.in_flight.len(),
+            0,
+            "the snapshot must TAKE the entry, so a handler finishing afterwards cannot \
+             write a second line for the same call"
+        );
+        drop(claim);
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one abandoned call must leave exactly one line; got {lines:?}"
+        );
+        let event: Value = serde_json::from_str(&lines[0])
+            .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {:?}", lines[0]));
+
+        assert_eq!(event["event_type"], "command_interrupted");
+        assert_eq!(event["tool_name"], crate::security::SHUTDOWN_TOOL);
+        assert_eq!(
+            event["host"], "raspberry",
+            "the host is captured before `registry.execute` consumes the arguments"
+        );
+        // And the OTHER population on the same line shape, which this test
+        // did not show: a call that carries no `host` argument at all lands
+        // on the sentinel. `NO_HOST`'s own doc says the shutdown emitter is
+        // armed for every tool and that `ssh_exec_multi` declares `hosts`
+        // and no `host`, so this is the reachable case rather than a
+        // hypothetical one — and the one documented line above carries a
+        // host, so nothing pinned it.
+        let hostless = server
+            .in_flight
+            .register("ssh_exec_multi", Some(&json!({"hosts": ["pi-a", "pi-b"]})));
+        let calls = server.in_flight.take_all();
+        drop(hostless);
+        assert_eq!(calls.len(), 1, "one registered call");
+        assert_eq!(
+            calls[0].host,
+            crate::security::NO_HOST,
+            "a call that names several machines and no `host` argument writes the sentinel: \
+             the machines are inside `command`, which is {:?}",
+            calls[0].operation
+        );
+        assert!(
+            calls[0].operation.contains("hosts"),
+            "and `command` is where a reader finds them: {:?}",
+            calls[0].operation
+        );
+        assert_eq!(
+            event["command"]
+                .as_str()
+                .expect("command must be a string")
+                .split_once(' ')
+                .map(|(tool, _)| tool),
+            Some("ssh_session_exec"),
+            "`tool_name` is the shutdown, so `command` is the only field naming the tool"
+        );
+        assert!(
+            event["result"]["Interrupted"]["reason"].is_string(),
+            "the result must be the Interrupted variant, not Error: an auditor filtering \
+             `.result.Error` is asking which commands FAILED"
+        );
+        assert!(
+            !lines[0].contains("exit_code"),
+            "no exit code was read, so none may appear: {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("duration_ms"),
+            "how long we waited before giving up is a fact about the shutdown, not about \
+             the command: {:?}",
+            lines[0]
+        );
+    }
+
+    /// **The order, OBSERVED at the moment of the write.**
+    ///
+    /// Two previous versions of this test asserted an order their assertions
+    /// could not see. The first dropped the claim by hand and then called
+    /// `log_success`. The second went through the real facade but still only
+    /// looked at the registry **after** `log_success` returned — and round 2
+    /// of the review proved that blind by moving the claim below the
+    /// `log(..)` call and watching everything stay green. Both counter-proofs
+    /// deleted the claim, which proves "it claims", never "it claims first".
+    ///
+    /// So this one does not infer the order, it observes it. `AuditLogger`
+    /// carries a write-time hook of the same kind as its injected clock, and
+    /// the hook reads the registry at the instant the line is written. If the
+    /// claim moves below the write, the hook sees `Some(0)` and the test
+    /// fails with a message about what it actually saw.
+    #[tokio::test]
+    async fn the_facade_claims_the_write_before_it_writes() {
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        let calls = InFlightCalls::default();
+        let claim = StdArc::new(calls.register("ssh_exec", Some(&json!({"host": "raspberry"}))));
+
+        // What the hook saw, at the instant `log` was entered.
+        let seen: StdArc<StdMutex<Vec<Option<u64>>>> = StdArc::new(StdMutex::new(Vec::new()));
+
+        let mut logger = AuditLogger::for_test();
+        {
+            let seen = StdArc::clone(&seen);
+            let claim = StdArc::clone(&claim);
+            logger.observe_writes(StdArc::new(move |_event: &crate::security::AuditEvent| {
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(claim.events_recorded());
+            }));
+        }
+
+        let security = crate::config::SecurityConfig::default();
+        let base = crate::domain::ExecuteCommandUseCase::new(
+            Arc::new(CommandValidator::new(&security)),
+            Arc::new(Sanitizer::from_config(&security.sanitize)),
+            Arc::new(logger),
+            Arc::new(CommandHistory::with_defaults()),
+        );
+        let per_call = base.with_claim(StdArc::clone(&claim));
+
+        assert_eq!(
+            claim.events_recorded(),
+            Some(0),
+            "nothing is recorded before the facade runs"
+        );
+
+        per_call.log_success("ssh_exec", "raspberry", "uptime", 0, 12);
+
+        let seen = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the facade must have written exactly one line"
+        );
+        assert_eq!(
+            seen[0],
+            Some(1),
+            "AT THE MOMENT the line was written the call must already be counted; \
+             {seen:?} means the claim happens after the write, which is the order this \
+             whole scheme exists to invert"
+        );
+
+        // And the entry is still there, which is the round-2 change: a write
+        // transitions the call, it does not make it unreportable.
+        assert_eq!(
+            claim.events_recorded(),
+            Some(1),
+            "a write must not remove the entry: a multi-event call has to stay reportable"
+        );
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// **A call that has already written is still reported, and its line
+    /// carries HOW MANY lines it had written.**
+    ///
+    /// Two findings in one test. Round 2's: releasing the claim on the first
+    /// write made a multi-event call unreportable from its first event on, so
+    /// a shutdown between host 1 and host 2 of an `ssh_metrics_multi` wrote
+    /// **zero** lines where the first revision wrote one — nothing false, a
+    /// line missing, which is this task's original defect. Round 3's: the
+    /// count belongs in a FIELD. It was briefly interpolated into the
+    /// `reason` sentence, which made a `jq` consumer regex an integer out of
+    /// prose the next commit could reword, so both assertions below are on
+    /// `events_recorded` and the `reason` is asserted to be the same stable
+    /// phrase on both lines.
+    #[tokio::test]
+    async fn a_call_that_already_wrote_is_reported_with_its_event_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        // Two calls: one that has recorded nothing, one that has recorded two
+        // results and not returned — the multi-host shape.
+        let untouched = Arc::new(
+            server
+                .in_flight
+                .register("ssh_exec", Some(&json!({"host": "pi-a"}))),
+        );
+        let halfway = Arc::new(server.in_flight.register(
+            "ssh_metrics_multi",
+            Some(&json!({"hosts": ["pi-b", "pi-c"]})),
+        ));
+        let per_call = server.execute_use_case.with_claim(Arc::clone(&halfway));
+        per_call.log_success("ssh_metrics_multi", "pi-b", "uptime", 0, 7);
+        per_call.log_failure("ssh_metrics_multi", "pi-c", "uptime", "unreachable");
+
+        server.audit_interrupted_in_flight();
+        drop(untouched);
+        drop(halfway);
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        let events: Vec<Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("audit line must be JSONL"))
+            .collect();
+        let interrupted: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["event_type"] == "command_interrupted")
+            .collect();
+        assert_eq!(
+            interrupted.len(),
+            2,
+            "BOTH calls must be reported, including the one that already wrote: {lines:?}"
+        );
+
+        let before = interrupted
+            .iter()
+            .find(|e| e["command"].as_str().unwrap_or("").starts_with("ssh_exec "))
+            .expect("the untouched call must have a line");
+        assert_eq!(
+            before["result"]["Interrupted"]["events_recorded"], 0,
+            "a call that recorded nothing says so IN A FIELD, not inside a sentence"
+        );
+
+        let after = interrupted
+            .iter()
+            .find(|e| {
+                e["command"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("ssh_metrics_multi ")
+            })
+            .expect("the half-written call must have a line too");
+        assert_eq!(
+            after["result"]["Interrupted"]["events_recorded"], 2,
+            "and the half-written call must carry its COUNT, not a different sentence: a \
+             consumer that wants N must not have to regex it out of prose"
+        );
+        assert_eq!(
+            after["result"]["Interrupted"]["reason"],
+            crate::security::INTERRUPTED_BY_SHUTDOWN,
+            "the reason is one stable phrase on both, with no number in it"
+        );
+        assert_eq!(
+            before["result"]["Interrupted"]["reason"],
+            crate::security::INTERRUPTED_BY_SHUTDOWN
+        );
+    }
+
+    /// **The case `in_flight.finish()` exists for, and it was coverable all
+    /// along.**
+    ///
+    /// The claim lives in an `Arc` so it can travel into a handler's spawned
+    /// sub-task; the price is that `Drop` only removes the entry once the
+    /// LAST clone is gone, and a handler that parked a `ToolContext` clone in
+    /// a detached task holds one. `handle_tools_call` therefore calls
+    /// `finish()` explicitly after `execute`, which bounds the entry's life
+    /// to the call whatever the handler did with its context.
+    ///
+    /// Round 3's report said this case was untested and implied it needed a
+    /// remote host. It did not: a parked `tokio::spawn` holding the `Arc` is
+    /// the whole scenario, and it is fifteen lines.
+    ///
+    /// **What this proves, exactly, because the division matters.** It proves
+    /// the MECHANISM — `finish()` removes the entry while another `Arc` is
+    /// alive — and not the WIRING. Measured: deleting
+    /// `in_flight.finish();` from `handle_tools_call` leaves this test green,
+    /// because it calls `finish()` itself. The wiring is covered by
+    /// `both_dispatch_paths_register_the_call_they_are_about_to_run`, whose
+    /// index quadruple counts that literal exactly once and which does redden
+    /// on that deletion (measured). Saying so here rather than letting the
+    /// name imply otherwise: a test whose docstring claims what its
+    /// assertions cannot see is the defect this task produced three times.
+    #[tokio::test]
+    async fn finish_bounds_the_entry_even_when_a_detached_task_still_holds_the_claim() {
+        let calls = InFlightCalls::default();
+        let claim = Arc::new(calls.register("ssh_exec", Some(&json!({"host": "raspberry"}))));
+        assert_eq!(calls.len(), 1);
+
+        // A handler that moved its context — and so the claim — into a task
+        // that outlives the call. Parked for ever; nothing joins it.
+        let parked = Arc::clone(&claim);
+        let detached = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(parked);
+        });
+
+        // The call returns. `drop(claim)` alone would NOT remove the entry:
+        // the detached task still holds an `Arc`.
+        claim.finish();
+        drop(claim);
+
+        assert_eq!(
+            calls.len(),
+            0,
+            "the entry must be gone when the CALL ends, not when the last Arc does: \
+             otherwise the shutdown reports a finished call as interrupted"
+        );
+        assert!(
+            !detached.is_finished(),
+            "the detached task must still be holding its clone, or this test proves nothing"
+        );
+        detached.abort();
+    }
+
+    /// The registry primitive on its own: `remove` returns the entry, so of
+    /// two racers exactly one is handed it.
+    ///
+    /// Named for what it proves. It is NOT coverage of the production
+    /// ordering — that is the test above — and it does not read the audit
+    /// file, so it does not claim to be about a journal either.
+    #[test]
+    fn the_registry_hands_one_entry_to_exactly_one_claimant() {
+        let calls = InFlightCalls::default();
+        let claim = calls.register("ssh_exec", Some(&json!({"host": "raspberry"})));
+        assert_eq!(calls.len(), 1);
+
+        let first = calls.take_all();
+        assert_eq!(first.len(), 1, "the first to drain gets the entry");
+
+        let second = calls.take_all();
+        assert!(second.is_empty(), "the second gets nothing");
+
+        drop(claim);
+        assert_eq!(
+            calls.len(),
+            0,
+            "and the claim's own removal is a no-op by then"
+        );
+    }
+
+    /// **No value of any shape reaches the shutdown's line.**
+    ///
+    /// Round 2's acceptance, end to end: through the registry, the emission,
+    /// the use-case facade and the writer task, read back off disk. The three
+    /// shapes are the three that defeated the previous versions:
+    ///
+    /// - `db_password`, a string whose key matches a keyword — caught by the
+    ///   round-1 redaction, and the tool (`ssh_db_dump`) is not destructive,
+    ///   so the CLI gate had never rendered it;
+    /// - `password` holding a NUMBER — the value-type exemption was the
+    ///   caller's choice, so round 1 wrote it as-is;
+    /// - `from_literal: [{key, value}]`, where no name matches a keyword at
+    ///   all, which is the defeat a keyword list cannot avoid.
+    ///
+    /// All three are absent for one reason now: this sink renders argument
+    /// **names**.
+    #[tokio::test]
+    async fn an_abandoned_call_does_not_write_its_password_to_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        let a = Arc::new(server.in_flight.register(
+            "ssh_db_dump",
+            Some(&json!({
+                "host": "raspberry",
+                "database": "prod",
+                "db_password": "S3cr3t!x",
+            })),
+        ));
+        let b = Arc::new(
+            server
+                .in_flight
+                .register("ssh_exec", Some(&json!({"password": 12_345_678}))),
+        );
+        let c = Arc::new(server.in_flight.register(
+            "ssh_k8s_create_secret",
+            Some(&json!({"from_literal": [{"key": "pw", "value": "N0tOnDisk"}]})),
+        ));
+
+        server.audit_interrupted_in_flight();
+        drop((a, b, c));
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        let whole = lines.join("\n");
+
+        for secret in ["S3cr3t!x", "12345678", "N0tOnDisk"] {
+            assert!(
+                !whole.contains(secret),
+                "{secret} must not be on any line: {whole}"
+            );
+        }
+        // And not because the lines are empty: the names ARE there.
+        assert!(
+            whole.contains("ssh_db_dump {database,db_password,host}"),
+            "{whole}"
+        );
+        assert!(whole.contains("ssh_exec {password}"), "{whole}");
+        assert!(
+            whole.contains("ssh_k8s_create_secret {from_literal}"),
+            "{whole}"
+        );
+    }
+
+    /// A caller cannot make its own call look hostless.
+    ///
+    /// The only new test of round 0 used `host: "raspberry"`, so the adverse
+    /// case was untested on this sink even though `audited_host` was written
+    /// for it. `NO_HOST`'s whole justification is that the angle brackets
+    /// belong to the writer.
+    #[tokio::test]
+    async fn a_forged_sentinel_in_the_host_argument_cannot_pass_for_a_hostless_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        let claim = server
+            .in_flight
+            .register("ssh_exec", Some(&json!({"host": crate::security::NO_HOST})));
+
+        server.audit_interrupted_in_flight();
+        drop(claim);
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(lines.len(), 1, "got {lines:?}");
+        let event: Value = serde_json::from_str(&lines[0]).expect("audit line must be JSONL");
+        assert_ne!(
+            event["host"],
+            crate::security::NO_HOST,
+            "a caller-supplied `<no-host>` must not render as the writer's sentinel: {:?}",
+            lines[0]
+        );
+        assert_eq!(
+            event["host"], "\\u{3c}no-host\\u{3e}",
+            "it is escaped, and visibly so: {:?}",
+            lines[0]
+        );
+    }
+
+    /// An empty registry writes **nothing**, and that is a contract.
+    ///
+    /// Four assertions elsewhere count the lines in `audit.log` exactly
+    /// after a teardown — `tests/daemon_integration.rs` twice,
+    /// `crate::mcp::transport::http` and `src/cli/runner.rs` once each —
+    /// and every ordinary shutdown has an empty registry. An unconditional
+    /// line would redden all four and tell an operator that something was
+    /// abandoned on every clean stop.
+    #[tokio::test]
+    async fn an_empty_registry_writes_no_line_at_shutdown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        assert_eq!(server.in_flight.len(), 0, "nothing was registered");
+        server.audit_interrupted_in_flight();
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        assert!(
+            audit_lines(&audit_path).is_empty(),
+            "a clean shutdown must say nothing: {:?}",
+            audit_lines(&audit_path)
+        );
+    }
+
+    /// The wiring, as source text, because nothing else here can see it.
+    ///
+    /// There are two teardowns with an audit channel to close, they are
+    /// different code, and the emission is worthless one statement too late:
+    /// after `close_audit()` the logger still writes its `tracing` line and
+    /// the file sink is gone, so the test above would stay green while
+    /// `audit.log` got nothing. Neither call can be driven from a unit test
+    /// — one needs a transport and a live remote command, the other a bound
+    /// socket and the same — so the order is pinned where it is written.
+    ///
+    /// A source-text guard is the weakest kind of test. It is still stronger
+    /// than the runtime test that cannot be written here.
+    #[test]
+    fn the_shutdown_emission_precedes_the_audit_close_on_both_teardowns() {
+        // `include_str!` pulls in this test too, whose own assertion
+        // arguments are the literals searched for below; scanning the whole
+        // file would make the guard match itself.
+        let src = include_str!("server.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+        let from_fn = production
+            .find("pub async fn serve<T: Transport>(")
+            .expect("serve must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    /// Join every in-flight session task")
+            .expect("the drain helpers must follow serve");
+        let body = &body[..to_next_fn];
+
+        // `matches(..).count() == 1` and not `find`, which is the failure
+        // mode wave 4 recorded: with `find` a SECOND exit added later — an
+        // early `return` that closed the channel without emitting — would
+        // leave this guard green, because `find` keeps answering about the
+        // first pair.
+        assert_eq!(
+            body.matches("self.audit_interrupted_in_flight();").count(),
+            1,
+            "serve must audit the calls its teardown abandoned, exactly once"
+        );
+        assert_eq!(
+            body.matches("self.close_audit();").count(),
+            1,
+            "serve must close the audit channel exactly once: a second exit that closed it \
+             without emitting first would be a silent loss"
+        );
+        let emit = body
+            .find("self.audit_interrupted_in_flight();")
+            .expect("just counted it");
+        let close = body.find("self.close_audit();").expect("just counted it");
+        assert!(
+            emit < close,
+            "serve must emit the interrupted lines BEFORE closing the audit channel: after \
+             it, `AuditLogger::log` reaches `tracing` and never the file"
+        );
+
+        // The HTTP transport does not run `serve` at all: it has its own,
+        // three-step teardown.
+        let http = include_str!("transport/http.rs");
+        let (http_production, _) = http
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("http.rs must have the same test boundary");
+        assert_eq!(
+            http_production
+                .matches("audit_owner.audit_interrupted_in_flight();")
+                .count(),
+            1,
+            "the HTTP teardown must audit the calls it abandoned too, exactly once"
+        );
+        assert_eq!(
+            http_production
+                .matches("audit_owner.close_audit();")
+                .count(),
+            1,
+            "and close its channel exactly once"
+        );
+        let http_emit = http_production
+            .find("audit_owner.audit_interrupted_in_flight();")
+            .expect("just counted it");
+        let http_close = http_production
+            .find("audit_owner.close_audit();")
+            .expect("just counted it");
+        assert!(
+            http_emit < http_close,
+            "the HTTP teardown must emit before closing the channel, for the same reason"
+        );
+    }
+
+    // ====================================================================
+    // T53 (audit-honesty wave) — the tunnels the shutdown aborts
+    // ====================================================================
+
+    fn tunnel_info(id: &str, host: &str) -> crate::domain::TunnelInfo {
+        crate::domain::TunnelInfo {
+            id: id.to_string(),
+            host: host.to_string(),
+            local_port: 8080,
+            remote_host: "localhost".to_string(),
+            remote_port: 80,
+            direction: crate::domain::TunnelDirection::Local,
+            created_at: std::time::Instant::now(),
+            age_seconds: 0,
+        }
+    }
+
+    /// **A tunnel open at shutdown leaves a line, read off the JSONL.**
+    ///
+    /// `TunnelManager::close_all` was `drain()` + `abort()` with **no log of
+    /// any kind** — not even `tracing` — so a port forwarded to a production
+    /// database was torn down and the trail recorded nothing at all. The
+    /// assertions are on the file: the reaper sentinel in `tool_name`, the
+    /// `shutdown` reason and the tunnel id in `command`, the host, and no
+    /// `exit_code` in the raw text.
+    ///
+    /// Counter-proof: delete the `self.audit_logger.log(..)` call in
+    /// `audit_tunnels_at_shutdown` and `lines.len()` is 0.
+    #[tokio::test]
+    async fn a_tunnel_open_at_shutdown_leaves_one_line_naming_the_reaper() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        server
+            .tunnel_manager
+            .register(tunnel_info("tunnel-pi-8080-80", "raspberry"), {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                let handle = tokio::spawn(async move {
+                    let _ = rx.await;
+                });
+                drop(tx);
+                handle
+            })
+            .await
+            .expect("the manager holds 20, so the first registration must succeed");
+
+        let open = server.tunnel_manager.list().await;
+        assert_eq!(
+            open.len(),
+            1,
+            "the tunnel must be registered before the snapshot, or this test proves nothing"
+        );
+        server.audit_tunnels_at_shutdown(&open);
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one open tunnel must leave exactly one line; got {lines:?}"
+        );
+        let event: Value = serde_json::from_str(&lines[0])
+            .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {:?}", lines[0]));
+
+        assert_eq!(event["event_type"], "state_change");
+        assert_eq!(event["tool_name"], crate::security::RESOURCE_REAPER_TOOL);
+        assert_eq!(event["host"], "raspberry");
+        assert_eq!(
+            event["command"], "<resource-reaper> reason=shutdown tunnel_id=tunnel-pi-8080-80",
+            "`tunnel_id=` is what tells a tunnel line from a session one, since both carry \
+             the same `tool_name`; the host is in the `host` field, asserted above, and in \
+             `command` it would be a second source for one fact"
+        );
+        assert!(!lines[0].contains("exit_code"), "nothing ran: {}", lines[0]);
+    }
+
+    /// The ordinary shutdown has no tunnels and must stay silent, which the
+    /// four exact-line-count assertions elsewhere depend on.
+    #[tokio::test]
+    async fn a_shutdown_with_no_tunnels_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        server.audit_tunnels_at_shutdown(&server.tunnel_manager.list().await);
+
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        assert!(
+            audit_lines(&audit_path).is_empty(),
+            "no tunnel, no line: {:?}",
+            audit_lines(&audit_path)
+        );
+    }
+
+    /// The wiring for the tunnel lines, as source text.
+    ///
+    /// `serve` needs a transport and an accept loop, so the test above calls
+    /// the emitter directly and this pins that `serve` calls it, exactly
+    /// once, **before** the bounded close that aborts the tasks it is about
+    /// to describe.
+    ///
+    /// **It does NOT assert anything about `close_audit()`**, and the
+    /// previous version of this paragraph said "and therefore long before
+    /// `close_audit()`" as if it did. That ordering is pinned by a different
+    /// guard — `the_shutdown_emission_precedes_the_audit_close_on_both_teardowns`
+    /// — and the inference here would hold only because the tunnel close
+    /// precedes the audit close in the same body, which is a fact neither of
+    /// this test's three assertions looks at.
+    ///
+    /// Anchored on `let open_tunnels =` rather than on
+    /// `self.tunnel_manager.list()`: the sibling guard
+    /// `every_close_all_in_the_teardown_is_bounded` counts occurrences of
+    /// the three `self.<pool>.close_all()` literals in this same body and
+    /// asserts each appears exactly once, so an anchor here that quoted one
+    /// of them would make that guard fail with a message about an unbounded
+    /// close.
+    #[test]
+    fn serve_audits_the_open_tunnels_before_it_aborts_them() {
+        let src = include_str!("server.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+        let from_fn = production
+            .find("pub async fn serve<T: Transport>(")
+            .expect("serve must exist");
+        let body = &production[from_fn..];
+        let to_next_fn = body
+            .find("\n    /// Join every in-flight session task")
+            .expect("the drain helpers must follow serve");
+        let body = &body[..to_next_fn];
+
+        assert_eq!(
+            body.matches("self.audit_tunnels_at_shutdown(").count(),
+            1,
+            "serve must audit the tunnels its teardown aborts, exactly once"
+        );
+        let emit = body
+            .find("self.audit_tunnels_at_shutdown(")
+            .expect("just counted it");
+        let snapshot = body
+            .find("let open_tunnels =")
+            .expect("the snapshot must be taken in serve's body");
+        let abort = body
+            .find("Self::close_bounded(\"tunnels\"")
+            .expect("the bounded tunnel close must exist");
+        assert!(
+            snapshot < emit && emit < abort,
+            "the order must be snapshot, then emit, then abort: a line written after the \
+             abort describes tunnels the manager has already forgotten"
+        );
+    }
+
+    /// **Every writing facade claims before it logs, as source text.**
+    ///
+    /// The runtime test above observes ONE facade. This one covers all of
+    /// them.
+    ///
+    /// **It used to promise the opposite of what it did, and the final review
+    /// is what established that.** The previous version held a hard-coded
+    /// list of five writer signatures and asserted
+    /// `count("self.claim_this_write();") == 5`. Walk the two cases it claims
+    /// to separate:
+    ///
+    /// - a sixth facade added **with** a correct claim → the count becomes 6,
+    ///   the assertion fails, and its message says "no more and no fewer". So
+    ///   the guard **reddened on the correct addition**;
+    /// - a sixth facade added **with no claim at all** → the count stays 5,
+    ///   the hard-coded list does not mention the new facade, nothing looks
+    ///   at it. So the guard **passed on the defect**, which is exactly the
+    ///   case its own docstring named as the reason it exists.
+    ///
+    /// Inverted, in other words — and a guard that is wrong in that
+    /// direction is worse than none, because it is believed. The list is now
+    /// **discovered from the source**: every method in the production half
+    /// whose body reaches `self.audit_logger` is a writing facade, and the
+    /// count it is compared against comes from the same walk.
+    ///
+    /// **Two shapes escape that discovery, and the promise is narrowed
+    /// rather than the rule widened.** An earlier version of this paragraph
+    /// said "a new one is in scope the moment it is written", which the rule
+    /// does not hold: a facade that binds the logger first
+    /// (`let l = &self.audit_logger; l.log(..)`) passes the `ends_with('&')`
+    /// test and reads as a clone site, and a facade declared
+    /// `pub async fn` / `pub const fn` / `pub(super) fn` is not one of the
+    /// three signature markers the walk looks for, so its body is absorbed
+    /// into the previous method's slice. Both are green-on-the-defect.
+    /// Widening the rule means parsing Rust in a test; what it buys is
+    /// coverage of two shapes that no facade in this module uses, so the
+    /// promise is corrected instead: **every facade written in the three
+    /// shapes this module uses is in scope**, and a facade written in
+    /// another shape is not.
+    ///
+    /// `log_interrupted` is excluded **by name**, and that is the one
+    /// hard-coded element left, deliberately: it IS the shutdown's write, so
+    /// a claim there would count the shutdown's own line against the call it
+    /// is reporting. Excluding it by name means a reader can see the single
+    /// exception rather than infer it.
+    ///
+    /// **What it does now, stated exactly, because the previous docstring did
+    /// not.** It reddens on **any** change to the set of writing facades,
+    /// claimed or not, and the message says which case you are in. Adding
+    /// one is then a deliberate two-step: put the claim in, add the name to
+    /// the census. Skip the claim and the per-facade assertion below fires
+    /// instead, with "writes an audit line, so it must claim this write" —
+    /// so an unclaimed facade cannot be landed either way. A facade
+    /// *disappearing* reddens too, which is how a handler moving onto the
+    /// facades gets noticed rather than silently shrinking the count.
+    ///
+    /// Counter-proof, run isolated, with the old guard's arithmetic measured
+    /// beside it. Adding a sixth facade `log_nothing` that writes and does
+    /// **not** claim: this test fails naming `log_nothing`, while the old
+    /// assertion was `count("self.claim_this_write();") == 5` and the count
+    /// **stayed 5** — measured — so it passed. Giving `log_nothing` its
+    /// claim takes the count to 6, which made the **old** assertion fail on
+    /// the correct addition. Both halves measured; that is the inversion.
+    #[test]
+    fn every_writing_facade_claims_before_it_logs() {
+        let src = include_str!("../domain/use_cases/execute_command.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // Every method of the production half, sliced between consecutive
+        // signatures at method indentation. Both `pub fn` and `fn`, because
+        // `record_success_redacted` — where `log_success` and
+        // `process_success` keep their shared claim — is private.
+        let mut starts: Vec<usize> = Vec::new();
+        for marker in ["\n    pub fn ", "\n    pub(crate) fn ", "\n    fn "] {
+            let mut from = 0_usize;
+            while let Some(at) = production[from..].find(marker) {
+                starts.push(from + at + 1);
+                from = from + at + 1;
+            }
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        assert!(
+            starts.len() > 5,
+            "the method walk found {} signatures, which cannot be right",
+            starts.len()
+        );
+
+        let name_of = |body: &str| -> String {
+            body.split_once("fn ")
+                .and_then(|(_, rest)| rest.split_once('('))
+                .map_or_else(|| "<unnamed>".to_string(), |(n, _)| n.trim().to_string())
+        };
+
+        // A writing facade is any method that reaches the audit logger to
+        // WRITE. `&self.audit_logger` is a clone site, not a write — that is
+        // how `with_claim` got into the first version of this list — and the
+        // test for it is the preceding byte rather than `.log(`, because
+        // `rustfmt` leaves `self.audit_logger` alone on its line in
+        // `log_denied` and anchoring on `.log(` misses it. The two shapes
+        // together are the reason this is a predicate and not a literal.
+        let writes_to_the_logger = |body: &str| -> bool {
+            let mut from = 0_usize;
+            while let Some(at) = body[from..].find("self.audit_logger") {
+                let at = from + at;
+                if !body[..at].ends_with('&') {
+                    return true;
+                }
+                from = at + 1;
+            }
+            false
+        };
+
+        let mut writers: Vec<String> = Vec::new();
+        let mut bodies: Vec<(String, &str)> = Vec::new();
+        for (i, start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).copied().unwrap_or(production.len());
+            let body = &production[*start..end];
+            if !writes_to_the_logger(body) {
+                continue;
+            }
+            let name = name_of(body);
+            if name == "log_interrupted" {
+                continue;
+            }
+            writers.push(name.clone());
+            bodies.push((name, body));
+        }
+
+        writers.sort();
+        assert_eq!(
+            writers,
+            [
+                "log_confirmed",
+                "log_denied",
+                "log_failure",
+                "log_state_change",
+                "record_success_redacted",
+            ],
+            "the census this guard was written against. A NEW writing facade is not a \
+             failure — give it a claim, then add it here. This list is checked so that a \
+             facade DISAPPEARING is noticed too."
+        );
+        assert_eq!(
+            production.matches("self.claim_this_write();").count(),
+            writers.len(),
+            "one claim per discovered writing facade, no more and no fewer"
+        );
+
+        for (writer, body) in bodies {
+            let claim = body.find("self.claim_this_write();").unwrap_or_else(|| {
+                panic!("{writer} writes an audit line, so it must claim this write")
+            });
+            // The RECEIVER, not the call: `rustfmt` leaves
+            // `self.audit_logger` alone on its line in `log_denied`, so a
+            // guard anchored on `self.audit_logger.log(` fails there for a
+            // formatting reason and says "must reach the audit logger",
+            // which is the misleading message wave 4 already paid for once.
+            let write = body
+                .find("self.audit_logger")
+                .unwrap_or_else(|| panic!("{writer} must reach the audit logger"));
+            assert!(
+                claim < write,
+                "{writer}: the claim must precede the write. Below it, a shutdown snapshot \
+                 landing between the two reports a call that has already written, with the \
+                 reason that says nothing was recorded"
+            );
+        }
+
+        assert!(
+            !production[production
+                .find("pub fn log_interrupted(")
+                .expect("log_interrupted must exist")..]
+                .split("\n    pub fn ")
+                .next()
+                .unwrap_or("")
+                .contains("self.claim_this_write();"),
+            "log_interrupted must NOT claim: it is the shutdown's own write, and claiming \
+             there would count it against the call it is reporting"
+        );
+    }
+
+    /// **A handler that writes its OWN events is reported with their count,
+    /// not with zero.**
+    ///
+    /// The sibling test above drives the facades. This one drives the path
+    /// the six file-transfer handlers actually take: build their own
+    /// `AuditEvent` and hand it straight to `ctx.audit_logger.log(..)`,
+    /// which reaches no facade. Before the fix that left the counter at 0,
+    /// so a `daemon stop` during `ssh_files_write` at file 21 of 50 put 20
+    /// lines on disk **and** a line saying none had been recorded.
+    ///
+    /// Shaped as `ssh_files_write`'s loop — two files written, then the
+    /// shutdown — because that is the materially reachable case: the other
+    /// five handlers write once per call on mutually exclusive branches.
+    ///
+    /// Counter-proof: delete the `claim_this_write()` line above either
+    /// `ctx.audit_logger.log(` in `ssh_files_write.rs` and
+    /// `events_recorded` reads 1 instead of 2.
+    #[tokio::test]
+    async fn a_handler_writing_its_own_events_is_not_reported_as_having_written_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (server, audit_task) = McpServer::new(audited_shutdown_config(audit_path.clone()));
+        let writer = tokio::spawn(
+            audit_task
+                .expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+
+        let claim = Arc::new(server.in_flight.register(
+            "ssh_files_write",
+            Some(&json!({"host": "raspberry", "files": ["a", "b", "c"]})),
+        ));
+        let per_call = server.execute_use_case.with_claim(Arc::clone(&claim));
+
+        // Two of the three files written, each exactly as the handler does
+        // it: claim, then a hand-built event straight to the logger.
+        for path in ["/tmp/a", "/tmp/b"] {
+            per_call.claim_this_write();
+            server.audit_logger.log(
+                "ssh_files_write",
+                crate::security::AuditEvent::new(
+                    "raspberry",
+                    &format!("SFTP_WRITE {path}"),
+                    crate::security::CommandResult::Success {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                ),
+            );
+        }
+
+        server.audit_interrupted_in_flight();
+        drop(claim);
+        server.close_audit();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            3,
+            "two file writes plus the shutdown's line; got {lines:?}"
+        );
+        let shutdown: Value = serde_json::from_str(&lines[2])
+            .unwrap_or_else(|e| panic!("audit line must be JSONL: {e}"));
+        assert_eq!(shutdown["tool_name"], crate::security::SHUTDOWN_TOOL);
+        assert_eq!(
+            shutdown["result"]["Interrupted"]["events_recorded"], 2,
+            "the two lines above it are on disk, so `0` here would be a false line about a \
+             true one: {lines:?}"
+        );
+    }
+
+    /// **Every direct `audit_logger.log` in a handler claims itself first.**
+    ///
+    /// The sibling guard above covers the facades in
+    /// `ExecuteCommandUseCase`. This one covers the handlers that bypass
+    /// them: eleven production writes in six file-transfer handlers build
+    /// their own `AuditEvent` and call `ctx.audit_logger.log(..)` directly,
+    /// so `claim_this_write` was never reached and the shutdown line printed
+    /// `events_recorded: 0` beside lines those calls had already written.
+    ///
+    /// **A directory walk and not `include_str!`, deliberately.** The
+    /// defect's whole shape is "a write that nobody remembered to count", so
+    /// a guard listing the six known files would have the same shape: the
+    /// seventh handler to grow a direct write would be invisible to it. This
+    /// walks every `.rs` under `src/mcp/tool_handlers/` and checks each
+    /// occurrence, so a new one is covered the day it is written.
+    /// `CARGO_MANIFEST_DIR` is absolute, so the walk does not depend on the
+    /// working directory.
+    ///
+    /// It checks each site's PRECEDING text rather than counting, because a
+    /// count is satisfied by eleven claims in the wrong places. The claim
+    /// must be the nearest statement above the write.
+    ///
+    /// **Four direct writes sit outside this walk and are deliberately left
+    /// unclaimed**: `src/cli/runner.rs` has its own
+    /// `ctx.audit_logger.log(..)` calls, and they are not a live defect.
+    /// `ExecuteCommandUseCase::with_claim` is reached only from
+    /// `McpServer::handle_tools_call` and the tasks worker (both in this
+    /// file), so a call served by the CLI holds **no** claim: its
+    /// `in_flight` is `None`, `claim_this_write` is a no-op, and no
+    /// `command_interrupted` line is ever written about it. There is no
+    /// counter for them to be wrong about. If the CLI ever gains an
+    /// in-flight registry, those four join the rule — and the walk already
+    /// covers the directory they would have to move into.
+    #[test]
+    fn every_direct_audit_write_claims_itself_first() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tool_handlers");
+        let mut sites = 0_usize;
+        let mut files_with_sites: Vec<String> = Vec::new();
+
+        for entry in std::fs::read_dir(&dir).expect("the handler directory must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("handler must be readable");
+            // Production half only: a test that asserts on a handler's own
+            // audit event is not a write about somebody else's call.
+            let production = src
+                .split_once("#[cfg(test)]\nmod tests {")
+                .map_or(src.as_str(), |(before, _)| before);
+
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let mut from = 0_usize;
+            let mut in_this_file = 0_usize;
+            while let Some(at) = production[from..].find("ctx.audit_logger.log(") {
+                let at = from + at;
+                sites += 1;
+                in_this_file += 1;
+                // The three lines above this one must contain the claim. Three
+                // and not one, because `rustfmt` may put the comment that
+                // explains it in between.
+                let window_start = production[..at]
+                    .char_indices()
+                    .rev()
+                    .filter(|(_, c)| *c == '\n')
+                    .nth(2)
+                    .map_or(0, |(i, _)| i);
+                assert!(
+                    production[window_start..at].contains("claim_this_write()"),
+                    "{name}: the direct `audit_logger.log` at byte {at} must be immediately \
+                     preceded by `ctx.execute_use_case.claim_this_write();`, or the shutdown \
+                     reports this call as having recorded nothing while its line is on disk"
+                );
+                from = at + 1;
+            }
+            if in_this_file > 0 {
+                files_with_sites.push(format!("{name}:{in_this_file}"));
+            }
+        }
+
+        files_with_sites.sort();
+        assert_eq!(
+            sites, 11,
+            "the census the fix was measured against: eleven direct writes in six handlers, \
+             found {files_with_sites:?}. A new one is not a failure — add the claim, then this \
+             number. A DISAPPEARING one means a handler moved onto the facades, which is better; \
+             lower the number and say so."
+        );
+        assert_eq!(
+            files_with_sites,
+            [
+                "ssh_download.rs:1",
+                "ssh_file_write.rs:2",
+                "ssh_files_write.rs:2",
+                "ssh_ls.rs:2",
+                "ssh_sync.rs:2",
+                "ssh_upload.rs:2",
+            ],
+            "and they are in these six handlers only"
+        );
+    }
+
+    /// The other half of the wiring: the FEED.
+    ///
+    /// Round 1 of the review made the point that could not be argued with:
+    /// removing the `register` call reddened nothing, and the reason given
+    /// for not guarding it ("it would pin a location rather than a property")
+    /// applies word for word to the emission guard above, which was written
+    /// anyway. So the feed is guarded in the same style.
+    ///
+    /// Two sites, two shapes. In `handle_tools_call` the claim must be taken
+    /// BEFORE the call is dispatched, or there is nothing registered while
+    /// the command runs. In `handle_tools_call_async` it must be taken AFTER
+    /// the permit, or a task still queued on the semaphore is described as a
+    /// command that was abandoned mid-flight.
+    #[test]
+    fn both_dispatch_paths_register_the_call_they_are_about_to_run() {
+        let src = include_str!("server.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // --- the synchronous path ---
+        let from_fn = production
+            .find("async fn handle_tools_call(")
+            .expect("handle_tools_call must exist");
+        let sync_body = &production[from_fn..];
+        let to_next = sync_body
+            .find("\n    /// Whether THIS request declared the tasks extension.")
+            .expect("the tasks-extension accessor must follow handle_tools_call");
+        let sync_body = &sync_body[..to_next];
+
+        // An INDEX QUADRUPLE, not three presence checks. Round 2 made the
+        // point: the previous third assertion was `contains(..)`, so moving
+        // the dispatch out from under the claim while leaving the claim's
+        // text anywhere in the function kept the guard green — the exact risk
+        // this guard was added for.
+        for literal in [
+            ".register(&tool_name, call_params.arguments.as_ref())",
+            "ctx.execute_use_case.with_claim(",
+            ".execute(&call_params.name, call_params.arguments, &ctx)",
+            "in_flight.finish();",
+        ] {
+            assert_eq!(
+                sync_body.matches(literal).count(),
+                1,
+                "handle_tools_call must contain `{literal}` exactly once"
+            );
+        }
+        let register = sync_body
+            .find(".register(&tool_name, call_params.arguments.as_ref())")
+            .expect("just counted it");
+        let hand_over = sync_body
+            .find("ctx.execute_use_case.with_claim(")
+            .expect("just counted it");
+        let dispatch = sync_body
+            .find(".execute(&call_params.name, call_params.arguments, &ctx)")
+            .expect("just counted it");
+        let finish = sync_body
+            .find("in_flight.finish();")
+            .expect("just counted it");
+        assert!(
+            register < hand_over && hand_over < dispatch && dispatch < finish,
+            "the order must be register -> hand the claim to the context's use case -> \
+             dispatch -> finish. Registered after the dispatch, nothing is in the registry \
+             while the command runs; handed over after the dispatch, the handler's own write \
+             cannot count the call before it logs."
+        );
+
+        // --- the tasks-extension worker ---
+        let from_async = production
+            .find("async fn handle_tools_call_async(")
+            .expect("handle_tools_call_async must exist");
+        let async_body = &production[from_async..];
+        let to_next = async_body
+            .find("\n    fn handle_prompts_list(")
+            .expect("handle_prompts_list must follow handle_tools_call_async");
+        let async_body = &async_body[..to_next];
+
+        assert_eq!(
+            async_body
+                .matches("in_flight.register_rendered(in_flight_call)")
+                .count(),
+            1,
+            "the tasks worker must register the call exactly once"
+        );
+        let permit = async_body
+            .find("permit = concurrent_limit.acquire_owned()")
+            .expect("the worker must take a permit");
+        let register = async_body
+            .find("in_flight.register_rendered(in_flight_call)")
+            .expect("just counted it");
+        assert!(
+            permit < register,
+            "the worker must register only AFTER it holds a permit: a task still queued on \
+             the semaphore has not started, and calling it interrupted would be the same \
+             kind of false statement this whole event exists to remove"
+        );
     }
 
     /// D8: the destructive-op elicitation gate MUST resolve BEFORE a task

@@ -1,9 +1,9 @@
 //! In-process mock SSH server for integration tests.
 //!
 //! This file is intentionally NOT a test runner — it only exposes helper
-//! types used by `ssh_client_mock.rs` and `sftp_mock.rs`. The single
-//! `#[test]` at the bottom is just a smoke check so cargo doesn't warn
-//! that this binary contains zero tests.
+//! types used by `ssh_client_mock.rs`, `sftp_mock.rs` and
+//! `session_reaper_audit.rs`. The single `#[test]` at the bottom is just a
+//! smoke check so cargo doesn't warn that this binary contains zero tests.
 //!
 //! The server is built on `russh::server::Server` + `russh_sftp::server::run`
 //! and binds on `127.0.0.1:0` (ephemeral port) so concurrent tests do not
@@ -18,6 +18,33 @@
 //! - [`mock_host_config`] — `HostConfig` pointing at `127.0.0.1:<port>`
 //!   with `HostKeyVerification::Off`
 //! - [`mock_limits`] — short-timeout `LimitsConfig` for fast tests
+//!
+//! # The shell is PARTIAL — read this before using it
+//!
+//! `shell_request` + `data` make `SessionManager::create` succeed, and that
+//! is **all** they do. `data` answers a shell channel by echoing back every
+//! `---SSHB_…---` marker it is asked to `echo`, each preceded by one line
+//! standing in for `pwd`. So:
+//!
+//! - **Emulated:** opening an interactive shell, the init handshake, the
+//!   initial `pwd`. Enough for session *lifecycle* tests — create, list,
+//!   reap, close — which is what `session_reaper_audit.rs` needs.
+//! - **NOT emulated:** running a command. `data` echoes back every marker it
+//!   is handed, and a command wrapper contains two of them, so
+//!   `parse_exec_output` is fed the mock's own echo lines — the stand-in
+//!   `pwd` line where the exit code belongs, and a marker where the cwd
+//!   belongs. **What it then returns has not been measured**, because no
+//!   test needs it; the earlier version of this paragraph asserted "no
+//!   output, no exit-code line and no cwd line", which is not what the echo
+//!   produces. Do not build a command test on this behaviour: extend `data`
+//!   deliberately first. Nothing here is a shell — no state, no `cd`, no
+//!   environment.
+//! - **Untouched:** `exec_request`'s one-shot channels. `data` returns early
+//!   unless the channel asked for a shell, so the pre-existing
+//!   `ssh_client_mock.rs` and `sftp_mock.rs` behaviour is unchanged.
+//!
+//! If you need a command to run, extend `data` deliberately and say so here;
+//! do not assume the shell already does it.
 //!
 //! # SFTP backend
 //!
@@ -339,6 +366,28 @@ fn generate_ed25519_host_key() -> PrivateKey {
         .expect("build PrivateKey from Ed25519Keypair")
 }
 
+/// Every `---SSHB_<kind>_<id>---` marker in `text`, in order.
+///
+/// `SessionManager` delimits its shell traffic with these; the mock replies
+/// with each one it is asked to print so the client's `read_until_marker`
+/// returns. Written as a scan rather than a regex to avoid a dev-dependency.
+fn echo_markers(text: &str) -> Vec<String> {
+    const PREFIX: &str = "---SSHB_";
+    const SUFFIX: &str = "---";
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(PREFIX) {
+        let after = &rest[start + PREFIX.len()..];
+        if let Some(end) = after.find(SUFFIX) {
+            out.push(format!("{PREFIX}{}{SUFFIX}", &after[..end]));
+            rest = &after[end + SUFFIX.len()..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 // ============================================================================
 // russh server impl.
 // ============================================================================
@@ -360,6 +409,7 @@ impl Server for MockServer {
             sftp_root: self.sftp_root.clone(),
             channels: Arc::new(Mutex::new(HashMap::new())),
             tunnel_channels: Arc::new(Mutex::new(HashSet::new())),
+            shell_channels: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -375,6 +425,11 @@ struct MockSession {
     /// expected to echo data back after the client's write side reaches
     /// EOF — so those ids are exempted from that auto-close.
     tunnel_channels: Arc<Mutex<HashSet<ChannelId>>>,
+    /// Channel ids that asked for an interactive shell (`shell_request`).
+    /// Data arriving on one of these is answered by [`echo_markers`]; data
+    /// on any other channel is ignored, as it was before shells existed
+    /// here, so `exec_request`'s one-shot channels are untouched.
+    shell_channels: Arc<Mutex<HashSet<ChannelId>>>,
 }
 
 // The signatures below are dictated by the russh traits, not by this file: a
@@ -452,6 +507,70 @@ impl ServerHandler for MockSession {
         Ok(())
     }
 
+    /// Accept an interactive shell request and remember the channel.
+    ///
+    /// **The `channel_success` is what russh's own documentation asks for,
+    /// and it is NOT what makes a session possible here.** Measured, because
+    /// the prediction was the other way round: removing this whole override
+    /// (russh 0.63.3's default `shell_request` is `async { Ok(()) }`, which
+    /// replies with neither `channel_success` nor `channel_failure`, while
+    /// `SshClient::open_shell` asks with `request_shell(true)`) does **not**
+    /// hang `SessionManager::create`. It fails with
+    /// `SshTimeout { seconds: 10 }` after ~10 s — `read_until_marker`'s own
+    /// `limits.command_timeout_seconds` — because what the client then waits
+    /// for is the init marker, and nothing was going to print it. Removing
+    /// only the `channel_success` call, keeping the rest, left **every** test
+    /// in `session_reaper_audit.rs` green. So the enabling piece is
+    /// [`Self::data`] below; this method is here because a mock that does
+    /// not answer a request it accepted is a lie about the protocol.
+    ///
+    /// (This said "all five" and the header of that file said "all four" —
+    /// the same measurement, counted once with the mock binary's own smoke
+    /// test and once without, then both left behind as the file grew. Neither
+    /// number is quoted now: the claim is about the whole file.)
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.shell_channels.lock().await.insert(channel);
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    /// Answer a shell channel's writes well enough for
+    /// `SessionManager::init_shell` to finish.
+    ///
+    /// Not a shell: this echoes back every `---SSHB_…---` marker it is
+    /// asked to `echo`, each preceded by a line standing in for `pwd`. That
+    /// is exactly what `read_until_marker` needs — it returns everything
+    /// before the marker line — and nothing more. A real command's output
+    /// is not emulated, so this serves session *lifecycle* tests (create,
+    /// reap, close, `tests/session_reaper_audit.rs`) and not command tests;
+    /// those have `exec_request`.
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if !self.shell_channels.lock().await.contains(&channel) {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(data).to_string();
+        let handle = session.handle();
+        // Spawn so we don't block the connection's read loop while writing
+        // (same reasoning as `exec_request`).
+        tokio::spawn(async move {
+            for marker in echo_markers(&text) {
+                let reply: tokio_util::bytes::Bytes =
+                    format!("/mock/cwd\n{marker}\n").into_bytes().into();
+                let _ = handle.data(channel, reply).await;
+            }
+        });
+        Ok(())
+    }
+
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
@@ -487,7 +606,9 @@ impl ServerHandler for MockSession {
         // A tunnel channel is still expected to echo data back after the
         // client's write side reaches EOF; its own task drives the close
         // once it has finished draining (see `channel_open_direct_tcpip`).
-        if self.tunnel_channels.lock().await.contains(&channel) {
+        if self.tunnel_channels.lock().await.contains(&channel)
+            || self.shell_channels.lock().await.contains(&channel)
+        {
             return Ok(());
         }
         session.close(channel)?;

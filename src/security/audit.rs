@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,19 +13,21 @@ use crate::config::AuditConfig;
 
 /// Host value for an audited operation that has no target host at all.
 ///
-/// **Five production callers**, counted in the tree; an earlier version of
-/// this sentence said "exactly one" and was out of date the day a second one
-/// was added without reopening it:
+/// **Six production callers**, counted in the tree; an earlier version of
+/// this sentence said "exactly one", then "five", and each was out of date
+/// the day another one was added without reopening it:
 ///
 /// - `ssh_config_set`, which changes a limit of the bridge process itself
 ///   ("not a remote host (there is no host param)", its own description);
 /// - the failure paths of `ssh_session_close`, `ssh_tunnel_close` and
 ///   `ssh_recording_stop`, where the id handed in matched nothing, so no host
 ///   was ever resolved to name;
-/// - and `cli::runner::gate_host`, the CLI's destructive gate, which is
-///   neither of those: it fires for **any** destructive call that carries no
-///   `host` argument. The gate runs before schema validation, so this is not
-///   limited to the three tools whose schema has no `host`: a call to
+/// - and the two callers of `audited_host_from_args`, which are neither of
+///   those: they read an UNRESOLVED `host` argument, so they land here for
+///   **any** call that carries no `host` string at all. Those two are the
+///   CLI's destructive gate and `McpServer::audit_interrupted_in_flight`,
+///   the shutdown emitter. The gate runs before schema validation, so this is
+///   not limited to the three tools whose schema has no `host`: a call to
 ///   `ssh_service_stop`, which requires one, writes
 ///   `{"host":"<no-host>","event_type":"command_denied", …}` when the
 ///   argument is simply left out
@@ -32,18 +35,37 @@ use crate::config::AuditConfig;
 ///
 /// The angle brackets are the point: no host alias in a `config.yaml` can
 /// contain them, so `"host":"<no-host>"` can never be confused with a real
-/// target, and `grep '<no-host>'` over `audit.log` enumerates exactly the
-/// hostless events. It is the single convention for the whole crate — before
-/// it there was none, every non-test caller passed a real alias, and the
-/// alternative was the empty string, which reads like a bug in the writer.
+/// target. It is the single convention for the whole crate — before it there
+/// was none, every non-test caller passed a real alias, and the alternative
+/// was the empty string, which reads like a bug in the writer.
 ///
-/// **That enumeration holds because the brackets are the writer's, not the
-/// caller's.** The gate is the one sink whose `host` is an unresolved
-/// argument rather than a resolved alias, and it used to pass it through
-/// verbatim: `--yes tool ssh_file_write 'host=<no-host>' …` produced a line
-/// no reader could tell from a genuinely hostless one. `cli::runner::
-/// audited_host` now escapes a caller's `<` and `>`, so the grep means again
-/// what this paragraph says it means.
+/// **The brackets are the writer's, not the caller's, in the `host` FIELD.**
+/// The two callers named above are the sinks whose `host` is an unresolved
+/// argument rather than a resolved alias, and the gate used to pass it
+/// through verbatim: `--yes tool ssh_file_write 'host=<no-host>' …` produced
+/// a line no reader could tell from a genuinely hostless one. `audited_host`
+/// escapes a caller's `<` and `>`, pinned by
+/// `a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event` and, on the
+/// shutdown sink, by
+/// `a_forged_sentinel_in_the_host_argument_cannot_pass_for_a_hostless_call`.
+///
+/// **`grep '<no-host>'` over `audit.log` still does not enumerate exactly
+/// the hostless events, and the reason narrowed in round 2.** The field is
+/// safe on both sinks. The LINE is safe on the shutdown's, which since round
+/// 2 renders argument NAMES and no values (`audited_argument_names`) — a
+/// key would have to be literally named `<no-host>`, and a key goes through
+/// `audited_text`, so it cannot be. It is **not** safe on the CLI gate's,
+/// which renders values on purpose: `--yes tool ssh_db_query
+/// 'query=select <no-host>'` puts the literal on a line whose `host` is a
+/// real alias, and so does `<elided: N chars>` or
+/// `<truncated: N chars total>`. The selector to key a rule on is therefore
+/// `jq 'select(.host == "<no-host>")'`, never a line grep.
+///
+/// The sibling sentinel does NOT have this hole, which is worth stating
+/// because the two are documented as one convention: `SHUTDOWN_TOOL`'s
+/// `grep '"tool_name":"<shutdown>"'` includes the quotes, and serde escapes
+/// a `"` inside an argument value to `\"`, so the quoted form cannot be
+/// reconstructed from caller data.
 ///
 /// **It reaches the command history too, not only `audit.log`.** The failure
 /// paths named above go through `ExecuteCommandUseCase::log_failure`, which
@@ -57,6 +79,84 @@ use crate::config::AuditConfig;
 /// matches **literally** and the correctly-encoded `host=%3Cno-host%3E` does
 /// not.
 pub const NO_HOST: &str = "<no-host>";
+
+/// `tool_name` for a line the SHUTDOWN wrote about somebody else's call.
+///
+/// [`AuditLogger::log`] takes the tool as a mandatory parameter and is the
+/// single writer of `tool_name`, so a line written by the shutdown path has
+/// to name *something* there. It cannot name the tool whose call it is about:
+/// that line would then be indistinguishable, on the one field a reader
+/// selects a tool by, from a line the tool itself wrote — and the whole point
+/// of [`CommandResult::Interrupted`] is that nobody knows how that call
+/// ended.
+///
+/// Same convention and the same reason as [`NO_HOST`]: the angle brackets are
+/// the writer's namespace. A tool name is a key of the registry built in
+/// `crate::mcp::registry`, and no name in the tree contains an angle bracket
+/// — every `fn name(&self) -> &'static str` body and every `const NAME`
+/// literal under `src/`, collected and deduplicated, is **503 names** (tools,
+/// prompts and resources together) of which **0** contain `<` or `>`. So
+/// nothing can collide with this value, and
+/// `grep '"tool_name":"<shutdown>"'` over `audit.log` enumerates exactly the
+/// calls whose outcome was never read. The `command` field carries the tool
+/// that was running, in the form `audited_argument_names` builds — the tool
+/// and the NAMES of its arguments. (This sentence said `audited_operation`
+/// until round 3 of the review; that is the renderer the CLI gate kept, and
+/// the shutdown's moved off it when the line stopped carrying values.)
+pub(crate) const SHUTDOWN_TOOL: &str = "<shutdown>";
+
+/// The one `reason` [`CommandResult::Interrupted`] carries.
+///
+/// **A stable sentence with no number in it, and round 3 is why.** For one
+/// revision there were two phrases and the count was interpolated into one of
+/// them, so a `jq` consumer that wanted to know how far a call had got had to
+/// pull an integer out of prose with a regular expression — against a
+/// sentence the next commit could reword. That is the coupling this whole
+/// release exists to remove, in miniature. The count is a field now
+/// (`CommandResult::Interrupted::events_recorded`), and this phrase is true
+/// whatever its value: the process stopped, and the call had not returned.
+///
+/// Not caller data, and that is a constraint rather than a convenience:
+/// [`AuditLogger::log`] sanitizes `event.command` and nothing else, so a
+/// `CommandResult`'s own strings reach both sinks unredacted. A reason built
+/// from arguments could therefore put a secret on the line.
+pub(crate) const INTERRUPTED_BY_SHUTDOWN: &str = "the server stopped before this call returned";
+
+/// `tool_name` for a line the bridge wrote about a session or a tunnel **it
+/// destroyed on its own**, with nobody asking.
+///
+/// [`AuditLogger::log`] takes the tool as a mandatory parameter and is the
+/// single writer of `tool_name`, so these lines have to name *something*
+/// there, and there is no tool to name: the idle reaper, the shutdown's
+/// `close_all` and the dead-channel branches of `SessionManager::exec` are
+/// the bridge's own machinery. `"ssh_session_close"` was the tempting value
+/// and it is the one that must never be used — the line would then be
+/// indistinguishable, on the one field a reader selects a tool by, from a
+/// close the operator actually asked for, which is the confusion this whole
+/// release exists to remove.
+///
+/// Same convention and the same reason as [`NO_HOST`] and `SHUTDOWN_TOOL`:
+/// the angle brackets are the writer's namespace, and no registered name can
+/// collide with a value containing one. Re-measured for this constant rather
+/// than inherited from `SHUTDOWN_TOOL`'s paragraph: every `fn name(&self) ->
+/// &'static str` body and every `const NAME` literal under `src/`, collected
+/// and deduplicated, is **503 names** of which **0** contain `<` or `>`.
+///
+/// **`resource` and not `session`, which took a round to get right.** One
+/// sentinel covers tunnels as well as sessions, because it names the WRITER
+/// and not a kind of resource — and `<session-reaper>`, the first spelling,
+/// put the word "session" on a line about a tunnel. That `command` then
+/// begins `reason=… tunnel_id=…` does not repair it: it catches the reader
+/// after the fact, and the short form is the one that gets read. Same class
+/// of defect as `{"": "x"}` rendering as `ssh_exec {}` — see
+/// `audited_argument_names` — and this release exists to remove lines that
+/// read as something they are not.
+///
+/// A reader who wants one of the two populations selects on `command`, whose
+/// second field is either `session_id=` or `tunnel_id=`; a reader who wants
+/// "everything the bridge tore down by itself" selects on this field alone,
+/// and that is the query the release notes give.
+pub(crate) const RESOURCE_REAPER_TOOL: &str = "<resource-reaper>";
 
 /// Result of a command execution for audit purposes
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +176,15 @@ pub enum CommandResult {
     /// They are audited because they change what the server is, not because a
     /// command was executed.
     ///
+    /// **And for the destructions NOBODY ASKED FOR**, which is the larger
+    /// population of the two and reads nothing like a tool call: the idle
+    /// reaper (`SessionManager::cleanup`, every 60 s), the shutdown's
+    /// `close_all` for sessions and for tunnels, and the four branches of
+    /// `SessionManager::exec` that find a session expired or its channel
+    /// dead. Those lines carry `RESOURCE_REAPER_TOOL` in `tool_name` and a
+    /// `reason=` in `command`; `crate::security::reaped_event` builds them
+    /// all.
+    ///
     /// **It carries the duration and no exit code, and the absence is the
     /// honest information** — the same doctrine
     /// `ToolCallResult::remote_exit_code` (`src/ports/protocol.rs`) states for
@@ -88,10 +197,21 @@ pub enum CommandResult {
     /// and what `SessionExecResult::exit_code` was changed to stop doing.
     ///
     /// Reading one of these lines: `event_type` says which kind of state
-    /// change it is, `tool_name` which tool did it (always set — `AuditLogger::
-    /// log` is the only writer of that field), and `command` carries the
+    /// change it is, `tool_name` says **who wrote it** — a tool's own name
+    /// when a tool did it, `RESOURCE_REAPER_TOOL` when the bridge destroyed
+    /// the thing by itself; always set either way, since `AuditLogger::log`
+    /// is the only writer of that field — and `command` carries the
     /// *operation* rather than a shell command, in the form
-    /// `<tool> <identifying-arg>=<value>`.
+    /// `<writer> <identifying-arg>=<value> …`.
+    ///
+    /// **`duration_ms` means two different things on these lines, and the
+    /// field cannot tell you which.** On a tool's line it is how long the
+    /// operation took, timed by the handler
+    /// (`mcp::tool_handlers::utils::elapsed_ms`). On a reaped line it is the
+    /// **lifetime of the session or tunnel that was destroyed** — nobody
+    /// timed the teardown, and the lifetime is the number that makes the
+    /// field worth carrying at all. `tool_name` is what disambiguates: a
+    /// reaped line's is `RESOURCE_REAPER_TOOL`.
     StateChanged { duration_ms: u64 },
     /// A confirmation gate let a destructive call through, and **nothing has
     /// run yet** when this line is written.
@@ -151,6 +271,63 @@ pub enum CommandResult {
     /// population the rule applies to. Fully usable on a trail only the CLI
     /// writes to.
     Confirmed { by: String },
+    /// A command had been handed to a handler and the process stopped before
+    /// it finished: **neither an exit code nor a duration**, because nobody
+    /// read either.
+    ///
+    /// Written at shutdown, once per tool call still in flight, by
+    /// `ExecuteCommandUseCase::log_interrupted` — whose only caller is
+    /// `McpServer::audit_interrupted_in_flight`. `tool_name` is
+    /// `SHUTDOWN_TOOL`, not the tool's own name, because this line is the
+    /// shutdown's statement about that call and not the call's own.
+    ///
+    /// **It is deliberately NOT [`Self::Error`]**, whose doc already covers
+    /// "an unread exit code" and which would have cost nothing to reuse. An
+    /// auditor selecting `.result.Error` is asking "which commands failed";
+    /// answering that with "and these, about which nothing is known"
+    /// conflates a verdict with the absence of one — the exact fault this
+    /// variant exists to avoid, so reusing the variant that embodies it in
+    /// the very event meant to remove it would have been self-defeating.
+    /// [`Self::StateChanged`]'s doc states the doctrine the two share: the
+    /// absence of a code is the honest information, and a fabricated one
+    /// would be a verdict posted on a fact that never happened. What differs
+    /// is the direction of the ignorance — `StateChanged` has no code because
+    /// nothing ran, `Interrupted` has none because something ran and was
+    /// abandoned.
+    ///
+    /// **And no duration either**, which is where it parts from
+    /// `StateChanged`. An elapsed time *could* be put on the line, and it
+    /// would answer a question nobody asked: "how long had it been running
+    /// when we gave up" is a fact about the shutdown, not about the command,
+    /// and in a field that everywhere else means "how long the command took"
+    /// it would read as the latter.
+    ///
+    /// **`reason` says WHAT happened and `events_recorded` says how far the
+    /// call had got**, which is the split round 3 settled: one stable phrase,
+    /// `INTERRUPTED_BY_SHUTDOWN`, plus a machine-readable count. A `reason`
+    /// is still a field rather than part of the `event_type`, which leaves
+    /// room for a second kind of abandonment — the cleanup loops are
+    /// `abort()`ed unbounded in `McpServer::serve`, and a handler running
+    /// inside one is lost the same way — to be named here without minting a
+    /// second `event_type` every consumer would have to learn.
+    Interrupted {
+        reason: String,
+        /// How many audit events this call had already written when the
+        /// shutdown found it.
+        ///
+        /// **A field and not a number inside `reason`.** `0` means the
+        /// process stopped before any result of this call was recorded;
+        /// `N > 0` means N were recorded and the call had still not returned
+        /// — which is exactly what a reader of a call that wrote every line
+        /// but never left `registry.execute` needs to see beside those lines.
+        /// Both readings are true statements, which is why one phrase plus a
+        /// count replaced the two phrases an earlier revision used.
+        ///
+        /// It is **not** a duration and not an exit code: it counts lines
+        /// this process wrote, which is a fact about the trail rather than a
+        /// claim about the command.
+        events_recorded: u64,
+    },
 }
 
 /// Audit event for logging
@@ -164,24 +341,42 @@ pub struct AuditEvent {
     /// `"ssh_exec"` from [`AuditEvent::new`] for a command that ran,
     /// `"command_denied"` from [`AuditEvent::denied`] for one that was
     /// refused. [`AuditEvent::tagged`] now takes it as a parameter, so the
-    /// set is open; `"state_change"` (from
-    /// `ExecuteCommandUseCase::log_state_change`) and `"command_confirmed"`
-    /// (from `ExecuteCommandUseCase::log_confirmed`) are the third and fourth
-    /// values in the log today. A consumer must therefore treat an unknown value as data,
+    /// set is open. **Five values in the log today**, and this sentence is
+    /// the one an implementer copies instead of reopening, so it is written
+    /// as a list rather than as a count in prose: `"ssh_exec"`,
+    /// `"command_denied"`, `"state_change"` (from
+    /// `ExecuteCommandUseCase::log_state_change`), `"command_confirmed"`
+    /// (from `ExecuteCommandUseCase::log_confirmed`) and
+    /// `"command_interrupted"` (from
+    /// `ExecuteCommandUseCase::log_interrupted`, the shutdown's line for a
+    /// call still in flight — see [`CommandResult::Interrupted`]).
+    /// A consumer must therefore treat an unknown value as data,
     /// not as a parse error — and a caller must keep passing a kind of
     /// outcome, which is the contract the field's name carries and the only
     /// thing stopping it from drifting into a second, unreliable `tool_name`.
     ///
     /// **`"state_change"` is narrower than the operations it names, and that
-    /// trips the obvious query.** It is written on the *success* path of the
-    /// seven state-changing tools only. When one of them fails it goes
-    /// through `ExecuteCommandUseCase::log_failure`, which builds
-    /// [`AuditEvent::new`] — and `new` hard-codes `"ssh_exec"`. So
+    /// trips the obvious query.** On the tools' side it is written on the
+    /// *success* path of the seven state-changing tools only. When one of
+    /// them fails it goes through `ExecuteCommandUseCase::log_failure`, which
+    /// builds [`AuditEvent::new`] — and `new` hard-codes `"ssh_exec"`. So
     /// `select(.event_type == "state_change")` enumerates the successful
     /// session, tunnel, recording and limit changes and **none of the failed
     /// ones**, which are spelled exactly like an ordinary command event.
     /// `tool_name` is the field that selects everything one of the seven did;
     /// `result` is the field that distinguishes the outcomes.
+    ///
+    /// **And it is no longer only the seven tools that write it.** Every
+    /// session or tunnel the bridge destroys by itself — the idle reaper, the
+    /// shutdown's `close_all`, a dead channel found by
+    /// `SessionManager::exec` — writes `"state_change"` too, with
+    /// `RESOURCE_REAPER_TOOL` in `tool_name` (see
+    /// `crate::security::reaped_event`). That is deliberate: destruction of a
+    /// session is one population and must answer to one query. The
+    /// consequence for the sentence above is that `tool_name` selects
+    /// everything one of the **seven** did and *not* everything that happened
+    /// to a session — for that, select `"state_change"` and read `tool_name`
+    /// to learn who did it.
     pub event_type: String,
     /// Target host alias, or [`NO_HOST`] when the operation had no target.
     pub host: String,
@@ -263,13 +458,22 @@ impl AuditEvent {
     /// have to either mislabel its event or reopen this signature. The
     /// `event_type`/`result` pair belongs to the caller, as one decision.
     ///
-    /// Callers do not reach this directly. Each goes through the named,
-    /// typed facade for its kind of event — today
-    /// `ExecuteCommandUseCase::log_state_change`, which passes
-    /// `"state_change"` with [`CommandResult::StateChanged`], and
-    /// `ExecuteCommandUseCase::log_confirmed`, which passes
-    /// `"command_confirmed"` with [`CommandResult::Confirmed`] — because
-    /// `tool` is mandatory on those facades and consultative nowhere.
+    /// Callers outside this module do not reach this directly. Each goes
+    /// through the named, typed facade for its kind of event, and the list is
+    /// written out rather than counted because it has been out of date twice:
+    /// `ExecuteCommandUseCase::log_state_change` (`"state_change"` with
+    /// [`CommandResult::StateChanged`]), `…::log_confirmed`
+    /// (`"command_confirmed"` with [`CommandResult::Confirmed`]) and
+    /// `…::log_interrupted` (`"command_interrupted"` with
+    /// [`CommandResult::Interrupted`]) — because `tool` is mandatory on those
+    /// facades and consultative nowhere.
+    ///
+    /// The one caller inside this module is `reaped_event`, which is a
+    /// renderer and not a facade: it takes no `tool` because its `tool_name`
+    /// can only ever be `RESOURCE_REAPER_TOOL`, exactly as
+    /// `log_interrupted` takes none for `SHUTDOWN_TOOL`. Its two call sites
+    /// are in two adapters that cannot see each other, which is why the
+    /// shape lives here.
     ///
     /// `command` receives whatever identifies the thing audited: a shell
     /// command for an event that ran one, or the **operation** (the tool and
@@ -304,6 +508,1042 @@ impl AuditEvent {
         self
     }
 }
+
+// ===========================================================================
+// Rendering caller-supplied values into an audit line
+//
+// Everything in this block was private to `src/cli/runner.rs`, where the
+// CLI's destructive gate was its only caller. It is here because a second
+// caller appeared — the MCP shutdown emitter,
+// `McpServer::audit_interrupted_in_flight`. Both build their `host` from the
+// same kind of input, a tool's RAW arguments, unresolved and unbounded; they
+// NO LONGER share the `command` renderer, and that split is round 2's, not an
+// oversight — the gate renders values (`audited_operation`) because its line
+// is read before the call runs, and the shutdown renders argument names
+// (`audited_argument_names`) because a keyword list cannot be made complete.
+// The caps are the audit line's own contract, so they belong beside the rest
+// of it; `src/mcp/` cannot see `src/cli/`, and duplicating a six-line host
+// renderer across two sinks is how two sinks start disagreeing.
+//
+// The two constants keep their `GATE_` prefix. Renaming them would have
+// rewritten every reference in `runner.rs` for nothing, and the prefix is not
+// false so much as no longer exhaustive: it names the caller the bound was
+// measured against, which is also the only one that can be handed a 128 KB
+// argument — a socket-borne call has no such ceiling, and no such floor.
+// ===========================================================================
+
+/// Longest a single argument value may be before [`audited_operation`]
+/// replaces it with its length.
+///
+/// **This exists because the gate's audit line would otherwise persist the
+/// call's arguments in full.** `--yes tool ssh_file_write … content=<a file>`
+/// wrote a `command_confirmed` line carrying that whole file.
+///
+/// How large, exactly, because the obvious figure is wrong: through `argv` the
+/// ceiling is `MAX_ARG_STRLEN`, 32 pages — **128 KB per argument** — and
+/// `ARG_MAX` for the whole command line; past that `execve` fails with `E2BIG`
+/// and the binary never starts.
+///
+/// **Where that comes from, since the attribution here used to be wrong:**
+/// `fork` + `execv("/bin/true", [prog, "A" × n])`, run directly, *succeeds*
+/// for n = 131071 and fails with `E2BIG` (errno 7) for n = 131072, with
+/// `getconf PAGESIZE` = 4096 — 32 pages, terminating NUL included. No test in
+/// this repository measures it: `tests/cli_exit_code.rs` *asserts* it in a
+/// docstring, to justify passing the 100 KB that succeeds, and the 400 KB
+/// figure lives in an in-memory unit test that calls no `execve` at all. The
+/// number is right; the citation was not.
+///
+/// A daemon-forwarded or MCP-served call carries its arguments as JSON over a
+/// socket and has no such limit. So the bound matters for volume — 128 KB a
+/// line fills a 100 MB archive in 800 calls, and breaks any JSONL consumer
+/// with a line-length bound — and it matters for content at any size: it
+/// defeated a deliberate exclusion, since the handler's own audit event for
+/// that write is `SFTP_WRITE <path>` and carries no content at all, precisely
+/// so the trail does not become a copy of the files it records.
+///
+/// 256 characters leaves every host alias, path, id, unit name and ordinary
+/// shell command intact — the values that make a line worth reading — while no
+/// file body survives it. A value over the bound is replaced by
+/// `<elided: N chars>`, which states what was dropped: a silent truncation
+/// would be another half-true line, which is the fault this whole change
+/// exists to remove.
+pub(crate) const GATE_AUDIT_MAX_VALUE_CHARS: usize = 256;
+
+/// Hard ceiling on the whole operation string, after per-value elision.
+///
+/// Per-value elision alone does not bound the line: a call with hundreds of
+/// short arguments stays under [`GATE_AUDIT_MAX_VALUE_CHARS`] on every one of
+/// them. What goes past this is cut and marked `<truncated: N chars total>`.
+pub(crate) const GATE_AUDIT_MAX_OPERATION_CHARS: usize = 2048;
+
+/// The host to put on an event built from a call's raw arguments: the call's
+/// `host` argument, rendered by [`audited_host`], or [`NO_HOST`] when the
+/// call carries no `host` string at all.
+///
+/// **Two callers, and in both the host is an unresolved JSON argument and
+/// nothing more**: the CLI's destructive gate, and the MCP shutdown emitter
+/// `McpServer::audit_interrupted_in_flight`. The gate writes before the alias
+/// is looked up at all — which is why it can refuse a call naming a host that
+/// does not exist — and the emitter only ever saw the arguments, because the
+/// handler that would have resolved the alias never came back. **So the
+/// sentinel is not reserved for the tools whose schema has no `host`**: the
+/// gate runs before any schema validation, so *any* destructive call that
+/// simply omits the argument lands on it too — pinned for
+/// `ssh_service_stop`, which requires one, in
+/// `a_caller_supplied_sentinel_cannot_pass_for_a_hostless_event`.
+///
+/// **The two callers see different populations, and the sentence here used to
+/// describe only the gate's.** The gate is armed for the tools whose
+/// `#[mcp_tool]` attribute declares the destructive annotation — **45** of
+/// them, counted through the registry rather than by grepping for a literal:
+/// `create_all_enabled_registry().list_tools()` filtered on
+/// `tool_annotations(..).destructive_hint == Some(true)`.
+///
+/// **The citation is shaped that way on purpose, and it took two goes.** The
+/// first version grepped `annotation = "destructive"` over `src/` and
+/// returned 46, counting the literal in its own docstring; the second
+/// restricted the path to `src/mcp/tool_handlers/`, which was right until
+/// round 3 added a *second* literal to this file and the discarded
+/// `src/`-wide form went to 47. **A citation that counts literals in the
+/// file containing it is fragile by construction**, however the path is
+/// narrowed — so this one counts registry entries, which no docstring can
+/// add to. Within those 45, three
+/// (`ssh_awx_job_cancel`, `ssh_awx_approval_deny`, `ssh_awx_workflow_cancel`)
+/// declare no `host` at all and none declares a plural `hosts`. The shutdown
+/// emitter is armed for **every** tool, and in that population the plural
+/// exists: `ssh_exec_multi` and `ssh_metrics_multi` declare a REQUIRED
+/// `hosts` array and no `host` property at all (`grep -c '"host":'` returns
+/// 0 on both; `'"hosts"'` returns 17 and 11). **So an interrupted
+/// `ssh_exec_multi` writes `"host":"<no-host>"` for a call that named several
+/// machines.** The machines are still on the line, inside `command`; the
+/// `host` field is simply the wrong field to look for them in, and widening
+/// it to a list would change the type of a field every consumer reads.
+///
+/// Returns an owned `String` because the value is *rendered*, not borrowed —
+/// see [`audited_host`] for what that rendering is for.
+pub(crate) fn audited_host_from_args(args: Option<&serde_json::Value>) -> String {
+    match args
+        .and_then(|a| a.get("host"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(raw) => audited_host(raw),
+        None => NO_HOST.to_string(),
+    }
+}
+
+/// Render a caller-supplied `host` for an audit event: bounded, and unable to
+/// write anything the *writer* reserves for itself.
+///
+/// Its callers are the only audit sinks in the crate whose `host` is not an
+/// alias the config already resolved — everywhere else resolution precedes
+/// the write. Three consequences of handing that string through verbatim, each
+/// re-measured by removing this function's body and watching the matching
+/// test go red:
+///
+/// - **The bound beside it was decorative.** `elide_oversized` caps
+///   `command` and nothing capped `host`, so a 100 000-character `host`
+///   reached the line whole while the `command` field on the same line was
+///   elided to its length. A cap on one field of a line is not a cap on the
+///   line.
+/// - **The sentinel was forgeable.** `NO_HOST`'s own doc justifies the angle
+///   brackets with "`grep '<no-host>'` over `audit.log` enumerates exactly
+///   the hostless events"; `host=<no-host>` produced a `host` field equal to
+///   the sentinel, character for character. The angle brackets are now the
+///   **writer's** namespace: a caller's `<` and `>` are escaped, so no caller
+///   value can render as `<no-host>`, as `<elided: N chars>`, or as any
+///   marker added later.
+/// - **The `tracing` sink took a forged record.** `command` is JSON, so serde
+///   escapes it; `host` goes to `AuditLogger::log_to_tracing` as `host =
+///   %event.host`, i.e. `Display`, with no rendering at all — so a newline
+///   inside it put a second, well-formed `Audit: …` line into the journal
+///   journald and syslog capture. Control characters are escaped here for
+///   that reason, not for `audit.log`, whose JSON was never at risk.
+///
+/// The escape is `\u{..}` with the backslash doubled first, so the rendering
+/// is unambiguous: a literal `\u{3c}` typed by a caller comes out
+/// `\\u{3c}`. Everything else — letters, digits, dots, dashes, colons,
+/// non-ASCII — passes through untouched, because a real alias must stay
+/// greppable and the sanitizer is deliberately **not** applied to this field
+/// (`the_operation_is_redacted_and_the_host_is_passed_through_verbatim`).
+///
+/// The cap is [`GATE_AUDIT_MAX_VALUE_CHARS`], the same one `elide_oversized`
+/// applies, and it reports the length of what the **caller** supplied rather
+/// than of the escaped form: that is the number a reader wants.
+pub(crate) fn audited_host(raw: &str) -> String {
+    let escaped = audited_text(raw);
+    if escaped.chars().count() > GATE_AUDIT_MAX_VALUE_CHARS {
+        return format!("<elided: {} chars>", raw.chars().count());
+    }
+    escaped
+}
+
+/// Escape a caller-supplied string so it cannot write anything the **writer**
+/// of an audit line reserves for itself, in either sink.
+///
+/// Split out of [`audited_host`] because the round-1 security review found the
+/// asymmetry: `host` was rendered, and the `tool_name` interpolated into the
+/// same line by [`audited_operation`] was not. One escaper, both fields.
+///
+/// Four families, each for a different reason — the reasons are not
+/// interchangeable and "non-printable" names none of them:
+///
+/// 1. `\` first, so the rendering is unambiguous: a literal `\u{3c}` typed by
+///    a caller comes out `\\u{3c}`.
+/// 2. `<` and `>`, because the angle brackets are the writer's namespace
+///    ([`NO_HOST`], `SHUTDOWN_TOOL`, `<elided: N chars>`).
+/// 3. **Every character this crate uses as a SEPARATOR**, which is a rule and
+///    not a list: ` ` and `=` for logfmt, and `,` `{` `}` for the
+///    argument-name rendering `audited_argument_names` builds.
+///
+///    **The rule, because this task created the same forgery twice before
+///    writing it down.** Round 1 picked the space as a separator and a
+///    caller-supplied space wrote its own logfmt field; round 3 picked the
+///    comma and `{"host,password,sudo_password": 1}` rendered **one**
+///    argument as **three**. A separator is a privileged character: the
+///    moment this crate gives one a meaning, it belongs in this set **by
+///    construction**, before anybody looks for an exploit. If a later change
+///    introduces a new separator, add it here in the same commit.
+///
+///    `AuditLogger::log_to_tracing`
+///    now passes `host` and `command` as `Debug`, which quotes them, so this
+///    is defence in depth rather than the fix — but the measured attack was
+///    the rendered line `host=raspberry exit_code=0 duration_ms=12
+///    event_type=command_executed`, **69 characters**, which made a logfmt
+///    consumer read an interrupted call as a **successful** one: exactly the
+///    two fields `CommandResult::Interrupted` documents as absent. The
+///    `host` ARGUMENT that produces it is the 64 characters after
+///    `host=`, well under the 256-character cap — the cap is on the
+///    argument, so that is the figure the cap applies to. (Both numbers said
+///    62 in five places until the final review, and
+///    `the_logfmt_separators_cannot_write_a_second_field` passed a
+///    36-character prefix of the payload while its title claimed the whole
+///    of it. Counted: `len("host=raspberry exit_code=0 duration_ms=12
+///    event_type=command_executed")` is 69.)
+///    No real host alias, no registered tool name, contains either character.
+/// 4. The characters that **reorder or hide** the rendered text, which is a
+///    different fault from the one `is_control()` covers. `char::is_control`
+///    is category **Cc only**, and neither sink escapes non-ASCII (`serde_json`
+///    does not), so before this: `U+2028`/`U+2029` (Zl/Zp) end a line for a
+///    JavaScript or some log readers; `U+200B` and `U+FEFF` are invisible;
+///    and `U+202A`..`U+202E` plus `U+2066`..`U+2069` are the bidi overrides
+///    and isolates — `host=raspberry\u{202E}` leaves the line valid for `jq`
+///    and **reverses everything after it for every human reader**, in a file
+///    whose only purpose is to be read.
+fn audited_text(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            // See family 3 above: every separator this crate uses.
+            '<' | '>' | ' ' | '=' | ',' | '{' | '}' => {
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(ch));
+            }
+            c if c.is_control() || reorders_or_hides(c) => {
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// Whether `c` changes where the characters around it are DRAWN, rather than
+/// being merely unprintable.
+///
+/// The name is the property; the body is **the whole of general categories
+/// `Cf`, `Zl` and `Zp`**, and that criterion is what closes the list. It is
+/// not a judgement about which of them are dangerous: a hand-picked subset
+/// cannot be audited, and the previous version of this function proved it —
+/// four ranges written by hand, chosen for being the ones a known attack
+/// used, which **missed members of their own cohort**: `U+061C` ARABIC
+/// LETTER MARK, `U+00AD` SOFT HYPHEN, `U+2060`..`U+2064` the invisible
+/// operators, `U+206A`..`U+206F` the deprecated bidi format characters,
+/// `U+FFF9`..`U+FFFB` the interlinear annotations, and the 97 code points of
+/// the tag block `U+E0020`..`U+E007F`, which render as nothing at all and
+/// were the mechanism of the 2017 "Trojan Source"-adjacent tag-smuggling
+/// reports. `U+200E`/`U+200F` were in range only by accident of `200b..200f`
+/// being written for the zero-width characters.
+///
+/// `Cc` is **deliberately not** here: `char::is_control()` already covers it
+/// at the one call site ([`audited_text`]), and duplicating it would make
+/// two lists to keep in step.
+///
+/// **How the list was derived, and how to re-derive it.** Not from memory —
+/// from the Unicode database Python carries, which is a source of truth
+/// present on any machine that can run the repo's own scripts:
+///
+/// ```text
+/// python3 -I -c '
+/// import unicodedata
+/// pts=[cp for cp in range(0x110000)
+///      if unicodedata.category(chr(cp)) in {"Cf","Zl","Zp"}]
+/// print(unicodedata.unidata_version, len(pts))'
+/// ```
+///
+/// → `16.0.0 172`. **172 code points in 21 ranges**, and
+/// `every_format_or_separator_code_point_is_covered` asserts that every one
+/// of the 172 returns `true` here, so the two cannot drift silently. A later
+/// Unicode version that adds a `Cf` code point will not be noticed by that
+/// test (it checks this list against itself, not against the table) — so the
+/// residual is explicit: **re-run the command above on a toolchain bump**,
+/// and the ranges below carry the Unicode version they were taken from.
+///
+/// Ranges, in code-point order, as that command emits them (Unicode 16.0.0):
+const fn reorders_or_hides(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'                       // U+00AD SOFT HYPHEN
+        | '\u{600}'..='\u{605}'         // ARABIC NUMBER SIGN .. NUMBER MARK ABOVE
+        | '\u{61c}'                    // U+061C ARABIC LETTER MARK
+        | '\u{6dd}'                    // U+06DD ARABIC END OF AYAH
+        | '\u{70f}'                    // U+070F SYRIAC ABBREVIATION MARK
+        | '\u{890}'..='\u{891}'         // ARABIC POUND/PIASTRE MARK ABOVE
+        | '\u{8e2}'                    // U+08E2 ARABIC DISPUTED END OF AYAH
+        | '\u{180e}'                   // U+180E MONGOLIAN VOWEL SEPARATOR
+        | '\u{200b}'..='\u{200f}'       // ZWSP, ZWNJ, ZWJ, LRM, RLM
+        | '\u{2028}'..='\u{202e}'       // Zl, Zp, then the bidi embeddings/overrides
+        | '\u{2060}'..='\u{2064}'       // WORD JOINER .. INVISIBLE PLUS
+        | '\u{2066}'..='\u{206f}'       // the bidi isolates, then the deprecated formats
+        | '\u{feff}'                   // U+FEFF BOM / ZERO WIDTH NO-BREAK SPACE
+        | '\u{fff9}'..='\u{fffb}'       // INTERLINEAR ANNOTATION ANCHOR .. TERMINATOR
+        | '\u{110bd}'                  // U+110BD KAITHI NUMBER SIGN
+        | '\u{110cd}'                  // U+110CD KAITHI NUMBER SIGN ABOVE
+        | '\u{13430}'..='\u{1343f}'     // Egyptian hieroglyph format controls
+        | '\u{1bca0}'..='\u{1bca3}'     // SHORTHAND FORMAT OVERLAP .. UP STEP
+        | '\u{1d173}'..='\u{1d17a}'     // MUSICAL SYMBOL BEGIN BEAM .. END PHRASE
+        | '\u{e0001}'                  // U+E0001 LANGUAGE TAG
+        | '\u{e0020}'..='\u{e007f}'     // the tag block: renders as nothing
+    )
+}
+
+/// Replace, by KEY NAME, the value of every argument that names a secret.
+///
+/// **This is the redaction that actually fires on this sink.** The `Sanitizer`
+/// runs on the rendered string and its key-anchored patterns need the key
+/// glued to its delimiter: the quoted family wants `"` immediately before
+/// `password`, the bare family wants `password` immediately before `:`. The
+/// JSON this module renders is `{"db_password":"…"}`, which satisfies
+/// neither, so `ssh_db_query` / `ssh_db_dump` / `ssh_db_restore` wrote their
+/// `db_password` **verbatim** to `audit.log`. The entropy backstop does not
+/// save it either: `entropy_min_length` is 16 by default.
+///
+/// By key rather than by pattern because the key is **structured** and in
+/// hand here, where the sanitizer only ever sees text whose anchors the
+/// quoting has already broken. The keyword list is
+/// [`Sanitizer::secret_keywords`] itself, not a copy, so the two cannot
+/// drift.
+///
+/// **No exemption by value type, and round 2 is why.** The first version
+/// spared `Number | Bool | Null` to keep readable values readable. But the
+/// value's type is **the caller's choice**, not the schema's: `{"password":
+/// 12345678}` is a perfectly well-formed JSON number and was written as-is.
+/// An exemption that an attacker selects is not an exemption. **If the key
+/// matches, the value goes, whatever its type** — the key is the signal.
+///
+/// The cost is readability on the **gate's** lines only — the shutdown sink
+/// no longer renders values at all (see [`audited_argument_names`]) — and it
+/// is real. Census, over the 476 schema-bearing files in
+/// `src/mcp/tool_handlers/`, using the same `": {"` + balanced-brace walk the
+/// guards below use so a reader re-derives the same figures: **448** distinct
+/// property names, **11** of which contain one of the keywords. (An earlier
+/// version of this paragraph said 450, from a looser regex; the in-tree
+/// helper is the reproducible one.)
+///
+/// - Real secrets, redacted correctly: `password` (1 schema), `db_password`
+///   (3), `docker_password` (1).
+/// - **Exempt, both paths**: `kubeconfig` (string, **10** schemas) and
+///   `vault_password_file` (string, **4**) — see [`REDACTION_EXEMPT_KEYS`],
+///   which carries the justification and the criterion.
+/// - Over-redacted, and the list is short on purpose: `secret_type`
+///   (string, 1), `author` (string, 1), `credential` (integer, 2),
+///   `credential_type` (integer, 1), `pass_credentials` (boolean, 1),
+///   `summary_max_tokens` (integer, 5).
+///
+/// So **6 over-redactions against 3 correct ones and 2 exemptions**, on the
+/// gate's lines. `secret_type` is the one that costs a reader something real:
+/// it says what KIND of secret was created, and its four values are listed in
+/// its *description* — `"Secret type: 'Opaque'/'generic' (default), 'tls', or
+/// 'docker-registry'"` — and **not** in an `enum`, which is why the
+/// structural criterion does not take it. The remedy is one line in
+/// `ssh_k8s_create_secret`'s schema; parsing a description would be a rule
+/// that rots. Two earlier versions of this list were wrong and the record is
+/// worth keeping: the first said 9 keys and 2 over-redactions, had
+/// `kubeconfig` under "correct" and omitted `docker_password` — it came from a
+/// regex requiring `"type"` on the line after the key.
+///
+/// **It is still not a complete defence, by construction.** A keyword list
+/// cannot be: `ssh_k8s_create_secret` takes
+/// `from_literal: [{"key": …, "value": …}]`, and neither `key` nor `value`
+/// matches a keyword, so a short secret in that array would reach the gate's
+/// line verbatim. That is the measurement that moved the shutdown sink to key
+/// names only; the gate keeps the hole, knowingly, because its line exists to
+/// be read before the call runs. What is no longer unguarded is the
+/// **coupling**: the gate only arms for destructive tools and that one is
+/// `mutating`, which
+/// `no_tool_with_a_never_logged_argument_may_become_destructive` now pins.
+///
+/// Recursive, because a secret one level down (`{"creds":{"password":"…"}}`)
+/// is reached by no top-level key. Depth is bounded by `serde_json`'s own
+/// parse recursion limit, so this cannot be driven deeper than the input was.
+///
+/// Reached only from `audited_operation`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
+fn redact_secret_values(value: &serde_json::Value) -> serde_json::Value {
+    const REDACTED: &str = "[REDACTED]";
+
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, inner)| {
+                    let rendered = if key_names_a_secret(key) {
+                        serde_json::Value::String(REDACTED.to_string())
+                    } else {
+                        redact_secret_values(inner)
+                    };
+                    (key.clone(), rendered)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_secret_values).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Keys the name rule matches but whose value cannot be a secret.
+///
+/// **An exemption list, not a redaction list, and the asymmetry is the whole
+/// argument for having one.** An incomplete redaction list leaks; an
+/// incomplete exemption list over-redacts, which is the safe direction to be
+/// wrong in. So this may be short and may be wrong without anybody losing a
+/// password.
+///
+/// Two criteria, one structural and one named:
+///
+/// 1. **A key whose schema declares an `enum`.** A finite, known value set
+///    cannot hide a secret, and the structure decides that, not a judgement.
+///    `the_exemption_list_still_matches_its_structural_criterion` re-derives
+///    this from the 476 schemas on every run, so a key that gains an `enum`
+///    reddens until it is added here.
+///
+///    **Measured, and it is worth stating because round 3 expected
+///    otherwise: this criterion takes NONE of the eleven keys today.** 45
+///    distinct property names in the tree declare an `enum`; not one of them
+///    matches a secret keyword. In particular it does **not** take
+///    `secret_type`, whose four values live in its *description* —
+///    `"Secret type: 'Opaque'/'generic' (default), 'tls', or
+///    'docker-registry'"` — and not in an `enum`. Parsing a description is
+///    exactly the kind of rule that rots, so the criterion stays as it is and
+///    `secret_type` stays redacted. The remedy is one line in
+///    `ssh_k8s_create_secret`'s schema: declare the `enum` it already
+///    describes, and this list picks it up.
+///
+/// 2. **Two keys by name, both for the same reason: they are PATHS and not
+///    contents.** A path cannot hold a secret — it names where one lives, and
+///    that is precisely what an auditor comes for.
+///
+///    - `kubeconfig`, on **10** of the 476 schemas (the most of any matching
+///      key): on a K3s host `kubeconfig=/etc/rancher/k3s/k3s.yaml` is what
+///      distinguishes "talked to the right cluster" from "talked to another
+///      one".
+///    - `vault_password_file`, on **4**: the same argument, and round 4
+///      overruled the judgement that had excluded it. Round 3 kept it
+///      redacted because it "does not distinguish anything important" — which
+///      is exactly the kind of per-name judgement the structural criterion
+///      exists to replace. Two entries justified identically, not one plus an
+///      opinion.
+///
+///    Named entries with their measurements beside them, and the test below
+///    pins that there are exactly **two**, so a third has to argue for itself
+///    in a failing assertion. Not a `*_file` family: `vault_password_file` is
+///    in because it is a path, not because of its suffix.
+///
+/// Read only by `key_names_a_secret`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
+const REDACTION_EXEMPT_KEYS: &[&str] = &["kubeconfig", "vault_password_file"];
+
+/// Whether an argument's key name contains one of the sanitizer's secret
+/// keywords, case-insensitively — and is not on [`REDACTION_EXEMPT_KEYS`].
+///
+/// Reached only from `redact_secret_values`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
+fn key_names_a_secret(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    if REDACTION_EXEMPT_KEYS.contains(&lowered.as_str()) {
+        return false;
+    }
+    crate::security::Sanitizer::secret_keywords()
+        .iter()
+        .any(|keyword| lowered.contains(&keyword.to_ascii_lowercase()))
+}
+
+/// The `command` field for a CLI gate event: the tool and its arguments,
+/// **values included**, bounded.
+///
+/// **One caller since round 2: the CLI's destructive gate.** The shutdown
+/// emitter used to share this and now uses `audited_argument_names`, because
+/// a keyword list cannot be made complete — see there. The gate keeps the
+/// values deliberately: its line exists to show an operator what is about to
+/// run, so a rendering without values would defeat its purpose.
+///
+/// No command string is available at the gate — the handler builds it and it
+/// has not run yet — so the line carries the *operation*, in the shape
+/// [`AuditEvent::tagged`] documents for an event that ran nothing. The bounds
+/// are [`GATE_AUDIT_MAX_VALUE_CHARS`] per value and
+/// [`GATE_AUDIT_MAX_OPERATION_CHARS`] overall, both marked where they bite.
+///
+/// The SIZE rule is a size rule on purpose, not a list of content-bearing
+/// field names: both callers see an opaque JSON object for any of 476 tools,
+/// so a name list (`content`, `body`, `script`, `playbook`, …) would have to
+/// be kept in step with every tool added and would leak in silence the first
+/// time a payload was called something else. A size rule cannot rot that way.
+///
+/// **The SECRET rule is a name rule, and the two are not in tension.** A size
+/// rule cannot tell a password from a path — a password is short — so
+/// [`redact_secret_values`] runs first, by key name, before anything is
+/// serialized. See there for why the `Sanitizer` cannot do it at this sink.
+///
+/// `tool_name` goes through [`audited_text`] like any other caller string.
+/// It is **not** validated before this runs: `register` happens before
+/// `registry.execute` resolves the name, so a `tools/call` whose `name`
+/// contains a newline reached `log_to_tracing` and forged a second, well-formed
+/// `Audit: …` record. `host` was rendered and the tool name beside it on the
+/// same line was not; that asymmetry was the defect.
+/// **Gated on `cli` (or a test build), and that gate is a measurement.**
+/// Its only consumer outside this module is the CLI's destructive gate, and
+/// `src/cli` is compiled only with the `cli` feature — so under
+/// `--no-default-features` this and its three helpers below were
+/// `dead_code` errors under `-D warnings`. That configuration is the third
+/// clippy gate the constraints name and the one **no CI job runs**, so the
+/// breakage was silent; it predates this entry (identical six errors at the
+/// revision before it) and is fixed here rather than left, because a gate
+/// that nobody runs is a gate that rots. `test` is in the `cfg` because this
+/// module's own tests assert on it and they build without `cli`.
+#[cfg(any(feature = "cli", test))]
+pub(crate) fn audited_operation(tool_name: &str, args: Option<&serde_json::Value>) -> String {
+    // Secrets BEFORE sizes, and on the whole value rather than per member:
+    // the key that names the secret is the TOP-level one, so a per-member
+    // call would never look at it.
+    let safe = args.map(redact_secret_values);
+    let bounded = match safe.as_ref() {
+        None => serde_json::Value::Object(serde_json::Map::new()),
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), elide_oversized(v)))
+                .collect(),
+        ),
+        Some(other) => elide_oversized(other),
+    };
+    let rendered = serde_json::to_string(&bounded).unwrap_or_else(|_| "{}".to_string());
+    let operation = format!("{} {rendered}", audited_text(tool_name));
+    let total = operation.chars().count();
+    if total <= GATE_AUDIT_MAX_OPERATION_CHARS {
+        return operation;
+    }
+    let kept: String = operation
+        .chars()
+        .take(GATE_AUDIT_MAX_OPERATION_CHARS)
+        .collect();
+    format!("{kept} <truncated: {total} chars total>")
+}
+
+/// The `command` field for the SHUTDOWN's line: the tool and the NAMES of
+/// its arguments, and no values at all.
+///
+/// **Round 2 moved this sink off [`audited_operation`], and the reason is
+/// that redaction by keyword cannot be complete.** Two measured defeats, both
+/// of the same kind: `ssh_k8s_create_secret` takes
+/// `from_literal: [{"key": …, "value": …}]` — whose own schema says "values
+/// are secret, never logged" — and neither member name matches a keyword, no
+/// sanitizer pattern anchors on `value`, and the entropy backstop wants 16
+/// characters; and the value-type exemption was a choice the **caller** made,
+/// so `{"password": 12345678}` went through. `ssh_k8s_create_secret` is
+/// annotated `mutating`, not destructive, so the CLI gate had never rendered
+/// it: this sink was its first path to disk.
+///
+/// **A key cannot carry a secret. A keyword list can, by construction.** So
+/// the shutdown's line carries no values, and that is enough for what it has
+/// to say — which tool, on which host, with which arguments PRESENT. "The
+/// command started and we will never know how it finished" never needed the
+/// values.
+///
+/// The names are caller-chosen JSON keys, so each one still goes through
+/// [`audited_text`]; they are sorted, because `serde_json::Map` preserves
+/// insertion order and a reader comparing two lines for the same tool should
+/// not have to care which order a client serialized in. Non-object arguments
+/// cannot have names, so they are reported as a shape rather than invented
+/// names. The whole string is bounded by
+/// [`GATE_AUDIT_MAX_OPERATION_CHARS`], because the number of keys is the
+/// caller's choice too.
+pub(crate) fn audited_argument_names(tool_name: &str, args: Option<&serde_json::Value>) -> String {
+    let rendered = match args {
+        None => "{}".to_string(),
+        Some(serde_json::Value::Object(map)) => {
+            let mut names: Vec<String> = map
+                .keys()
+                .map(|k| {
+                    if k.is_empty() {
+                        // `{"": "x"}` rendered `ssh_exec {}` — byte for byte
+                        // what a call with NO arguments renders. That is the
+                        // same class of defect as the forgeable `<no-host>`
+                        // this release closed: a line that reads as something
+                        // it is not. An argument exists, so the line says so.
+                        "<empty-name>".to_string()
+                    } else {
+                        audited_text(k)
+                    }
+                })
+                .collect();
+            names.sort();
+            format!("{{{}}}", names.join(","))
+        }
+        // A `tools/call` whose `arguments` is not an object at all. Naming the
+        // shape is the honest answer: there are no argument names to list, and
+        // an empty `{}` would read as "a call with no arguments".
+        Some(serde_json::Value::Array(items)) => format!("<array: {} items>", items.len()),
+        Some(_) => "<scalar>".to_string(),
+    };
+    let operation = format!("{} {rendered}", audited_text(tool_name));
+    let total = operation.chars().count();
+    if total <= GATE_AUDIT_MAX_OPERATION_CHARS {
+        return operation;
+    }
+    let kept: String = operation
+        .chars()
+        .take(GATE_AUDIT_MAX_OPERATION_CHARS)
+        .collect();
+    format!("{kept} <truncated: {total} chars total>")
+}
+
+/// Replace one argument value with its length when it is over
+/// [`GATE_AUDIT_MAX_VALUE_CHARS`]. Applies to arrays and objects too, by their
+/// serialized length, so a nested payload is bounded like a flat one.
+///
+/// Reached only from `audited_operation`, so it carries the same `cfg`.
+#[cfg(any(feature = "cli", test))]
+pub(crate) fn elide_oversized(value: &serde_json::Value) -> serde_json::Value {
+    let len = match value {
+        serde_json::Value::String(s) => s.chars().count(),
+        other => serde_json::to_string(other).map_or(0, |s| s.chars().count()),
+    };
+    if len <= GATE_AUDIT_MAX_VALUE_CHARS {
+        return value.clone();
+    }
+    serde_json::Value::String(format!("<elided: {len} chars>"))
+}
+
+/// Why a session or a tunnel was destroyed without anybody asking for it.
+///
+/// **Here and not in `src/ssh/session.rs`, and the final review is why.**
+/// It lived beside `SessionManager`, so the tunnel line in
+/// `McpServer::audit_tunnels_at_shutdown` could not reach it and passed the
+/// bare string `"shutdown"` instead — **one literal on the wire, two
+/// sources**, the same defect that renaming the sentinel's identifier
+/// alongside its value had removed one round earlier. The type is the
+/// single source now: [`reaped_event`] takes a `ReapReason` and not a
+/// `&str`, so no caller can spell a reason that is not in this enum.
+///
+/// A **closed** set, and that is what makes it safe to put in an audit line:
+/// `AuditLogger::log` sanitizes `event.command` and nothing else, and these
+/// strings are interpolated into `command` beside a `reason=` key. A `&str`
+/// parameter in their place would be a path for caller data to reach the
+/// line unescaped — the same constraint `INTERRUPTED_BY_SHUTDOWN` documents
+/// for `CommandResult::Interrupted`'s `reason`.
+///
+/// `ssh_session_close` is deliberately **not** a member. The explicit close
+/// is audited by its handler, through
+/// `ExecuteCommandUseCase::log_state_change`, and
+/// [`SessionManager::close`] — the method that handler calls — is the one
+/// removal site that must never reach `SessionManager::audit_destroyed`.
+/// Pinned by `every_silent_removal_site_now_audits_except_the_explicit_close`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReapReason {
+    /// `last_used` is older than `sessions.idle_timeout_seconds` (300 s by
+    /// default). Reached from the 60 s reaper **and** from `exec`'s prologue,
+    /// whichever gets there first.
+    IdleTimeout,
+    /// `created_at` is older than `sessions.max_age_seconds` (3600 s by
+    /// default). Reached from the same two places as `IdleTimeout`.
+    MaxAge,
+    /// `SessionManager::close_all`, i.e. the server is going down and the
+    /// session was still open.
+    Shutdown,
+    /// The shell closed while `exec` was discarding the output of an earlier
+    /// command that had overrun its deadline.
+    ShellClosedWhileDraining,
+    /// Writing the command into the shell's stdin failed: the channel is
+    /// dead and the session is a zombie.
+    ChannelWriteFailed,
+    /// Reading the command's output gave EOF or a closed channel — evidence
+    /// the shell itself is gone, as opposed to merely slow.
+    ShellGone,
+}
+
+impl ReapReason {
+    /// The literal that goes on the audit line. Stable: it is a wire value a
+    /// `jq` rule selects on, not a message.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleTimeout => "idle_timeout",
+            Self::MaxAge => "max_age",
+            Self::Shutdown => "shutdown",
+            Self::ShellClosedWhileDraining => "shell_closed_while_draining",
+            Self::ChannelWriteFailed => "channel_write_failed",
+            Self::ShellGone => "shell_gone",
+        }
+    }
+}
+
+/// The whole event for a session or a tunnel the bridge destroyed by itself:
+/// the idle reaper, the shutdown, or a dead channel.
+///
+/// **One renderer for two call sites in two layers**, and that is the only
+/// reason it lives here rather than beside either of them.
+/// `SessionManager::audit_destroyed` (`src/ssh/session.rs`) writes the
+/// session lines and `McpServer::audit_tunnels_at_shutdown`
+/// (`src/mcp/server.rs`) writes the tunnel ones; neither adapter can see the
+/// other, and a second copy of this shape is how the two lines would come to
+/// disagree about the field a `jq` rule selects on.
+///
+/// `event_type` is **`"state_change"`**, the same value the seven
+/// state-changing tools write, and deliberately not a new one: an auditor
+/// asking "when was this session destroyed" must get one query, not two.
+/// What tells the two apart is `tool_name` — `RESOURCE_REAPER_TOOL` here, a
+/// real tool name there.
+///
+/// `duration_ms` is the resource's **LIFETIME**, not the time the teardown
+/// took, and that is a departure from what the field means on the other
+/// `state_change` lines. It is the one number that makes
+/// [`CommandResult::StateChanged`]'s duration meaningful for an event nobody
+/// timed: "this session existed for 43 minutes and then the reaper took it".
+/// Stated on the variant too, because a reader comparing a reaped line with
+/// an `ssh_session_close` line would otherwise read the same field two ways
+/// without being told.
+///
+/// **The host is in the `host` FIELD and nowhere else, which took a round to
+/// get right.** The first version also interpolated `host=` into `command`,
+/// on the reasoning that an auditor pairing a reaped line with an
+/// `ssh_session_create` one wants everything on the line. But two sources
+/// for one fact in a line-oriented format are two sources that can
+/// **disagree** — they are rendered by different functions, `audited_host`
+/// caps at [`GATE_AUDIT_MAX_VALUE_CHARS`] and `audited_text` does not — and
+/// the auditor filters on the field, which is the one every other event
+/// shape already uses. `command` carries what the `host` field cannot: the
+/// reason and the resource id.
+///
+/// **The separators are ` ` and `=`, and neither is new.** Both are already
+/// in [`audited_text`]'s family 3, so `id` — a UUID this crate minted, or a
+/// tunnel id built from a caller's host and ports — cannot forge a third
+/// field. `reason` is a [`ReapReason`] and `id_key` a `&'static str` **on
+/// purpose**: they are the writer's own vocabulary, so there is no path by
+/// which caller data reaches them unescaped. `reason` was a `&'static str`
+/// until the final review found the cost — the tunnel caller, which could not
+/// see the enum from its own module, passed the bare literal `"shutdown"`,
+/// putting one wire value in two places. A type cannot be spelled wrong.
+///
+/// The `u64::try_from(..).unwrap_or(u64::MAX)` is the same saturation
+/// `mcp::tool_handlers::utils::elapsed_ms` applies, open-coded rather than
+/// imported: `src/security/` must not depend on `src/mcp/`.
+pub(crate) fn reaped_event(
+    reason: ReapReason,
+    id_key: &'static str,
+    id: &str,
+    host: &str,
+    lifetime: std::time::Duration,
+) -> AuditEvent {
+    let command = format!(
+        "{RESOURCE_REAPER_TOOL} reason={} {id_key}={}",
+        reason.as_str(),
+        audited_text(id)
+    );
+    AuditEvent::tagged(
+        "state_change",
+        &audited_host(host),
+        &command,
+        CommandResult::StateChanged {
+            duration_ms: u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX),
+        },
+    )
+}
+
+// ===========================================================================
+// The in-flight registry
+//
+// Here and not in `src/mcp/server.rs` since round 1 of the review: the
+// handler's own audit write happens inside `registry.execute`, through
+// `ExecuteCommandUseCase`, and that use case lives in `src/domain/` — which
+// `tests/architecture_rules.rs::domain_must_not_import_mcp_adapter` forbids
+// from importing `src/mcp/`. The registry exists for no purpose but to
+// produce an audit line, so this is also where it belongs. `McpServer` still
+// OWNS it, as a field.
+// ===========================================================================
+
+/// One tool call handed to a handler, as much of it as a shutdown line needs.
+///
+/// Rendered at registration rather than kept raw, which is a deliberate
+/// departure from "the entry carries the tool name and the raw arguments":
+/// `audited_argument_names` bounds its result, so a registry of these is
+/// bounded by construction. (This said `audited_operation` until round 4 —
+/// the fifth member of that family, and it was contradicted twelve lines
+/// below inside this same docstring. `audited_operation` is the renderer the
+/// CLI gate kept.) Keeping an `Option<Value>` instead would have
+/// held a clone of the whole argument object for the life of the command,
+/// which for `ssh_file_write content=<a file>` is the file.
+///
+/// **The bound, in the unit that matters.** `host` is at most
+/// [`GATE_AUDIT_MAX_VALUE_CHARS`] = 256 **characters** and `operation` at
+/// most [`GATE_AUDIT_MAX_OPERATION_CHARS`] = 2048 plus the
+/// `<truncated: N chars total>` suffix, ~2075 in all. Both caps count
+/// `chars()`, and a UTF-8 char is up to 4 bytes, so the worst case is
+/// **~9.3 KB per entry** — not the ~2.3 KB an earlier version of this
+/// paragraph implied by quoting the character counts as if they were bytes.
+/// Round 2 narrowed what fills those 2048: `operation` is now argument NAMES
+/// only, so the realistic case is a few dozen bytes, and the 9.3 KB is a
+/// caller who sends thousands of long key names. The registry's own size is
+/// bounded by the semaphore, not by a cap here: every `tools/call` takes a
+/// permit before it is dispatched and the tasks worker takes one before it
+/// registers, so the ceiling is `limits.max_concurrent_commands`, **5** by
+/// default — ~47 KB in all.
+///
+/// **The transient cost is the real one, and it is not bounded by the
+/// registry.** [`audited_argument_names`] runs on every tool call, before
+/// the name is even known to be valid. It is much cheaper than the
+/// value-rendering form it replaced — it allocates one escaped `String` per
+/// key and sorts them, touching no value — but the gate's
+/// [`audited_operation`] still does the expensive thing, and on that path
+/// the cost is not "about what the parse cost": [`redact_secret_values`]
+/// rebuilds the object, `elide_oversized` clones each value under the cap,
+/// the result is serialized, and the serialized form is walked once more by
+/// `chars().count()` — two full copies of the bounded object and two O(len)
+/// scans, plus a full `to_string` of an oversized NON-string value purely to
+/// measure it. The cap does its job on the pathological case (a 256 KB
+/// `content=` string is measured by `chars().count()` without being copied),
+/// and `src/mcp/transport/stdio.rs` reads a line into an unbounded `String`
+/// while HTTP caps a body at 1 MB.
+///
+/// Neither a start instant nor a duration, and that is the variant's
+/// contract: see [`crate::security::CommandResult::Interrupted`].
+#[derive(Clone, Debug)]
+pub(crate) struct InFlightCall {
+    /// The event's `host`: the call's unresolved `host` argument, rendered.
+    pub(crate) host: String,
+    /// The event's `command`: the tool name and the NAMES of its arguments.
+    pub(crate) operation: String,
+    /// How many audit events this call has already written.
+    ///
+    /// **A counter and not a removal, and round 2 is why.** The first design
+    /// had the handler's own write REMOVE the entry, which is the
+    /// "`remove` then `log`" order the whole scheme asks for — and it made a
+    /// multi-event call unreportable from its first event on: a shutdown
+    /// between host 1 and host 2 of an `ssh_metrics_multi` found an empty
+    /// registry and wrote **nothing**, while hosts 2..N sent their lines into
+    /// a channel `close_audit()` had closed. Nothing false, a line
+    /// **missing** — which is the defect this whole task exists to remove,
+    /// reintroduced by its own fix.
+    ///
+    /// So the entry is not taken away by a write; it is **transitioned**.
+    /// Incremented before each write, so the claim is still taken first, and
+    /// copied onto the shutdown's line as
+    /// `CommandResult::Interrupted::events_recorded` — **a field, since round
+    /// 3, not a number inside the `reason` sentence**. One stable phrase plus
+    /// a count, read two ways:
+    ///
+    /// - `0` — the process stopped before any result of this call was
+    ///   recorded;
+    /// - `N > 0` — the process stopped after N were recorded and before the
+    ///   call returned, which is exactly what a reader of a call that had
+    ///   written every line but not yet left `registry.execute` needs to see
+    ///   beside those lines.
+    pub(crate) events_recorded: u64,
+}
+
+impl InFlightCall {
+    /// Render a call's two audited fields, bounded, without keeping the
+    /// arguments.
+    pub(crate) fn render(tool_name: &str, args: Option<&serde_json::Value>) -> Self {
+        Self {
+            host: audited_host_from_args(args),
+            operation: audited_argument_names(tool_name, args),
+            events_recorded: 0,
+        }
+    }
+}
+
+/// The tool calls this server has dispatched and not yet seen finish.
+///
+/// **Why a new registry and not one of the four that already exist**, each
+/// measured before this was written:
+///
+/// - [`ActiveRequests`] is the closest skeleton and the wrong one twice over.
+///   It maps a request id to a `CancellationToken` and carries no tool name,
+///   no host and no arguments; and it is **per session** by a deliberate
+///   security fix (FIND-038, see its own doc), so it is unreachable from
+///   [`McpServer::serve`] and must not be promoted to a singleton to make it
+///   reachable.
+/// - `TaskStore` is global and reachable, but covers only the calls promoted
+///   to `io.modelcontextprotocol/tasks`, and `create_task` takes no arguments
+///   at all, so it stores neither a tool nor a host.
+/// - `concurrent_limit` counts and cannot name.
+/// - `SessionManager::sessions` is the trap the wave-4 notes pointed at: it
+///   holds hosts and ids, but reading it needs `lock().await` on the very
+///   `tokio::sync::Mutex` that `SessionManager::exec` holds for the whole of a
+///   remote command — so a shutdown snapshot taken from it would park behind
+///   the command it is trying to report, reopening through another door the
+///   unbounded wait `Self::close_bounded("sessions", ..)` just closed.
+///
+/// `std::sync::Mutex`, not tokio's, for that last reason stated positively:
+/// the lock is held for a hashmap insert, remove or drain and nothing else, no
+/// `.await` is taken inside the critical section, and therefore the shutdown
+/// snapshot **cannot park**. Same choice and same justification as
+/// [`ActiveRequests`].
+#[derive(Clone, Default)]
+pub(crate) struct InFlightCalls {
+    calls: Arc<std::sync::Mutex<std::collections::HashMap<u64, InFlightCall>>>,
+    /// Source of the keys. A counter and not the JSON-RPC `id`, which is
+    /// caller-chosen, not unique across sessions (`ActiveRequests`' doc says
+    /// so) and absent entirely from the tasks worker.
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl InFlightCalls {
+    /// Record a dispatched call and return the claim that removes it again.
+    ///
+    /// The claim is what must be held for the duration of the call; dropping
+    /// it is how the call is reported finished.
+    #[must_use]
+    pub(crate) fn register(
+        &self,
+        tool_name: &str,
+        args: Option<&serde_json::Value>,
+    ) -> InFlightClaim {
+        self.register_rendered(InFlightCall::render(tool_name, args))
+    }
+
+    /// [`Self::register`] for a call whose fields were rendered earlier.
+    ///
+    /// The tasks worker needs this split: its arguments are moved into the
+    /// spawned future, but it must not be registered until it holds a
+    /// concurrency permit — otherwise a task still queued on the semaphore at
+    /// shutdown is described as a command that was abandoned mid-flight,
+    /// when it had not started.
+    #[must_use]
+    pub(crate) fn register_rendered(&self, call: InFlightCall) -> InFlightClaim {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.lock().insert(id, call);
+        InFlightClaim {
+            calls: self.clone(),
+            id,
+        }
+    }
+
+    /// Take one call out of the map, returning it to whoever got there first.
+    ///
+    /// This **is** the claim: `HashMap::remove` returns the entry, so of the
+    /// two racers — the handler finishing and the shutdown snapshot — exactly
+    /// one can be handed it, and the other gets `None`. The pattern is
+    /// `ActiveRequests::cancel`'s, whose doc states the same property ("the
+    /// map entry is removed atomically with the cancel signal").
+    fn take(&self, id: u64) -> Option<InFlightCall> {
+        self.lock().remove(&id)
+    }
+
+    /// Take every call out of the map, for the shutdown snapshot.
+    ///
+    /// **Removes first and logs afterwards**, never the reverse: the drain
+    /// happens under the lock and the `log()` calls happen outside it, so the
+    /// snapshot can neither park behind the audit sink nor behind a handler.
+    ///
+    /// It takes EVERY remaining entry, including the ones that have already
+    /// written events — [`InFlightCall::events_recorded`] is what tells the
+    /// two apart, and both get a line. A handler's write no longer removes
+    /// anything, so there is no race to win here and no call that goes
+    /// unreported because it happened to write first.
+    pub(crate) fn take_all(&self) -> Vec<InFlightCall> {
+        self.lock().drain().map(|(_, call)| call).collect()
+    }
+
+    /// The map, with a poisoned lock recovered rather than tolerated.
+    ///
+    /// [`ActiveRequests`] answers a poisoned lock with `if let Ok(..)`, which
+    /// silently does nothing. That is right for a cancellation — losing one
+    /// is not worth a panic — and wrong here: a `PoisonError` would retire
+    /// this registry permanently, and a registry that is permanently empty
+    /// writes no shutdown lines and reports success by writing nothing. So
+    /// the guard is taken back out of the poison, which is also what
+    /// `AuditLogger`'s own sender lock does.
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, InFlightCall>> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// How many calls are registered. Test helper, like `ActiveRequests::len`.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock().len()
+    }
+}
+
+/// A registered call's entry, removed when this is dropped.
+///
+/// RAII and not a paired `unregister` call, because the paths out of a tool
+/// call are not all returns: the handler can panic, and the task it runs in
+/// can be dropped at an await point when the runtime goes away. A `Drop` impl
+/// covers all three; an explicit [`Self::finish`] at the end of the happy
+/// path covers one, and bounds the entry's life to `registry.execute` even if
+/// a handler left a clone of its `ToolContext` in a detached task.
+pub(crate) struct InFlightClaim {
+    calls: InFlightCalls,
+    id: u64,
+}
+
+impl Drop for InFlightClaim {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+impl InFlightClaim {
+    /// Count one audit event this call has written, BEFORE it is written.
+    ///
+    /// The claim half of "claim then log", and the whole of it since round 2:
+    /// see [`InFlightCall::events_recorded`] for why this counts instead of
+    /// removing. Called by every `ExecuteCommandUseCase` facade that writes
+    /// about a call somebody else made — not by `log_interrupted`, which is
+    /// the shutdown's own write.
+    ///
+    /// Saturating, so a call that somehow wrote `u64::MAX` events does not
+    /// wrap back to the "nothing was recorded" statement.
+    pub(crate) fn record_event(&self) {
+        if let Some(call) = self.calls.lock().get_mut(&self.id) {
+            call.events_recorded = call.events_recorded.saturating_add(1);
+        }
+    }
+
+    /// Take this call's entry out of the registry. Idempotent.
+    pub(crate) fn finish(&self) {
+        drop(self.calls.take(self.id));
+    }
+
+    /// How many events this call has recorded, if it is still registered.
+    /// Test helper: it is what makes the claim-before-write order
+    /// **observable** rather than inferred.
+    #[cfg(test)]
+    pub(crate) fn events_recorded(&self) -> Option<u64> {
+        self.calls.lock().get(&self.id).map(|c| c.events_recorded)
+    }
+}
+
+/// What [`AuditLogger::observe_writes`] takes: a function run at the moment
+/// of a write, with the event about to be written.
+///
+/// An alias because the bare type trips `clippy::type_complexity`, and
+/// because the name says what the thing is for.
+#[cfg(test)]
+pub(crate) type WriteObserver = Arc<dyn Fn(&AuditEvent) + Send + Sync>;
 
 /// Audit logger that writes events to a file and/or tracing
 ///
@@ -345,6 +1585,18 @@ pub struct AuditLogger {
     /// `new` both leave this `None`, so they behave exactly as before.
     #[cfg(test)]
     captured: Option<std::sync::Mutex<Vec<AuditEvent>>>,
+    /// Observation point taken at the MOMENT of a write, the same kind of
+    /// injected seam as `now_fn` beside it.
+    ///
+    /// It exists because the order "claim, then log" is not observable from
+    /// outside: every assertion a test can make after `log()` returns is
+    /// equally satisfied by a release that happened AFTER the write. Round 2
+    /// of the review proved it by moving the claim below the `log(..)` call
+    /// and watching the whole suite stay green. A hook called from inside
+    /// `log` lets a test read the registry at the instant the line is
+    /// written, which is the only place the order shows.
+    #[cfg(test)]
+    at_write: Option<WriteObserver>,
 }
 
 /// Background task that writes audit events to a file.
@@ -729,6 +1981,8 @@ impl AuditLogger {
             now_fn: Utc::now,
             #[cfg(test)]
             captured: None,
+            #[cfg(test)]
+            at_write: None,
         };
 
         let task = AuditWriterTask {
@@ -827,6 +2081,8 @@ impl AuditLogger {
             now_fn: Utc::now,
             #[cfg(test)]
             captured: None,
+            #[cfg(test)]
+            at_write: None,
         }
     }
 
@@ -840,6 +2096,12 @@ impl AuditLogger {
             captured: Some(std::sync::Mutex::new(Vec::new())),
             ..Self::disabled()
         }
+    }
+
+    /// Install the write-time observation point. See [`Self::at_write`].
+    #[cfg(test)]
+    pub(crate) fn observe_writes(&mut self, hook: WriteObserver) {
+        self.at_write = Some(hook);
     }
 
     /// Take every event captured so far, leaving the logger empty.
@@ -889,6 +2151,15 @@ impl AuditLogger {
     pub fn log(&self, tool: &str, event: AuditEvent) {
         let mut event = event;
         event.tool_name = Some(tool.to_string());
+
+        // FIRST, before anything this function does: the observation point
+        // exists to report the state of the world at the moment of the write,
+        // and a hook called later would report the state after it.
+        #[cfg(test)]
+        if let Some(ref hook) = self.at_write {
+            hook(&event);
+        }
+
         if let Some(ref s) = self.sanitizer {
             event.command = s.sanitize(&event.command).into_owned();
         }
@@ -917,6 +2188,59 @@ impl AuditLogger {
     }
 
     /// Log event to tracing (synchronous, fast)
+    ///
+    /// **`host` and `command` are emitted as `Debug` (`?`), not `Display`
+    /// (`%`), and that is a security property of this function rather than a
+    /// formatting preference.** `tracing_subscriber`'s default visitor renders
+    /// a `Display` field RAW into a logfmt-shaped record, so a caller-supplied
+    /// value containing the format's own separators writes its own fields.
+    /// Measured attack, **69 characters** rendered (a 64-character `host`
+    /// argument, under the 256-character cap that applies to it):
+    /// `host=raspberry exit_code=0 duration_ms=12 event_type=command_executed`
+    /// — which made a logfmt consumer (journald `_MESSAGE` parsers, Vector,
+    /// Promtail, Splunk `logfmt`) read an INTERRUPTED call as a successful
+    /// one, injecting precisely the two fields
+    /// [`CommandResult::Interrupted`] documents as absent. `Debug` on a `str`
+    /// quotes and escapes, so the whole value lands inside one quoted field
+    /// whatever it contains.
+    ///
+    /// It closes three findings at once, for every caller of this sink and
+    /// not only for the shutdown's line: that injection, the same forgery
+    /// through `command` (into which `audited_operation` interpolates a
+    /// caller-chosen `tool_name`, unvalidated because `register` precedes
+    /// `registry.execute`'s lookup), and the newline in a real shell command
+    /// that `log_success`/`log_failure` have always written here — the
+    /// `Sanitizer` strips ANSI and secrets, never line breaks.
+    ///
+    /// **The rule is NOT "caller-supplied fields are quoted", and round 2
+    /// caught that wording being false where it mattered.** The first version
+    /// left the other fields `Display` on the ground that they were
+    /// "writer-chosen". Two of them are not: `reason` carries caller text **by
+    /// design** — `src/mcp/standard_tool.rs` says so in production, "validators
+    /// interpolate it into their `reason`", a few lines above its `log_denied`
+    /// — and `message` carries it through `BridgeError`'s `Display`
+    /// (`Session not found: {session_id}`, `Unknown host: {host}`). So the
+    /// same 69-character input forged the same four fields again, through
+    /// `reason=` on a `command_denied` record.
+    ///
+    /// The rule is therefore mechanical and has no judgement in it: **every
+    /// string-valued field on this sink is `Debug`**. `event_type`, `host`,
+    /// `command`, `reason`, `error` and `confirmed_by` are all quoted;
+    /// `exit_code` and `duration_ms` are integers and cannot carry text.
+    ///
+    /// `tool_name` is the one field left unquoted, and it is a provenance
+    /// argument rather than an escaping one: it comes from
+    /// [`AuditLogger::log`]'s mandatory `tool`, and every call site in the
+    /// tree passes a literal, a `handler.name()` or `SHUTDOWN_TOOL` — never a
+    /// value off the wire. **If that ever changes, it must be quoted too**;
+    /// it is `Option<&str>`, which `tracing` records bare, and `?` on it would
+    /// render `Some("…")`.
+    ///
+    /// Checked before changing it: the three `logs_contain` assertions in this
+    /// module's tests (`test_log_to_tracing_emits_*`) all probe a VALUE
+    /// (`"tracing-test-host"`, `"denied-host"`, `"error-host"`) and never the
+    /// `host=value` pair, so quoting leaves them matching as substrings. No
+    /// other test in the tree parses this sink.
     fn log_to_tracing(event: &AuditEvent) {
         match &event.result {
             CommandResult::Success {
@@ -924,10 +2248,10 @@ impl AuditLogger {
                 duration_ms,
             } => {
                 info!(
-                    event_type = %event.event_type,
+                    event_type = ?event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     exit_code = exit_code,
                     duration_ms = duration_ms,
                     "Audit: command executed"
@@ -935,21 +2259,21 @@ impl AuditLogger {
             }
             CommandResult::Error { message } => {
                 info!(
-                    event_type = %event.event_type,
+                    event_type = ?event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
-                    error = %message,
+                    host = ?event.host,
+                    command = ?event.command,
+                    error = ?message,
                     "Audit: command failed"
                 );
             }
             CommandResult::Denied { reason } => {
                 info!(
-                    event_type = %event.event_type,
+                    event_type = ?event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
-                    reason = %reason,
+                    host = ?event.host,
+                    command = ?event.command,
+                    reason = ?reason,
                     "Audit: command denied"
                 );
             }
@@ -957,10 +2281,10 @@ impl AuditLogger {
             // is absent rather than zero, exactly as on the variant.
             CommandResult::StateChanged { duration_ms } => {
                 info!(
-                    event_type = %event.event_type,
+                    event_type = ?event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
+                    host = ?event.host,
+                    command = ?event.command,
                     duration_ms = duration_ms,
                     "Audit: state changed"
                 );
@@ -970,12 +2294,28 @@ impl AuditLogger {
             // nothing yet to have exited.
             CommandResult::Confirmed { by } => {
                 info!(
-                    event_type = %event.event_type,
+                    event_type = ?event.event_type,
                     tool_name = event.tool_name.as_deref(),
-                    host = %event.host,
-                    command = %event.command,
-                    confirmed_by = %by,
+                    host = ?event.host,
+                    command = ?event.command,
+                    confirmed_by = ?by,
                     "Audit: destructive call confirmed"
+                );
+            }
+            // Neither field again, and for a third reason: something DID run
+            // and we stopped without learning how it ended. See the variant.
+            CommandResult::Interrupted {
+                reason,
+                events_recorded,
+            } => {
+                info!(
+                    event_type = ?event.event_type,
+                    tool_name = event.tool_name.as_deref(),
+                    host = ?event.host,
+                    command = ?event.command,
+                    reason = ?reason,
+                    events_recorded = events_recorded,
+                    "Audit: command interrupted by shutdown"
                 );
             }
         }
@@ -2949,5 +4289,888 @@ mod tests {
 
         // Recent file should remain
         assert!(recent_file.exists(), "Recent file should not be cleaned up");
+    }
+
+    // ====================================================================
+    // Round 1 of the T45 review — rendering a caller's string into a line
+    // ====================================================================
+
+    /// **A database password used to reach the disk in clear.**
+    ///
+    /// The `Sanitizer` runs on this sink and catches nothing here: its
+    /// key-anchored families need the key glued to its delimiter, and the
+    /// JSON rendered by `audited_operation` is `{"db_password":"…"}`, which
+    /// puts a `"` between `password` and the `:` and a `db_` between the `"`
+    /// and `password`. `ssh_db_query` and `ssh_db_dump` are not destructive,
+    /// so the CLI gate never rendered them: this sink was their first path to
+    /// `audit.log`.
+    ///
+    /// Three properties, because dropping any one of them brings the leak
+    /// back by another door: the value is gone, the marker says so, and the
+    /// key stays readable.
+    #[test]
+    fn a_secret_named_argument_is_redacted_by_its_key() {
+        let args = serde_json::json!({
+            "host": "pi",
+            "db_password": "S3cr3t!x",
+            "query": "select 1",
+        });
+        let line = audited_operation("ssh_db_query", Some(&args));
+
+        assert!(
+            !line.contains("S3cr3t!x"),
+            "the password must not reach the line: {line}"
+        );
+        assert!(
+            line.contains(r#""db_password":"[REDACTED]""#),
+            "the key must stay readable and say it was redacted: {line}"
+        );
+        assert!(
+            line.contains(r#""query":"select 1""#),
+            "a value whose key names no secret must be untouched: {line}"
+        );
+    }
+
+    /// One level down is still a secret, and no top-level key names it.
+    #[test]
+    fn a_secret_nested_under_an_innocent_key_is_redacted_too() {
+        let args = serde_json::json!({"creds": {"password": "hunter2", "user": "pi"}});
+        let line = audited_operation("ssh_db_query", Some(&args));
+
+        assert!(!line.contains("hunter2"), "{line}");
+        assert!(line.contains(r#""user":"pi""#), "{line}");
+    }
+
+    /// `kubeconfig` survives the name rule, and `secret_type` does not.
+    ///
+    /// The halves of the exemption, as behaviour rather than as a list: both
+    /// named entries work — they are paths — and the key the structural
+    /// criterion does NOT take is still redacted. That last assertion is the
+    /// one that would quietly reverse if somebody "finished" the exemption
+    /// with a `*_type` family; `secret_type` stays redacted until its schema
+    /// declares the `enum` its description already spells out.
+    #[test]
+    fn the_exemption_spares_a_path_and_not_a_prose_enumeration() {
+        let line = audited_operation(
+            "ssh_k8s_create_secret",
+            Some(&serde_json::json!({
+                "kubeconfig": "/etc/rancher/k3s/k3s.yaml",
+                "vault_password_file": "/etc/ansible/vault.txt",
+                "secret_type": "docker-registry",
+                "docker_password": "S3cr3t",
+            })),
+        );
+
+        assert!(
+            line.contains(r#""kubeconfig":"/etc/rancher/k3s/k3s.yaml""#),
+            "a path is what an auditor comes for, and a path cannot hide a secret: {line}"
+        );
+        assert!(
+            line.contains(r#""vault_password_file":"/etc/ansible/vault.txt""#),
+            "and the second exemption is in for the identical reason — round 4 overruled \
+             the judgement that had kept it redacted: {line}"
+        );
+        assert!(
+            line.contains(r#""secret_type":"[REDACTED]""#),
+            "its value set is in the description, not in an `enum`, so the structural \
+             criterion does not see it: {line}"
+        );
+        assert!(
+            !line.contains("S3cr3t"),
+            "and the real secret beside them still goes: {line}"
+        );
+    }
+
+    /// **A matching key is redacted whatever the value's type.**
+    ///
+    /// The first version spared `Number | Bool | Null` to keep readable
+    /// values readable, and round 2 of the review pointed out that the
+    /// value's type is **the caller's** choice: `{"password": 12345678}` is a
+    /// well-formed JSON number and went through untouched. An exemption an
+    /// attacker selects is not an exemption.
+    #[test]
+    fn a_secret_named_argument_is_redacted_whatever_its_value_type() {
+        let line = audited_operation(
+            "ssh_exec",
+            Some(&serde_json::json!({
+                "password": 12_345_678,
+                "token": true,
+                "api_key": ["a", "b"],
+                "limit": 50,
+            })),
+        );
+
+        assert!(
+            !line.contains("12345678"),
+            "a numeric password is still a password: {line}"
+        );
+        assert!(
+            line.contains(r#""password":"[REDACTED]""#),
+            "and it says so: {line}"
+        );
+        assert!(!line.contains("true"), "nor a boolean one: {line}");
+        assert!(
+            line.contains(r#""limit":50"#),
+            "a key that names no secret keeps its value whatever the type: {line}"
+        );
+    }
+
+    /// Every tool schema in the tree, as source text, for the two guards
+    /// below.
+    ///
+    /// Reads `src/mcp/tool_handlers/` from `CARGO_MANIFEST_DIR` rather than
+    /// `include_str!`ing 476 files. Same technique the repository already
+    /// uses for its source-text guards; it touches nothing outside the
+    /// checkout.
+    fn tool_handler_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp/tool_handlers");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the tool_handlers directory must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).expect("readable handler");
+                if text.contains("const SCHEMA") || text.contains("fn schema") {
+                    out.push((
+                        path.file_name()
+                            .expect("a file name")
+                            .to_string_lossy()
+                            .into_owned(),
+                        text,
+                    ));
+                }
+            }
+        }
+        assert!(
+            out.len() > 400,
+            "expected the ~476 schema-bearing handlers, found {} — this guard has lost its \
+             corpus and would pass vacuously",
+            out.len()
+        );
+        out
+    }
+
+    /// The balanced `{ … }` object a schema property opens, for each
+    /// `"name": {` in `text`.
+    fn schema_properties(text: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while let Some(found) = text[i..].find("\": {") {
+            let at = i + found;
+            let name_end = at;
+            let Some(name_start) = text[..name_end].rfind('"') else {
+                i = at + 4;
+                continue;
+            };
+            let name = &text[name_start + 1..name_end];
+            let open = at + 3;
+            let mut depth = 0usize;
+            let mut j = open;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && !name.is_empty()
+                && !matches!(name, "properties" | "items" | "schema" | "type")
+            {
+                out.push((
+                    name.to_string(),
+                    text[open..=j.min(bytes.len() - 1)].to_string(),
+                ));
+            }
+            i = open;
+        }
+        out
+    }
+
+    /// **The exemption list is a cache of a criterion, and this re-derives
+    /// the criterion.**
+    ///
+    /// Criterion 1: a key whose schema declares an `enum` cannot hide a
+    /// secret. If one ever both matches a secret keyword and declares an
+    /// `enum`, this reddens until it is added to `REDACTION_EXEMPT_KEYS` —
+    /// which is how the list stays structural instead of becoming a name
+    /// family. Measured today: **zero** such keys, so the whole list is
+    /// name-based.
+    ///
+    /// Criterion 2: the name-based entries are `kubeconfig` **and**
+    /// `vault_password_file`, both on the same ground — they are PATHS, not
+    /// contents — and the assertion below pins that there are exactly those
+    /// **two**, so a future "while we are here" addition has to argue for
+    /// itself in a failing test rather than slip in.
+    ///
+    /// **This paragraph claimed a single named entry until the final
+    /// review**, and had done so since `vault_password_file` was added in
+    /// the round
+    /// that overruled its exclusion: the assertion below was edited to pin
+    /// two and the prose above it was not. Sixth relapse of the stale-number
+    /// family in this release, in the test whose own round had just edited
+    /// it.
+    #[test]
+    fn the_exemption_list_still_matches_its_structural_criterion() {
+        let keywords: Vec<String> = crate::security::Sanitizer::secret_keywords()
+            .iter()
+            .map(|k| k.to_ascii_lowercase())
+            .collect();
+        let names_a_secret = |key: &str| {
+            keywords
+                .iter()
+                .any(|k| key.to_ascii_lowercase().contains(k))
+        };
+
+        let mut enum_declaring_secret_keys: Vec<String> = Vec::new();
+        for (_file, text) in tool_handler_sources() {
+            for (name, body) in schema_properties(&text) {
+                if body.contains("\"enum\"") && names_a_secret(&name) {
+                    enum_declaring_secret_keys.push(name);
+                }
+            }
+        }
+        enum_declaring_secret_keys.sort();
+        enum_declaring_secret_keys.dedup();
+
+        for key in &enum_declaring_secret_keys {
+            assert!(
+                REDACTION_EXEMPT_KEYS.contains(&key.as_str()),
+                "`{key}` matches a secret keyword AND declares an `enum`, so its value set is \
+                 finite and known and it cannot hide a secret. Add it to \
+                 REDACTION_EXEMPT_KEYS: redacting it costs a reader information for nothing."
+            );
+        }
+
+        let mut named_only: Vec<&&str> = REDACTION_EXEMPT_KEYS
+            .iter()
+            .filter(|k| !enum_declaring_secret_keys.iter().any(|e| e == **k))
+            .collect();
+        named_only.sort_unstable();
+        assert_eq!(
+            named_only,
+            vec![&"kubeconfig", &"vault_password_file"],
+            "exactly two entries are justified by name rather than by structure, and both \
+             on the same ground — they are PATHS, not contents. Their justifications are on \
+             REDACTION_EXEMPT_KEYS. A third must come with one too: change this assertion \
+             deliberately, not in passing"
+        );
+    }
+
+    /// **The coupling nothing guarded: an annotation change would put a
+    /// secret on disk.**
+    ///
+    /// The CLI's destructive gate renders argument VALUES, on purpose — its
+    /// line exists to show an operator what is about to run. The key-name
+    /// redaction is what keeps a secret off it, and a keyword list cannot be
+    /// complete: `ssh_k8s_create_secret`'s `from_literal` is
+    /// `[{"key": …, "value": …}]`, described "values are secret, never
+    /// logged", and neither member name matches any keyword. Today that is
+    /// harmless only because the tool is annotated `mutating`, so the gate
+    /// never arms for it — and **nothing was pinning that**.
+    ///
+    /// Measured corpus, so the guard is not one hand-picked tool: exactly
+    /// **2** schema properties in the tree carry the phrase `never logged`,
+    /// both on `ssh_k8s_create_secret` (`from_literal` and
+    /// `docker_password`), and `docker_password` is caught by the key-name
+    /// rule anyway. Widening the probe to any description mentioning a
+    /// secret-ish word returns 28 non-destructive tools, nearly all of them
+    /// false positives (`summary_max_tokens` matches `token`, the
+    /// `ssh_k8s_secret_*` family matches on its own name), which is why the
+    /// probe is the phrase an author writes when the ARGUMENT is the secret.
+    ///
+    /// This derives the set rather than naming it, so a tool added later with
+    /// the same shape is covered without anybody remembering to come back.
+    #[test]
+    fn no_tool_with_a_never_logged_argument_may_become_destructive() {
+        let mut found = 0usize;
+        for (file, text) in tool_handler_sources() {
+            let destructive = text.contains(r#"annotation = "destructive""#);
+            for (name, body) in schema_properties(&text) {
+                if !body.contains("never logged") {
+                    continue;
+                }
+                found += 1;
+                if key_names_a_secret(&name) {
+                    // The gate would replace this value with `[REDACTED]`
+                    // whatever the annotation says, so it is safe either way.
+                    continue;
+                }
+                assert!(
+                    !destructive,
+                    "{file}: `{name}` is described \"never logged\" and its NAME matches no \
+                     secret keyword, so the key-name redaction cannot see it — and this tool \
+                     is annotated `destructive`, which arms the CLI gate and makes the gate \
+                     render argument values. That puts the secret in audit.log. Remedy, \
+                     either one: rename the argument so the key names the secret (then \
+                     `redact_secret_values` catches it), or teach the gate to render names \
+                     only for this tool. Do not simply delete this assertion."
+                );
+            }
+        }
+        assert_eq!(
+            found, 2,
+            "the corpus this guard polices is 2 properties carrying `never logged`, both on \
+             ssh_k8s_create_secret; {found} means the probe has drifted and the guard may be \
+             passing vacuously"
+        );
+    }
+
+    /// The same coupling, asserted directly — belt beside the braces.
+    ///
+    /// The derived guard above generalises to a tool added later with the
+    /// same shape, and it depends on the phrase `never logged` surviving a
+    /// reword. This one depends on no prose at all, and cannot. Three lines
+    /// for the one tool that is measurably at risk today; keep both.
+    #[test]
+    fn ssh_k8s_create_secret_is_not_destructive() {
+        assert_ne!(
+            crate::mcp::registry::tool_annotations("ssh_k8s_create_secret").destructive_hint,
+            Some(true),
+            "`destructive` arms the CLI gate, the gate renders argument VALUES, and this \
+             tool's `from_literal: [{{\"key\": …, \"value\": …}}]` carries secrets under \
+             names no keyword matches. Remedy: rename the argument so its key names the \
+             secret, or render names only for this tool at the gate."
+        );
+    }
+
+    /// **The shutdown's line carries argument NAMES and no values.**
+    ///
+    /// Round 2's ruling, and the measurement behind it: redaction by keyword
+    /// cannot be complete. `ssh_k8s_create_secret` takes
+    /// `from_literal: [{"key": …, "value": …}]`, neither member name matches
+    /// a keyword, and the tool is annotated `mutating` so the CLI gate never
+    /// rendered it — this sink was its first path to disk. A key cannot carry
+    /// a secret; a keyword list can.
+    #[test]
+    fn the_shutdown_sink_renders_argument_names_and_no_values() {
+        let args = serde_json::json!({
+            "host": "raspberry",
+            "name": "tls-cert",
+            "from_literal": [{"key": "pw", "value": "S3cr3t"}],
+        });
+        let line = audited_argument_names("ssh_k8s_create_secret", Some(&args));
+
+        assert_eq!(
+            line, "ssh_k8s_create_secret {from_literal,host,name}",
+            "names only, sorted, and nothing else"
+        );
+        assert!(!line.contains("S3cr3t"), "{line}");
+        assert!(
+            !line.contains("raspberry"),
+            "not even an innocent value: {line}"
+        );
+    }
+
+    /// **Two ways a caller could make the shutdown's line read as something
+    /// else**, both of the class this release closed for `<no-host>`.
+    ///
+    /// Neither leaked a value and neither forged a logfmt field; both made a
+    /// line say the wrong thing about the call, which is the fault the whole
+    /// wave exists to remove.
+    ///
+    /// The comma case carries the rule worth more than the fix: **every time
+    /// this task chose a separator it created a forgery** — the space in
+    /// round 1, the comma in round 3 — so a separator belongs to
+    /// `audited_text`'s escape set by construction. See family 3 there.
+    #[test]
+    fn a_caller_cannot_make_the_argument_list_read_as_a_different_call() {
+        // One argument named "", which used to render byte for byte like a
+        // call with no arguments at all.
+        let empty_name = audited_argument_names("ssh_exec", Some(&serde_json::json!({"": "x"})));
+        assert_ne!(
+            empty_name,
+            audited_argument_names("ssh_exec", None),
+            "an argument with an empty name must not render as NO arguments"
+        );
+        assert_eq!(empty_name, "ssh_exec {<empty-name>}");
+
+        // One argument whose name contains the writer's separator, which used
+        // to render as three arguments.
+        let forged = audited_argument_names(
+            "ssh_exec",
+            Some(&serde_json::json!({"host,password,sudo_password": 1})),
+        );
+        assert!(
+            !forged.contains(','),
+            "the comma is the writer's separator: one argument must not render as three: \
+             {forged}"
+        );
+        assert_eq!(
+            forged, "ssh_exec {host\\u{2c}password\\u{2c}sudo_password}",
+            "escaped and visibly so, not dropped"
+        );
+
+        // And the braces, for the same reason.
+        let braced = audited_argument_names("ssh_exec", Some(&serde_json::json!({"a} {b": 1})));
+        assert_eq!(braced, "ssh_exec {a\\u{7d}\\u{20}\\u{7b}b}");
+    }
+
+    /// A key name is caller-chosen JSON, so it is rendered like any other
+    /// caller string — and a non-object `arguments` has no names to list, so
+    /// it is reported as a shape rather than as an empty call.
+    #[test]
+    fn the_shutdown_sink_renders_the_names_it_lists_and_names_a_non_object() {
+        let forged = audited_argument_names(
+            "ssh_exec",
+            Some(&serde_json::json!({"a b=c\nAudit: command executed": 1})),
+        );
+        assert!(
+            !forged.contains('\n'),
+            "a key cannot forge a record: {forged:?}"
+        );
+        assert!(!forged.contains(" b=c"), "nor a logfmt field: {forged:?}");
+
+        assert_eq!(
+            audited_argument_names("ssh_exec", Some(&serde_json::json!([1, 2, 3]))),
+            "ssh_exec <array: 3 items>"
+        );
+        assert_eq!(
+            audited_argument_names("ssh_exec", Some(&serde_json::json!("x"))),
+            "ssh_exec <scalar>"
+        );
+        assert_eq!(audited_argument_names("ssh_exec", None), "ssh_exec {}");
+    }
+
+    /// **The input that made an interrupted call read as a successful one —
+    /// the whole of it, which this test did not carry.**
+    ///
+    /// `audited_host` escaped `\`, `<`, `>` and `Cc`, but neither of logfmt's
+    /// two separators, and the `tracing` sink wrote the field raw. Defence in
+    /// depth now: the sink quotes (see `AuditLogger::log_to_tracing`) AND the
+    /// separators are escaped here.
+    ///
+    /// **The title used to say "62-character" and the body passed 36.** Two
+    /// errors in one place: the payload is 69 characters rendered (64 as the
+    /// `host` argument the cap applies to), and the literal here was a
+    /// prefix that stopped before `event_type=command_executed` — the field
+    /// that does the actual lying. Both are fixed: the argument below is the
+    /// real one, and its length is asserted so the next edit cannot shorten
+    /// it back without saying so.
+    #[test]
+    fn the_logfmt_separators_cannot_write_a_second_field() {
+        // The full measured payload, not a prefix of it.
+        let argument = "raspberry exit_code=0 duration_ms=12 event_type=command_executed";
+        assert_eq!(
+            argument.chars().count(),
+            64,
+            "the host ARGUMENT of the measured attack; `host=` + this is the 69-character \
+             rendered line the docstring on `audited_text` quotes"
+        );
+        assert!(
+            argument.chars().count() <= GATE_AUDIT_MAX_VALUE_CHARS,
+            "and it is under the cap, which is the point: no size rule stops it"
+        );
+
+        let forged = audited_host(argument);
+
+        assert!(
+            !forged.contains(' ') && !forged.contains('='),
+            "neither logfmt separator may survive: {forged}"
+        );
+        assert!(
+            forged.starts_with("raspberry\\u{20}exit_code\\u{3d}0"),
+            "and they are escaped rather than dropped, so nothing is silently lost: {forged}"
+        );
+        // The word survives — it is not a separator, and a real alias may
+        // legitimately contain letters. What must not survive is the word
+        // followed by a RAW `=`, which is what makes it a field. (The first
+        // version of this assertion said `!contains("event_type")` and was
+        // false about what escaping does: the defect class this whole
+        // release is about, committed inside its own fix.)
+        assert!(
+            forged.contains("event_type"),
+            "the last field of the payload must still be reachable in the line: {forged}"
+        );
+        assert!(
+            !forged.contains("event_type="),
+            "but not as a FIELD — that is the one that made an interrupted call read as a \
+             successful one, and the old 36-character literal never reached it: {forged}"
+        );
+        assert_eq!(
+            audited_host("raspberry"),
+            "raspberry",
+            "a real alias is untouched"
+        );
+    }
+
+    /// The characters that reorder or hide the rest of the line.
+    ///
+    /// One case per family, because they are four different reasons and a
+    /// single probe would let three of them back in: `Zl`/`Zp` break a line,
+    /// the invisible `Cf` hide text, and the bidi overrides AND the newer
+    /// isolates reverse it. None is `char::is_control()`, which is `Cc` only,
+    /// and `serde_json` does not escape non-ASCII, so before this they reached
+    /// both sinks intact.
+    #[test]
+    fn a_reordering_or_hiding_character_is_escaped_by_the_renderer() {
+        // The NAME is `..._by_the_renderer` and not `..._cannot_reach_either
+        // _sink`, which is what it said until the final review: it calls
+        // `audited_host` and asserts on its return value, so it observes one
+        // RENDERER and neither sink. The sink-level claim is made by
+        // `a_forged_tool_name_cannot_write_a_field_on_the_shutdown_line`,
+        // which reads the JSONL off disk and asks `logs_contain` about the
+        // journal record.
+        for (name, ch) in [
+            ("U+00AD SOFT HYPHEN", '\u{ad}'),
+            ("U+061C ARABIC LETTER MARK", '\u{61c}'),
+            ("U+2028 LINE SEPARATOR", '\u{2028}'),
+            ("U+2029 PARAGRAPH SEPARATOR", '\u{2029}'),
+            ("U+200B ZERO WIDTH SPACE", '\u{200b}'),
+            ("U+200F RIGHT-TO-LEFT MARK", '\u{200f}'),
+            ("U+202E RIGHT-TO-LEFT OVERRIDE", '\u{202e}'),
+            ("U+2060 WORD JOINER", '\u{2060}'),
+            ("U+2066 LEFT-TO-RIGHT ISOLATE", '\u{2066}'),
+            ("U+2069 POP DIRECTIONAL ISOLATE", '\u{2069}'),
+            ("U+206F NOMINAL DIGIT SHAPES", '\u{206f}'),
+            ("U+FEFF BYTE ORDER MARK", '\u{feff}'),
+            ("U+FFF9 INTERLINEAR ANNOTATION ANCHOR", '\u{fff9}'),
+            ("U+E0041 TAG LATIN CAPITAL LETTER A", '\u{e0041}'),
+        ] {
+            let rendered = audited_host(&format!("raspberry{ch}"));
+            assert!(
+                !rendered.contains(ch),
+                "{name} must not reach the line verbatim: {rendered:?}"
+            );
+            assert!(
+                rendered.contains(&format!("\\u{{{:x}}}", u32::from(ch))),
+                "{name} must be escaped, not dropped: {rendered:?}"
+            );
+        }
+    }
+
+    /// **The whole cohort, not a sample: all 172 `Cf`/`Zl`/`Zp` code points.**
+    ///
+    /// `reorders_or_hides` is named for a property and written as ranges, so
+    /// the only way the two can be held together is to check every member.
+    /// The membership list here is the same one its docstring's `python3`
+    /// command produces for Unicode 16.0.0, transcribed as ranges — so this
+    /// test proves the *function's* ranges and the *documented* ranges agree,
+    /// and it is honest about what that does not prove: a future Unicode
+    /// version adding a `Cf` code point is invisible to both, which is why
+    /// the docstring says to re-run the command on a toolchain bump.
+    ///
+    /// It also pins the count, so a range edited by hand cannot quietly
+    /// widen or narrow the cohort.
+    #[test]
+    fn every_format_or_separator_code_point_is_covered() {
+        // Unicode 16.0.0, general categories Cf + Zl + Zp, 21 ranges.
+        const COHORT: &[(u32, u32)] = &[
+            (0x00ad, 0x00ad),
+            (0x0600, 0x0605),
+            (0x061c, 0x061c),
+            (0x06dd, 0x06dd),
+            (0x070f, 0x070f),
+            (0x0890, 0x0891),
+            (0x08e2, 0x08e2),
+            (0x180e, 0x180e),
+            (0x200b, 0x200f),
+            (0x2028, 0x202e),
+            (0x2060, 0x2064),
+            (0x2066, 0x206f),
+            (0xfeff, 0xfeff),
+            (0xfff9, 0xfffb),
+            (0x1_10bd, 0x1_10bd),
+            (0x1_10cd, 0x1_10cd),
+            (0x1_3430, 0x1_343f),
+            (0x1_bca0, 0x1_bca3),
+            (0x1_d173, 0x1_d17a),
+            (0xe_0001, 0xe_0001),
+            (0xe_0020, 0xe_007f),
+        ];
+
+        let mut counted = 0_u32;
+        for (lo, hi) in COHORT {
+            for cp in *lo..=*hi {
+                let ch = char::from_u32(cp).unwrap_or_else(|| panic!("U+{cp:04X} is a char"));
+                assert!(
+                    reorders_or_hides(ch),
+                    "U+{cp:04X} is in the Cf/Zl/Zp cohort and must be covered: a \
+                     hand-picked subset is what missed U+061C and the whole tag block"
+                );
+                // And it must actually be escaped by the one caller, not
+                // merely recognised here.
+                let rendered = audited_text(&format!("a{ch}b"));
+                assert!(
+                    !rendered.contains(ch),
+                    "U+{cp:04X} must not survive `audited_text`: {rendered:?}"
+                );
+                counted += 1;
+            }
+        }
+        assert_eq!(
+            counted, 172,
+            "the cohort is 172 code points at Unicode 16.0.0; a different number means \
+             the ranges above were edited without re-running the command in the docstring"
+        );
+
+        // Cc stays OUT of this function on purpose: `char::is_control()`
+        // covers it at the call site, and two lists would drift.
+        for cp in [0x00_u32, 0x09, 0x0a, 0x1b, 0x7f, 0x80, 0x9f] {
+            let ch = char::from_u32(cp).expect("a char");
+            assert!(
+                !reorders_or_hides(ch),
+                "U+{cp:04X} is Cc and belongs to `char::is_control()`, not here"
+            );
+            assert!(
+                ch.is_control(),
+                "…and `audited_text` must still escape it through that arm"
+            );
+        }
+    }
+
+    /// **The tool-name escaping of `audited_argument_names`, which had NO
+    /// test at all, on both sinks.**
+    ///
+    /// This is the sink **every** `tools/call` reaches: `InFlightCalls::
+    /// register` renders the name here for the shutdown's line, before
+    /// `registry.execute` has resolved it, so the string is whatever the
+    /// client sent. The round-1 fix of the forgery was never covered —
+    /// every existing caller in the suite passes a benign literal — so the
+    /// escape could have been deleted without a single test going red.
+    ///
+    /// One payload carrying every family at once: a newline (a second
+    /// well-formed `Audit: …` record in the journal), each of the four
+    /// separators this crate renders with (space, `=`, comma, brace), and
+    /// the writer's own sentinel in angle brackets.
+    ///
+    /// Both sinks, which is what the name claims: the JSONL is read back off
+    /// disk, and `logs_contain` is asked about the `tracing` record.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_forged_tool_name_cannot_write_a_field_on_the_shutdown_line() {
+        let forged = "ssh_exec\nAudit: command executed host=pi exit_code=0,{<shutdown>}";
+        let registry = InFlightCalls::default();
+        let claim = registry.register(forged, Some(&serde_json::json!({"host": "pi"})));
+        let stranded = registry.take_all();
+        drop(claim);
+        assert_eq!(stranded.len(), 1, "one registered call");
+        let operation = stranded[0].operation.clone();
+
+        // The rendered string itself: nothing raw survives.
+        for (name, needle) in [
+            ("newline", "\n"),
+            ("space", " ssh"),
+            ("equals", "exit_code="),
+            ("comma", "0,{"),
+            ("brace", "{<"),
+            ("the writer's sentinel", "<shutdown>"),
+        ] {
+            assert!(
+                !operation.contains(needle),
+                "{name} survived into the operation: {operation:?}"
+            );
+        }
+        assert!(
+            operation.starts_with("ssh_exec\\u{a}"),
+            "escaped rather than dropped, so the name stays greppable: {operation:?}"
+        );
+
+        // Sink 1: the JSONL on disk.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (logger, task) = AuditLogger::new(&AuditConfig {
+            enabled: true,
+            path: audit_path.clone(),
+            max_size_mb: 0,
+            retain_days: 0,
+        })
+        .expect("tempdir must be writable");
+        let writer = tokio::spawn(task.expect("enabled audit yields a writer").run());
+        logger.log(
+            SHUTDOWN_TOOL,
+            AuditEvent::tagged(
+                "command_interrupted",
+                "pi",
+                &operation,
+                CommandResult::Interrupted {
+                    reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+                    events_recorded: 0,
+                },
+            ),
+        );
+        logger.close();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert_eq!(
+            contents.lines().count(),
+            1,
+            "one event must be one JSONL line: {contents:?}"
+        );
+        let event: serde_json::Value =
+            serde_json::from_str(contents.lines().next().expect("one line"))
+                .expect("the line must still parse as JSON");
+        assert_eq!(
+            event["tool_name"], "<shutdown>",
+            "`tool_name` is the writer's, and the forged name cannot reach it"
+        );
+
+        // Sink 2: the `tracing` record. A forged `host=pi exit_code=0` in a
+        // logfmt reader would have read this interrupted call as a
+        // successful one — the two fields `Interrupted` documents as absent.
+        assert!(
+            logs_contain("Audit: command interrupted"),
+            "the real record must be there, or this test proves nothing"
+        );
+        assert!(
+            !logs_contain("exit_code=0"),
+            "a forged exit code must not appear in the journal record"
+        );
+    }
+
+    /// `host` was rendered and the tool name beside it on the same line was
+    /// not — and nothing validates the name before the registry sees it,
+    /// because `register` runs before `registry.execute` resolves it.
+    #[test]
+    fn a_tool_name_cannot_forge_a_second_audit_record() {
+        let line = audited_operation("ssh_exec\nAudit: command executed", None);
+
+        assert!(
+            !line.contains('\n'),
+            "a newline in the tool name forged a second journal record: {line:?}"
+        );
+        assert!(
+            line.starts_with("ssh_exec\\u{a}"),
+            "it is escaped rather than dropped: {line:?}"
+        );
+    }
+
+    /// **The attack replayed on every arm, with a DISTINCT payload per arm.**
+    ///
+    /// The first fix quoted `host` and `command` and left the rest `Display`
+    /// because they were "writer-chosen". Two of them are not: `reason`
+    /// carries caller text by design — `src/mcp/standard_tool.rs` says
+    /// "validators interpolate it into their `reason`" a few lines above its
+    /// `log_denied` — and `message` carries it through `BridgeError`'s
+    /// `Display`. So the same 69-character input forged the same four fields
+    /// again, on a `command_denied` record.
+    ///
+    /// **The payload is per case, and that is the whole correctness of this
+    /// test.** `tracing_test` collects every record of the test into ONE
+    /// buffer, so a shared payload let the `Denied` record satisfy the
+    /// `reason="…"` assertion written for `Interrupted`: the final re-review
+    /// reverted the `Interrupted` arm alone to `%reason` and the whole `--lib`
+    /// suite stayed green. That was the **third** time in this task that a
+    /// test asserted a property its assertion could not see, and the third
+    /// time inside the test written to fix the previous one. A distinct
+    /// payload per case makes each assertion unsatisfiable by any other arm.
+    #[test]
+    #[tracing_test::traced_test]
+    fn no_field_on_this_sink_can_carry_caller_text_unquoted() {
+        // Each payload carries its own marker, so no arm's record can satisfy
+        // another arm's assertion out of the shared buffer.
+        fn payload(marker: &str) -> String {
+            format!("raspberry-{marker} exit_code=0 duration_ms=12 event_type=command_executed")
+        }
+
+        let logger = AuditLogger::disabled();
+
+        // (field name on the record, marker, the result carrying the payload)
+        let cases: Vec<(&str, &str, CommandResult)> = vec![
+            (
+                "error",
+                "err",
+                CommandResult::Error {
+                    message: payload("err"),
+                },
+            ),
+            (
+                "reason",
+                "den",
+                CommandResult::Denied {
+                    reason: payload("den"),
+                },
+            ),
+            (
+                "confirmed_by",
+                "cnf",
+                CommandResult::Confirmed { by: payload("cnf") },
+            ),
+            (
+                "reason",
+                "int",
+                CommandResult::Interrupted {
+                    reason: payload("int"),
+                    events_recorded: 0,
+                },
+            ),
+            (
+                "command",
+                "suc",
+                CommandResult::Success {
+                    exit_code: 0,
+                    duration_ms: 12,
+                },
+            ),
+            (
+                "command",
+                "chg",
+                CommandResult::StateChanged { duration_ms: 12 },
+            ),
+        ];
+
+        for (field, marker, result) in cases {
+            let p = payload(marker);
+            logger.log("ssh_exec", AuditEvent::tagged(&p, &p, &p, result));
+            assert!(
+                logs_contain(&format!("{field}=\"{p}\"")),
+                "{field} must be quoted on the {marker} arm, or a caller writes its own \
+                 logfmt fields. The payload is unique to this arm, so no other record can \
+                 satisfy this assertion."
+            );
+            // The three fields every arm shares, on this arm's own payload.
+            for shared in ["event_type", "host", "command"] {
+                assert!(
+                    logs_contain(&format!("{shared}=\"{p}\"")),
+                    "{shared} must be quoted on the {marker} arm"
+                );
+            }
+            assert!(
+                !logs_contain(&format!("host={p}")),
+                "the unquoted form is what let the value write its own fields ({marker})"
+            );
+        }
+    }
+
+    /// The sink half of the logfmt fix, and the only test that can tell the
+    /// two halves apart.
+    ///
+    /// The event is built by hand with a RAW host, bypassing `audited_host`,
+    /// so what is under test is `log_to_tracing`'s `?` and nothing else. With
+    /// `%` the record carries `host=raspberry exit_code=0` — four unquoted
+    /// logfmt fields. With `?` the whole value sits inside one quoted field.
+    #[test]
+    #[tracing_test::traced_test]
+    fn the_tracing_sink_quotes_the_two_caller_supplied_fields() {
+        let logger = AuditLogger::disabled();
+        let event = AuditEvent::tagged(
+            "command_interrupted",
+            "raspberry exit_code=0 duration_ms=12",
+            "ssh_exec {}",
+            CommandResult::Interrupted {
+                reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+                events_recorded: 0,
+            },
+        );
+
+        logger.log(SHUTDOWN_TOOL, event);
+
+        assert!(
+            logs_contain(r#"host="raspberry exit_code=0 duration_ms=12""#),
+            "the whole caller value must sit inside ONE quoted field"
+        );
+        assert!(
+            !logs_contain("host=raspberry"),
+            "the unquoted form is what let the value write its own fields"
+        );
     }
 }

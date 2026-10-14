@@ -10,7 +10,10 @@ use std::time::Duration;
 use crate::domain::CommandHistory;
 use crate::error::Result;
 use crate::ports::CommandOutput;
-use crate::security::{AuditEvent, AuditLogger, CommandResult, CommandValidator, Sanitizer};
+use crate::security::{
+    AuditEvent, AuditLogger, CommandResult, CommandValidator, INTERRUPTED_BY_SHUTDOWN,
+    SHUTDOWN_TOOL, Sanitizer,
+};
 
 /// Request for executing a command
 #[derive(Debug, Clone)]
@@ -127,6 +130,35 @@ pub struct ExecuteCommandUseCase {
     sanitizer: Arc<Sanitizer>,
     audit_logger: Arc<AuditLogger>,
     history: Arc<CommandHistory>,
+    /// This call's entry in the server's in-flight registry, when there is
+    /// one.
+    ///
+    /// **A field and not a hidden channel, and round 2 of the review is why.**
+    /// The first version carried the claim in a `tokio::task_local`, which
+    /// cost nothing in signatures and two things that matter: it could be
+    /// broken without any signature changing (so only a source-text guard
+    /// pinned it), and it does not cross a `tokio::spawn`, which left
+    /// `ssh_exec_multi` — whose per-host writes happen inside
+    /// `join_set.spawn` — on the old behaviour.
+    ///
+    /// A field costs neither, because of three facts the re-review measured:
+    /// `ToolContext` is built per request; it already carries per-call state
+    /// of exactly this kind (`mrtr`, "shared by `Arc` so a `ToolContext`
+    /// cloned into a sub-task still records into the same slot"); and all 98
+    /// call sites of the facades below reach them **through**
+    /// `ctx.execute_use_case`, which is filled at one place on the tool path.
+    /// So a per-call use case reaches every one of them with **zero**
+    /// call-site edits, is visible in a struct, and travels into a spawned
+    /// sub-task with the `Arc` the handler clones out of the context.
+    ///
+    /// `None` off the MCP request path: the CLI builds its own use case and
+    /// has no shutdown registry to report to.
+    ///
+    /// The 98 above was 98 when it was counted and is **100** today — two of
+    /// this wave's own tests call the facades. The figure moving is the
+    /// point: a claim parameter would have to be threaded through every one
+    /// of them, tests included, and the count grows with the suite.
+    in_flight: Option<Arc<crate::security::InFlightClaim>>,
 }
 
 impl ExecuteCommandUseCase {
@@ -141,6 +173,57 @@ impl ExecuteCommandUseCase {
             sanitizer,
             audit_logger,
             history,
+            in_flight: None,
+        }
+    }
+
+    /// This use case again, bound to one call's in-flight claim.
+    ///
+    /// Called once per `tools/call`, by `McpServer::handle_tools_call` and by
+    /// the tasks worker, which put the result in
+    /// `ToolContext::execute_use_case`. Four `Arc` clones, so the cost is a
+    /// refcount bump per call and no deep copy.
+    ///
+    /// `pub(crate)`: [`crate::security::InFlightClaim`] is crate-internal and
+    /// must not appear in the public API through this signature.
+    #[must_use]
+    pub(crate) fn with_claim(&self, claim: Arc<crate::security::InFlightClaim>) -> Self {
+        Self {
+            validator: Arc::clone(&self.validator),
+            sanitizer: Arc::clone(&self.sanitizer),
+            audit_logger: Arc::clone(&self.audit_logger),
+            history: Arc::clone(&self.history),
+            in_flight: Some(claim),
+        }
+    }
+
+    /// Count the audit event this call is ABOUT to write.
+    ///
+    /// Called as the first statement of every facade below that writes about
+    /// a call somebody else made, so the claim is taken before the write.
+    /// Never called by [`Self::log_interrupted`], which IS the shutdown's
+    /// write. See `crate::security::InFlightCall::events_recorded` for why it
+    /// counts rather than removing — the removing version made a multi-event
+    /// call unreportable from its first event on.
+    ///
+    /// **`pub(crate)` since the final review, and the reason is a false line
+    /// it found.** Eleven production writes in six file-transfer handlers
+    /// (`ssh_ls`, `ssh_files_write`, `ssh_file_write`, `ssh_download`,
+    /// `ssh_upload`, `ssh_sync`) build their own `AuditEvent` and go straight
+    /// to `ctx.audit_logger.log(..)`, so they reached no facade and this
+    /// counter stayed at 0. The shutdown line then printed
+    /// `events_recorded: 0` — defined as "the process stopped before any
+    /// result of this call was recorded" — **beside lines that call had
+    /// already written**. The reachable case is `ssh_files_write`, whose
+    /// writes are inside its per-file loop: a `daemon stop` at file 21 of 50
+    /// left 20 lines plus a line saying there were none. Those eleven sites
+    /// now call this directly, each immediately before its `log`, and
+    /// `every_direct_audit_write_claims_itself_first` pins both the count and
+    /// the order. The alternative — widening the field's definition until the
+    /// 0 was true — would have been the same defect from the other side.
+    pub(crate) fn claim_this_write(&self) {
+        if let Some(ref claim) = self.in_flight {
+            claim.record_event();
         }
     }
 
@@ -199,6 +282,10 @@ impl ExecuteCommandUseCase {
     /// at all. An absent name proved nothing; it only meant a caller had
     /// not bothered.
     pub fn log_denied(&self, tool: &str, host: &str, command: &str, reason: &str) {
+        // Claim THEN log, which is the order the whole in-flight scheme rests
+        // on and which production used to get backwards on this side. A no-op
+        // off the MCP request path: the CLI has no registry to report to.
+        self.claim_this_write();
         // Same redaction as `process_success`, `log_failure`, `log_state_change`
         // and `log_confirmed` — see `process_success`'s comment. This was the
         // one entry point that did NOT pre-redact, and the asymmetry leaked:
@@ -250,6 +337,10 @@ impl ExecuteCommandUseCase {
     /// reason, so both halves of a gate decision are audit-only and
     /// `ssh_history` shows neither.
     pub fn log_confirmed(&self, tool: &str, host: &str, command: &str, by: &str) {
+        // Claim THEN log, which is the order the whole in-flight scheme rests
+        // on and which production used to get backwards on this side. A no-op
+        // off the MCP request path: the CLI has no registry to report to.
+        self.claim_this_write();
         // Same redaction as `process_success` — see its comment. The string
         // is built from the call's own arguments, and those can carry a
         // password (`sudo_password`, a `--password` value in a free-form
@@ -367,6 +458,8 @@ impl ExecuteCommandUseCase {
         duration_ms: u64,
         reduction: &[&'static str],
     ) {
+        // Claim THEN log — see `log_denied`.
+        self.claim_this_write();
         let mut event = AuditEvent::new(
             host,
             redacted,
@@ -438,6 +531,8 @@ impl ExecuteCommandUseCase {
     /// command history is not — but neither is complete, and no reader should
     /// take either for a count of attempts.
     pub fn log_state_change(&self, tool: &str, host: &str, operation: &str, duration_ms: u64) {
+        // Claim THEN log — see `log_denied`.
+        self.claim_this_write();
         // Same redaction as `process_success` — see its comment. An operation
         // string is built from tool arguments, and `ssh_config_set` passes a
         // key and a value.
@@ -454,10 +549,78 @@ impl ExecuteCommandUseCase {
         );
     }
 
+    /// Log a tool call that was still running when the process stopped: the
+    /// shutdown's line about somebody else's call.
+    ///
+    /// **The one facade here that does NOT take a `tool`**, and the asymmetry
+    /// is the point. The other six take it because `AuditLogger::log`
+    /// overwrites `tool_name` with it and the caller is the tool, so a
+    /// mandatory parameter is what stops a line from being anonymous. Here
+    /// the caller is the shutdown, the only honest value is
+    /// `crate::security::SHUTDOWN_TOOL`, and a parameter would invite the one
+    /// value that must never be passed — the name of the tool whose call this
+    /// is about, which would make the line indistinguishable from one that
+    /// tool wrote itself. The tool is still on the line: `operation` begins
+    /// with it, in the form `audited_argument_names`
+    /// (`src/security/audit.rs`) builds. **Named by file and not by module
+    /// path**, because the `crate::security::…` form this sentence used until
+    /// now does not resolve at all: the function is `pub(crate)` inside the
+    /// PRIVATE module `audit` (`mod audit;` in `src/security/mod.rs`) and
+    /// appears in none of that module's `use audit::{…}` re-export lists.
+    ///
+    /// **No grep backs that, and the first correction shows why.** It cited
+    /// a `grep -c` of this function's name over `src/security/mod.rs` as
+    /// returning 0; the correcting round then added a doc comment to
+    /// `mod.rs` naming the function, and the count became 1 — the citation
+    /// was falsified by the same wave that wrote it. The command is
+    /// described and not reproduced, for exactly that reason. The claim is structural and the compiler
+    /// is its proof: write `crate::security::audited_argument_names`
+    /// anywhere in the crate and `cargo check` fails. Plain backticks and
+    /// not an intra-doc link, so rustdoc never flagged the broken path; the
+    /// file is the citation that stays true. (This named
+    /// `audited_operation` until round 3; that is the renderer the CLI gate
+    /// kept, and it carries argument VALUES, which this line no longer
+    /// does.)
+    ///
+    /// **No history entry**, for the reason [`Self::log_state_change`]
+    /// states and that applies here word for word: `HistoryEntry::exit_code`
+    /// is a non-optional `u32` whose `0` means success, so the history cannot
+    /// express "no code was ever read" — it could only express "it
+    /// succeeded", which is precisely the false claim this line exists to
+    /// avoid. `audit.log` is therefore the only record of an interrupted
+    /// call, and `ssh_history` will not show it.
+    ///
+    /// `reason` is not a parameter either: `AuditLogger::log` sanitizes
+    /// `event.command` and nothing else, so a `CommandResult`'s own strings
+    /// reach both sinks unredacted. One fixed phrase, in the crate's own
+    /// constant.
+    pub fn log_interrupted(&self, host: &str, operation: &str, events_recorded: u64) {
+        // Same redaction as `log_state_change`. The operation string is now
+        // argument NAMES only (`audited_argument_names`), so there is far
+        // less for a sanitizer to find — but it is still caller-chosen text
+        // and the redaction stays.
+        let redacted = self.sanitizer.sanitize(operation);
+
+        self.audit_logger.log(
+            SHUTDOWN_TOOL,
+            AuditEvent::tagged(
+                "command_interrupted",
+                host,
+                &redacted,
+                CommandResult::Interrupted {
+                    reason: INTERRUPTED_BY_SHUTDOWN.to_string(),
+                    events_recorded,
+                },
+            ),
+        );
+    }
+
     /// Log a failed command execution, recording which tool ran it.
     ///
     /// `tool` is mandatory — see [`Self::log_denied`].
     pub fn log_failure(&self, tool: &str, host: &str, command: &str, error: &str) {
+        // Claim THEN log — see `log_denied`.
+        self.claim_this_write();
         // Same redaction as `process_success` — see its comment.
         let redacted = self.sanitizer.sanitize(command);
 

@@ -8,6 +8,7 @@
 //! marker appears, enabling reliable output delimiting.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use russh::ChannelMsg;
@@ -19,6 +20,7 @@ use uuid::Uuid;
 
 use crate::config::{HostConfig, LimitsConfig, SessionConfig, ShellType};
 use crate::error::{BridgeError, Result};
+use crate::security::{AuditLogger, RESOURCE_REAPER_TOOL, ReapReason, reaped_event};
 
 use super::client::SshClient;
 
@@ -93,6 +95,42 @@ pub struct SessionExecResult {
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, ShellSession>>,
     config: SessionConfig,
+    /// Where a destruction nobody asked for is recorded, when there is
+    /// anywhere to record it.
+    ///
+    /// `Option` and set by a **separate** constructor step rather than a
+    /// parameter of [`Self::new`], and the reason is arithmetic.
+    /// `git grep -c "SessionManager::new(" 6e38c5e -- 'src/*.rs' 'tests/*.rs'
+    /// 'benches/*.rs' 'examples/*.rs'`, summed, returns **131** — and the
+    /// revision is the branch's **base**, pinned, because that is the only
+    /// form of this number that stays true. Of those 131, **2** are
+    /// production. An added parameter — even an `Option` one — has to be
+    /// written at every one of them, because Rust has no default arguments;
+    /// the setter costs the 2.
+    ///
+    /// **No count of the CURRENT tree is quoted here, and two attempts are
+    /// why.** The first said "136 after this change"; the next commit on the
+    /// same branch added three more test fixtures and it was 139, then this
+    /// round's own tests took it to 141. A census of a literal, taken in a
+    /// tree that keeps acquiring the literal, measures the probe. The same
+    /// trap caught the sibling sentence twice. First it quoted a count of
+    /// the setter's own call sites as "those 2 plus 3 in tests", and every
+    /// test added since moved the second number. Then the correction for
+    /// that **reproduced the command**, so the sentence became one of its
+    /// own matches: 11 results for 10 call sites. Fifth recurrence of a
+    /// self-counting citation in this release, inside the fix for the entry
+    /// about it.
+    ///
+    /// So the command is described and not written: a recursive grep of this
+    /// setter's name over `src` and `tests`, minus its definition. What does
+    /// not move is the shape: **2 production call sites**
+    /// (`src/mcp/server.rs`, `src/cli/runner.rs`), and as many test sites as
+    /// the suite needs.
+    ///
+    /// `None` is therefore the shape every test and every embedder gets, and
+    /// it must stay silent rather than panic: a manager with no logger simply
+    /// does not record, exactly as it did before this change.
+    audit: Option<Arc<AuditLogger>>,
 }
 
 impl SessionManager {
@@ -102,6 +140,174 @@ impl SessionManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             config,
+            audit: None,
+        }
+    }
+
+    /// Give this manager somewhere to record the sessions it destroys on its
+    /// own: the idle reaper, the shutdown, and `exec`'s dead-channel
+    /// branches.
+    ///
+    /// Additive on purpose — see the `audit` field. Two production callers:
+    /// `McpServer::new` (`src/mcp/server.rs`) and
+    /// `cli::runner::create_context_from_wiring`. Without it the manager
+    /// behaves exactly as it did before: the `tracing` lines are unchanged
+    /// and nothing reaches `audit.log`.
+    #[must_use]
+    pub fn with_audit_logger(mut self, logger: Arc<AuditLogger>) -> Self {
+        self.audit = Some(logger);
+        self
+    }
+
+    /// Which bound a session has passed, or `None` if it has passed neither.
+    ///
+    /// **Pure, and over elapsed DURATIONS rather than `Instant`s**, which is
+    /// the whole reason it is a function. `ShellSession` keeps
+    /// `std::time::Instant`s, and `tokio::time::advance` does not age a
+    /// `std::time::Instant` — measured as the repository's own constraint in
+    /// the wave's pre-flight — so a predicate over `Instant`s is testable
+    /// only by waiting on the wall clock or by switching a hot production
+    /// path to `tokio::time::Instant`. Over durations the clock question does
+    /// not arise: the caller reads `elapsed()` and this decides.
+    ///
+    /// **One function for the two sites that apply it**, and before this
+    /// change there were two single-`||` expressions — in `Self::cleanup`
+    /// and in [`Self::exec`]'s prologue — **in opposite operand order**.
+    /// With a single `||` that difference was unobservable, which is why it
+    /// survived: an identical predicate written twice the other way round
+    /// was a defect waiting for someone to give it a voice. Naming the bound
+    /// is that voice, and it forces a tie-break.
+    ///
+    /// **`max_age` wins a tie, because it is the HARD bound.** A session past
+    /// `max_age_seconds` is reaped **even while it is actively in use**,
+    /// where `idle_timeout_seconds` only bites on inactivity — so when both
+    /// hold, the dominant fact is the one that would have sufficed alone. An
+    /// auditor counting reaps by reason has to find `max_age` on exactly the
+    /// sessions that were condemned whatever their traffic; reporting
+    /// `idle_timeout` there would say the session could have been saved by
+    /// using it, which is false.
+    ///
+    /// Note `idle <= age` always holds for a real session (`last_used` is set
+    /// to `created_at` at creation), but the two bounds are independent
+    /// config values, so either can fire alone.
+    fn expiry_reason(idle: Duration, age: Duration, config: &SessionConfig) -> Option<ReapReason> {
+        // The two comparisons, operator for operator, that the two single
+        // `||` expressions used to make. Not a `const fn`: `PartialOrd` on
+        // `Duration` is not const, and open-coding the comparison on
+        // `as_secs()`/`subsec_nanos()` to buy `const` would be a rewrite of
+        // the condition this function exists to preserve exactly.
+        if age > Duration::from_secs(config.max_age_seconds) {
+            return Some(ReapReason::MaxAge);
+        }
+        if idle > Duration::from_secs(config.idle_timeout_seconds) {
+            return Some(ReapReason::IdleTimeout);
+        }
+        None
+    }
+
+    /// Write the one audit line for a session this manager destroyed without
+    /// being asked to.
+    ///
+    /// **The single helper for six of the seven removal sites**, called by
+    /// the four in [`Self::exec`], by [`Self::close_all`] and by
+    /// [`Self::cleanup`]. The seventh is [`Self::close`], and it is excluded
+    /// by design: `ssh_session_close`'s handler already writes a
+    /// `state_change` line for that path, so a shared helper reached from
+    /// `close` would put **two** lines on the trail for one operation. That
+    /// is the only place in this file where a double line could be born, and
+    /// it would be born of exactly the factoring that looks tidiest.
+    ///
+    /// **Not `async`, and that is what makes
+    /// [`Self::audit_all_destroyed`] possible** — see there for why batching
+    /// matters. `AuditLogger::log` writes to `tracing` and pushes onto an
+    /// unbounded mpsc, so it never awaits and never blocks.
+    ///
+    /// **Called for ONE session only**, from `Self::remove_dead_session`.
+    /// `close_all` and `cleanup` destroy a batch and go through
+    /// [`Self::audit_all_destroyed`]; calling this one from inside their
+    /// close loops is the defect the batch helper exists to prevent.
+    ///
+    /// Silent when no logger was wired (see the `audit` field) — which is
+    /// every test and every embedder that builds the manager with
+    /// [`Self::new`] alone.
+    fn audit_destroyed(&self, reason: ReapReason, id: &str, host: &str, lifetime: Duration) {
+        if let Some(logger) = self.audit.as_ref() {
+            logger.log(
+                RESOURCE_REAPER_TOOL,
+                reaped_event(reason, "session_id", id, host, lifetime),
+            );
+        }
+    }
+
+    /// Write the line for EVERY session in a batch, in one synchronous pass,
+    /// **before any of them is closed**.
+    ///
+    /// **The defect this exists to remove loses lines 2..N.** Both batch
+    /// sites used to interleave: for each session, write its line, then
+    /// `client.close().await` it. That close is bounded by
+    /// `SshClient::close`'s own 5 s, and `close_all` runs inside
+    /// `McpServer::close_bounded`'s 2 s — so against a dead peer the FIRST
+    /// session got its line and sessions 2..N got neither a line nor a
+    /// DISCONNECT, because `close_bounded` abandons the future mid-flight.
+    /// `cleanup` had the same shape with a different abandoner: it removes
+    /// every expired session from the map before writing the first line, and
+    /// `McpServer::serve` aborts the cleanup loop **unbounded**, so an abort
+    /// between two iterations lost the lines of sessions already removed
+    /// from the map — sessions no later pass can find.
+    ///
+    /// **The fix costs nothing**, which is why it is the right one:
+    /// [`Self::audit_destroyed`] is not `async`, so N lines are N pushes
+    /// onto an unbounded channel with no await between them. The batch pass
+    /// cannot be abandoned part-way by a timeout, because no timer can fire
+    /// inside it.
+    ///
+    /// Takes the FACTS and not the sessions: `ShellSession` is private and
+    /// has no test constructor, so a tuple iterator is what lets
+    /// `a_batch_of_three_leaves_three_lines_each_with_its_own_id_and_reason` drive
+    /// this with three entries and no SSH at all.
+    fn audit_all_destroyed<'a>(
+        &self,
+        destroyed: impl IntoIterator<Item = (&'a str, &'a str, Duration, ReapReason)>,
+    ) {
+        for (id, host, lifetime, reason) in destroyed {
+            self.audit_destroyed(reason, id, host, lifetime);
+        }
+    }
+
+    /// Take a session out of the map, record why, and send the SSH
+    /// DISCONNECT — the three steps, in that order, that every one of
+    /// [`Self::exec`]'s four dead-session branches has to perform.
+    ///
+    /// **One helper because the sequence was got wrong once.** The expiry
+    /// branch did step 1 alone: `sessions.remove(session_id);` as a
+    /// statement, discarding the `ShellSession`, so its `SshClient` was
+    /// dropped without `close()` and no DISCONNECT was ever sent — where the
+    /// other three branches all sent one. With one helper no branch can
+    /// forget again, and the guard
+    /// `every_silent_removal_site_now_audits_except_the_explicit_close`
+    /// counts its call sites.
+    ///
+    /// The audit line is written **before** the close and does not depend on
+    /// its outcome: `SshClient::close` can spend up to its own 5 s timeout on
+    /// a connection that is already in a bad state, and "we destroyed this
+    /// session" is true whether or not the peer answered the DISCONNECT. That
+    /// 5 s is now also on the expiry path, which used to skip it — the same
+    /// cost the other three branches have always paid on a call that was
+    /// returning an error anyway.
+    ///
+    /// `close_all` and `cleanup` call `Self::audit_destroyed` directly
+    /// instead: their own loops already own the `ShellSession` and have
+    /// released the lock, so there is no map to remove from. [`Self::close`]
+    /// calls neither.
+    async fn remove_dead_session(
+        &self,
+        sessions: &mut HashMap<String, ShellSession>,
+        session_id: &str,
+        reason: ReapReason,
+    ) {
+        if let Some(dead) = sessions.remove(session_id) {
+            self.audit_destroyed(reason, &dead.id, &dead.host, dead.created_at.elapsed());
+            let _ = dead.client.close().await;
         }
     }
 
@@ -225,13 +431,20 @@ impl SessionManager {
                 session_id: session_id.to_string(),
             })?;
 
-        // Check expiry
-        let max_age = Duration::from_secs(self.config.max_age_seconds);
-        let max_idle = Duration::from_secs(self.config.idle_timeout_seconds);
+        // Check expiry. The SAME predicate the 60 s reaper applies, through
+        // the same function: whichever of the two reaches an abandoned
+        // session first destroys it, and before this they were two separate
+        // `||` expressions that could drift.
+        let expiry = Self::expiry_reason(
+            session.last_used.elapsed(),
+            session.created_at.elapsed(),
+            &self.config,
+        );
 
-        if session.created_at.elapsed() > max_age || session.last_used.elapsed() > max_idle {
+        if let Some(reason) = expiry {
             let id = session.id.clone();
-            sessions.remove(session_id);
+            self.remove_dead_session(&mut sessions, session_id, reason)
+                .await;
             return Err(BridgeError::SessionExpired { session_id: id });
         }
 
@@ -247,9 +460,12 @@ impl SessionManager {
             // The channel gave EOF or closed while draining. *That* is evidence
             // the shell is gone — the same rule as below, at its other site.
             if Self::read_error_proves_shell_is_gone(&e) {
-                if let Some(dead_session) = sessions.remove(session_id) {
-                    let _ = dead_session.client.close().await;
-                }
+                self.remove_dead_session(
+                    &mut sessions,
+                    session_id,
+                    ReapReason::ShellClosedWhileDraining,
+                )
+                .await;
                 return Err(BridgeError::SshExec {
                     reason: format!(
                         "the session's shell closed while discarding the output of an earlier \
@@ -296,9 +512,8 @@ impl SessionManager {
 
         if let Err(e) = session.channel.data(wrapped.as_bytes()).await {
             // Channel is dead - remove and close the zombie session
-            if let Some(dead_session) = sessions.remove(session_id) {
-                let _ = dead_session.client.close().await;
-            }
+            self.remove_dead_session(&mut sessions, session_id, ReapReason::ChannelWriteFailed)
+                .await;
             return Err(BridgeError::SshExec {
                 reason: format!("Failed to send command to session: {e}"),
             });
@@ -317,9 +532,8 @@ impl SessionManager {
                 if Self::read_error_proves_shell_is_gone(&e) {
                     // The channel gave EOF or closed: the shell really is gone.
                     // Remove and close the zombie session.
-                    if let Some(dead_session) = sessions.remove(session_id) {
-                        let _ = dead_session.client.close().await;
-                    }
+                    self.remove_dead_session(&mut sessions, session_id, ReapReason::ShellGone)
+                        .await;
                 } else {
                     // Only the deadline expired. That says nothing about the
                     // shell — the command is merely slow — so the session
@@ -380,6 +594,17 @@ impl SessionManager {
 
     /// Close a specific session
     ///
+    /// **This is the one removal site in this file that must NOT call
+    /// `Self::audit_destroyed`.** Its only caller is
+    /// `ssh_session_close`'s handler, which writes the `state_change` line
+    /// for this path itself through
+    /// `ExecuteCommandUseCase::log_state_change` — so an audit call here
+    /// would put two lines on the trail for one close, which is worse than
+    /// the silence the rest of this file just stopped producing. If `close`,
+    /// `close_all` and `cleanup` are ever factored into one
+    /// `remove_and_close`, the audit write stays out of the shared part.
+    /// Pinned by `every_silent_removal_site_now_audits_except_the_explicit_close`.
+    ///
     /// # Errors
     ///
     /// Returns an error if the session ID is not found.
@@ -398,12 +623,33 @@ impl SessionManager {
     }
 
     /// Close all sessions
+    ///
+    /// **One audit line per session actually closed, and none at all for an
+    /// empty manager.** That is a contract rather than an optimisation: four
+    /// assertions elsewhere count the lines in `audit.log` exactly after a
+    /// teardown — two in `tests/daemon_integration.rs`, one in
+    /// `crate::mcp::transport::http`, one in `src/cli/runner.rs` — and in
+    /// every one of them this manager is empty. An unconditional "closing all
+    /// sessions" line would redden all four while proving nothing.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn close_all(&self) {
         let mut sessions = self.sessions.lock().await;
         let count = sessions.len();
         let drained: Vec<_> = sessions.drain().collect();
         drop(sessions); // Release lock before closing connections
+
+        // EVERY line first, in one synchronous pass. Interleaving them with
+        // the closes below lost sessions 2..N whenever the bound fired — see
+        // `audit_all_destroyed`.
+        self.audit_all_destroyed(drained.iter().map(|(_, session)| {
+            (
+                session.id.as_str(),
+                session.host.as_str(),
+                session.created_at.elapsed(),
+                ReapReason::Shutdown,
+            )
+        }));
+
         for (_, session) in drained {
             let _ = session.client.close().await;
         }
@@ -413,17 +659,23 @@ impl SessionManager {
     }
 
     /// Clean up expired sessions
+    ///
+    /// The reason is computed **per session** and not per batch, which is why
+    /// the single `||` this used to filter on is gone: with one predicate for
+    /// both bounds the loop could not name `idle_timeout` rather than
+    /// `max_age`, so the audit line could not either. See
+    /// `Self::expiry_reason` for the tie-break.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn cleanup(&self) {
         let mut sessions = self.sessions.lock().await;
-        let max_idle = Duration::from_secs(self.config.idle_timeout_seconds);
-        let max_age = Duration::from_secs(self.config.max_age_seconds);
 
-        // Collect expired session IDs
-        let expired_ids: Vec<String> = sessions
+        // Collect expired session IDs, each with the bound it passed
+        let expired_ids: Vec<(String, ReapReason)> = sessions
             .iter()
-            .filter(|(_, s)| s.last_used.elapsed() > max_idle || s.created_at.elapsed() > max_age)
-            .map(|(id, _)| id.clone())
+            .filter_map(|(id, s)| {
+                Self::expiry_reason(s.last_used.elapsed(), s.created_at.elapsed(), &self.config)
+                    .map(|reason| (id.clone(), reason))
+            })
             .collect();
 
         if expired_ids.is_empty() {
@@ -433,17 +685,33 @@ impl SessionManager {
         // Remove expired sessions from the map
         let expired: Vec<_> = expired_ids
             .iter()
-            .filter_map(|id| {
-                debug!(session_id = %id, "Cleaning up expired session");
-                sessions.remove(id)
+            .filter_map(|(id, reason)| {
+                debug!(
+                    session_id = %id,
+                    reason = reason.as_str(),
+                    "Cleaning up expired session"
+                );
+                sessions.remove(id).map(|session| (session, *reason))
             })
             .collect();
 
         let remaining = sessions.len();
         drop(sessions); // Release lock before closing connections
 
+        // EVERY line first, same reason as `close_all`: these sessions are
+        // already out of the map, so a loop abandoned between two closes
+        // loses the lines of sessions no later pass can find.
+        self.audit_all_destroyed(expired.iter().map(|(session, reason)| {
+            (
+                session.id.as_str(),
+                session.host.as_str(),
+                session.created_at.elapsed(),
+                *reason,
+            )
+        }));
+
         // Close SSH connections properly (sends SSH DISCONNECT)
-        for session in expired {
+        for (session, _) in expired {
             if let Err(e) = session.client.close().await {
                 warn!(session_id = %session.id, error = %e, "Failed to close expired session");
             }
@@ -456,10 +724,17 @@ impl SessionManager {
         );
     }
 
-    /// Build the shell initialization command that disables echo and prompts.
     /// Initialize a shell session: open channel, disable echo/prompts, get CWD.
     ///
     /// Extracted to allow the caller to close the SSH client on error.
+    ///
+    /// (A stray copy of `build_init_command`'s own first doc line used to sit
+    /// above this one, so this function's first sentence described something
+    /// it does not do. It is deleted rather than quoted here: quoting it
+    /// would keep the duplicate that made `build_init_command`'s doc line a
+    /// non-unique slice anchor, which is the very defect being removed — and
+    /// the first draft of this paragraph did exactly that. The guard below
+    /// now asserts the uniqueness of both ends of every slice.)
     async fn init_shell(
         client: &SshClient,
         host_config: &HostConfig,
@@ -2771,5 +3046,640 @@ mod tests {
         assert!(SessionManager::read_error_proves_shell_is_gone(
             &BridgeError::SshOutputTooLarge { limit_bytes: 10 }
         ));
+    }
+
+    // ====================================================================
+    // T53 (audit-honesty wave) — the destructions nobody asked for
+    // ====================================================================
+
+    /// The verdict, as a truth table, with no logger and no SSH anywhere
+    /// near it.
+    ///
+    /// This is the half of the wave that **can** be tested in isolation, and
+    /// the reason it is a free function over durations rather than a method
+    /// over `Instant`s: `ShellSession` keeps `std::time::Instant`s, which
+    /// `tokio::time::advance` does not age, so a predicate over `Instant`s
+    /// is reachable only by waiting 300 s on the wall clock. Nothing here
+    /// sleeps.
+    #[test]
+    fn expiry_reason_names_the_bound_that_fired() {
+        let config = SessionConfig {
+            max_sessions: 10,
+            idle_timeout_seconds: 300,
+            max_age_seconds: 3600,
+        };
+        let s = Duration::from_secs;
+
+        // Neither bound.
+        assert_eq!(
+            SessionManager::expiry_reason(s(299), s(299), &config),
+            None,
+            "a session used 299 s ago and 299 s old has passed neither bound"
+        );
+        // Exactly ON a bound is not past it: the operator is `>`, as it was
+        // before this function existed.
+        assert_eq!(
+            SessionManager::expiry_reason(s(300), s(300), &config),
+            None,
+            "`elapsed() > bound`, so the boundary second itself does not expire"
+        );
+        // Idle alone.
+        assert_eq!(
+            SessionManager::expiry_reason(s(301), s(301), &config),
+            Some(ReapReason::IdleTimeout),
+            "idle past 300 s with age under 3600 s is an idle timeout"
+        );
+        // Age alone: used a second ago, but created over an hour ago.
+        assert_eq!(
+            SessionManager::expiry_reason(s(1), s(3601), &config),
+            Some(ReapReason::MaxAge),
+            "a session in constant use is still destroyed at max_age"
+        );
+        // BOTH, which is the case the single `||` could not report and the
+        // tie-break `expiry_reason` had to choose: the age bound is the
+        // unconditional one, so it wins.
+        assert_eq!(
+            SessionManager::expiry_reason(s(4000), s(4000), &config),
+            Some(ReapReason::MaxAge),
+            "when both bounds have passed the line must say max_age"
+        );
+        // A zero bound expires at the first non-zero elapsed time, which is
+        // what the fixtures in this file use instead of sleeping.
+        let eager = SessionConfig {
+            max_sessions: 10,
+            idle_timeout_seconds: 0,
+            max_age_seconds: 0,
+        };
+        assert_eq!(
+            SessionManager::expiry_reason(Duration::ZERO, Duration::ZERO, &eager),
+            None,
+            "zero elapsed is not past a zero bound either"
+        );
+        assert_eq!(
+            SessionManager::expiry_reason(Duration::from_nanos(1), Duration::from_nanos(1), &eager),
+            Some(ReapReason::MaxAge),
+            "a zero bound is passed by the first nanosecond"
+        );
+    }
+
+    /// Every reason renders to the literal a `jq` rule selects on, and the
+    /// six are distinct.
+    #[test]
+    fn every_reap_reason_has_its_own_wire_literal() {
+        let all = [
+            ReapReason::IdleTimeout,
+            ReapReason::MaxAge,
+            ReapReason::Shutdown,
+            ReapReason::ShellClosedWhileDraining,
+            ReapReason::ChannelWriteFailed,
+            ReapReason::ShellGone,
+        ];
+        let rendered: Vec<&str> = all.iter().map(|r| r.as_str()).collect();
+        assert_eq!(
+            rendered,
+            [
+                "idle_timeout",
+                "max_age",
+                "shutdown",
+                "shell_closed_while_draining",
+                "channel_write_failed",
+                "shell_gone",
+            ]
+        );
+        let mut sorted = rendered.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            all.len(),
+            "two reasons sharing a literal would make the trail unreadable"
+        );
+        // No reason may spell a tool name: these go into `command` beside a
+        // `tool_name` of `<resource-reaper>`, and a reader must not be able to
+        // mistake one for the explicit close.
+        assert!(
+            !rendered.contains(&"ssh_session_close"),
+            "the explicit close is audited by its handler, never from here"
+        );
+    }
+
+    /// A logger whose writer really writes, into a tempdir.
+    ///
+    /// `AuditConfig::default()` carries the REAL path outside `cfg(test)`;
+    /// rotation and retention are off because this reads the live file.
+    fn audited_logger(path: std::path::PathBuf) -> (AuditLogger, tokio::task::JoinHandle<()>) {
+        let (logger, task) = AuditLogger::new(&crate::config::AuditConfig {
+            enabled: true,
+            path,
+            max_size_mb: 0,
+            retain_days: 0,
+        })
+        .expect("a tempdir path must be writable");
+        let writer = tokio::spawn(
+            task.expect("audit is enabled, so a writer task must be produced")
+                .run(),
+        );
+        (logger, writer)
+    }
+
+    fn audit_lines(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// **The effect, read off the JSONL rather than asserted about a return
+    /// value.**
+    ///
+    /// The defect: under the default config a session idle for five minutes
+    /// is destroyed by the 60 s reaper and `audit.log` says nothing, so an
+    /// auditor pairing `ssh_session_create` with `ssh_session_close` concludes
+    /// the session stayed open for ever. This is the line that makes the
+    /// destruction visible, and the assertions are on the file a consumer
+    /// reads: the reason, the ids, the host, the sentinel `tool_name`, the
+    /// lifetime in `duration_ms`, and no `exit_code` anywhere in the text.
+    ///
+    /// Counter-proof: delete the `logger.log(..)` call in
+    /// `SessionManager::audit_destroyed` and `lines.len()` is 0.
+    #[tokio::test]
+    async fn a_reaped_session_leaves_one_audit_line_naming_the_reason() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (logger, writer) = audited_logger(audit_path.clone());
+        let logger = Arc::new(logger);
+
+        let manager =
+            SessionManager::new(SessionConfig::default()).with_audit_logger(Arc::clone(&logger));
+        manager.audit_destroyed(
+            ReapReason::IdleTimeout,
+            "4f1c-session",
+            "raspberry",
+            Duration::from_millis(43_210),
+        );
+
+        logger.close();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one reaped session must leave exactly one line; got {lines:?}"
+        );
+        let event: serde_json::Value = serde_json::from_str(&lines[0])
+            .unwrap_or_else(|e| panic!("audit line must be JSONL: {e} — line was {:?}", lines[0]));
+
+        assert_eq!(
+            event["event_type"], "state_change",
+            "the same event_type as an explicit close, so destruction is ONE query"
+        );
+        assert_eq!(
+            event["tool_name"], "<resource-reaper>",
+            "and NOT `ssh_session_close`, which would make it indistinguishable"
+        );
+        assert_eq!(event["host"], "raspberry");
+        assert_eq!(
+            event["command"], "<resource-reaper> reason=idle_timeout session_id=4f1c-session",
+            "the reason and the id are in `command`; the host is in the `host` FIELD, and \
+             putting it in both would be two sources for one fact"
+        );
+        assert_eq!(
+            event["result"]["StateChanged"]["duration_ms"], 43_210,
+            "duration_ms is the session's LIFETIME on this line, not a teardown time"
+        );
+        assert!(
+            !lines[0].contains("exit_code"),
+            "nothing ran, so there is no code to claim: {}",
+            lines[0]
+        );
+    }
+
+    /// The session id and the host are escaped, so neither can forge a field
+    /// of the line it rides on.
+    ///
+    /// `command` is built with ` ` and `=` as separators — both already in
+    /// `audited_text`'s set, which is why this change adds nothing to it —
+    /// and the angle brackets belong to the writer, so neither value can
+    /// spell `<resource-reaper>` or `<no-host>`.
+    ///
+    /// The host no longer appears in `command` at all, so the forgery it
+    /// could attempt there is gone by construction; what is still checked is
+    /// the `host` FIELD, which reaches `log_to_tracing` and whose escaping is
+    /// the only thing standing between a caller and a second journal record.
+    #[tokio::test]
+    async fn a_forged_id_or_host_cannot_add_a_field_to_a_reaped_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (logger, writer) = audited_logger(audit_path.clone());
+        let logger = Arc::new(logger);
+
+        let manager =
+            SessionManager::new(SessionConfig::default()).with_audit_logger(Arc::clone(&logger));
+        manager.audit_destroyed(
+            ReapReason::Shutdown,
+            "id reason=max_age",
+            "pi host=<no-host>",
+            Duration::from_millis(1),
+        );
+
+        logger.close();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(lines.len(), 1, "got {lines:?}");
+        let event: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("audit line must be JSONL");
+
+        let command = event["command"].as_str().expect("command is a string");
+        assert_eq!(
+            command.matches(" reason=").count(),
+            1,
+            "a forged `reason=` in the session id must not become a second field: {command}"
+        );
+        assert_eq!(
+            command.matches("host=").count(),
+            0,
+            "the host is not a field of `command` any more, forged or otherwise: {command}"
+        );
+        assert!(
+            !command.contains("<no-host>"),
+            "the angle brackets are the writer's namespace: {command}"
+        );
+        let host_field = event["host"].as_str().expect("host is a string");
+        assert!(
+            !host_field.contains(' ') && !host_field.contains('<'),
+            "the `host` FIELD is escaped: a space would forge a logfmt field for any \
+             consumer reading the `tracing` record as logfmt, and a `<` would forge the \
+             writer's namespace. Defence in depth rather than the only line of defence — \
+             `log_to_tracing` passes `host` as `Debug`, which quotes it, since earlier in \
+             this same release: {host_field}"
+        );
+    }
+
+    /// **A batch of three leaves three lines, each with its own id and its
+    /// own reason.**
+    ///
+    /// **The name says what is checked and not what is wanted**, which took a
+    /// round: it used to end `..._is_written_before_any_of_them_is_closed`,
+    /// and this test closes **nothing** — three tuples, no session, no
+    /// `client.close()` anywhere near it. The docstring said so honestly,
+    /// but the name is the only text a reader of `N passed` ever sees. Same
+    /// class as the test that used to end `..._cannot_reach_either_sink`,
+    /// renamed one round earlier for exactly this reason.
+    ///
+    /// Both old names are quoted by their TAIL only, so a grep for either
+    /// full identifier does not land on this paragraph — the same discipline
+    /// the rest of this release applies to commands and module paths.
+    ///
+    /// The defect: both batch sites used to interleave, writing one line and
+    /// then awaiting that session's `client.close()` — bounded at 5 s by
+    /// `SshClient::close` and wrapped in `McpServer::close_bounded`'s 2 s —
+    /// so against a dead peer the FIRST session got a line and 2..N got
+    /// nothing. Three sessions here, one pass, three lines.
+    ///
+    /// **What this proves and what it does not.** It proves that
+    /// `audit_all_destroyed` writes N lines for N inputs, each with its own
+    /// id and its own reason — which no single-session test can show, and
+    /// which the batch sites now go through. It does **not** prove the
+    /// placement, because making a real `client.close()` slow enough to be
+    /// abandoned needs an unresponsive peer that the in-process mock cannot
+    /// be; that half is
+    /// `each_removal_site_audits_from_the_right_place`, which is the guard
+    /// that slices each method and asserts `self.audit_destroyed(` appears
+    /// **zero** times in either batch body. (This named
+    /// `every_silent_removal_site_now_audits_except_the_explicit_close`,
+    /// which is the sibling: it counts the three call sites over the whole
+    /// file and has no per-body assertion at all. The protection was real
+    /// either way — a batch call takes the file-wide count from 2 to 3, and
+    /// CP-A1 measured both guards red — but the name was wrong.)
+    ///
+    /// And the pass has no `.await` in it at all, so no timer can fire
+    /// part-way through: that is the property that makes "all lines first"
+    /// free rather than a trade.
+    #[tokio::test]
+    async fn a_batch_of_three_leaves_three_lines_each_with_its_own_id_and_reason() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (logger, writer) = audited_logger(audit_path.clone());
+        let logger = Arc::new(logger);
+
+        let manager =
+            SessionManager::new(SessionConfig::default()).with_audit_logger(Arc::clone(&logger));
+        manager.audit_all_destroyed([
+            (
+                "s-1",
+                "raspberry",
+                Duration::from_millis(1),
+                ReapReason::Shutdown,
+            ),
+            (
+                "s-2",
+                "pi-two",
+                Duration::from_millis(2),
+                ReapReason::IdleTimeout,
+            ),
+            (
+                "s-3",
+                "pi-three",
+                Duration::from_millis(3),
+                ReapReason::MaxAge,
+            ),
+        ]);
+
+        logger.close();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert_eq!(
+            lines.len(),
+            3,
+            "three destroyed sessions must leave three lines, not just the first; got {lines:?}"
+        );
+        let commands: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value =
+                    serde_json::from_str(l).expect("audit line must be JSONL");
+                v["command"]
+                    .as_str()
+                    .expect("command is a string")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "<resource-reaper> reason=shutdown session_id=s-1",
+                "<resource-reaper> reason=idle_timeout session_id=s-2",
+                "<resource-reaper> reason=max_age session_id=s-3",
+            ],
+            "each session keeps its OWN id and its OWN reason, in order"
+        );
+        let hosts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value =
+                    serde_json::from_str(l).expect("audit line must be JSONL");
+                v["host"].as_str().expect("host is a string").to_string()
+            })
+            .collect();
+        assert_eq!(hosts, ["raspberry", "pi-two", "pi-three"]);
+    }
+
+    /// **Nothing destroyed, nothing written** — and this is a contract, not
+    /// an optimisation.
+    ///
+    /// Four assertions elsewhere count the lines in `audit.log` exactly after
+    /// a teardown (two in `tests/daemon_integration.rs`, one in
+    /// `crate::mcp::transport::http`, one in `src/cli/runner.rs`), and in
+    /// all four this manager is empty. An unconditional line would redden all
+    /// four while proving nothing.
+    #[tokio::test]
+    async fn an_empty_manager_writes_nothing_when_it_is_reaped_or_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+        let (logger, writer) = audited_logger(audit_path.clone());
+        let logger = Arc::new(logger);
+
+        // `idle_timeout_seconds: 0` is the eager config: every session that
+        // exists is already expired. There are none, so there is nothing to
+        // say.
+        let manager = SessionManager::new(SessionConfig {
+            max_sessions: 10,
+            idle_timeout_seconds: 0,
+            max_age_seconds: 0,
+        })
+        .with_audit_logger(Arc::clone(&logger));
+
+        manager.cleanup().await;
+        manager.close_all().await;
+
+        logger.close();
+        crate::security::drain_audit_writer(Some(writer)).await;
+
+        let lines = audit_lines(&audit_path);
+        assert!(
+            lines.is_empty(),
+            "an empty manager must say nothing: {lines:?}"
+        );
+    }
+
+    /// A manager built with `new` alone has no logger, and that must be
+    /// silence rather than a panic: 129 test call sites and every embedder
+    /// construct it that way.
+    #[tokio::test]
+    async fn a_manager_without_a_logger_still_reaps_without_panicking() {
+        let manager = SessionManager::new(SessionConfig {
+            max_sessions: 10,
+            idle_timeout_seconds: 0,
+            max_age_seconds: 0,
+        });
+        manager.audit_destroyed(
+            ReapReason::MaxAge,
+            "no-logger",
+            "raspberry",
+            Duration::from_secs(1),
+        );
+        manager.cleanup().await;
+        manager.close_all().await;
+        assert!(manager.list().await.is_empty());
+    }
+
+    /// **The WIRING, as source text, because no UNIT test can see it.**
+    ///
+    /// No unit test in this module can put a session into a
+    /// `SessionManager`: `ShellSession` is private and holds a live
+    /// `russh::Channel` and an `SshClient` with no `#[cfg(test)]`
+    /// constructor, so the five pre-existing `cleanup`/`close_all` tests all
+    /// run on an empty map and the tests above call `audit_destroyed`
+    /// directly.
+    ///
+    /// **Three of the six call sites ARE driven end to end**, from
+    /// `tests/session_reaper_audit.rs`, against the in-process mock SSH
+    /// server — which grew a `shell_request` handler for exactly that. It
+    /// covers `cleanup`'s line (both bounds, each named), `close_all`'s, and
+    /// `close`'s silence. What remains pinned only here are **`exec`'s four
+    /// branches**: reaching them needs a shell that accepts a command and
+    /// then dies mid-read, which the mock does not emulate.
+    ///
+    /// A source-text guard is the weakest kind of test. It is still stronger
+    /// than the runtime test that cannot be written for those four, and it
+    /// is the one assertion that would redden if a future refactor moved the
+    /// audit write into a shared `remove_and_close` reached from `close`.
+    #[test]
+    fn every_silent_removal_site_now_audits_except_the_explicit_close() {
+        // `include_str!` pulls in this test too, whose own literals are what
+        // is searched for; scope to the production half.
+        let src = include_str!("session.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        assert_eq!(
+            production.matches("self.audit_destroyed(").count(),
+            2,
+            "the single-session audit helper has two callers: `remove_dead_session` (which is \
+             how `exec`'s four branches reach it) and `audit_all_destroyed`'s own loop. NOT \
+             `close`, and NOT a batch site: a batch that calls it directly is the interleaving \
+             that lost sessions 2..N"
+        );
+        assert_eq!(
+            production.matches("self.audit_all_destroyed(").count(),
+            2,
+            "the two batch sites — `close_all` and `cleanup` — each write every line in one \
+             synchronous pass before closing anything"
+        );
+        assert_eq!(
+            production.matches("self.remove_dead_session(").count(),
+            4,
+            "`exec` destroys a session on four branches and each must go through the helper \
+             that audits AND closes: a bare `sessions.remove(..)` is the defect this fixes"
+        );
+
+        // Slice each method's body between consecutive signatures, in file
+        // order, so no body can be read as another's.
+    }
+
+    /// The per-method half of the guard above, split out because the two
+    /// together passed `clippy::too_many_lines` (121/100) and because they
+    /// assert different things: that one counts call sites across the file,
+    /// this one checks WHICH method each site is in.
+    #[test]
+    fn each_removal_site_audits_from_the_right_place() {
+        let src = include_str!("session.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // Both ends of every slice must be UNIQUE in the production half, or
+        // the slice is not the one the assertion names. Measured: the
+        // previous version ended `cleanup`'s slice on
+        // `"/// Build the shell initialization command"`, which occurred
+        // TWICE in the production half — a stray copy of
+        // `build_init_command`'s doc sat on `init_shell`, and `find` takes
+        // the first. That stray copy came AFTER `cleanup`, so the slice was
+        // too BIG (it swallowed part of `init_shell`) rather than too small,
+        // and the count assertions could not go false from it. The defect was
+        // therefore in what the guard analysed, not yet in what it reported —
+        // which is exactly the state in which such a guard is believed and
+        // then breaks. The stray line is gone and both ends are checked.
+        let slice = |from: &str, to: &str| -> &str {
+            assert_eq!(
+                production.matches(from).count(),
+                1,
+                "slice anchor {from:?} must be unique in the production half"
+            );
+            assert_eq!(
+                production.matches(to).count(),
+                1,
+                "slice anchor {to:?} must be unique in the production half"
+            );
+            let start = production
+                .find(from)
+                .unwrap_or_else(|| panic!("{from} must exist in production code"));
+            let end = production
+                .find(to)
+                .unwrap_or_else(|| panic!("{to} must exist in production code"));
+            assert!(start < end, "{from} must precede {to} in this file");
+            &production[start..end]
+        };
+
+        for (from, to, needle, expected, why) in [
+            (
+                "pub async fn exec(",
+                "/// List all active sessions",
+                "self.remove_dead_session(",
+                4,
+                "`exec` destroys a session on four branches: expired, the shell closed while \
+                 draining, the write failed, and the read proved the shell gone",
+            ),
+            (
+                "pub async fn close(",
+                "/// Close all sessions",
+                "audit_destroyed(",
+                0,
+                "`ssh_session_close`'s handler already writes this path's line; a second write \
+                 here is the one way a double line could be born",
+            ),
+            (
+                "pub async fn close(",
+                "/// Close all sessions",
+                "remove_dead_session(",
+                0,
+                "and it must not reach the audit helper through the removal helper either",
+            ),
+            (
+                "pub async fn close_all(",
+                "/// Clean up expired sessions",
+                "self.audit_all_destroyed(",
+                1,
+                "the shutdown writes every line in one batch pass",
+            ),
+            (
+                "pub async fn close_all(",
+                "/// Clean up expired sessions",
+                "self.audit_destroyed(",
+                0,
+                "and NOT one at a time inside the close loop: that is the interleaving whose \
+                 first `client.close().await` ate the 2 s bound and lost sessions 2..N",
+            ),
+            (
+                "pub async fn cleanup(",
+                "async fn init_shell(",
+                "self.audit_all_destroyed(",
+                1,
+                "the reaper writes every line in one batch pass",
+            ),
+            (
+                "pub async fn cleanup(",
+                "async fn init_shell(",
+                "self.audit_destroyed(",
+                0,
+                "and NOT one at a time: `serve` aborts the cleanup loop unbounded, and these \
+                 sessions are already out of the map",
+            ),
+        ] {
+            let body = slice(from, to);
+            assert_eq!(
+                body.matches(needle).count(),
+                expected,
+                "{from} must contain {expected} occurrence(s) of `{needle}`: {why}"
+            );
+        }
+    }
+
+    /// The shared predicate and the security half, split from the two guards
+    /// above for `clippy::too_many_lines` and because they are properties of
+    /// the FILE rather than of one method.
+    #[test]
+    fn the_expiry_predicate_is_shared_and_no_removal_drops_a_client() {
+        let src = include_str!("session.rs");
+        let (production, _) = src.split_once("#[cfg(test)]\nmod tests {").expect(
+            "the `#[cfg(test)] mod tests {` boundary must exist for this guard to scope itself",
+        );
+
+        // And the predicate is shared rather than duplicated: two call sites
+        // in production, one in `exec`'s prologue and one in `cleanup`.
+        assert_eq!(
+            production.matches("Self::expiry_reason(").count(),
+            2,
+            "the idle/age predicate is applied in exactly two places and both must go through \
+             the one function, or they drift as they already had"
+        );
+        // The bare `||` form both sites used is gone from production.
+        assert!(
+            !production.contains("last_used.elapsed() > max_idle"),
+            "the open-coded predicate must not survive beside the function that replaced it"
+        );
+
+        // The security half of this task: no removal site drops a
+        // `ShellSession` without closing its SSH client first.
+        assert!(
+            !production.contains("\n            sessions.remove(session_id);\n"),
+            "a bare `sessions.remove(..)` discards the session and drops its `SshClient` \
+             without an SSH DISCONNECT, which is what `exec`'s expiry branch used to do"
+        );
     }
 }

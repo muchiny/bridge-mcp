@@ -528,7 +528,15 @@ impl Sanitizer {
     }
 
     /// Keywords that indicate potential secrets (for fast pre-filtering)
-    fn secret_keywords() -> Vec<&'static str> {
+    /// The Tier-1 literal keyword list.
+    ///
+    /// `pub(crate)` since the audit-honesty wave: `security::audit::
+    /// audited_operation` reuses it to redact argument values **by key name**,
+    /// because the JSON form it renders defeats the key-anchored patterns (a
+    /// `"db_password"` key matches neither the quoted-key family, which needs
+    /// the quote glued to `password`, nor the bare-key family, which needs
+    /// `password` glued to the `:`). One list, so the two sinks cannot drift.
+    pub(crate) fn secret_keywords() -> Vec<&'static str> {
         vec![
             // Generic
             "password",
