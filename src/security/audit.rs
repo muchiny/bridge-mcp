@@ -820,11 +820,13 @@ const fn reorders_or_hides(c: char) -> bool {
 ///
 /// **This is the redaction that actually fires on this sink.** The `Sanitizer`
 /// runs on the rendered string and its key-anchored patterns need the key
-/// glued to its delimiter: the quoted family wants `"` immediately before
-/// `password`, the bare family wants `password` immediately before `:`. The
-/// JSON this module renders is `{"db_password":"…"}`, which satisfies
-/// neither, so `ssh_db_query` / `ssh_db_dump` / `ssh_db_restore` wrote their
-/// `db_password` **verbatim** to `audit.log`. The entropy backstop does not
+/// glued to its delimiter: the exact-keyword quoted family wants `"`
+/// immediately before `password`, the bare family wants `password`
+/// immediately before `:`. The JSON this module renders is
+/// `{"db_password":"…"}`, which satisfied neither when this redaction was
+/// written, so `ssh_db_query` / `ssh_db_dump` / `ssh_db_restore` wrote their
+/// `db_password` **verbatim** to `audit.log`. (The prefixed quoted families
+/// added since now match that form too; this redaction does not rely on them.) The entropy backstop does not
 /// save it either: `entropy_min_length` is 16 by default.
 ///
 /// By key rather than by pattern because the key is **structured** and in
@@ -4297,8 +4299,9 @@ mod tests {
 
     /// **A database password used to reach the disk in clear.**
     ///
-    /// The `Sanitizer` runs on this sink and catches nothing here: its
-    /// key-anchored families need the key glued to its delimiter, and the
+    /// When this was written the `Sanitizer` caught nothing here (since then
+    /// the prefixed quoted families catch this form too): its exact-keyword
+    /// families need the key glued to its delimiter, and the
     /// JSON rendered by `audited_operation` is `{"db_password":"…"}`, which
     /// puts a `"` between `password` and the `:` and a `db_` between the `"`
     /// and `password`. `ssh_db_query` and `ssh_db_dump` are not destructive,

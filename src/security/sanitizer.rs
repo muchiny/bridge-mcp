@@ -540,6 +540,10 @@ impl Sanitizer {
 
         // Add custom patterns (with size limit to prevent expensive compilation)
         for custom_pattern in custom {
+            // An empty regex matches between every character.
+            if custom_pattern.pattern.is_empty() {
+                continue;
+            }
             if custom_pattern.pattern.len() > MAX_CUSTOM_PATTERN_LEN {
                 error!(
                     pattern_len = custom_pattern.pattern.len(),
@@ -626,9 +630,11 @@ impl Sanitizer {
     /// `pub(crate)` since the audit-honesty wave: `security::audit::
     /// audited_operation` reuses it to redact argument values **by key name**,
     /// because the JSON form it renders defeats the key-anchored patterns (a
-    /// `"db_password"` key matches neither the quoted-key family, which needs
-    /// the quote glued to `password`, nor the bare-key family, which needs
-    /// `password` glued to the `:`). One list, so the two sinks cannot drift.
+    /// `"db_password"` key defeats the exact-keyword quoted family, which needs
+    /// the quote glued to `password`, and the bare-key family, which needs
+    /// `password` glued to the `:`; the prefixed quoted families added since
+    /// do match it, but the by-key redaction does not depend on them). One
+    /// list, so the two sinks cannot drift.
     pub(crate) fn secret_keywords() -> Vec<&'static str> {
         vec![
             // Generic
@@ -1867,10 +1873,6 @@ Done";
         assert!(output.contains("[REDACTED]"), "Should contain REDACTED");
     }
 
-    /// **Sprint 3 Phase B.6:** custom patterns loaded via `SanitizeConfig`
-    /// must compose cleanly with builtin patterns — *both* fire against
-    /// a single input, in one pass, with custom patterns taking their
-    /// configured replacement label.
     #[test]
     fn test_custom_pattern_without_builtin_keyword_redacts() {
         let sanitizer = Sanitizer::new(&[r"WIDGETKEY-\d+".to_string()]);
@@ -1924,21 +1926,81 @@ Done";
         assert_eq!(output, "--key [WIDGET]");
     }
 
+    /// An operator pattern must neither change what the built-in patterns do
+    /// nor disable them. Every row below is modified by the built-ins (checked
+    /// by the first assert), so equality with the plain sanitizer can redden.
     #[test]
-    fn test_custom_pattern_does_not_disable_or_widen_builtin_when_keyword_absent() {
-        // Text with no built-in keyword: the built-in tier must stay skipped,
-        // so a custom pattern that does not match changes nothing.
+    fn test_custom_pattern_leaves_builtin_output_unchanged() {
         let with_custom = Sanitizer::new(&[r"WIDGETKEY-\d+".to_string()]);
         let plain = Sanitizer::with_defaults();
-        for input in ["total 4 drwxr-xr-x root", "name: foo version: 1.2.3"] {
-            assert_eq!(with_custom.sanitize(input), plain.sanitize(input));
+        for input in [
+            "password=hunter22 tail",
+            "token: abcdef123456 tail",
+            "key AKIAIOSFODNN7EXAMPLE tail",
+        ] {
+            let expected = plain.sanitize(input);
+            assert_ne!(expected, input, "the built-ins must modify {input:?}");
+            assert_eq!(with_custom.sanitize(input), expected, "{input:?}");
         }
-        // A built-in secret still redacts when a custom pattern is present.
         let out = with_custom.sanitize("password=hunter22 WIDGETKEY-4242");
         assert!(!out.contains("hunter22"), "got {out:?}");
         assert!(!out.contains("WIDGETKEY-4242"), "got {out:?}");
     }
 
+    /// Guards `custom_start`: with no keyword in the text, each operator
+    /// pattern must land on its OWN label, with and without `disable_builtin`
+    /// shifting the offset. A built-in pushed after `custom_start` is computed
+    /// would be applied by tier 1 to keyword-free text; it would show here as
+    /// a wrong or missing label.
+    #[test]
+    fn test_custom_start_maps_each_pattern_to_its_own_label() {
+        let custom = |p: &str, r: &str| CustomSanitizePattern {
+            pattern: p.to_string(),
+            replacement: r.to_string(),
+            description: None,
+        };
+        for disable_builtin in [vec![], vec!["generic".to_string()]] {
+            let cfg = SanitizeConfig {
+                disable_builtin,
+                custom_patterns: vec![
+                    custom(r"AAAA-\d{4}", "[L1]"),
+                    custom(r"BBBB-\d{4}", "[L2]"),
+                    custom(r"CCCC-\d{4}", "[L3]"),
+                ],
+                ..SanitizeConfig::default()
+            };
+            let s = Sanitizer::from_config(&cfg);
+            assert_eq!(
+                s.sanitize("id AAAA-1111 BBBB-2222 CCCC-3333 ok"),
+                "id [L1] [L2] [L3] ok"
+            );
+            assert_eq!(s.sanitize("id CCCC-3333 ok"), "id [L3] ok");
+        }
+    }
+
+    /// An empty operator pattern matches between every character; it must be
+    /// skipped (as an empty legacy entry already was), not applied to all output.
+    #[test]
+    fn test_empty_custom_pattern_is_skipped() {
+        let cfg = SanitizeConfig {
+            custom_patterns: vec![CustomSanitizePattern {
+                pattern: String::new(),
+                replacement: "[R]".to_string(),
+                description: None,
+            }],
+            ..SanitizeConfig::default()
+        };
+        assert_eq!(Sanitizer::from_config(&cfg).sanitize("abcdef"), "abcdef");
+        assert_eq!(
+            Sanitizer::new(&[String::new()]).sanitize("abcdef"),
+            "abcdef"
+        );
+    }
+
+    /// **Sprint 3 Phase B.6:** custom patterns loaded via `SanitizeConfig`
+    /// must compose cleanly with builtin patterns — *both* fire against
+    /// a single input, in one pass, with custom patterns taking their
+    /// configured replacement label.
     #[test]
     fn test_custom_patterns_from_config_compose_with_builtin() {
         let cfg = SanitizeConfig {

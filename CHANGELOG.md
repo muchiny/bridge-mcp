@@ -1517,8 +1517,8 @@ tests and a serialisation test.
 
 ### Fixed
 
-- **Your own sanitizer patterns (`sanitize.custom_patterns` and the legacy
-  `security.sanitize_patterns`) were inert whenever the text held none of the
+- **Your own sanitizer patterns (`security.sanitize.custom_patterns` and the
+  legacy `security.sanitize_patterns`) were inert whenever the text held none of the
   built-in secret keywords.** The sanitizer skipped its whole regex stage
   unless a built-in keyword (`password`, `token`, `secret`, ...; there is no bare
   `key`) appeared somewhere in the text, and your patterns were not consulted
@@ -1526,12 +1526,19 @@ tests and a serialisation test.
   WIDGETKEY-4242` but not `--key WIDGETKEY-4242`, nor the token alone on a line,
   on every output (tool output, audit and history lines). The keyword-only
   construction of that stage dates from v1.0.0 (`git log -S literal_detector`
-  on the sanitizer file lists 5f25f0a as the first commit). Your patterns are now checked on their own
-  when the keyword stage finds nothing, and only they are applied there; the
-  built-in patterns still run only where they did before. With no custom or
-  legacy pattern configured, nothing changes. If you do have a broad pattern
-  configured, expect redactions in outputs that escaped before, including ones you read
-  every day: it now applies to all output, not only to lines near a keyword.
+  on the sanitizer file lists 5f25f0a as the first commit). Your patterns are
+  now checked on their own when the keyword stage finds nothing, and only they
+  are applied there; the built-in patterns still run only where they did
+  before. With no custom or legacy pattern configured, nothing changes. If you
+  do have a broad pattern configured, expect redactions in outputs that escaped
+  before, including ones you read every day: it now applies to all output, not
+  only to lines near a keyword. For example, a legacy entry
+  `security.sanitize_patterns: ["[0-9a-f]{32}"]` now masks every 32-hex
+  checksum (`md5sum` output, a `crictl images` IMAGE ID, a `git ls-tree` sha).
+  Anchor your patterns: one that ends in `.*` or `\S*` eats the closing quote
+  and breaks the JSON of the output, which makes a call with `jq_filter` fail.
+  Empty patterns are now skipped (an empty regex matches between every
+  character).
 
 - **The output sanitizer now masks a JSON key whose name ENDS in the keyword:
   `{"db_password":"…"}`, `{"dbPassword":"…"}`, `{"admin_token":"…"}`,
@@ -1562,10 +1569,9 @@ tests and a serialisation test.
   entropy tier, as before this change.
   **No existing verdict changes:** the shared `plausible_secret` gate is
   untouched. Measured by running the unmodified `849234c` sanitizer and this
-  one on the same 3549 inputs (13 keywords, three key prefixings, 13 values,
-  7 forms): none of the 1183 inputs with an unprefixed key differs, and all
-  234 that differ have a prefixed key and went from clear to masked; none went
-  from masked to clear, and no path-valued input changed. That is a
+  one on generated inputs: no input with an unprefixed key differs; every one
+  that differs has a prefixed key and went from clear to masked; none went from
+  masked to clear, and none under a listed root changed. That is a
   measurement on a generated corpus, not a guarantee on real outputs.
   **Not covered, declared:** a camelCase weak key carrying a real secret
   stays in clear — `botToken`, `jwtSecret`, `appSecret`, `webhookSecret`,
@@ -2005,9 +2011,10 @@ tests and a serialisation test.
 ### Known issues
 
 - **The flag form `--password <value>` (and `--db-password <value>`) is not
-  masked by the sanitizer.** No generic pattern targets a secret that follows a
+  masked by the sanitizer.** No pattern in the `password` family targets a secret that follows a
   flag after a space; only `docker login -p` and `--vault-password-file` have
-  one. Accepting a space as separator for the `password` family would also
+  one. (Other flags do: `--api-key <v>` and `--auth-token <v>` are masked by
+  the generic API-key pattern, whose key class accepts a space by design.) Accepting a space as separator for the `password` family would also
   mask `password required pam_unix.so` in PAM output, so it needs its own
   measurement (tracked as T66). Until then, do not pass a secret as a
   command-line argument.
@@ -2018,8 +2025,10 @@ tests and a serialisation test.
   renders its quotes as `\"`, and the sanitizer's quoted-key families anchor
   on a quote glued to the keyword: `{\"password\":\"S3cr3t!x\"}` and
   `{\"db_password\":\"S3cr3t!x\"}` both come out unchanged (measured, with an
-  8-character and a 20-character value; the entropy tier did not catch the
-  20-character one either). The by-key redaction of the audit sinks does not
+  8-character and a 20-character value; the entropy tier cannot catch the
+  20-character one either: the Shannon entropy of a token's own bytes is at
+  most `log2(length)`, so at the 4.5 threshold no token under 23 characters
+  can be flagged, and this one measures 4.322, its maximum). The by-key redaction of the audit sinks does not
   help, because the outer key is innocent. This is the same mechanism as the
   re-encoding limit the threat model accepts (base64, hexdump), with one
   difference: here the re-encoding is performed by our own serializer, not by

@@ -180,6 +180,10 @@ async fn audit_log_redacts_a_custom_pattern_without_builtin_keyword() {
         "line not written:\n{contents}"
     );
     assert!(!contents.contains("WIDGETKEY-4242"), "leaked:\n{contents}");
+    assert!(
+        contents.contains("[WIDGET]"),
+        "the configured label must be the one written:\n{contents}"
+    );
 }
 
 /// Same, through the legacy list (`security.sanitize_patterns`).

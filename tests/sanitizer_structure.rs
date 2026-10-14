@@ -222,12 +222,13 @@ fn text_lines_false_positives_left_alone() {
 /// A key name that carries the keyword inside the quotes must not hide its
 /// value.
 ///
-/// Which rows carry the regression: only the PREFIXED quoted rows (`db_password`,
-/// `admin_token`, `api_secret`, `dbPassword`, `rootPassword`, `x-api-key`,
-/// `db.password`, the single-quoted one and the `/a+b/c==` one) fail on the
-/// base. The exact-keyword, `"key": bare` and unquoted rows pass on the base;
-/// they stay because the acceptance asks for prefix / suffix / bare / quoted
-/// coverage. The keyword may be prefixed (`_`, camelCase, `-`, `.`); the closing
+/// Which rows carry the regression, measured by running the `849234c`
+/// sanitizer over this very table: every row whose key is PREFIXED and quoted
+/// fails on the base, including `"db_password": S3cr3t!x` and the
+/// `12345678` / `changeit` rows. The rows that pass on the base are the
+/// exact-keyword ones (`password`, `credentials`, the two `secret` path rows)
+/// and the three unquoted forms; they stay because the acceptance asks for
+/// prefix / suffix / bare / quoted coverage. The keyword may be prefixed (`_`, camelCase, `-`, `.`); the closing
 /// quote stays glued to it.
 #[test]
 fn prefixed_json_keys_are_redacted() {
@@ -322,7 +323,7 @@ fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
         r#"{"summary_max_tokens":"2048"}"#,
         r#"{"vault_password_file":"/root/.vault_pass"}"#,
         r#"{"db_token":true}"#,
-        // The prefixed strong form is gated by `plausible_secret`: a name that
+        // The prefixed strong form is gated by `plausible_shape`: a name that
         // only ENDS in the keyword says nothing about its value.
         r#"{"usePassword":true}"#,
         r#"{"MYSQL_ALLOW_EMPTY_PASSWORD":"yes"}"#,
@@ -482,4 +483,27 @@ fn corpus_regressions_hold() {
             "corpus regression for {input:?}"
         );
     }
+}
+
+/// An operator pattern now applies to output that holds no built-in keyword
+/// (the tier-1 gate used to skip it). A well-anchored pattern must leave a
+/// JSON document parseable, because `jq_filter` re-parses the sanitized text
+/// and a failure there is a hard tool error. Greedy patterns (a trailing `.*`
+/// or `\S*`) swallow the closing quote and are warned against in the
+/// CHANGELOG, not pinned here.
+#[test]
+fn an_anchored_operator_pattern_keeps_keyword_free_json_parseable() {
+    let doc = r#"{"items":[{"name":"SA-1234","ready":true},{"name":"web","ready":false}]}"#;
+    let s = Sanitizer::from_config(&SanitizeConfig {
+        custom_patterns: vec![bridge_mcp::config::CustomSanitizePattern {
+            pattern: r"SA-\d{4}".to_string(),
+            replacement: "[SA]".to_string(),
+            description: None,
+        }],
+        ..SanitizeConfig::default()
+    });
+    let out = s.sanitize(doc);
+    assert!(!out.contains("SA-1234"), "the pattern must bite: {out}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("must still parse");
+    assert_eq!(parsed["items"][0]["name"], "[SA]");
 }
