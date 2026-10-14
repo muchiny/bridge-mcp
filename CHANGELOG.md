@@ -1525,29 +1525,36 @@ tests and a serialisation test.
   `save_output`, the audit log). The prefix is tolerant on the **left only**:
   the closing quote must still follow the keyword, so `secretName`,
   `secretKeyRef`, `AccessKeyId`, `public_key`, `keyword`, `max_tokens`,
-  `vault_password_file` and `"password_db"` are unchanged. Three guards keep
-  the widening from masking what is not a secret: the exact `"password"` form
-  is unchanged (any scalar), but the **prefixed** `password`/`passwd`/`pwd` form
-  is only masked when the value looks like a secret (so `usePassword: true`,
+  `vault_password_file` and `"password_db"` are unchanged. The `password`,
+  `passwd` and `pwd` family accepts any prefix (`db_password`, `dbPassword`,
+  `keystore_password`) and masks the usual defaults (`changeit`, `postgres`,
+  `hunter2`) as it does under the exact key, but leaves alone the shapes that
+  are not passwords: `true`/`null`, the words `yes`, `no`, `on`, `off`,
+  `auto`, `default`, `enabled`, `disabled`, `required`, `optional`, a number
+  shorter than 8 digits, and a path under `/etc/`, `/var/`, `/usr/`, `/opt/`,
+  `/home/`, `/root/`, `/srv/`, `/mnt/`, `/tmp/`, `/boot/`, `/dev/`, `/proc/`,
+  `/sys/`, `./`, `../`, `~/`, a drive letter or a UNC `\\` — so `usePassword: true`,
   `MYSQL_ALLOW_EMPTY_PASSWORD: "yes"`, `OLDPWD: "/var/lib/rancher/k3s"` and
-  `db_password: 90` are left alone); the **weak** keys (`token`, `secret`,
-  `credential`…) accept a prefix only if it ends in `_`, `.` or `-`, so
-  `NextToken`, `nextPageToken` and `existingSecret` are left alone, at the
-  price that a camelCase `adminToken` is **not** masked; and a value shaped
-  like a **path** (starts with `/`, `./`, `~/` or a drive, two separators or
-  more, only `[A-Za-z0-9._/~-]`) is no longer taken for a secret by any gated
-  key.
-  **One existing verdict changes:** a weak key with exactly the keyword and a
-  path value (`{"credentials":"/etc/creds"}`) used to be masked and no longer
-  is. Measured on the 496 names of the sorted union of the property names under
-  `src/mcp/tool_handlers` and every quoted string under
-  `tests/fixtures/sanitizer`, each with `true`, `5`, `"enabled"` and
-  `"/etc/x.pem"` as value: no boolean-, number- or enum-valued key is newly
-  masked, and six names (`credential`, `credentials`, `Credentials`, `secret`,
-  `SecretAccessKey`, `SessionToken`) stop being masked for the path value.
-  That census only covers names that can be enumerated; a real output carries
-  names nobody declared, and a key ending in the keyword whose value looks
-  like a secret (a long mixed string) is masked whatever the name means.
+  `db_password: 90` are unchanged while `db_password: 12345678` is masked. A path
+  under any other root is masked (the safe direction). The weak keys (`token`,
+  `secret`, `credential`, `api_key`…) accept a prefix only if it ends in `_`,
+  `.` or `-` (`admin_token`, `api_secret`, `x-api-key`), which leaves short
+  camelCase pagination cursors (`nextPageToken`, `pageToken`) and
+  `existingSecret` alone. Long cursors such as `NextToken` are masked by the
+  entropy tier, as before this change.
+  **No existing verdict changes:** the shared `plausible_secret` gate is
+  untouched. Measured by running the unmodified `849234c` sanitizer and this
+  one on the same 3549 inputs (13 keywords, three key prefixings, 13 values,
+  7 forms): none of the 1183 inputs with an unprefixed key differs, and all
+  306 that differ have a prefixed key and went from clear to masked. That is
+  not a guarantee on real outputs, and one class of those 306 is over-masking:
+  a weak, separator-prefixed key with a path value
+  (`GOOGLE_APPLICATION_CREDENTIALS: "/etc/gcp/sa.json"`) is now masked.
+  **Not covered, declared:** a camelCase weak key carrying a real secret
+  stays in clear — `botToken`, `jwtSecret`, `appSecret`, `webhookSecret`,
+  `vaultToken`, `dbSecret`, `myApiKey`, `registryCredentials`, `adminToken` —
+  none of them was masked before this change either. Note the asymmetry:
+  `dbPassword` is masked and `dbSecret` is not. Tracked in T69.
 
 - **The audit writer is drained when any of the three MCP transports shuts
   down, and `SIGTERM` is handled at all.** `McpServer::serve` and

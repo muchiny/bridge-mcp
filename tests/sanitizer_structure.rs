@@ -246,6 +246,34 @@ fn prefixed_json_keys_are_redacted() {
         (r#"{"rootPassword":"Zq8!vN3pLw0x"}"#, "Zq8!vN3pLw0x"),
         // base64 that starts with `/` has `+`/`=`: not a path, still masked
         (r#"{"db_password":"/a+b/c=="}"#, "/a+b/c=="),
+        // the common defaults are masked under a prefixed key as under the exact
+        // one: the prefixed gate REJECTS shapes, it does not demand a look
+        (r#"{"db_password":"changeit"}"#, "changeit"),
+        (r#"{"keystore_password":"changeit"}"#, "changeit"),
+        (r#"{"db_password":"postgres"}"#, "postgres"),
+        (r#"{"mysql_password":"hunter2"}"#, "hunter2"),
+        (
+            r#"{"db_password":"correcthorsebatterystaple"}"#,
+            "correcthorsebatterystaple",
+        ),
+        (r#"{"dbPassword":"changeit"}"#, "changeit"),
+        (r#"{"db_password":12345678}"#, "12345678"),
+        // a path-shaped secret is not spared by a path-shaped GUESS: the entropy
+        // tier skips tokens starting with `/`, so only the key can mask these
+        (
+            r#"{"secret":"/K7MDENGbPxRfiCY/EXAMPLEKEY/abcdefghij"}"#,
+            "EXAMPLEKEY",
+        ),
+        (
+            r#"{"secret":"/aB3xZ9kQ/mN7pR2sT/vW5yU8iO1lK4jH6gF0dS"}"#,
+            "vW5yU8iO1lK4",
+        ),
+        (
+            r#"{"db_password":"/aB3xZ9kQ/mN7pR2sT/vW5yU8iO1lK4jH6gF0dS"}"#,
+            "vW5yU8iO1lK4",
+        ),
+        // existing verdicts, unchanged: a weak exact key with a path value
+        (r#"{"credentials":"/etc/creds"}"#, "/etc/creds"),
         // the exact keyword keeps its no-gate behaviour: any scalar goes
         (r#"{"password":12345678}"#, "12345678"),
         (r#"{"password":"/etc/x"}"#, "/etc/x"),
@@ -298,13 +326,12 @@ fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
         r#"{"MYSQL_ALLOW_EMPTY_PASSWORD":"yes"}"#,
         r#"{"OLDPWD":"/var/lib/rancher/k3s"}"#,
         r#"{"db_password":90}"#,
-        // A path is not a credential, weak exact key included (this one is a
-        // verdict that CHANGED: it used to be masked).
-        r#"{"GOOGLE_APPLICATION_CREDENTIALS":"/etc/gcp/sa.json"}"#,
-        r#"{"credentials":"/etc/creds"}"#,
-        // The weak family's prefix needs a separator: pagination cursors are
-        // camelCase, and `existingSecret` names a Secret object.
-        r#"{"NextToken":"AAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        r#"{"db_password":"/etc/gcp/sa.json"}"#,
+        r#"{"db_password":"\\fs01\share\p.txt"}"#,
+        // The weak family's prefix needs a separator: short pagination cursors
+        // are camelCase, and `existingSecret` names a Secret object. (A long
+        // cursor such as `NextToken` is masked by the ENTROPY tier, at the
+        // base too, so it cannot sit in this table.)
         r#"{"nextPageToken":"CgkIABDr1Zb2BRIf"}"#,
         r#"{"existingSecret":"redis-prod-01"}"#,
         // Documented non-coverage: camelCase weak key with a real secret.
