@@ -488,6 +488,18 @@ impl Sanitizer {
         }
     }
 
+    /// Detection set over the operator's patterns only (`regex_patterns[start..]`),
+    /// so tier 1 can consult them without evaluating the full set. No operator
+    /// pattern means no set: the default configuration pays nothing.
+    fn custom_detection_set(regex_patterns: &[String], start: usize) -> Option<RegexSet> {
+        if regex_patterns.len() <= start {
+            return None;
+        }
+        RegexSet::new(&regex_patterns[start..])
+            .map_err(|e| error!(error = %e, "Failed to build custom RegexSet"))
+            .ok()
+    }
+
     /// Build sanitizer from pattern definitions with custom patterns
     fn from_pattern_defs_with_custom(
         defs: &[PatternDef],
@@ -570,15 +582,7 @@ impl Sanitizer {
             }
         };
 
-        // Operator patterns get their own set so tier 1 can consult them
-        // without evaluating the full set; no operator pattern means no set.
-        let custom_set = if regex_patterns.len() > custom_start {
-            RegexSet::new(&regex_patterns[custom_start..])
-                .map_err(|e| error!(error = %e, "Failed to build custom RegexSet"))
-                .ok()
-        } else {
-            None
-        };
+        let custom_set = Self::custom_detection_set(&regex_patterns, custom_start);
 
         // Build Aho-Corasick for literal keyword detection (fast pre-filter)
         let literal_keywords = Self::secret_keywords();
