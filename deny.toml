@@ -40,15 +40,6 @@ ignore = [
     "RUSTSEC-2026-0098",   # webpki URI name constraints — transitive via aws-smithy rustls 0.21
     "RUSTSEC-2026-0099",   # webpki wildcard name constraint — transitive via aws-smithy rustls 0.21
     "RUSTSEC-2026-0104",   # webpki CRL IssuingDistributionPoint panic — transitive via aws-smithy rustls 0.21
-    # quick-xml 0.36 DoS advisories (published 2026-06-29): unbounded
-    # namespace-declaration allocation + quadratic duplicate-attribute check.
-    # Transitive via the OPTIONAL psrp-rs 1.0 dep — only compiled under the
-    # `psrp`/`all-protocols` features; default and air-gapped builds never
-    # include it. Both are fixed in quick-xml >=0.41: proper remediation is
-    # bumping quick-xml inside psrp-rs (our crate), releasing, then updating
-    # the dep here and removing these two entries. Same list as audit.toml.
-    "RUSTSEC-2026-0194",   # quick-xml quadratic duplicate-attribute check — transitive via psrp-rs
-    "RUSTSEC-2026-0195",   # quick-xml unbounded namespace alloc (DoS) — transitive via psrp-rs
     # h2 unbounded empty DATA frames (published 2026-08-18), patched in h2
     # >=0.4.16 ONLY. This lockfile is already on 0.4.16, so the entry below
     # suppresses exactly one remaining match: h2 0.3.27, which has no patched
@@ -61,10 +52,32 @@ ignore = [
     # crates only), so removing this entry is the check that the aws-smithy
     # stack has moved off h2 0.3.
     "RUSTSEC-2026-0258",   # h2 0.3 unbounded empty DATA frames — transitive via aws-smithy, no 0.3 fix
+    # rustls advisories published 2026-10-14. Four were raised; two are gone from
+    # the lockfile because rustls 0.23.45 -> 0.23.46 fixes them (RUSTSEC-2026-0347
+    # ECH buffered data, RUSTSEC-2026-0348 brotli cert decompression — both 0.23-only
+    # features). The two below match the OTHER rustls in the tree, 0.21.12, for which
+    # there is NO fix on its own major line: every one of the four advisories says
+    # "upgrade to >=0.23.46". Same chain and same reachability as the webpki and h2
+    # entries above: aws-smithy-http-client 1.1.13 -> hyper-rustls 0.24.2 ->
+    # tokio-rustls 0.24.1 -> rustls 0.21.12, pulled by aws-config / aws-sdk-ssm under
+    # the OPTIONAL `ssm`/`cloud` features. Measured: `full` is
+    # ["cli","mimalloc","http","jq","otel"] and RELEASE_FEATURES is `full,winrm,psrp`,
+    # so no shipped binary compiles rustls 0.21 at all — `cargo audit` reads the
+    # lockfile, not the feature graph, which is why the gate reddens anyway.
+    # 0346 additionally requires something to Debug-print client session values, which
+    # this crate never does. As with h2 0.3, cargo-deny cannot scope an ignore to a
+    # version, so removing these two entries is the check that the aws-smithy stack
+    # has left rustls 0.21.
+    "RUSTSEC-2026-0346",   # rustls Debug impls expose TLS secrets — transitive via aws-smithy rustls 0.21
+    "RUSTSEC-2026-0349",   # rustls ServerHello KEX downgrade — transitive via aws-smithy rustls 0.21
     # Verified no longer matched (kept here as historical context):
     # - RUSTSEC-2025-0134 (rustls-pemfile unmaintained)
     # - RUSTSEC-2026-0049 (rustls-webpki CRL matching)
     # - RUSTSEC-2026-0074 (libcrux-ml-kem SHAKE API — patched upstream in russh)
+    # - RUSTSEC-2026-0194 / 0195 (quick-xml DoS) — removed 2026-10-14: psrp-rs 2.0.2
+    #   resolves quick-xml 0.42.0, past the >=0.41 fix, and `cargo deny` reported
+    #   "no crate matched advisory criteria" for both. That warning IS the removal
+    #   condition those entries documented.
 ]
 
 # =============================================================================

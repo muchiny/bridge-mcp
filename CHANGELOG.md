@@ -1847,6 +1847,27 @@ tests and a serialisation test.
   nothing kept in agreement; behaviour is unchanged, the byte-for-byte identical
   body is gone.
 
+- **`rustls` 0.23.45 -> 0.23.46, and the advisory exception list is net
+  unchanged at seven.** Four `rustls` advisories were published on 2026-10-14
+  (RUSTSEC-2026-0346 `Debug` impls expose TLS secrets, -0347 buffered
+  application data after ECH rejection, -0348 brotli certificate decompression
+  allocating up to 1 GiB before authentication, -0349 unauthenticated
+  ServerHello downgrading later connections to classical key exchange). The
+  lockfile bump removes -0347 and -0348 outright: they are 0.23-only features
+  and 0.23.46 fixes them. The other two also match the SECOND `rustls` in the
+  tree, 0.21.12, which has no fix on its own major line — all four advisories
+  say "upgrade to >=0.23.46" — and which arrives only through
+  `aws-smithy-http-client` -> `hyper-rustls` 0.24 -> `tokio-rustls` 0.24, pulled
+  by `aws-config`/`aws-sdk-ssm` under the optional `ssm`/`cloud` features. No
+  shipped binary compiles it (`full` is `cli,mimalloc,http,jq,otel` and
+  `RELEASE_FEATURES` is `full,winrm,psrp`), but `cargo audit` reads the lockfile
+  and not the feature graph, so the gate fails regardless; both are now ignored
+  with that reachability written down. Against that, the two `quick-xml`
+  exceptions are **gone**: `psrp-rs` 2.0.2 resolves `quick-xml` 0.42.0, past the
+  >=0.41 fix, and `cargo deny` answered "no crate matched advisory criteria" for
+  both — which is precisely the removal condition those entries documented.
+  Nothing else moved in the lockfile.
+
 ### Changed
 
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
