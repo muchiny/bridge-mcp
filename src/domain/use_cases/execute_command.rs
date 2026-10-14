@@ -849,10 +849,14 @@ mod tests {
     /// (`AKIA` + 16) is masked by a pattern that needs no key name, so it stays
     /// green with every KEYED family broken. This one's secret has no shape of
     /// its own — `S3cr3t!x` is 8 characters, below the entropy floor — so only
-    /// a family keyed on the name in front of it can mask it. The operation is
-    /// in the logfmt form `log_state_change`'s callers pass; the quoted-JSON
-    /// form lives in `tests/sanitizer_structure.rs` and
-    /// `tests/security_audit_redaction.rs`.
+    /// a family keyed on the name in front of it can mask it: here the BARE
+    /// `password` family (`db_password=…` matches it by substring).
+    ///
+    /// **It is a guard, not a regression test for the prefixed-key fix, and
+    /// it passes on the base**: the bare family already caught this form. The
+    /// operation is in the logfmt form `log_state_change`'s callers pass; the
+    /// quoted-JSON form, where the fix lives, is proved in
+    /// `tests/sanitizer_structure.rs` and `tests/security_audit_redaction.rs`.
     #[test]
     fn a_keyed_secret_in_the_operation_is_redacted_by_its_key() {
         let uc = test_use_case();

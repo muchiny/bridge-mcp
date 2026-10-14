@@ -4889,7 +4889,7 @@ mod tests {
     /// text, so `db_password` never reaches it. That fix is proved where the
     /// text is controlled verbatim, in `tests/security_audit_redaction.rs`.
     #[test]
-    fn a_prefixed_secret_argument_is_masked_in_both_gate_lines() {
+    fn a_secret_named_argument_is_masked_by_key_in_both_gate_lines() {
         let config = gate_config(true);
         let args = serde_json::json!({"host": "pi", "db_password": "S3cr3t!x"});
 

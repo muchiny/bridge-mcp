@@ -220,7 +220,14 @@ fn text_lines_false_positives_left_alone() {
 }
 
 /// A key name that carries the keyword inside the quotes must not hide its
-/// value. The keyword may be prefixed (`_`, camelCase, `-`, `.`); the closing
+/// value.
+///
+/// Which rows carry the regression: only the PREFIXED quoted rows (`db_password`,
+/// `admin_token`, `api_secret`, `dbPassword`, `rootPassword`, `x-api-key`,
+/// `db.password`, the single-quoted one and the `/a+b/c==` one) fail on the
+/// base. The exact-keyword, `"key": bare` and unquoted rows pass on the base;
+/// they stay because the acceptance asks for prefix / suffix / bare / quoted
+/// coverage. The keyword may be prefixed (`_`, camelCase, `-`, `.`); the closing
 /// quote stays glued to it.
 #[test]
 fn prefixed_json_keys_are_redacted() {
@@ -233,9 +240,15 @@ fn prefixed_json_keys_are_redacted() {
         (r#"{"db_password": "S3cr3t!x"}"#, "S3cr3t!x"),
         (r#"{"admin_token":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
         (r#"{"api_secret":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
-        // camelCase prefix: no separator
+        // camelCase prefix: no separator. Strong family only — the weak
+        // family needs a separator (see the unchanged table: `adminToken`).
         (r#"{"dbPassword":"S3cr3t!x"}"#, "S3cr3t!x"),
-        (r#"{"adminToken":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        (r#"{"rootPassword":"Zq8!vN3pLw0x"}"#, "Zq8!vN3pLw0x"),
+        // base64 that starts with `/` has `+`/`=`: not a path, still masked
+        (r#"{"db_password":"/a+b/c=="}"#, "/a+b/c=="),
+        // the exact keyword keeps its no-gate behaviour: any scalar goes
+        (r#"{"password":12345678}"#, "12345678"),
+        (r#"{"password":"/etc/x"}"#, "/etc/x"),
         // other separators
         (r#"{"x-api-key":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
         (r#"{"db.password":"S3cr3t!x"}"#, "S3cr3t!x"),
@@ -279,6 +292,23 @@ fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
         r#"{"summary_max_tokens":"2048"}"#,
         r#"{"vault_password_file":"/root/.vault_pass"}"#,
         r#"{"db_token":true}"#,
+        // The prefixed strong form is gated by `plausible_secret`: a name that
+        // only ENDS in the keyword says nothing about its value.
+        r#"{"usePassword":true}"#,
+        r#"{"MYSQL_ALLOW_EMPTY_PASSWORD":"yes"}"#,
+        r#"{"OLDPWD":"/var/lib/rancher/k3s"}"#,
+        r#"{"db_password":90}"#,
+        // A path is not a credential, weak exact key included (this one is a
+        // verdict that CHANGED: it used to be masked).
+        r#"{"GOOGLE_APPLICATION_CREDENTIALS":"/etc/gcp/sa.json"}"#,
+        r#"{"credentials":"/etc/creds"}"#,
+        // The weak family's prefix needs a separator: pagination cursors are
+        // camelCase, and `existingSecret` names a Secret object.
+        r#"{"NextToken":"AAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        r#"{"nextPageToken":"CgkIABDr1Zb2BRIf"}"#,
+        r#"{"existingSecret":"redis-prod-01"}"#,
+        // Documented non-coverage: camelCase weak key with a real secret.
+        r#"{"adminToken":"S3cr3t!xyz"}"#,
         r#"{"admin_secret":{"a":1}}"#,
         // Suffixed names (keyword NOT last) are out of scope: the right anchor
         // is deliberately unchanged.

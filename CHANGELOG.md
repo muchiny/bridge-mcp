@@ -1517,22 +1517,37 @@ tests and a serialisation test.
 
 ### Fixed
 
-- **The output sanitizer now masks a JSON key whose name carries the keyword
-  as a suffix: `{"db_password":"…"}`, `{"dbPassword":"…"}`, `{"admin_token":"…"}`,
+- **The output sanitizer now masks a JSON key whose name ENDS in the keyword:
+  `{"db_password":"…"}`, `{"dbPassword":"…"}`, `{"admin_token":"…"}`,
   `{"x-api-key":"…"}`.** The two quoted-key families required the opening
   quote glued to the keyword, so `"password"` was masked and `"db_password"`
   was not, in every output that passes the sanitizer (tool output, pagination,
-  `save_output`, the audit log). The prefix is tolerant on the **left only**: the
-  closing quote must still follow the keyword, so `secretName`, `secretKeyRef`,
-  `AccessKeyId`, `public_key`, `keyword`, `max_tokens` and
-  `vault_password_file` are unchanged. Measured on the 496 distinct key names
-  of the tool schemas and the sanitizer fixtures, with a boolean, a number, an
-  enum word and a path as value: no path-, boolean- or enum-valued key is newly
-  masked; the newly masked names are `db_password`, `docker_password` and
-  `ARGOCD_REDIS_PASSWORD`, all real secrets. A **weak** key (`token`, `secret`,
-  `credential`…) still masks only a value that looks like a secret. Still not
-  masked: a keyword that is not the last part of the name (`"password_db"`),
-  and the flag form `--password <value>`.
+  `save_output`, the audit log). The prefix is tolerant on the **left only**:
+  the closing quote must still follow the keyword, so `secretName`,
+  `secretKeyRef`, `AccessKeyId`, `public_key`, `keyword`, `max_tokens`,
+  `vault_password_file` and `"password_db"` are unchanged. Three guards keep
+  the widening from masking what is not a secret: the exact `"password"` form
+  is unchanged (any scalar), but the **prefixed** `password`/`passwd`/`pwd` form
+  is only masked when the value looks like a secret (so `usePassword: true`,
+  `MYSQL_ALLOW_EMPTY_PASSWORD: "yes"`, `OLDPWD: "/var/lib/rancher/k3s"` and
+  `db_password: 90` are left alone); the **weak** keys (`token`, `secret`,
+  `credential`…) accept a prefix only if it ends in `_`, `.` or `-`, so
+  `NextToken`, `nextPageToken` and `existingSecret` are left alone, at the
+  price that a camelCase `adminToken` is **not** masked; and a value shaped
+  like a **path** (starts with `/`, `./`, `~/` or a drive, two separators or
+  more, only `[A-Za-z0-9._/~-]`) is no longer taken for a secret by any gated
+  key.
+  **One existing verdict changes:** a weak key with exactly the keyword and a
+  path value (`{"credentials":"/etc/creds"}`) used to be masked and no longer
+  is. Measured on the 496 names of the sorted union of the property names under
+  `src/mcp/tool_handlers` and every quoted string under
+  `tests/fixtures/sanitizer`, each with `true`, `5`, `"enabled"` and
+  `"/etc/x.pem"` as value: no boolean-, number- or enum-valued key is newly
+  masked, and six names (`credential`, `credentials`, `Credentials`, `secret`,
+  `SecretAccessKey`, `SessionToken`) stop being masked for the path value.
+  That census only covers names that can be enumerated; a real output carries
+  names nobody declared, and a key ending in the keyword whose value looks
+  like a secret (a long mixed string) is masked whatever the name means.
 
 - **The audit writer is drained when any of the three MCP transports shuts
   down, and `SIGTERM` is handled at all.** `McpServer::serve` and
@@ -1962,6 +1977,14 @@ tests and a serialisation test.
   dash-login host.
 
 ### Known issues
+
+- **The flag form `--password <value>` (and `--db-password <value>`) is not
+  masked by the sanitizer.** No generic pattern targets a secret that follows a
+  flag after a space; only `docker login -p` and `--vault-password-file` have
+  one. Accepting a space as separator for the `password` family would also
+  mask `password required pam_unix.so` in PAM output, so it needs its own
+  measurement (tracked as T66). Until then, do not pass a secret as a
+  command-line argument.
 
 - **A secret in a JSON document nested inside a JSON string is not masked by
   the sanitizer, whatever the key name.** When a JSON document is carried as

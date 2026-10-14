@@ -278,7 +278,26 @@ pub(crate) fn plausible_secret(candidate: &str) -> bool {
         .chars()
         .all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '.' | '-'));
     let digits_only = s.chars().all(|c| c.is_ascii_digit());
-    !(letters_only || digits_only)
+    !(letters_only || digits_only || looks_like_path(s))
+}
+
+/// A filesystem path, not a credential: starts with `/`, `./`, `~/` or a
+/// Windows drive, has at least two separators, and nothing outside
+/// `[A-Za-z0-9._/~-]` (plus `\` after a drive). Deliberately narrow: standard
+/// base64 can start with `/`, but it has `+` or `=` or too few separators, so
+/// it is not mistaken for a path and stays masked.
+fn looks_like_path(s: &str) -> bool {
+    let (rest, windows) = match s.as_bytes() {
+        [d, b':', b'\\' | b'/', ..] if d.is_ascii_alphabetic() => (&s[2..], true),
+        _ if s.starts_with('/') || s.starts_with("./") || s.starts_with("~/") => (s, false),
+        _ => return false,
+    };
+    let allowed = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '_' | '/' | '~' | '-')
+            || (windows && c == '\\')
+    };
+    rest.chars().all(allowed) && rest.chars().filter(|c| matches!(c, '/' | '\\')).count() >= 2
 }
 
 impl Sanitizer {
@@ -1159,15 +1178,13 @@ impl Sanitizer {
             // token, credential, api_key…) replace only a plausible secret
             // (`secret_group`), see `plausible_secret`.
             // ══════════════════════════════════════════════════════════════════
-            // Quoted JSON/YAML keys, strong: {"password": "…"}. The keyword
-            // may be PREFIXED inside the quotes (`"db_password"`, `"dbPassword"`):
-            // `[A-Za-z0-9_.-]*` is tolerant on the LEFT only. The closing quote
-            // stays glued to the keyword, so `"secretName"`, `"secretKeyRef"`,
-            // `"AccessKeyId"`, `"max_tokens"`, `"password_file"` and
-            // `"public_key"` are still left alone. Do not add a suffix class.
+            // Quoted JSON/YAML keys, strong, EXACT keyword: {"password": "…"}.
+            // No plausibility gate: the caller chooses the value's type
+            // (`{"password": 12345678}` must be masked), and the key says it
+            // is a password.
             PatternDef {
                 pattern: concat!(
-                    r#"(["'][A-Za-z0-9_.-]*(?i:password|passwd|pwd)["'][ \t]*[=:][ \t]*)"#,
+                    r#"(["'](?i:password|passwd|pwd)["'][ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: r#"${1}"[REDACTED]""#,
@@ -1175,12 +1192,35 @@ impl Sanitizer {
                 category: "generic",
                 secret_group: None,
             },
-            // Quoted JSON/YAML keys, weak: {"token": "…"} — the value must look
-            // like a secret, so {"token": true}, {"credential": 5} and
-            // {"secret": {…}} are left alone.
+            // Quoted JSON/YAML keys, strong, PREFIXED keyword: {"db_password": "…"},
+            // {"dbPassword": "…"}. The prefix is tolerant on the LEFT only (the
+            // closing quote stays glued to the keyword: `"secretName"`,
+            // `"max_tokens"`, `"password_file"` are not touched). Unlike the exact
+            // form this one IS gated by `plausible_secret`: a name that merely
+            // ENDS in the keyword (`usePassword`, `MYSQL_ALLOW_EMPTY_PASSWORD`,
+            // `OLDPWD`) says nothing about its value being a secret, and a
+            // widening may add redactions where a secret is plausible but never
+            // remove or retype an existing verdict. Placed right after the exact
+            // form, still before the weak family and the bare families.
             PatternDef {
                 pattern: concat!(
-                    r#"(["'][A-Za-z0-9_.-]*(?i:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)["'][ \t]*[=:][ \t]*)"#,
+                    r#"(["'][A-Za-z0-9_.-]+(?i:password|passwd|pwd)["'][ \t]*[=:][ \t]*)"#,
+                    scalar_value!()
+                ),
+                replacement: r#"${1}"[REDACTED]""#,
+                description: "Quoted JSON/YAML prefixed password keys",
+                category: "generic",
+                secret_group: Some(2),
+            },
+            // Quoted JSON/YAML keys, weak: {"token": "…"} — the value must look
+            // like a secret, so {"token": true}, {"credential": 5} and
+            // {"secret": {…}} are left alone. A prefix is allowed only when it ends
+            // in a separator (`admin_token`, `x-api-key`, `api_secret`): pagination
+            // cursors are camelCase with none (`NextToken`, `nextPageToken`) and
+            // `existingSecret` names a Secret object, not its content.
+            PatternDef {
+                pattern: concat!(
+                    r#"(["'](?:[A-Za-z0-9_.-]*[_.-])?(?i:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|secret[_-]?access[_-]?key|client[_-]?secret|private[_-]?key|credentials?)["'][ \t]*[=:][ \t]*)"#,
                     scalar_value!()
                 ),
                 replacement: r#"${1}"[REDACTED]""#,
@@ -2814,6 +2854,11 @@ users:
             "argocd-repo-server-tls",
             "enabled",
             "short7!",
+            "/etc/creds",
+            "/var/lib/rancher/k3s",
+            "./conf/app.pem",
+            "~/.kube/config",
+            "C:\\Users\\a\\b.pem",
         ] {
             assert!(
                 !plausible_secret(candidate),
@@ -2830,6 +2875,10 @@ users:
             "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
             "\"wJalrXUtnFEMI/K7MDENG\"",
             "Z2hwX2FiYzEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xtbm9w",
+            // starts like a path but is base64: `+`, `=` or one separator
+            "/a+b/c==",
+            "/abcdefgh12",
+            "/ab+cdefgh/12/34",
         ] {
             assert!(
                 plausible_secret(candidate),
