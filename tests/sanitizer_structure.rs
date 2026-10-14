@@ -287,6 +287,12 @@ fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
         "--password S3cr3t!x",
         "--db-password S3cr3t!x",
         "docker login -u me --password-stdin reg.example",
+        // Escaped form: a JSON document nested in a JSON string, quotes
+        // rendered `\"`. The backslash breaks the glued-quote anchor, for the
+        // bare key as much as the prefixed one. Documented non-coverage,
+        // tracked as T68 — these two lines go away when it is fixed.
+        r#"{\"password\":\"S3cr3t!x\"}"#,
+        r#"{\"db_password\":\"S3cr3t!x\"}"#,
     ];
     for input in cases {
         let out = s.sanitize(input);

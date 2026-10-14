@@ -4883,6 +4883,40 @@ mod tests {
         );
     }
 
+    /// A secret-named argument is masked in both gate lines, and its key
+    /// survives. **This does not exercise the sanitizer's prefixed-key fix**:
+    /// `audited_operation` redacts by key name before the sanitizer sees the
+    /// text, so `db_password` never reaches it. That fix is proved where the
+    /// text is controlled verbatim, in `tests/security_audit_redaction.rs`.
+    #[test]
+    fn a_prefixed_secret_argument_is_masked_in_both_gate_lines() {
+        let config = gate_config(true);
+        let args = serde_json::json!({"host": "pi", "db_password": "S3cr3t!x"});
+
+        let (denied_logger, denied_audit) = gate_audit(&config);
+        let _ = gate("ssh_exec", Some(&args), false, &config, &denied_audit)
+            .expect_err("no terminal, so refused");
+        let (confirmed_logger, confirmed_audit) = gate_audit(&config);
+        gate("ssh_exec", Some(&args), true, &config, &confirmed_audit).expect("--yes confirms");
+
+        for lines in [
+            denied_logger.drain_for_test(),
+            confirmed_logger.drain_for_test(),
+        ] {
+            assert_eq!(lines.len(), 1);
+            assert!(
+                lines[0].command.contains("db_password"),
+                "{:?}",
+                lines[0].command
+            );
+            assert!(
+                !lines[0].command.contains("S3cr3t!x"),
+                "{:?}",
+                lines[0].command
+            );
+        }
+    }
+
     /// The gate is the CLI's half of `require_elicitation_on_destructive`, so
     /// turning that policy off must turn the gate off with it — otherwise the
     /// setting means one thing over MCP and another here.

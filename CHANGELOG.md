@@ -1942,6 +1942,21 @@ tests and a serialisation test.
 
 ### Known issues
 
+- **A secret in a JSON document nested inside a JSON string is not masked by
+  the sanitizer, whatever the key name.** When a JSON document is carried as
+  a string value (an argument holding a request body, say), `serde_json`
+  renders its quotes as `\"`, and the sanitizer's quoted-key families anchor
+  on a quote glued to the keyword: `{\"password\":\"S3cr3t!x\"}` and
+  `{\"db_password\":\"S3cr3t!x\"}` both come out unchanged (measured, with an
+  8-character and a 20-character value; the entropy tier did not catch the
+  20-character one either). The by-key redaction of the audit sinks does not
+  help, because the outer key is innocent. This is the same mechanism as the
+  re-encoding limit the threat model accepts (base64, hexdump), with one
+  difference: here the re-encoding is performed by our own serializer, not by
+  the caller. Closing it needs the value class widened as well as the key
+  anchor, so it is tracked as its own task (T68) rather than folded into the
+  prefixed-key fix above.
+
 - The output cache is MCP-server-only, so CLI truncation emits no `output_id`
   and the omitted bytes are unrecoverable. The tool says so when called from the
   CLI; the docs previously implied otherwise.
