@@ -980,11 +980,19 @@ impl Sanitizer {
                 secret_group: None,
                 gate: Gate::Plausible,
             },
-            // Anthropic API keys (specific prefix sk-ant-*)
+            // Anthropic API keys (specific prefix sk-ant-*). Not a duplicate of
+            // the keyed `ANTHROPIC_API_KEY=` pattern below, though both used to
+            // share one description: this one matches the key by SHAPE wherever
+            // it appears, that one matches the variable NAME and redacts any
+            // value. Measured: dropping the keyed one leaves
+            // `ANTHROPIC_API_KEY=hunter2` in clear; dropping this one turns the
+            // `[ANTHROPIC_API_KEY_REDACTED]` marker into `[REDACTED]` and a bare
+            // key into `[HIGH_ENTROPY_REDACTED]`. The descriptions now differ so
+            // nobody takes them for a copy-paste.
             PatternDef {
                 pattern: r"sk-ant-api\d{2}-[A-Za-z0-9_-]{80,}",
                 replacement: "[ANTHROPIC_API_KEY_REDACTED]",
-                description: "Anthropic API Key",
+                description: "Anthropic API Key (sk-ant- shape)",
                 category: "openai",
                 secret_group: None,
                 gate: Gate::Plausible,
@@ -1286,14 +1294,11 @@ impl Sanitizer {
                 secret_group: None,
                 gate: Gate::Plausible,
             },
-            PatternDef {
-                pattern: concat!(r#"(?i)(--vault-password-file[ \t]+)"#, scalar_value!()),
-                replacement: "${1}[REDACTED]",
-                description: "Ansible vault password file path",
-                category: "ansible",
-                secret_group: None,
-                gate: Gate::Plausible,
-            },
+            // No pattern for `--vault-password-file <path>`: a path to a secret
+            // is not the secret. The control on that file is its filesystem
+            // permissions, and the path carries forensic value (which vault
+            // a run used) that masking destroys. `audit.rs` makes the same
+            // argument for `REDACTION_EXEMPT_KEYS`; the two now agree.
             PatternDef {
                 pattern: concat!(
                     r#"(?i)(ansible[_-]?ssh[_-]?pass[ \t]*[=:][ \t]*)"#,
@@ -1382,7 +1387,7 @@ impl Sanitizer {
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
-                description: "Anthropic API Key",
+                description: "Anthropic API Key (env variable name)",
                 category: "openai", // Grouped with AI APIs
                 secret_group: None,
                 gate: Gate::Plausible,
@@ -3439,10 +3444,24 @@ users:
             s.sanitize("docker login -u bob -p hunter2").as_ref(),
             "docker login -u bob -p [REDACTED]"
         );
-        assert_eq!(
-            s.sanitize("--vault-password-file /root/.vault").as_ref(),
-            "--vault-password-file [REDACTED]"
-        );
+    }
+
+    /// A path to a secret is not the secret: the control on the file is its
+    /// filesystem permissions, and the path carries forensic value (which
+    /// vault a run used) that masking destroys. `audit.rs` exempts
+    /// `vault_password_file` and `kubeconfig` on the same argument
+    /// (`REDACTION_EXEMPT_KEYS`); the sanitizer used to mask the former
+    /// through a dedicated pattern and now agrees.
+    #[test]
+    fn vault_password_file_path_stays_in_clear() {
+        let s = Sanitizer::with_defaults();
+        for input in [
+            "--vault-password-file /root/.vault",
+            "ansible-playbook --vault-password-file /root/.vault_pass site.yml",
+            "kubeconfig: /etc/rancher/k3s/k3s.yaml",
+        ] {
+            assert_eq!(s.sanitize(input).as_ref(), input);
+        }
     }
 
     /// The docker-login `-p` must be a flag, not any `-p` substring: the
