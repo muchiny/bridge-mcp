@@ -75,6 +75,16 @@ impl EntropyDetector {
     /// - Hex secrets: 3.7-4.0 bits
     /// - Base64 secrets: 5.0-6.0 bits
     /// - Random bytes (base64): ~5.95 bits
+    ///
+    /// **Upper bound: `H <= log2(len)`**, `len` being the token's length in
+    /// bytes, reached when every byte is distinct. A token can therefore
+    /// never reach a threshold `t` unless it is at least `2^t` bytes long:
+    /// at the default 4.5 that is 23 (`2^4.5` is about 22.6), so nothing
+    /// shorter is ever flagged, whatever its content. The effective floor of
+    /// the detector is `max(min_length, 2^threshold)`. The default
+    /// `min_length` of 16 is below that, so for the general threshold it is
+    /// inert; it only binds the opt-in hex path, where the threshold (e.g.
+    /// 3.1, floor about 8.6) is low enough for 16 to be the real floor.
     #[must_use]
     #[expect(clippy::cast_precision_loss)]
     pub fn shannon_entropy(s: &str) -> f64 {
@@ -479,6 +489,64 @@ mod tests {
             "hex secret must be redacted: {result}"
         );
         assert!(result.contains("[HIGH_ENTROPY_REDACTED]"));
+    }
+
+    #[test]
+    fn test_default_detector_never_flags_a_token_under_23_chars() {
+        // Structural, not a bug: H <= log2(len), so at the default threshold
+        // of 4.5 a token needs 2^4.5 (about 22.6) characters to be flaggable.
+        // The most varied token of a given length has all-distinct bytes and
+        // reaches H = log2(len) exactly. If this fails, someone lowered the
+        // default threshold, or `min_length` stopped being the weaker floor.
+        let detector = EntropyDetector::default();
+        let alphabet: Vec<char> = "aZ9kQ2mFpLwBnYdRjGtHvXc7Sx3UeIo5NbMqVzTyKrDfAhJgCl1W8E4P6O0"
+            .chars()
+            .collect();
+        for len in detector.min_length..=22 {
+            let token: String = alphabet[..len].iter().collect();
+            let h = EntropyDetector::shannon_entropy(&token);
+            assert!(
+                (h - (len as f64).log2()).abs() < 1e-9,
+                "token of {len} is not maximally varied: H = {h}"
+            );
+            let input = format!("secret={token} end");
+            assert_eq!(
+                detector.redact(&input),
+                input,
+                "a {len}-char token (H = {h:.3}) must stay under 4.5 and pass through"
+            );
+        }
+        // Control: at 23 distinct characters the same construction is flagged.
+        let token: String = alphabet[..23].iter().collect();
+        assert!(
+            detector
+                .redact(&format!("secret={token} end"))
+                .contains("[HIGH_ENTROPY_REDACTED]"),
+            "23 distinct chars (H = log2 23 = 4.52) must be flagged: the control proves the loop above is not vacuous"
+        );
+    }
+
+    #[test]
+    fn test_hex_threshold_makes_min_length_16_the_binding_floor() {
+        // 16 distinct hex digits: H = log2(16) = 4.0 > 3.1, so with the opt-in
+        // hex threshold a 16-char hex token IS redacted. This is why the
+        // default `min_length` stays 16 rather than 23: raising it would stop
+        // masking hex tokens of 16 to 22 characters for these operators.
+        let token = "3f7a9c2e8b1d4605";
+        assert_eq!(token.len(), 16);
+        assert!(EntropyDetector::shannon_entropy(token) > 3.1);
+        let detector = EntropyDetector::default().with_hex_threshold(Some(3.1));
+        let result = detector.redact(&format!("leaked {token} here"));
+        assert!(
+            result.contains("[HIGH_ENTROPY_REDACTED]") && !result.contains(token),
+            "16-char hex must be redacted with the hex threshold on: {result}"
+        );
+        // 15 characters sit under min_length: the floor that binds is 16.
+        let short = "3f7a9c2e8b1d460";
+        assert_eq!(
+            detector.redact(&format!("leaked {short} here")),
+            format!("leaked {short} here")
+        );
     }
 
     #[test]

@@ -1954,6 +1954,17 @@ tests and a serialisation test.
 
 ### Changed
 
+- **The entropy tier's real floor is `2^threshold` characters, and the prose now
+  says so.** A token's Shannon entropy is at most `log2(len)`, so at the default
+  `entropy_threshold` of 4.5 nothing under 23 characters can ever be flagged
+  (`2^4.5` is about 22.6), whatever `entropy_min_length` says. The default
+  `entropy_min_length` **stays 16**: it is inert at the general threshold but it
+  is the binding floor for the opt-in hex tier (`entropy_hex_threshold`, e.g.
+  3.1, whose mathematical floor is about 9), and raising it to 23 would stop
+  masking hex tokens of 16 to 22 characters. No behaviour changes. Documentation
+  and tests only: `audit.rs` had given 16 as the reason the entropy backstop
+  does not save a `db_password` argument, which was the wrong reason.
+
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
   Create envelope, so Windows grants the shell the disconnect capability it had been
   refusing — the whole `psrp-rs` disconnect/reconnect path had never run against a

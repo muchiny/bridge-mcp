@@ -723,10 +723,21 @@ pub struct SanitizeConfig {
     /// - Hex secrets: ~3.7-4.0 bits (mathematically capped at 4.0 —
     ///   see `entropy_hex_threshold`)
     /// - Base64 secrets: ~5.0-6.0 bits
+    ///
+    /// The threshold implies a minimum length: a token's entropy is at most
+    /// `log2(len)`, so no token shorter than `2^threshold` characters can be
+    /// flagged (23 at the default 4.5). Raising the threshold raises that
+    /// floor; `entropy_min_length` cannot lower it.
     #[serde(default = "default_entropy_threshold")]
     pub entropy_threshold: f64,
 
     /// Minimum token length for entropy analysis (default: 16)
+    ///
+    /// The effective floor is `max(entropy_min_length, 2^entropy_threshold)`
+    /// characters: 23 at the default threshold of 4.5, so at the default
+    /// this setting changes nothing for ordinary tokens. It is the binding
+    /// floor only for hex tokens, once `entropy_hex_threshold` is set (a
+    /// threshold of 3.1 puts the mathematical floor near 9).
     #[serde(default = "default_entropy_min_length")]
     pub entropy_min_length: usize,
 
