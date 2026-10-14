@@ -59,15 +59,19 @@ const PARALLEL_THRESHOLD: usize = 512 * 1024; // 512 KB
 pub struct Sanitizer {
     /// Compiled regex patterns with their replacements
     patterns: Vec<SanitizePattern>,
-    /// `RegexSet` for fast detection (single-pass to check if ANY pattern matches)
-    detection_set: RegexSet,
+    /// `RegexSet` for fast detection (single-pass to check if ANY pattern matches).
+    /// `None` means the set could not be built: it is only a pre-filter, so the
+    /// sanitizer then applies every pattern instead of none (see
+    /// `Sanitizer::matched_indices`).
+    detection_set: Option<RegexSet>,
     /// Aho-Corasick automaton for literal patterns (keywords that indicate secrets)
-    literal_detector: AhoCorasick,
-    /// Detection set over the operator's own patterns only (`None` when there
-    /// are none, which is the default configuration). Consulted when tier 1
-    /// misses, because an operator pattern need not contain any built-in
+    /// `None` means the automaton could not be built: every text is then
+    /// treated as keyword-bearing so tiers 2 and 3 run (see `has_keyword`).
+    literal_detector: Option<AhoCorasick>,
+    /// Detection set over the operator's own patterns only. Consulted when
+    /// tier 1 misses, because an operator pattern need not contain any built-in
     /// keyword; its indices are relative to `custom_start`.
-    custom_set: Option<RegexSet>,
+    custom_set: CustomSet,
     /// Index in `patterns` of the first operator pattern
     custom_start: usize,
     /// Whether sanitization is enabled
@@ -352,7 +356,75 @@ pub(crate) fn plausible_shape(candidate: &str) -> bool {
     !(drive || PATH_ROOTS.iter().any(|r| lower.starts_with(r)))
 }
 
+/// Maximum length for user-supplied custom sanitize patterns.
+pub const MAX_CUSTOM_PATTERN_LEN: usize = 512;
+
+/// Maximum number of operator patterns (`security.sanitize.custom_patterns`
+/// plus legacy `security.sanitize_patterns`, empty entries excluded).
+///
+/// The count is NOT what makes a configuration unbuildable, in either
+/// direction. The binding constraint is the compiled size of the combined
+/// detection set (built-ins plus operator patterns), and
+/// `Sanitizer::check_buildable` is the real guard. Measured in a debug build:
+/// 8 patterns of the shape `SECRET-NNN-\w{24}` are refused, while 60 of
+/// `kNNN_[A-Za-z0-9]{32}` and even 5000 plain literals build. So this cap is
+/// neither necessary nor sufficient; it is a coarse fence whose job is to
+/// bound the work that validation and `check_buildable` themselves do.
+pub const MAX_OPERATOR_PATTERNS: usize = 50;
+
+/// State of the tier-1 detection set over the operator's patterns.
+///
+/// `Option<RegexSet>` conflated two opposite states: "no operator pattern"
+/// (the default configuration, which must pay nothing) and "the set failed to
+/// build" (which must not switch the operator's patterns off).
+enum CustomSet {
+    /// No operator pattern is configured.
+    Absent,
+    /// Operator patterns are configured and their set compiled.
+    Built(RegexSet),
+    /// Operator patterns are configured but their set did not compile: every
+    /// one of them is applied, since the individual regexes did compile.
+    Unbuilt,
+}
+
 impl Sanitizer {
+    /// Whether the full detection set (the built-ins left enabled plus every
+    /// operator pattern) compiles. `RegexSet` has a size limit that the
+    /// individual regexes do not hit, so a configuration whose every pattern is
+    /// valid can still fail here. Checked at load time so the operator hears
+    /// about it before any text is served.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `regex` error text when the set cannot be built.
+    pub fn check_buildable(
+        config: &SanitizeConfig,
+        legacy_patterns: &[String],
+    ) -> std::result::Result<(), String> {
+        let disabled: std::collections::HashSet<&str> =
+            config.disable_builtin.iter().map(String::as_str).collect();
+        let mut all: Vec<&str> = Self::default_pattern_defs()
+            .into_iter()
+            .filter(|d| !disabled.contains(d.category))
+            .map(|d| d.pattern)
+            .collect();
+        all.extend(
+            config
+                .custom_patterns
+                .iter()
+                .map(|c| c.pattern.as_str())
+                .chain(legacy_patterns.iter().map(String::as_str))
+                .filter(|p| !p.is_empty()),
+        );
+        RegexSet::new(&all).map(|_| ()).map_err(|e| {
+            format!(
+                "{e}. Any bounded repetition of a Unicode-aware class (`\\w{{24}}`, \
+                 `\\d{{8}}`) is expensive in a set: replace it with an explicit ASCII \
+                 class such as `[A-Za-z0-9]{{32}}`"
+            )
+        })
+    }
+
     /// Create a new sanitizer from advanced configuration
     #[must_use]
     pub fn from_config(config: &SanitizeConfig) -> Self {
@@ -477,9 +549,9 @@ impl Sanitizer {
     pub fn disabled() -> Self {
         Self {
             patterns: Vec::new(),
-            detection_set: RegexSet::empty(),
-            literal_detector: empty_literal_detector(),
-            custom_set: None,
+            detection_set: Some(RegexSet::empty()),
+            literal_detector: Some(empty_literal_detector()),
+            custom_set: CustomSet::Absent,
             custom_start: 0,
             enabled: false,
             strip_ansi: false,
@@ -491,12 +563,34 @@ impl Sanitizer {
     /// Detection set over the operator's patterns only (`regex_patterns[start..]`),
     /// so tier 1 can consult them without evaluating the full set. No operator
     /// pattern means no set: the default configuration pays nothing.
-    fn custom_detection_set(regex_patterns: &[String], start: usize) -> Option<RegexSet> {
+    fn custom_detection_set(regex_patterns: &[String], start: usize) -> CustomSet {
         if regex_patterns.len() <= start {
-            return None;
+            return CustomSet::Absent;
         }
-        RegexSet::new(&regex_patterns[start..])
-            .map_err(|e| error!(error = %e, "Failed to build custom RegexSet"))
+        match RegexSet::new(&regex_patterns[start..]) {
+            Ok(set) => CustomSet::Built(set),
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Failed to build custom RegexSet: applying every operator pattern"
+                );
+                CustomSet::Unbuilt
+            }
+        }
+    }
+
+    /// Aho-Corasick automaton over the keyword list (tier-1 pre-filter).
+    /// `None` on failure: see `Sanitizer::has_keyword`.
+    fn build_literal_detector() -> Option<AhoCorasick> {
+        AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(Self::secret_keywords())
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    "Failed to build Aho-Corasick: treating every text as keyword-bearing"
+                );
+            })
             .ok()
     }
 
@@ -507,9 +601,6 @@ impl Sanitizer {
         enabled: bool,
         entropy_detector: EntropyDetector,
     ) -> Self {
-        /// Maximum length for user-supplied custom sanitize patterns.
-        const MAX_CUSTOM_PATTERN_LEN: usize = 512;
-
         let mut patterns = Vec::with_capacity(defs.len() + custom.len());
         let mut regex_patterns = Vec::with_capacity(defs.len() + custom.len());
 
@@ -578,25 +669,22 @@ impl Sanitizer {
         }
 
         // Build RegexSet for fast detection
+        // It is only a pre-filter: when it cannot be built, every pattern is
+        // applied (slower, never weaker) rather than none.
         let detection_set = match RegexSet::new(&regex_patterns) {
-            Ok(set) => set,
+            Ok(set) => Some(set),
             Err(e) => {
-                error!(error = %e, "Failed to build RegexSet, falling back to empty set");
-                RegexSet::empty()
+                error!(
+                    error = %e,
+                    "Failed to build RegexSet: applying every pattern without the pre-filter"
+                );
+                None
             }
         };
 
         let custom_set = Self::custom_detection_set(&regex_patterns, custom_start);
 
-        // Build Aho-Corasick for literal keyword detection (fast pre-filter)
-        let literal_keywords = Self::secret_keywords();
-        let literal_detector = AhoCorasick::builder()
-            .ascii_case_insensitive(true)
-            .build(&literal_keywords)
-            .unwrap_or_else(|e| {
-                error!(error = %e, "Failed to build Aho-Corasick, using empty");
-                empty_literal_detector()
-            });
+        let literal_detector = Self::build_literal_detector();
 
         info!(
             builtin_patterns = defs.len(),
@@ -892,11 +980,19 @@ impl Sanitizer {
                 secret_group: None,
                 gate: Gate::Plausible,
             },
-            // Anthropic API keys (specific prefix sk-ant-*)
+            // Anthropic API keys (specific prefix sk-ant-*). Not a duplicate of
+            // the keyed `ANTHROPIC_API_KEY=` pattern below, though both used to
+            // share one description: this one matches the key by SHAPE wherever
+            // it appears, that one matches the variable NAME and redacts any
+            // value. Measured: dropping the keyed one leaves
+            // `ANTHROPIC_API_KEY=hunter2` in clear; dropping this one turns the
+            // `[ANTHROPIC_API_KEY_REDACTED]` marker into `[REDACTED]` and a bare
+            // key into `[HIGH_ENTROPY_REDACTED]`. The descriptions now differ so
+            // nobody takes them for a copy-paste.
             PatternDef {
                 pattern: r"sk-ant-api\d{2}-[A-Za-z0-9_-]{80,}",
                 replacement: "[ANTHROPIC_API_KEY_REDACTED]",
-                description: "Anthropic API Key",
+                description: "Anthropic API Key (sk-ant- shape)",
                 category: "openai",
                 secret_group: None,
                 gate: Gate::Plausible,
@@ -1198,13 +1294,23 @@ impl Sanitizer {
                 secret_group: None,
                 gate: Gate::Plausible,
             },
+            // `--vault-password-file <value>`: a path to a secret is not the
+            // secret (its control is the file's permissions, and the path says
+            // which vault a run used), so a PATH-shaped value stays in clear.
+            // But the sanitizer, unlike `audit.rs` which redacts by a
+            // structured, path-typed key, sees only a token after a flag, and
+            // `--vault-password-file hunter2` is a real misuse: hence
+            // `Gate::Shape`, which masks everything `plausible_shape` does not
+            // recognise as a path under a well-known root. A path under an
+            // unlisted root (`/data/vault_pass`) or a bare filename
+            // (`vault_pass.txt`) is therefore masked too: the safe direction.
             PatternDef {
                 pattern: concat!(r#"(?i)(--vault-password-file[ \t]+)"#, scalar_value!()),
                 replacement: "${1}[REDACTED]",
                 description: "Ansible vault password file path",
                 category: "ansible",
-                secret_group: None,
-                gate: Gate::Plausible,
+                secret_group: Some(2),
+                gate: Gate::Shape,
             },
             PatternDef {
                 pattern: concat!(
@@ -1294,7 +1400,7 @@ impl Sanitizer {
                     scalar_value!()
                 ),
                 replacement: "${1}[REDACTED]",
-                description: "Anthropic API Key",
+                description: "Anthropic API Key (env variable name)",
                 category: "openai", // Grouped with AI APIs
                 secret_group: None,
                 gate: Gate::Plausible,
@@ -1592,28 +1698,30 @@ impl Sanitizer {
 
         // Tier 1: Fast keyword detection with Aho-Corasick
         // If no keywords found, very likely no secrets present — but entropy may still catch some
-        if !self.literal_detector.is_match(text_ref) {
+        if !self.has_keyword(text_ref) {
             debug!(
                 len = text_ref.len(),
                 "No secret keywords detected, skipping regex"
             );
             // Operator patterns do not depend on built-in keywords: apply
             // those (and only those) before the entropy pass.
-            if let Some(ref set) = self.custom_set {
-                let hits: Vec<usize> = set
+            let hits: Vec<usize> = match self.custom_set {
+                CustomSet::Absent => Vec::new(),
+                CustomSet::Built(ref set) => set
                     .matches(text_ref)
                     .into_iter()
                     .map(|i| i + self.custom_start)
-                    .collect();
-                if !hits.is_empty() {
-                    let redacted = self.apply_patterns(text_ref, &hits);
-                    let result = if self.entropy_detector.is_enabled() {
-                        self.entropy_detector.redact(&redacted)
-                    } else {
-                        redacted
-                    };
-                    return Cow::Owned(result);
-                }
+                    .collect(),
+                CustomSet::Unbuilt => (self.custom_start..self.patterns.len()).collect(),
+            };
+            if !hits.is_empty() {
+                let redacted = self.apply_patterns(text_ref, &hits);
+                let result = if self.entropy_detector.is_enabled() {
+                    self.entropy_detector.redact(&redacted)
+                } else {
+                    redacted
+                };
+                return Cow::Owned(result);
             }
             // Still run entropy detection (catches secrets without known keywords)
             if self.entropy_detector.is_enabled() {
@@ -1626,7 +1734,11 @@ impl Sanitizer {
         }
 
         // Tier 2: Check if any regex pattern matches
-        if !self.detection_set.is_match(text_ref) {
+        if self
+            .detection_set
+            .as_ref()
+            .is_some_and(|set| !set.is_match(text_ref))
+        {
             debug!(len = text_ref.len(), "Keywords found but no regex matches");
             // Still run entropy detection
             if self.entropy_detector.is_enabled() {
@@ -1664,8 +1776,27 @@ impl Sanitizer {
     /// Sequential sanitization for smaller inputs
     fn sanitize_sequential(&self, text: &str) -> String {
         // Only apply patterns that actually matched (optimization)
-        let matched_indices: Vec<usize> = self.detection_set.matches(text).into_iter().collect();
+        let matched_indices = self.matched_indices(text);
         self.apply_patterns(text, &matched_indices)
+    }
+
+    /// Tier-1 pre-filter. Without the automaton every text counts as
+    /// keyword-bearing: the pre-filter narrows work, it never decides whether
+    /// the built-in patterns run.
+    fn has_keyword(&self, text: &str) -> bool {
+        self.literal_detector
+            .as_ref()
+            .is_none_or(|ac| ac.is_match(text))
+    }
+
+    /// Indices of the patterns worth applying to `text`. Without a detection
+    /// set (it failed to build) that is every pattern: the set only narrows
+    /// the work, it never decides whether masking happens.
+    fn matched_indices(&self, text: &str) -> Vec<usize> {
+        match self.detection_set {
+            Some(ref set) => set.matches(text).into_iter().collect(),
+            None => (0..self.patterns.len()).collect(),
+        }
     }
 
     /// Apply the patterns at `indices` (in order) to `text`
@@ -1717,7 +1848,7 @@ impl Sanitizer {
     fn sanitize_parallel(&self, text: &str) -> String {
         // Quick check: if no patterns match, return original text
         // This uses parallel regex matching for detection only
-        let matched_indices: Vec<usize> = self.detection_set.matches(text).into_iter().collect();
+        let matched_indices = self.matched_indices(text);
 
         if matched_indices.is_empty() {
             return text.to_string();
@@ -1896,9 +2027,15 @@ Done";
     #[test]
     fn test_default_config_has_no_operator_detection_set() {
         let default = Sanitizer::from_config(&SanitizeConfig::default());
-        assert!(default.custom_set.is_none());
-        assert!(Sanitizer::with_defaults().custom_set.is_none());
-        assert!(Sanitizer::new(&[r"x\d+".to_string()]).custom_set.is_some());
+        assert!(matches!(default.custom_set, CustomSet::Absent));
+        assert!(matches!(
+            Sanitizer::with_defaults().custom_set,
+            CustomSet::Absent
+        ));
+        assert!(matches!(
+            Sanitizer::new(&[r"x\d+".to_string()]).custom_set,
+            CustomSet::Built(_)
+        ));
     }
 
     #[test]
@@ -3304,7 +3441,10 @@ users:
     /// used `\s` around the value, which matches a newline — on the K3s host
     /// `docker login -u bob -p` followed by a bare newline (password supplied
     /// on stdin) swallowed the next line of output as the "password", and
-    /// `--vault-password-file` did the same.
+    /// `--vault-password-file` did the same. Both patterns are line-local
+    /// now. The vault one is also gated by `Gate::Shape`, so the newline case
+    /// uses a NON-path next line (`hunter2`): a path-shaped one would stay in
+    /// clear through the gate alone and prove nothing about line-locality.
     #[test]
     fn docker_login_and_vault_file_stop_at_end_of_line() {
         let s = Sanitizer::with_defaults();
@@ -3313,17 +3453,59 @@ users:
             "docker login -u bob -p\nnext-line"
         );
         assert_eq!(
-            s.sanitize("--vault-password-file\n/etc/passwd").as_ref(),
-            "--vault-password-file\n/etc/passwd"
+            s.sanitize("--vault-password-file\nhunter2").as_ref(),
+            "--vault-password-file\nhunter2"
         );
         assert_eq!(
             s.sanitize("docker login -u bob -p hunter2").as_ref(),
             "docker login -u bob -p [REDACTED]"
         );
-        assert_eq!(
-            s.sanitize("--vault-password-file /root/.vault").as_ref(),
-            "--vault-password-file [REDACTED]"
-        );
+    }
+
+    /// A path to a secret is not the secret: the control on the file is its
+    /// filesystem permissions, and the path carries forensic value (which
+    /// vault a run used) that masking destroys. But the sanitizer sees only a
+    /// token after a flag, not a path-typed parameter as `audit.rs` does for
+    /// `REDACTION_EXEMPT_KEYS`, so a NON-path value there
+    /// (`--vault-password-file hunter2`, a real misuse) must still be masked.
+    /// Both halves in one test: that pairing is the decision. Paths under an
+    /// unlisted root or bare filenames are masked too (safe direction).
+    #[test]
+    fn vault_password_file_masks_values_but_not_paths() {
+        let s = Sanitizer::with_defaults();
+        for input in [
+            "--vault-password-file /root/.vault",
+            "ansible-playbook --vault-password-file /root/.vault_pass site.yml",
+            "--vault-password-file ./vault_pass.txt",
+            "--vault-password-file ~/.vault",
+            "kubeconfig: /etc/rancher/k3s/k3s.yaml",
+        ] {
+            assert_eq!(s.sanitize(input).as_ref(), input, "path must stay clear");
+        }
+        for (input, want) in [
+            (
+                "--vault-password-file hunter2",
+                "--vault-password-file [REDACTED]",
+            ),
+            (
+                "ansible-playbook --vault-password-file Winter2026Office! site.yml",
+                "ansible-playbook --vault-password-file [REDACTED] site.yml",
+            ),
+            (
+                "--vault-password-file d41d8cd98f00b204e9800998ecf8427e",
+                "--vault-password-file [REDACTED]",
+            ),
+            (
+                "--vault-password-file /data/vault_pass",
+                "--vault-password-file [REDACTED]",
+            ),
+            (
+                "--vault-password-file vault_pass.txt",
+                "--vault-password-file [REDACTED]",
+            ),
+        ] {
+            assert_eq!(s.sanitize(input).as_ref(), want);
+        }
     }
 
     /// The docker-login `-p` must be a flag, not any `-p` substring: the
@@ -3717,5 +3899,91 @@ users:
                 "input {input:?}"
             );
         }
+    }
+
+    /// 25 operator patterns of a shape whose COMBINED `RegexSet` does not
+    /// compile (each regex compiles on its own), plus one real pattern. Measured:
+    /// the operator-only set of this fixture fails to build too, so it drives
+    /// both the main set and the tier-1 operator set into their failure state.
+    ///
+    /// Version-coupled: it relies on the `regex` crate's compiled-size limit. A
+    /// red here after a `regex` bump means raising the repeat count, not a
+    /// product defect. Audit measurements (debug build): `k{i:03}_\w{40}` first
+    /// fails at 6 patterns, `kNNN\w+\d{10,20}` at 69; both monotone, no larger
+    /// set ever builds again.
+    fn unbuildable_operator_patterns() -> Vec<String> {
+        let mut patterns: Vec<String> = (0..25).map(|i| format!(r"k{i:03}_\w{{40}}")).collect();
+        patterns.push(r"WIDGET-\d+".to_string());
+        patterns
+    }
+
+    /// A `RegexSet` that cannot be built must cost the pre-filter, not the
+    /// control. Against `23341f0` the set fell back to `RegexSet::empty()`,
+    /// tier 2 answered "nothing matches" and the password came out in clear.
+    #[test]
+    fn test_unbuildable_detection_set_still_masks_builtins() {
+        let sanitizer = Sanitizer::new(&unbuildable_operator_patterns());
+        assert!(
+            sanitizer.detection_set.is_none(),
+            "fixture no longer drives the failure path"
+        );
+        let pat = format!("ghp_{}", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6");
+        let input = format!("password=hunter22 and {pat}");
+        let out = sanitizer.sanitize(&input);
+        assert_eq!(out, "password=[REDACTED] and [GITHUB_PAT_REDACTED]");
+    }
+
+    /// Same failure, tier-1 path: no built-in keyword in the text, so only the
+    /// operator pattern can fire. `custom_set` used to be `None` here, which
+    /// meant "no operator pattern" and skipped it.
+    #[test]
+    fn test_unbuilt_operator_set_still_applies_operator_patterns() {
+        let sanitizer = Sanitizer::new(&unbuildable_operator_patterns());
+        assert!(
+            matches!(sanitizer.custom_set, CustomSet::Unbuilt),
+            "fixture no longer drives the failure path"
+        );
+        assert_eq!(sanitizer.sanitize("id WIDGET-1234 ok"), "id [REDACTED] ok");
+    }
+
+    /// The failure state must also work on text that crosses the parallel
+    /// threshold, and must leave clean text untouched.
+    #[test]
+    fn test_unbuildable_detection_set_large_input_and_clean_text() {
+        let sanitizer = Sanitizer::new(&unbuildable_operator_patterns());
+        assert!(sanitizer.detection_set.is_none());
+        let line = "password=hunter22 filler filler filler\n";
+        let big = line.repeat(PARALLEL_THRESHOLD / line.len() + 2);
+        assert!(big.len() >= PARALLEL_THRESHOLD);
+        let out = sanitizer.sanitize(&big);
+        assert!(!out.contains("hunter22"), "large input leaked");
+        let clean = "total 4 drwxr-xr-x 2 root root 4096 Sep 1 .\n";
+        assert_eq!(sanitizer.sanitize(clean), clean);
+    }
+
+    /// `check_buildable` is what the loader trusts: it must agree with the
+    /// constructor on the same fixture, in both directions.
+    #[test]
+    fn test_check_buildable_agrees_with_constructor() {
+        let bad = unbuildable_operator_patterns();
+        assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &bad).is_err());
+        assert!(Sanitizer::new(&bad).detection_set.is_none());
+        let ok = [r"WIDGET-\d+".to_string()];
+        assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &ok).is_ok());
+        assert!(Sanitizer::new(&ok).detection_set.is_some());
+        assert!(Sanitizer::check_buildable(&SanitizeConfig::default(), &[]).is_ok());
+    }
+
+    /// If the keyword automaton is absent the built-ins must still run, not
+    /// be skipped for every text. The state is reached by clearing the field:
+    /// there is no input that makes `AhoCorasick` fail on the static list.
+    /// Against `23341f0` the field is not an `Option` (does not compile); the
+    /// old fallback was an empty automaton, which skips tiers 2 and 3.
+    #[test]
+    fn test_absent_keyword_automaton_still_masks_builtins() {
+        let mut sanitizer = Sanitizer::with_defaults();
+        sanitizer.literal_detector = None;
+        let out = sanitizer.sanitize("password=hunter22 ok");
+        assert_eq!(out, "password=[REDACTED] ok");
     }
 }

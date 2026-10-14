@@ -401,7 +401,7 @@ fn test_default_security_config() {
     // Default sanitize is enabled with builtin patterns (legacy patterns can be empty)
     assert!(config.sanitize.enabled);
     // Builtin patterns are handled internally, custom patterns start empty
-    assert!(config.sanitize.custom_patterns.is_empty());
+    assert_eq!(config.sanitize.custom_patterns.len(), 0);
     assert_eq!(
         config.sanitize.disable_builtin,
         [] as [std::string::String; 0]

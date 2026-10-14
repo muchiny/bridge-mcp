@@ -62,5 +62,5 @@ pub use entropy::EntropyDetector;
 pub use rate_limiter::{RateLimitExceeded, RateLimiter};
 pub use rbac::{RbacConfig, RbacEnforcer};
 pub use recording::SessionRecorder;
-pub use sanitizer::{ANSI_PATTERN, Sanitizer};
+pub use sanitizer::{ANSI_PATTERN, MAX_CUSTOM_PATTERN_LEN, MAX_OPERATOR_PATTERNS, Sanitizer};
 pub use validator::CommandValidator;

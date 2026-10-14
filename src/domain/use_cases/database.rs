@@ -105,9 +105,10 @@ fn shell_escape(s: &str) -> String {
 /// the password is readable with `ps` on the target. And because `db_password`
 /// arrives as a caller argument rather than from config, it is outside the
 /// masker's exact-match value set, so whether it is masked in the audit trail
-/// depends entirely on the entropy heuristic: masked when it is at least 16
-/// characters and above 4.5 bits per character, not masked at all below either
-/// threshold. Fixing this is a separate task; the `exec_with_stdin` seam is not
+/// depends entirely on the entropy heuristic: masked when it is at least 23
+/// bytes long (`2^4.5`: below that no token can reach 4.5 bits per character,
+/// whatever `entropy_min_length` says) and above 4.5 bits per character, not
+/// masked at all below either threshold. Fixing this is a separate task; the `exec_with_stdin` seam is not
 /// directly reusable, since its one stdin is documented as carrying the sudo
 /// password and nothing else.
 ///
