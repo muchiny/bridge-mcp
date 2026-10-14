@@ -96,8 +96,9 @@ pub struct Cli {
     /// **A value that fits in 256 characters is written as it stands**, after
     /// the same redaction every audit line gets. With `security.sanitize` at
     /// its defaults that redaction is strong against the obvious case:
-    /// entropy detection is on (4.5 bits per character, 16 characters
-    /// minimum), so a random base64 token is masked. What it does not
+    /// entropy detection is on (4.5 bits per character, which in effect
+    /// means 23 bytes minimum), so a random base64 token is masked from 23
+    /// bytes up; a shorter one is not. What it does not
     /// separate goes through — a hexadecimal token (4.0 bits per character at
     /// most, and `entropy_hex_threshold` is off by default), a passphrase, an
     /// excerpt of a configuration file, an internal host name. So: nothing on

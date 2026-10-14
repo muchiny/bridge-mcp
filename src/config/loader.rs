@@ -258,16 +258,104 @@ pub fn validate_config(config: &Config) -> Result<()> {
         })?;
     }
 
-    for pattern in &config.security.sanitize_patterns {
-        regex::Regex::new(pattern).map_err(|e| BridgeError::ConfigInvalid {
-            field: "security.sanitize_patterns".to_string(),
-            reason: format!("Invalid regex '{pattern}': {e}"),
-        })?;
-    }
+    validate_sanitize_patterns(config)?;
 
     reject_settings_that_govern_nothing(config)?;
 
     Ok(())
+}
+
+const SANITIZE_CUSTOM_KEY: &str = "security.sanitize.custom_patterns";
+const SANITIZE_LEGACY_KEY: &str = "security.sanitize_patterns";
+
+/// The key(s) that actually contribute patterns, for errors about the set.
+fn involved_sanitize_keys(entries: &[(&str, usize, &str)]) -> String {
+    let custom = entries.iter().any(|e| e.0 == SANITIZE_CUSTOM_KEY);
+    let legacy = entries.iter().any(|e| e.0 == SANITIZE_LEGACY_KEY);
+    match (custom, legacy) {
+        (true, true) => format!("{SANITIZE_CUSTOM_KEY} + {SANITIZE_LEGACY_KEY}"),
+        (false, true) => SANITIZE_LEGACY_KEY.to_string(),
+        _ => SANITIZE_CUSTOM_KEY.to_string(),
+    }
+}
+
+/// Validate the operator's sanitizer patterns, from BOTH keys alike:
+/// `security.sanitize.custom_patterns` and the legacy `security.sanitize_patterns`.
+///
+/// Empty entries are skipped by the sanitizer for both keys (an empty regex
+/// matches between every character), so they are not counted here either.
+/// A pattern the sanitizer would drop, or a set it could not build, used to
+/// leave output unmasked with only a log line; here it refuses to start.
+fn validate_sanitize_patterns(config: &Config) -> Result<()> {
+    use crate::security::{MAX_CUSTOM_PATTERN_LEN, MAX_OPERATOR_PATTERNS, Sanitizer};
+
+    let sanitize = &config.security.sanitize;
+    // (key, zero-based index within that key, pattern); empties are skipped but
+    // keep their index so the position reported is the one in the file.
+    let entries: Vec<(&str, usize, &str)> = sanitize
+        .custom_patterns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (SANITIZE_CUSTOM_KEY, i, c.pattern.as_str()))
+        .chain(
+            config
+                .security
+                .sanitize_patterns
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (SANITIZE_LEGACY_KEY, i, p.as_str())),
+        )
+        .filter(|(_, _, p)| !p.is_empty())
+        .collect();
+
+    let involved_keys = involved_sanitize_keys(&entries);
+
+    // Cap first: it bounds the work of everything below, including the
+    // compile loop. Skipped when sanitization is off (nothing is built).
+    if sanitize.enabled && entries.len() > MAX_OPERATOR_PATTERNS {
+        return Err(BridgeError::ConfigInvalid {
+            field: involved_keys,
+            reason: format!(
+                "{} operator sanitize patterns exceed the limit of {MAX_OPERATOR_PATTERNS} \
+                 (non-empty entries of both keys are counted together)",
+                entries.len()
+            ),
+        });
+    }
+
+    // Reported by key and index only: a `custom_patterns` entry is the config
+    // value most likely to BE a live secret, and `reason` reaches unsanitized
+    // logs. The `regex` error text is kept, and for a syntax error it embeds
+    // the pattern, so this halves the exposure rather than ending it.
+    for &(field, index, pattern) in &entries {
+        if pattern.len() > MAX_CUSTOM_PATTERN_LEN {
+            return Err(BridgeError::ConfigInvalid {
+                field: format!("{field}[{index}]"),
+                reason: format!(
+                    "Pattern of {} bytes exceeds the {MAX_CUSTOM_PATTERN_LEN}-byte limit \
+                     (it would be dropped, leaving what it covers unmasked)",
+                    pattern.len()
+                ),
+            });
+        }
+        regex::Regex::new(pattern).map_err(|e| BridgeError::ConfigInvalid {
+            field: format!("{field}[{index}]"),
+            reason: format!("Invalid regex: {e}"),
+        })?;
+    }
+
+    if !sanitize.enabled || entries.is_empty() {
+        return Ok(());
+    }
+    Sanitizer::check_buildable(sanitize, &config.security.sanitize_patterns).map_err(|e| {
+        BridgeError::ConfigInvalid {
+            field: involved_keys,
+            reason: format!(
+                "the sanitizer's combined detection set cannot be compiled with these \
+                 patterns: {e}"
+            ),
+        }
+    })
 }
 
 /// Refuse settings the operator would believe are in force when they are not.
@@ -1106,5 +1194,132 @@ sessions:
 "#;
         let config = load_yaml(yaml).expect("sessions.max_sessions is still a live setting");
         assert_eq!(config.sessions.max_sessions, 7);
+    }
+
+    fn sanitize_yaml(custom: &[String], legacy: &[String]) -> String {
+        use std::fmt::Write as _;
+        let mut yaml = String::from(
+            "hosts:\n  test:\n    hostname: \"192.168.1.1\"\n    user: testuser\n    auth:\n      type: agent\nsecurity:\n",
+        );
+        if !custom.is_empty() {
+            yaml.push_str("  sanitize:\n    custom_patterns:\n");
+            for p in custom {
+                writeln!(yaml, "      - pattern: '{p}'\n        replacement: '[X]'").unwrap();
+            }
+        }
+        if !legacy.is_empty() {
+            yaml.push_str("  sanitize_patterns:\n");
+            for p in legacy {
+                writeln!(yaml, "    - '{p}'").unwrap();
+            }
+        }
+        yaml
+    }
+
+    fn load_sanitize(custom: &[String], legacy: &[String]) -> Result<Config> {
+        let mut file = secure_temp_file();
+        file.write_all(sanitize_yaml(custom, legacy).as_bytes())
+            .unwrap();
+        load_config(file.path())
+    }
+
+    #[test]
+    fn test_invalid_custom_sanitize_pattern_rejected() {
+        let result = load_sanitize(&["(unmatched".to_string()], &[]);
+        assert!(
+            matches!(result, Err(BridgeError::ConfigInvalid { field, reason })
+            if field == "security.sanitize.custom_patterns[0]" && reason.contains("Invalid regex"))
+        );
+    }
+
+    #[test]
+    fn test_empty_sanitize_pattern_agrees_between_keys() {
+        // Skipped (not rejected) on both keys, and not counted toward the cap.
+        let empties: Vec<String> = vec![String::new(); crate::security::MAX_OPERATOR_PATTERNS + 5];
+        assert!(load_sanitize(&empties, &[]).is_ok());
+        assert!(load_sanitize(&[], &empties).is_ok());
+    }
+
+    #[test]
+    fn test_operator_pattern_count_cap_counts_both_keys() {
+        let cap = crate::security::MAX_OPERATOR_PATTERNS;
+        let literals = |range: std::ops::Range<usize>| -> Vec<String> {
+            range.map(|i| format!("lit{i:05}tok")).collect()
+        };
+        assert!(load_sanitize(&literals(0..cap), &[]).is_ok());
+        assert!(load_sanitize(&[], &literals(0..cap)).is_ok());
+        let over = load_sanitize(&literals(0..cap), &literals(cap..cap + 1));
+        assert!(
+            matches!(over, Err(BridgeError::ConfigInvalid { ref field, ref reason })
+            if field.contains("security.sanitize.custom_patterns") && reason.contains("exceed the limit")),
+            "got {over:?}"
+        );
+        let over_legacy = load_sanitize(&[], &literals(0..cap + 1));
+        assert!(matches!(
+            over_legacy,
+            Err(BridgeError::ConfigInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn test_unbuildable_sanitize_set_rejected_at_load() {
+        // Every pattern is individually valid and the count is under the cap,
+        // yet the combined set does not compile.
+        let heavy: Vec<String> = (0..25).map(|i| format!(r"k{i:03}_\w{{40}}")).collect();
+        for result in [load_sanitize(&heavy, &[]), load_sanitize(&[], &heavy)] {
+            assert!(
+                matches!(result, Err(BridgeError::ConfigInvalid { ref reason, .. })
+                if reason.contains("cannot be compiled")),
+                "got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_overlong_sanitize_pattern_rejected_on_both_keys() {
+        let long = "a".repeat(crate::security::MAX_CUSTOM_PATTERN_LEN + 1);
+        for result in [
+            load_sanitize(std::slice::from_ref(&long), &[]),
+            load_sanitize(&[], std::slice::from_ref(&long)),
+        ] {
+            assert!(
+                matches!(result, Err(BridgeError::ConfigInvalid { ref reason, .. })
+                if reason.contains("-byte limit")),
+                "got {result:?}"
+            );
+        }
+    }
+
+    /// Against `23341f0` every set-level error named the `custom_patterns` key
+    /// whatever key was at fault, and a bad regex echoed the pattern.
+    #[test]
+    fn test_sanitize_errors_name_the_key_at_fault_and_index() {
+        let cap = crate::security::MAX_OPERATOR_PATTERNS;
+        let literals: Vec<String> = (0..=cap).map(|i| format!("literal{i:05}tok")).collect();
+        let over = load_sanitize(&[], &literals);
+        assert!(
+            matches!(over, Err(BridgeError::ConfigInvalid { ref field, .. })
+            if field == "security.sanitize_patterns"),
+            "got {over:?}"
+        );
+        let both = load_sanitize(&literals[..cap], &literals[cap..]);
+        assert!(
+            matches!(both, Err(BridgeError::ConfigInvalid { ref field, .. })
+            if field.contains("custom_patterns") && field.contains("sanitize_patterns")),
+            "got {both:?}"
+        );
+        let heavy: Vec<String> = (0..25).map(|i| format!(r"k{i:03}_\w{{40}}")).collect();
+        let unbuildable = load_sanitize(&[], &heavy);
+        assert!(
+            matches!(unbuildable, Err(BridgeError::ConfigInvalid { ref field, ref reason })
+            if field == "security.sanitize_patterns" && reason.contains("[A-Za-z0-9]")),
+            "got {unbuildable:?}"
+        );
+        let bad = load_sanitize(&["ok".to_string(), "(SECRETTOKEN".to_string()], &[]);
+        let Err(BridgeError::ConfigInvalid { field, reason }) = bad else {
+            panic!("expected ConfigInvalid");
+        };
+        assert_eq!(field, "security.sanitize.custom_patterns[1]");
+        assert!(!reason.contains("Invalid regex '"), "{reason}");
     }
 }

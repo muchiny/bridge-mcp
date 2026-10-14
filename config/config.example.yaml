@@ -243,7 +243,11 @@ security:
     # Detects high-entropy strings that don't match any known pattern
     # entropy_detection: true        # Enable/disable (default: true)
     # entropy_threshold: 4.5         # Shannon entropy bits threshold (default: 4.5)
-    # entropy_min_length: 16         # Min token length to analyze (default: 16)
+    # entropy_min_length: 16         # Min token length to analyze (default: 16). The real
+    #                                # floor is max(this, 2^entropy_threshold) = 23 bytes
+    #                                # at 4.5 (chars, for ASCII tokens): nothing shorter
+    #                                # is ever flagged. Binds only hex tokens, and only
+    #                                # if entropy_hex_threshold is set.
     # entropy_hex_threshold: 3.1    # Opt-in hex-charset threshold (default: disabled).
     #                               # Hex caps at 4.0 bits/char so the 4.5 default never
     #                               # fires on hex. Enabling may redact checksums (md5/sha).

@@ -675,7 +675,7 @@ fn default_require_elicitation_on_destructive() -> bool {
 /// - Enable/disable sanitization
 /// - Disable specific builtin pattern categories
 /// - Add custom patterns with custom replacement text
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizeConfig {
     /// Enable/disable sanitization entirely (default: true)
@@ -723,10 +723,22 @@ pub struct SanitizeConfig {
     /// - Hex secrets: ~3.7-4.0 bits (mathematically capped at 4.0 —
     ///   see `entropy_hex_threshold`)
     /// - Base64 secrets: ~5.0-6.0 bits
+    ///
+    /// The threshold implies a minimum length: a token's entropy is at most
+    /// `log2(len)`, so no token shorter than `2^threshold` bytes can be
+    /// flagged (23 at the default 4.5: bytes, which are characters for the
+    /// ASCII tokens this targets). Raising the threshold raises that
+    /// floor; `entropy_min_length` cannot lower it.
     #[serde(default = "default_entropy_threshold")]
     pub entropy_threshold: f64,
 
     /// Minimum token length for entropy analysis (default: 16)
+    ///
+    /// The effective floor is `max(entropy_min_length, 2^entropy_threshold)`
+    /// bytes: 23 at the default threshold of 4.5, so at the default
+    /// this setting changes nothing for ordinary tokens. It is the binding
+    /// floor only for hex tokens, once `entropy_hex_threshold` is set (a
+    /// threshold of 3.1 puts the mathematical floor at about 8.6).
     #[serde(default = "default_entropy_min_length")]
     pub entropy_min_length: usize,
 
@@ -772,7 +784,7 @@ const fn default_sanitize_enabled() -> bool {
 }
 
 /// Custom sanitization pattern with configurable replacement
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomSanitizePattern {
     /// Regex pattern to match sensitive data
@@ -1840,7 +1852,7 @@ hosts:
         let config = SanitizeConfig::default();
         assert!(config.enabled);
         assert_eq!(config.disable_builtin, [] as [std::string::String; 0]);
-        assert!(config.custom_patterns.is_empty());
+        assert_eq!(config.custom_patterns, [] as [CustomSanitizePattern; 0]);
     }
 
     #[test]
