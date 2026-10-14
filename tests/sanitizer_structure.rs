@@ -219,6 +219,158 @@ fn text_lines_false_positives_left_alone() {
     }
 }
 
+/// A key name that carries the keyword inside the quotes must not hide its
+/// value.
+///
+/// Which rows carry the regression, measured by running the `849234c`
+/// sanitizer over this very table: every row whose key is PREFIXED and quoted
+/// fails on the base, including `"db_password": S3cr3t!x` and the
+/// `12345678` / `changeit` rows. The rows that pass on the base are the
+/// exact-keyword ones (`password`, `credentials`, the two `secret` path rows)
+/// and the three unquoted forms; they stay because the acceptance asks for
+/// prefix / suffix / bare / quoted coverage. The keyword may be prefixed (`_`, camelCase, `-`, `.`); the closing
+/// quote stays glued to it.
+#[test]
+fn prefixed_json_keys_are_redacted() {
+    let s = sanitizer();
+    let cases = [
+        // bare keyword, as before
+        (r#"{"password":"S3cr3t!x"}"#, "S3cr3t!x"),
+        // `_` prefix, strong and weak keys
+        (r#"{"db_password":"S3cr3t!x"}"#, "S3cr3t!x"),
+        (r#"{"db_password": "S3cr3t!x"}"#, "S3cr3t!x"),
+        (r#"{"admin_token":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        (r#"{"api_secret":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        // camelCase prefix: no separator. Strong family only — the weak
+        // family needs a separator (see the unchanged table: `adminToken`).
+        (r#"{"dbPassword":"S3cr3t!x"}"#, "S3cr3t!x"),
+        (r#"{"rootPassword":"Zq8!vN3pLw0x"}"#, "Zq8!vN3pLw0x"),
+        // base64 that starts with `/` has `+`/`=`: not a path, still masked
+        (r#"{"db_password":"/a+b/c=="}"#, "/a+b/c=="),
+        // the common defaults are masked under a prefixed key as under the exact
+        // one: the prefixed gate REJECTS shapes, it does not demand a look
+        (r#"{"db_password":"changeit"}"#, "changeit"),
+        (r#"{"keystore_password":"changeit"}"#, "changeit"),
+        (r#"{"db_password":"postgres"}"#, "postgres"),
+        (r#"{"mysql_password":"hunter2"}"#, "hunter2"),
+        (
+            r#"{"db_password":"correcthorsebatterystaple"}"#,
+            "correcthorsebatterystaple",
+        ),
+        (r#"{"dbPassword":"changeit"}"#, "changeit"),
+        (r#"{"db_password":12345678}"#, "12345678"),
+        // an unlisted root is masked: the safe direction of the path list
+        (r#"{"db_password":"/data/x/y"}"#, "/data/x/y"),
+        // a path-shaped secret is not spared by a path-shaped GUESS: the entropy
+        // tier skips tokens starting with `/`, so only the key can mask these
+        (
+            r#"{"secret":"/K7MDENGbPxRfiCY/EXAMPLEKEY/abcdefghij"}"#,
+            "EXAMPLEKEY",
+        ),
+        (
+            r#"{"secret":"/aB3xZ9kQ/mN7pR2sT/vW5yU8iO1lK4jH6gF0dS"}"#,
+            "vW5yU8iO1lK4",
+        ),
+        (
+            r#"{"db_password":"/aB3xZ9kQ/mN7pR2sT/vW5yU8iO1lK4jH6gF0dS"}"#,
+            "vW5yU8iO1lK4",
+        ),
+        // existing verdicts, unchanged: a weak exact key with a path value
+        (r#"{"credentials":"/etc/creds"}"#, "/etc/creds"),
+        // the exact keyword keeps its no-gate behaviour: any scalar goes
+        (r#"{"password":12345678}"#, "12345678"),
+        (r#"{"password":"/etc/x"}"#, "/etc/x"),
+        // other separators
+        (r#"{"x-api-key":"S3cr3t!xyz"}"#, "S3cr3t!xyz"),
+        (r#"{"db.password":"S3cr3t!x"}"#, "S3cr3t!x"),
+        // single-quoted
+        ("{'db_password': 'S3cr3t!x'}", "S3cr3t!x"),
+        // YAML flow / bare-after-quoted-key
+        (r#""db_password": S3cr3t!x"#, "S3cr3t!x"),
+        // unquoted forms, caught by the bare families
+        ("db_password: S3cr3t!x", "S3cr3t!x"),
+        ("db_password=S3cr3t!x", "S3cr3t!x"),
+        ("dbPassword: S3cr3t!x", "S3cr3t!x"),
+    ];
+    for (input, secret) in cases {
+        let out = s.sanitize(input);
+        assert!(
+            !out.contains(secret),
+            "{input:?} must be redacted, got {out:?}"
+        );
+    }
+    // The structure survives: still valid JSON, key kept.
+    let out = s.sanitize(r#"{"db_password":"S3cr3t!x","host":"pi"}"#);
+    let v = parse_json(&out, "prefixed key");
+    assert_eq!(v["host"], "pi");
+    assert!(v.get("db_password").is_some(), "key must be kept: {out}");
+}
+
+/// The other direction: a name that merely CONTAINS a keyword, or carries a
+/// path / boolean / enum, is not a secret. The right anchor (closing quote
+/// glued to the keyword) is what keeps these alone.
+#[test]
+fn prefixed_json_keys_left_alone_when_the_name_is_not_a_secret() {
+    let s = sanitizer();
+    let cases = [
+        r#"{"secretName":"tls-cert"}"#,
+        r#"{"secretKeyRef":{"name":"x"}}"#,
+        r#"{"AccessKeyId":"AKIAxxxx"}"#,
+        r#"{"key":"abc"}"#,
+        r#"{"public_key":"ssh-ed25519 AAAA"}"#,
+        r#"{"keyword":"nginx"}"#,
+        r#"{"max_tokens":4096}"#,
+        r#"{"summary_max_tokens":"2048"}"#,
+        r#"{"vault_password_file":"/root/.vault_pass"}"#,
+        r#"{"db_token":true}"#,
+        // The prefixed strong form is gated by `plausible_shape`: a name that
+        // only ENDS in the keyword says nothing about its value.
+        r#"{"usePassword":true}"#,
+        r#"{"MYSQL_ALLOW_EMPTY_PASSWORD":"yes"}"#,
+        r#"{"OLDPWD":"/var/lib/rancher/k3s"}"#,
+        r#"{"db_password":90}"#,
+        r#"{"db_password":"/etc/gcp/sa.json"}"#,
+        // the Docker / Kubernetes secret-file idiom: which file holds the
+        // credential is what the operator reads
+        r#"{"db_password":"/run/secrets/db_password"}"#,
+        r#"{"db_password":"/media/usb/data"}"#,
+        r#"{"db_password":"/lib/systemd/system"}"#,
+        // The weak PREFIXED form refuses the same shapes (R-Z16: a surface
+        // this change creates must not mask a path / boolean / number).
+        r#"{"GOOGLE_APPLICATION_CREDENTIALS":"/etc/gcp/sa.json"}"#,
+        r#"{"db_token":"/etc/x.pem"}"#,
+        r#"{"db_secret":"C:\\sa.json"}"#,
+        r#"{"admin_token":true}"#,
+        r#"{"db_password":"\\fs01\share\p.txt"}"#,
+        // The weak family's prefix needs a separator: short pagination cursors
+        // are camelCase, and `existingSecret` names a Secret object. (A long
+        // cursor such as `NextToken` is masked by the ENTROPY tier, at the
+        // base too, so it cannot sit in this table.)
+        r#"{"nextPageToken":"CgkIABDr1Zb2BRIf"}"#,
+        r#"{"existingSecret":"redis-prod-01"}"#,
+        // Documented non-coverage: camelCase weak key with a real secret.
+        r#"{"adminToken":"S3cr3t!xyz"}"#,
+        r#"{"admin_secret":{"a":1}}"#,
+        // Suffixed names (keyword NOT last) are out of scope: the right anchor
+        // is deliberately unchanged.
+        r#"{"password_db":"S3cr3t!x"}"#,
+        // Flag form `--password <value>`: no generic pattern, tracked as T66.
+        "--password S3cr3t!x",
+        "--db-password S3cr3t!x",
+        "docker login -u me --password-stdin reg.example",
+        // Escaped form: a JSON document nested in a JSON string, quotes
+        // rendered `\"`. The backslash breaks the glued-quote anchor, for the
+        // bare key as much as the prefixed one. Documented non-coverage,
+        // tracked as T68 — these two lines go away when it is fixed.
+        r#"{\"password\":\"S3cr3t!x\"}"#,
+        r#"{\"db_password\":\"S3cr3t!x\"}"#,
+    ];
+    for input in cases {
+        let out = s.sanitize(input);
+        assert_eq!(out.as_ref(), input, "{input:?} must not be touched");
+    }
+}
+
 #[test]
 fn brace_wrapped_scalars_are_redacted_but_structures_are_not() {
     let s = sanitizer();
@@ -331,4 +483,27 @@ fn corpus_regressions_hold() {
             "corpus regression for {input:?}"
         );
     }
+}
+
+/// An operator pattern now applies to output that holds no built-in keyword
+/// (the tier-1 gate used to skip it). A well-anchored pattern must leave a
+/// JSON document parseable, because `jq_filter` re-parses the sanitized text
+/// and a failure there is a hard tool error. Greedy patterns (a trailing `.*`
+/// or `\S*`) swallow the closing quote and are warned against in the
+/// CHANGELOG, not pinned here.
+#[test]
+fn an_anchored_operator_pattern_keeps_keyword_free_json_parseable() {
+    let doc = r#"{"items":[{"name":"SA-1234","ready":true},{"name":"web","ready":false}]}"#;
+    let s = Sanitizer::from_config(&SanitizeConfig {
+        custom_patterns: vec![bridge_mcp::config::CustomSanitizePattern {
+            pattern: r"SA-\d{4}".to_string(),
+            replacement: "[SA]".to_string(),
+            description: None,
+        }],
+        ..SanitizeConfig::default()
+    });
+    let out = s.sanitize(doc);
+    assert!(!out.contains("SA-1234"), "the pattern must bite: {out}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("must still parse");
+    assert_eq!(parsed["items"][0]["name"], "[SA]");
 }

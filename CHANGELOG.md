@@ -1517,6 +1517,70 @@ tests and a serialisation test.
 
 ### Fixed
 
+- **Your own sanitizer patterns (`security.sanitize.custom_patterns` and the
+  legacy `security.sanitize_patterns`) were inert whenever the text held none of the
+  built-in secret keywords.** The sanitizer skipped its whole regex stage
+  unless a built-in keyword (`password`, `token`, `secret`, ...; there is no bare
+  `key`) appeared somewhere in the text, and your patterns were not consulted
+  before that skip. A pattern such as `WIDGETKEY-\d+` masked `--token
+  WIDGETKEY-4242` but not `--key WIDGETKEY-4242`, nor the token alone on a line,
+  on every output (tool output, audit and history lines). The keyword-only
+  construction of that stage dates from v1.0.0 (`git log -S literal_detector`
+  on the sanitizer file lists 5f25f0a as the first commit). Your patterns are
+  now checked on their own when the keyword stage finds nothing, and only they
+  are applied there; the built-in patterns still run only where they did
+  before. With no custom or legacy pattern configured, nothing changes. If you
+  do have a broad pattern configured, expect redactions in outputs that escaped
+  before, including ones you read every day: it now applies to all output, not
+  only to lines near a keyword. For example, a legacy entry
+  `security.sanitize_patterns: ["[0-9a-f]{32}"]` now masks every 32-hex
+  checksum (`md5sum` output, a `crictl images` IMAGE ID, a `git ls-tree` sha).
+  Anchor your patterns: one that ends in `.*` or `\S*` eats the closing quote
+  and breaks the JSON of the output, which makes a call with `jq_filter` fail.
+  Empty patterns are now skipped (an empty regex matches between every
+  character).
+
+- **The output sanitizer now masks a JSON key whose name ENDS in the keyword:
+  `{"db_password":"…"}`, `{"dbPassword":"…"}`, `{"admin_token":"…"}`,
+  `{"x-api-key":"…"}`.** The two quoted-key families required the opening
+  quote glued to the keyword, so `"password"` was masked and `"db_password"`
+  was not, in every output that passes the sanitizer (tool output, pagination,
+  `save_output`, the audit log). The prefix is tolerant on the **left only**:
+  the closing quote must still follow the keyword, so `secretName`,
+  `secretKeyRef`, `AccessKeyId`, `public_key`, `keyword`, `max_tokens`,
+  `vault_password_file` and `"password_db"` are unchanged. The `password`,
+  `passwd` and `pwd` family accepts a prefix of letters, digits, `_`, `.` or `-` (`db_password`,
+  `dbPassword`, `keystore_password`) and masks the usual defaults (`changeit`, `postgres`,
+  `hunter2`) as it does under the exact key, but leaves alone the shapes that
+  are not passwords: `true`/`null`, the words `yes`, `no`, `on`, `off`,
+  `auto`, `default`, `enabled`, `disabled`, `required`, `optional`, a number
+  shorter than 8 digits, and a path under `/etc/`, `/var/`, `/usr/`, `/opt/`,
+  `/home/`, `/root/`, `/srv/`, `/mnt/`, `/tmp/`, `/boot/`, `/dev/`, `/proc/`,
+  `/sys/`, `/run/`, `/media/`, `/lib/`, `./`, `../`, `~/`, a drive letter or a UNC `\\` — so `usePassword: true`,
+  `MYSQL_ALLOW_EMPTY_PASSWORD: "yes"`, `OLDPWD: "/var/lib/rancher/k3s"` and
+  `db_password: 90` are unchanged while `db_password: 12345678` is masked. A path
+  under any other root is masked (the safe direction). The weak keys (`token`,
+  `secret`, `credential`, `api_key`…) accept a prefix only if it ends in `_`,
+  `.` or `-` (`admin_token`, `api_secret`, `x-api-key`) and, like the password
+  family, leave a boolean, enum word, short number or known-root path unmasked
+  (`GOOGLE_APPLICATION_CREDENTIALS: "/etc/gcp/sa.json"`); this leaves short
+  camelCase pagination cursors (`nextPageToken`, `pageToken`) and
+  `existingSecret` alone. Long cursors such as `NextToken` are masked by the
+  entropy tier, as before this change.
+  **No existing verdict changes:** the shared `plausible_secret` gate is
+  untouched. Measured by running the unmodified `849234c` sanitizer and this
+  one on generated inputs: no input with an unprefixed key differs; every one
+  that differs has a prefixed key and went from clear to masked; none went from
+  masked to clear, and none under a listed root changed. That is a
+  measurement on a generated corpus, not a guarantee on real outputs.
+  **Not covered, declared:** a camelCase weak key carrying a real secret
+  stays in clear — `botToken`, `jwtSecret`, `appSecret`, `webhookSecret`,
+  `vaultToken`, `dbSecret`, `myApiKey`, `registryCredentials`, `adminToken` —
+  none of them was masked before this change either. Note the asymmetry:
+  `dbPassword` is masked and `dbSecret` is not. A key name containing `/`, `:`
+  or a space (`app/db/password`, `mysql::server::root_password`,
+  `db password`) is not matched either. Both are tracked in T69.
+
 - **The audit writer is drained when any of the three MCP transports shuts
   down, and `SIGTERM` is handled at all.** `McpServer::serve` and
   `mcp::transport::http::serve` each spawned the `AuditWriterTask` and threw
@@ -1830,6 +1894,27 @@ tests and a serialisation test.
   nothing kept in agreement; behaviour is unchanged, the byte-for-byte identical
   body is gone.
 
+- **`rustls` 0.23.45 -> 0.23.46, and the advisory exception list is net
+  unchanged at seven.** Four `rustls` advisories were published on 2026-10-14
+  (RUSTSEC-2026-0346 `Debug` impls expose TLS secrets, -0347 buffered
+  application data after ECH rejection, -0348 brotli certificate decompression
+  allocating up to 1 GiB before authentication, -0349 unauthenticated
+  ServerHello downgrading later connections to classical key exchange). The
+  lockfile bump removes -0347 and -0348 outright: they are 0.23-only features
+  and 0.23.46 fixes them. The other two also match the SECOND `rustls` in the
+  tree, 0.21.12, which has no fix on its own major line — all four advisories
+  say "upgrade to >=0.23.46" — and which arrives only through
+  `aws-smithy-http-client` -> `hyper-rustls` 0.24 -> `tokio-rustls` 0.24, pulled
+  by `aws-config`/`aws-sdk-ssm` under the optional `ssm`/`cloud` features. No
+  shipped binary compiles it (`full` is `cli,mimalloc,http,jq,otel` and
+  `RELEASE_FEATURES` is `full,winrm,psrp`), but `cargo audit` reads the lockfile
+  and not the feature graph, so the gate fails regardless; both are now ignored
+  with that reachability written down. Against that, the two `quick-xml`
+  exceptions are **gone**: `psrp-rs` 2.0.2 resolves `quick-xml` 0.42.0, past the
+  >=0.41 fix, and `cargo deny` answered "no crate matched advisory criteria" for
+  both — which is precisely the removal condition those entries documented.
+  Nothing else moved in the lockfile.
+
 ### Changed
 
 - **`winrm-rs` 1.2.2 and `psrp-rs` 2.0.2.** 1.2.2 stamps `wsmv:SessionId` on the
@@ -1924,6 +2009,32 @@ tests and a serialisation test.
   dash-login host.
 
 ### Known issues
+
+- **The flag form `--password <value>` (and `--db-password <value>`) is not
+  masked by the sanitizer.** No pattern in the `password` family targets a secret that follows a
+  flag after a space; only `docker login -p` and `--vault-password-file` have
+  one. (Other flags do: `--api-key <v>` and `--auth-token <v>` are masked by
+  the generic API-key pattern, whose key class accepts a space by design.) Accepting a space as separator for the `password` family would also
+  mask `password required pam_unix.so` in PAM output, so it needs its own
+  measurement (tracked as T66). Until then, do not pass a secret as a
+  command-line argument.
+
+- **A secret in a JSON document nested inside a JSON string is not masked by
+  the sanitizer, whatever the key name.** When a JSON document is carried as
+  a string value (an argument holding a request body, say), `serde_json`
+  renders its quotes as `\"`, and the sanitizer's quoted-key families anchor
+  on a quote glued to the keyword: `{\"password\":\"S3cr3t!x\"}` and
+  `{\"db_password\":\"S3cr3t!x\"}` both come out unchanged (measured, with an
+  8-character and a 20-character value; the entropy tier cannot catch the
+  20-character one either: the Shannon entropy of a token's own bytes is at
+  most `log2(length)`, so at the 4.5 threshold no token under 23 characters
+  can be flagged, and this one measures 4.322, its maximum). The by-key redaction of the audit sinks does not
+  help, because the outer key is innocent. This is the same mechanism as the
+  re-encoding limit the threat model accepts (base64, hexdump), with one
+  difference: here the re-encoding is performed by our own serializer, not by
+  the caller. Closing it needs the value class widened as well as the key
+  anchor, so it is tracked as its own task (T68) rather than folded into the
+  prefixed-key fix above.
 
 - The output cache is MCP-server-only, so CLI truncation emits no `output_id`
   and the omitted bytes are unrecoverable. The tool says so when called from the

@@ -845,6 +845,41 @@ mod tests {
         );
     }
 
+    /// The sibling of the test above, for what that one cannot see: its probe
+    /// (`AKIA` + 16) is masked by a pattern that needs no key name, so it stays
+    /// green with every KEYED family broken. This one's secret has no shape of
+    /// its own — `S3cr3t!x` is 8 characters, below the entropy floor — so only
+    /// a family keyed on the name in front of it can mask it: here the BARE
+    /// `password` family (`db_password=…` matches it by substring).
+    ///
+    /// **It is a guard, not a regression test for the prefixed-key fix, and
+    /// it passes on the base**: the bare family already caught this form. The
+    /// operation is in the logfmt form `log_state_change`'s callers pass; the
+    /// quoted-JSON form, where the fix lives, is proved in
+    /// `tests/sanitizer_structure.rs` and `tests/security_audit_redaction.rs`.
+    #[test]
+    fn a_keyed_secret_in_the_operation_is_redacted_by_its_key() {
+        let uc = test_use_case();
+        uc.log_state_change(
+            "ssh_config_set",
+            "pi",
+            "ssh_config_set db_password=S3cr3t!x value=80000",
+            0,
+        );
+        let events = uc.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1);
+        assert!(
+            !events[0].command.contains("S3cr3t!x"),
+            "got {:?}",
+            events[0].command
+        );
+        assert!(
+            events[0].command.contains("db_password="),
+            "the key stays, only the value goes, got {:?}",
+            events[0].command
+        );
+    }
+
     #[test]
     fn test_validate_command() {
         let use_case = create_test_use_case();

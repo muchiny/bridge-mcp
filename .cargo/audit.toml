@@ -19,19 +19,22 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
-    # quick-xml 0.36 DoS advisories (2026-06-29): unbounded namespace
-    # allocation + quadratic duplicate-attribute check. Transitive via the
-    # optional psrp-rs dep (`psrp`/`all-protocols` features only; default
-    # and air-gapped builds never compile it). Fixed in quick-xml >=0.41 —
-    # remove once psrp-rs bumps quick-xml. Same list as deny.toml.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
     # h2 unbounded empty DATA frames (2026-08-18). Patched in h2 >=0.4.16
     # only; the lockfile is already there. The remaining match is h2 0.3.27,
     # transitive via aws-smithy-http-client -> aws-config / aws-sdk-ssm, with
     # no patched 0.3 release. Optional `ssm`/`cloud` features only. Remove
     # once the aws-smithy stack leaves h2 0.3. Same list as deny.toml.
     "RUSTSEC-2026-0258",
+    # rustls advisories published 2026-10-14. Of the four raised, two are fixed in
+    # the lockfile by rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0347, -0348, both
+    # 0.23-only features). The two below match rustls 0.21.12, which has no fix on
+    # its own major line — all four advisories say "upgrade to >=0.23.46". Transitive
+    # via aws-smithy-http-client -> hyper-rustls 0.24 -> tokio-rustls 0.24 ->
+    # rustls 0.21, pulled by aws-config / aws-sdk-ssm under the optional
+    # `ssm`/`cloud` features, which no shipped build enables (`full` has no `ssm`).
+    # Remove once the aws-smithy stack leaves rustls 0.21. Same list as deny.toml.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0349",
 ]
 
 # Warn instead of error for informational advisories
