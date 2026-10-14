@@ -1524,11 +1524,14 @@ tests and a serialisation test.
   `key`) appeared somewhere in the text, and your patterns were not consulted
   before that skip. A pattern such as `WIDGETKEY-\d+` masked `--token
   WIDGETKEY-4242` but not `--key WIDGETKEY-4242`, nor the token alone on a line,
-  on every output (tool output, audit and history lines). It has been that way
-  since the first release (v1.0.0). Your patterns are now checked on their own
+  on every output (tool output, audit and history lines). The keyword-only
+  construction of that stage dates from v1.0.0 (`git log -S literal_detector`
+  on the sanitizer file lists 5f25f0a as the first commit). Your patterns are now checked on their own
   when the keyword stage finds nothing, and only they are applied there; the
   built-in patterns still run only where they did before. With no custom or
-  legacy pattern configured, nothing changes.
+  legacy pattern configured, nothing changes. If you do have a broad pattern
+  configured, expect redactions in outputs that escaped before, including ones you read
+  every day: it now applies to all output, not only to lines near a keyword.
 
 - **The output sanitizer now masks a JSON key whose name ENDS in the keyword:
   `{"db_password":"…"}`, `{"dbPassword":"…"}`, `{"admin_token":"…"}`,

@@ -1892,6 +1892,14 @@ Done";
     }
 
     #[test]
+    fn test_default_config_has_no_operator_detection_set() {
+        let default = Sanitizer::from_config(&SanitizeConfig::default());
+        assert!(default.custom_set.is_none());
+        assert!(Sanitizer::with_defaults().custom_set.is_none());
+        assert!(Sanitizer::new(&[r"x\d+".to_string()]).custom_set.is_some());
+    }
+
+    #[test]
     fn test_legacy_pattern_without_builtin_keyword_redacts() {
         let sanitizer = Sanitizer::from_config_with_legacy(
             &SanitizeConfig::default(),
