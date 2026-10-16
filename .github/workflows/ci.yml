@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      release_build: ${{ steps.filter.outputs.release_build }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -60,6 +61,49 @@ jobs:
               - 'config/**'
               - 'docker-compose.test.yml'
               - '.github/workflows/ci.yml'
+            # What release.yml's build reads: a change here can break the
+            # release build without touching any source file.
+            release_build:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'Cross.toml'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+
+  # release.yml only runs on a tag, so a build that breaks there stayed
+  # invisible until the tag was public: v4.0.0's linux-arm64 job crashed rustc
+  # 1.99.1 on a `target-cpu=native` that `cross` resolved to the x86 runner
+  # (#242), and its GitHub Release was never created. This replays that job —
+  # same toolchain (stable), same `cross` command, same features — whenever a
+  # build input changes, so a tag only ever ships a build already seen to work.
+  # arm64 is the one release target built through `cross`; the other three are
+  # native `cargo build`s that Tests and Clippy already exercise.
+  release-build-arm64:
+    name: Release build (linux-arm64)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.release_build == 'true'
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Ensure target is installed
+        run: rustup target add aarch64-unknown-linux-gnu
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      # No rust-cache, as in release.yml: the point is to build what the
+      # release will build, from scratch.
+      - name: Build (cross)
+        run: cross build --release --features full --target aarch64-unknown-linux-gnu
 
   format:
     name: Format
