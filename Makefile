@@ -97,7 +97,7 @@ daemon-stop:
 daemon-status:
 	./target/release/bridge-mcp daemon status
 
-# Run clippy linter (MSRV toolchain — rust-toolchain.toml pins 1.98.0)
+# Run clippy linter (MSRV toolchain — rust-toolchain.toml pins 1.99.1)
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings
 
@@ -333,7 +333,7 @@ quality: fmt-check lint typos machete
 # coverage (COVERAGE_MIN, 93%) and feature-powerset.
 #
 # `lint-stable` is in this list because CI's Clippy runs real stable
-# (RUSTUP_TOOLCHAIN: stable at workflow level) while `lint` runs the 1.98.0
+# (RUSTUP_TOOLCHAIN: stable at workflow level) while `lint` runs the MSRV
 # pinned by rust-toolchain.toml. `lint` alone went green three times on a PR
 # whose Clippy was red, and clippy 1.99's `assert_is_empty` put 618 violations
 # on every PR. `lint` stays: it is the MSRV check. `test` uses --all-features

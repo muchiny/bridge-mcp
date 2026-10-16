@@ -82,7 +82,7 @@ bridge-mcp --version
 >
 > ```bash
 > git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp
-> make install      # Rust 1.98+; builds --features full,winrm,psrp into ~/.local/bin/bridge-mcp
+> make install      # Rust 1.99+; builds --features full,winrm,psrp into ~/.local/bin/bridge-mcp
 > ```
 >
 > `make install` refuses to install a binary that cannot load your config, which
@@ -1118,7 +1118,7 @@ make ci                 # fmt-check, lint (pinned + stable + no-default), test, 
 make help               # Every target
 ```
 
-Rust edition 2024, MSRV 1.98+, `#![forbid(unsafe_code)]`, 10,000+ tests.
+Rust edition 2024, MSRV 1.99+, `#![forbid(unsafe_code)]`, 10,000+ tests.
 
 **Adding a new tool — 3 steps:** annotate the struct with `#[mcp_tool]` (or
 `#[mcp_standard_tool]`), add the `mod` + `pub use` line, and (only if
