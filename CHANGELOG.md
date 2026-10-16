@@ -1013,7 +1013,7 @@ tests and a serialisation test.
   exits on the returned code. The collision test now walks the function instead
   of asserting `!(0..=5).contains(&6)`.
 - **`bridge-mcp tool <name>` rejects arguments the tool does not declare**,
-  exiting 5. Any invocation passing an extra key stops working. They used to be
+  exiting 1. Any invocation passing an extra key stops working. They used to be
   parsed and dropped in silence, and the keys most likely to be mistyped are the
   reduction params — `jq_fitler=…` returned the full unreduced output, which
   looks exactly like a working call. A close miss now names its fix
@@ -1453,8 +1453,8 @@ tests and a serialisation test.
   other 398 tools on that pipeline are unchanged — the 77 direct handlers do
   not implement the trait and never took `sudo` through this path at all; the
   one tool that sets it `false` also stops advertising the param, which on the
-  CLI is what makes `sudo=true` fail at parse time (exit 5) rather than
-  mid-pipeline.
+  CLI is what makes `sudo=true` fail at parse time (exit 1, before any
+  connection) rather than mid-pipeline.
 
   **Both refusals are audited, and so is every other `validate` rejection.**
   Step 4 of the `StandardTool` pipeline now writes a `command_denied` event
