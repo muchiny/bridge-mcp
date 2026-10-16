@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-10-16
+
+**4.0.0 is a major release because of the `### BREAKING` list below, not
+because of the protocol.** bridge-mcp still speaks MCP revision `2026-07-28`
+only, exactly as 3.0.0 did. What breaks: configuration that used to load
+(sanitizer patterns, `ssh_net_equip_config` host tags), the CLI contract
+(exit codes, the destructive-tool prompt, undeclared arguments), MCP `isError`
+on a failed remote command, the `audit.log` wire format, and the library API.
+Read that list before upgrading.
+
 Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
 reading it. Every item below was reproduced before the fix and measured after.
 
@@ -1009,6 +1019,17 @@ tests and a serialisation test.
   looks exactly like a working call. A close miss now names its fix
   ("Did you mean `jq_filter`?"). `--json-args` is unaffected.
 
+- **An MCP `tools/call` now refuses arguments the tool does not declare, and
+  reduction params its output kind cannot use** — the same refusal as the CLI
+  item above, on the other door (#161). `#[serde(deny_unknown_fields)]` is on
+  every handler argument struct, so documented aliases (`ssh_pkg_remove`
+  `name` for `package`) still deserialize; a `jq_filter`, `columns`, `limit`
+  or `output_format` that the tool's `OutputKind` cannot apply is refused
+  with the kind named and its reduction strategy quoted. Found by
+  `ssh_firewall_status limit=3` returning 66,443 characters over MCP.
+  **Migration:** a client that sent extra keys must drop them; read the
+  tool's schema (`mcp_describe_tool`) for the parameters it accepts.
+
 - **(lib API) `SessionExecResult::exit_code` is now `Option<u32>`, and the
   `ssh_session_exec` JSON `exit_code` can be `null`.** `None`/`null` means the
   bridge read no exit code representable as a `u32` (begin marker missing, or
@@ -1244,7 +1265,7 @@ tests and a serialisation test.
   config value. Known restriction, not a defect of this change.
 
   Established by unit test and mutation testing, not on a host — see the note
-  under `[Unreleased]`.
+  under `[4.0.0]`.
 
 - **`ssh_exec` and `ssh_exec_multi` now exit 6 when the remote command exits
   non-zero — but they do not call it an error.** `bridge-mcp tool ssh_exec
@@ -1397,7 +1418,7 @@ tests and a serialisation test.
 
   Established by unit test, running the generated script under `bash` against
   stub `curl` and `sleep` binaries — not on a host; AWX is configured on no
-  machine this was written on. See the note under `[Unreleased]`.
+  machine this was written on. See the note under `[4.0.0]`.
 
 - **`ssh_net_equip_config` now refuses any host whose `tags` do not contain
   `network-equipment`, and refuses `sudo` outright.** **An existing config that
@@ -2627,6 +2648,93 @@ role and the AD cmdlets, absent on that server.
   1.2.1 also completes CredSSP against Server 2025. The `[patch.crates-io]`
   used while those releases were pending is gone; the lockfile resolves both
   from the registry.
+
+### Merged in this cycle without a CHANGELOG line
+
+Recorded at release time from the pull requests themselves (#142 to #227):
+these merged without touching this file. Nothing below was re-measured for
+this entry; each line says what its PR measured.
+
+**Security**
+
+- **The destructive confirmation prompt could be forged (#171, #173).**
+  `confirm_destructive_request` put a client-chosen command inside a fixed
+  three-backtick fence, and `ssh_exec`'s `command` may carry real newlines: a
+  command could close the fence and show the operator a benign `**Command:**`
+  section and a "this is a dry run" line. Since 3.0.0 this prompt is the whole
+  of `require_elicitation_on_destructive`. The fence is now one backtick longer
+  than the longest run in the content, which CommonMark cannot close, for the
+  command and the JSON arguments (#171) and for a tool name that is not a plain
+  identifier (#173; not reachable from a client today, since an unknown name
+  never gets a prompt).
+- **stdio and HTTP disagreed on the same bytes (#171, #175).** HTTP went
+  through `serde_json::Value`, which keeps the last of two duplicate members,
+  so `{"method":"tools/list","method":"tools/call"}` was refused on stdio and
+  dispatched as `tools/call` on HTTP. HTTP now calls the same `parse_incoming`.
+  And a JSON-RPC positional array (`["2.0",1,"tools/call",{…}]`) deserialized
+  into a complete `tools/call`, refused only by a textual `starts_with('[')`
+  guard; `JsonRpcMessage`'s `Deserialize` now refuses a sequence at the level
+  of the type (#175).
+- **`ssh_pkg_list` `filter` chose grep's options (#171).** It was pasted into
+  `grep -i {}` with no `-e`, so `-rf<file>` read the SSH user's home
+  recursively into the output of a `read_only` tool. The filter is validated,
+  passed as `-e`, and a leading hyphen is refused; `--` now precedes every
+  package-manager operand.
+- **`ssh_net_equip_show_interfaces` and `ssh_net_equip_show_run` passed the
+  interface name and config section to the device unvalidated (#167):**
+  `eth0; id` went through verbatim, and `validate_builtin` skips the whitelist
+  for specialised tools. `validate_identifier` now refuses anything but
+  letters, digits, space and `/._-:`; it refuses rather than escapes, since no
+  escaping is correct across a POSIX shell, a Cisco CLI and JunOS.
+- **Smaller defects from the same fuzz pass (#171):** `validate_network_target`
+  accepted a leading hyphen and `interface` / `server` / `record_type` had no
+  validator (`dig '-f/etc/passwd'`); `history://recent?since=100000000d`
+  reached chrono's panicking constructors and, with `panic = "abort"`, killed
+  the bridge; `AuthConfig` accepted unknown fields (`passphraze` loaded
+  silently and surfaced later as `SshKeyInvalid`); YAML parse errors printed
+  three source lines around the fault, close enough to a `password:` to echo
+  it, and now print line and column only; `build_top_command` wrapped
+  `count + 1` to `head -n 0`; `entropy_threshold: .nan` left the entropy
+  detector enabled and redacting nothing, and is now refused at load.
+- **`rustls` 0.23.43 -> 0.23.45, RUSTSEC-2026-0285 (#212):** TLS 1.3
+  handshake messages accepted at the wrong encryption level. Superseded by
+  the 0.23.46 bump under **Fixed** above.
+- **`russh` 0.62.7 -> 0.63.1 (#157, #160).** The bump merged unbuilt and
+  `main` did not compile. `check_server_key` now receives a
+  `PublicKeyOrCertificate`, and **a CA-signed host certificate is refused**:
+  `known_hosts` pins a bare key and cannot judge a CA. `hardened_preferred`
+  advertises no certificate algorithm, so a conforming server never offers
+  one. `chacha20` 0.10.1 (yanked) -> 0.10.2.
+
+**Fixed**
+
+- **Twenty-three AWX tools ignored `timeout_seconds` (#165).** The schema
+  published it; the handlers passed `awx.api_timeout` regardless. It is now
+  honoured, and a value outside the published `1..=3600` is refused rather
+  than clamped.
+- **`ssh_config` parsing (#177):** a `Host *` block followed by another `Host`
+  line was finalised as a real host named `*`; `Port 0` was taken at face
+  value and produced a host that could never connect, and now warns and falls
+  back to 22 like any other invalid port.
+
+**Development only — no change to the shipped binary's behaviour**
+
+- `cargo test` no longer rotates the developer's real
+  `~/.local/share/bridge-mcp/audit.log` (#227); twenty Makefile targets no
+  longer report success when the tool they wrap failed, so `make ci` cannot go
+  green on an open advisory (#162); the dev profile builds with
+  `line-tables-only` and dependencies without debuginfo (#225).
+- Tests and CI: clippy 1.99 `assert_is_empty` (#221), host-key decision
+  matrix (#166), daemon readiness probe (#163), two `dead_code` warnings on a
+  default build (#149), mutation score published by CI (#164), three red
+  workflows greened (#199).
+- Fuzz: shell dictionary and asserting targets (#170, #172, #176), eight mute
+  targets deleted and 34 seeded (#177). Live-probe harness and Raspberry
+  campaigns (#188, #195, #211). README: five claims the tree did not support
+  (#150).
+- Dependencies: `dirs` 6 -> 7 (#215), `syn` 2 -> 3 (#144), `uuid` (#156),
+  `rust-minor-patch` groups (#213, #217), `actions/setup-python` 6 -> 7
+  (#143), `actions/labeler` 5 -> 7 (#142).
 
 ## [3.0.0] - 2026-08-26
 
@@ -5204,7 +5312,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v3.0.0
 [1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0
