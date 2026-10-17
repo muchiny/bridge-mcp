@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Claude Code plugin now registers its MCP server.** `plugin.json` has
+  always pointed at `plugin/.mcp.json`, but the `.gitignore` line meant for the
+  checkout's own `.mcp.json` was unanchored and hid that file too, so it was
+  never committed and the published plugin shipped skills and a hook but no
+  server. The line is now `/.mcp.json`, and `plugin/.mcp.json` is committed in
+  the documented `mcpServers` form. Verified with `claude plugin validate` and
+  with `claude --plugin-dir ./plugin mcp list` (`plugin:bridge-mcp:bridge-mcp
+  … ✔ Connected`). If you use the plugin, drop any `claude mcp add` entry for
+  bridge-mcp, or the server runs twice.
+
+### Changed
+
+- `.gitignore`: `/dist/` (`make dxt`, `make mcpb`), `/fuzz/target/` and
+  `/fuzz/coverage/` (fuzz/ is its own workspace) and `bom.json` are ignored;
+  entries for files nothing produces any more are gone. `.claude/rules/protocol-adapters.md`
+  is no longer tracked, like every other file under the ignored `.claude/`.
+
 ## [4.0.2] - 2026-10-17
 
 Dependency updates merged after the v4.0.1 tag. No new feature, no API

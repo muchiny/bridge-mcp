@@ -109,8 +109,9 @@ their strict modes (`0600`).
 
 **Claude Code plugin.** It adds the `/bridge-mcp:bridge` and
 `/bridge-mcp:discover` skills and a session hook that downloads the release
-binary when `bridge-mcp` is not on your `PATH`. **It does not register the MCP
-server** — do step 4 as well.
+binary when `bridge-mcp` is not on your `PATH`, and it registers the MCP
+server itself — skip step 4's `claude mcp add`, or you get the server twice. It
+uses your default config path (step 2).
 
 ```bash
 claude plugin marketplace add muchiny/bridge-mcp
