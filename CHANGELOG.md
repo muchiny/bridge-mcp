@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`serde-saphyr` 1.3 -> 2.0** (#244), with one setting it needs: the YAML
+  parser now passes `emit_comments: false`. serde-saphyr 2.0 retains comments
+  by default and budgets that retention, and past 32 consecutive comment lines
+  ahead of a nested key it refused the input ("too many consecutive comments
+  before resolving collection entry") — a well-commented `config.yaml` would
+  have stopped loading on upgrade. bridge-mcp never reads comments, so they are
+  now validated and dropped, as with 1.x. Pinned by
+  `long_comment_blocks_parse_in_every_position` (200-line comment blocks at the
+  top level, before a nested key, deeper, and before sequence items; it fails
+  without the setting) and `shipped_example_config_parses`. Interpolation
+  (`${VAR}`) and `!include` stay off: both need a cargo feature this crate does
+  not enable, and interpolation also needs a property map passed in code.
+
 ## [4.0.1] - 2026-10-17
 
 **4.0.1 exists because the 4.0.0 release never finished.** The `v4.0.0` tag
