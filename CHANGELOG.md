@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-10-17
+
+Dependency updates merged after the v4.0.1 tag. No new feature, no API
+change, no configuration key added or removed. The config is now parsed by
+serde-saphyr 2.0, with the 1.x handling of comments kept (see below).
+
 ### Changed
 
 - **`serde-saphyr` 1.3 -> 2.0** (#244), with one setting it needs: the YAML
@@ -21,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without the setting) and `shipped_example_config_parses`. Interpolation
   (`${VAR}`) and `!include` stay off: both need a cargo feature this crate does
   not enable, and interpolation also needs a property map passed in code.
+- **Patch updates** (#243): `tokio` 1.53.3, `sha2` 0.11.1, `syn` 3.0.9.
+- `fuzz/Cargo.lock` re-resolved: it still pinned `serde-saphyr` 1.1.
 
 ## [4.0.1] - 2026-10-17
 
@@ -5380,7 +5388,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.0.1...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.0.2...HEAD
+[4.0.2]: https://github.com/muchiny/bridge-mcp/compare/v4.0.1...v4.0.2
 [4.0.1]: https://github.com/muchiny/bridge-mcp/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v3.0.0
