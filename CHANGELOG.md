@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-10-17
+
+**4.0.1 exists because the 4.0.0 release never finished.** The `v4.0.0` tag
+was pushed and its Docker image (`ghcr.io/muchiny/bridge-mcp:4.0.0`)
+published, but the `linux-arm64` build crashed rustc, so the GitHub Release —
+binaries, checksums, SBOM, DXT/MCPB bundles — was never created. 4.0.1 is
+4.0.0 plus that fix, a raised MSRV and the dependency updates merged since.
+Everything in the 4.0.0 entry below, its `### BREAKING` list included, applies
+to anyone upgrading from 3.0.0.
+
+### BREAKING
+
+- **MSRV raised 1.98 -> 1.99, and `rust-toolchain.toml` pins 1.99.1.** Chosen,
+  not forced: nothing in the code needs 1.99. It only affects building from
+  source (`make install`); **migration:** `rustup update`. The Docker build
+  image follows (`rust:1.99-alpine`).
+
+### Fixed
+
+- **The `linux-arm64` release build no longer hands rustc an x86 CPU** (#242).
+  `.cargo/config.toml` had set `-C target-cpu=native` for
+  `aarch64-unknown-linux-gnu` since 1.0.0. Under `cross` rustc runs on the x86
+  runner, where `native` is `icelake-server`, so the ARM build was given an
+  x86 CPU and its AVX-512 features. rustc 1.98 ignored them (194,370 "not a
+  recognized feature for this target" lines in the v3.0.0 arm64 job); rustc
+  1.99.1 segfaults in fat-LTO codegen (`MCSchedModel::getReciprocalThroughput`),
+  which is what failed the 4.0.0 release. The block is gone: a config that
+  produces distributed binaries must not tie them to the build machine's CPU.
+  Not reproduced locally (the full aarch64 build needs `cross`'s C toolchain);
+  the release job is the test.
+
+### Security
+
+- **`russh` 0.63.3 -> 0.64.1** (#234). It fixes GHSA-4wc5-f2rc-q74m (unbounded
+  allocation in the agent-protocol *server*) and GHSA-j7h2-66j4-ghjf (signature
+  algorithm not checked by the SSH *server*); bridge-mcp is an SSH client and
+  runs neither, so neither applied. The fix that does apply: rekey read and time
+  limits are now enforced. 0.64 also drops the parser for the legacy ed25519
+  key format that russh wrote before 0.43 — such keys now fail to load; keys
+  from `ssh-keygen` are unaffected.
+
+### Changed
+
+- **OpenTelemetry 0.33** (#241): `opentelemetry`, `opentelemetry_sdk` and
+  `opentelemetry-otlp` 0.32 -> 0.33.1, `tracing-opentelemetry` 0.33 -> 0.34.0,
+  bumped together — Dependabot's four one-crate PRs (#230-#233) could not build,
+  each leaving two `opentelemetry` versions in the graph. `dependabot.yml` now
+  groups these crates so they arrive as one PR.
+- **Minor and patch updates** (#236): `tokio` 1.53.2, `tokio-util` 0.7.20,
+  `serde_json` 1.0.154, `uuid` 1.28.0, `zeroize` 1.9.1, `inventory` 0.3.25,
+  `syn` 3.0.8; dev-only `proptest` 1.12.0 and `insta` 1.49.0.
+- `fuzz/Cargo.lock` re-resolved: it still pinned `russh` 0.63.1.
+
 ## [4.0.0] - 2026-10-16
 
 **4.0.0 is a major release because of the `### BREAKING` list below, not
@@ -5312,7 +5365,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.0.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.0.1...HEAD
+[4.0.1]: https://github.com/muchiny/bridge-mcp/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v3.0.0
 [1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
