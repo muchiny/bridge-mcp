@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-mcp"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "aho-corasick",
  "anyhow",

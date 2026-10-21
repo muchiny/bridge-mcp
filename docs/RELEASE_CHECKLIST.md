@@ -74,7 +74,7 @@ being released for `X.Y.Z` (`2.2.0` for the first use of this file).
   `--all-features`, and this box has OOM-crashed twice without the cap.
 - [ ] `git status --porcelain` after the gate — empty. A gate that rewrites
   tracked files is a finding.
-- [ ] RUSTSEC ignore lists still match and still hold the same 7 entries:
+- [ ] RUSTSEC ignore lists still match and still hold the same entries (1 since 4.1.0, RUSTSEC-2023-0071):
   `diff <(grep -v '^[[:space:]]*#' deny.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]+' | sort -u) <(grep -v '^[[:space:]]*#' .cargo/audit.toml | grep -oE 'RUSTSEC-[0-9]{4}-[0-9]+' | sort -u)`
   — no output. Changing one file without the other turns one CI gate red while
   the other stays green.
