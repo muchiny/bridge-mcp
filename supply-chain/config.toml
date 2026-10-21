@@ -921,7 +921,7 @@ version = "1.0.18"
 criteria = "safe-to-deploy"
 
 [[exemptions.jaq-core]]
-version = "3.1.1"
+version = "3.1.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.jaq-json]]
@@ -929,7 +929,7 @@ version = "2.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.jaq-std]]
-version = "3.0.3"
+version = "3.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff]]

@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Claude Code plugin now registers its MCP server.** `plugin.json` has
+  always pointed at `plugin/.mcp.json`, but the `.gitignore` line meant for the
+  checkout's own `.mcp.json` was unanchored and hid that file too, so it was
+  never committed and the published plugin shipped skills and a hook but no
+  server. The line is now `/.mcp.json`, and `plugin/.mcp.json` is committed in
+  the documented `mcpServers` form. Verified with `claude plugin validate` and
+  with `claude --plugin-dir ./plugin mcp list` (`plugin:bridge-mcp:bridge-mcp
+  … ✔ Connected`). If you use the plugin, drop any `claude mcp add` entry for
+  bridge-mcp, or the server runs twice.
+
+### Changed
+
+- `.gitignore`: `/dist/` (`make dxt`, `make mcpb`), `/fuzz/target/` and
+  `/fuzz/coverage/` (fuzz/ is its own workspace) and `bom.json` are ignored;
+  entries for files nothing produces any more are gone. `.claude/rules/protocol-adapters.md`
+  is no longer tracked, like every other file under the ignored `.claude/`.
+
+## [4.0.2] - 2026-10-17
+
+Dependency updates merged after the v4.0.1 tag. No new feature, no API
+change, no configuration key added or removed. The config is now parsed by
+serde-saphyr 2.0, with the 1.x handling of comments kept (see below).
+
+### Changed
+
+- **`serde-saphyr` 1.3 -> 2.0** (#244), with one setting it needs: the YAML
+  parser now passes `emit_comments: false`. serde-saphyr 2.0 retains comments
+  by default and budgets that retention, and past 32 consecutive comment lines
+  ahead of a nested key it refused the input ("too many consecutive comments
+  before resolving collection entry") — a well-commented `config.yaml` would
+  have stopped loading on upgrade. bridge-mcp never reads comments, so they are
+  now validated and dropped, as with 1.x. Pinned by
+  `long_comment_blocks_parse_in_every_position` (200-line comment blocks at the
+  top level, before a nested key, deeper, and before sequence items; it fails
+  without the setting) and `shipped_example_config_parses`. Interpolation
+  (`${VAR}`) and `!include` stay off: both need a cargo feature this crate does
+  not enable, and interpolation also needs a property map passed in code.
+- **Patch updates** (#243): `tokio` 1.53.3, `sha2` 0.11.1, `syn` 3.0.9.
+- `fuzz/Cargo.lock` re-resolved: it still pinned `serde-saphyr` 1.1.
+
+## [4.0.1] - 2026-10-17
+
+**4.0.1 exists because the 4.0.0 release never finished.** The `v4.0.0` tag
+was pushed and its Docker image (`ghcr.io/muchiny/bridge-mcp:4.0.0`)
+published, but the `linux-arm64` build crashed rustc, so the GitHub Release —
+binaries, checksums, SBOM, DXT/MCPB bundles — was never created. 4.0.1 is
+4.0.0 plus that fix, a raised MSRV and the dependency updates merged since.
+Everything in the 4.0.0 entry below, its `### BREAKING` list included, applies
+to anyone upgrading from 3.0.0.
+
+### BREAKING
+
+- **MSRV raised 1.98 -> 1.99, and `rust-toolchain.toml` pins 1.99.1.** Chosen,
+  not forced: nothing in the code needs 1.99. It only affects building from
+  source (`make install`); **migration:** `rustup update`. The Docker build
+  image follows (`rust:1.99-alpine`).
+
+### Fixed
+
+- **The `linux-arm64` release build no longer hands rustc an x86 CPU** (#242).
+  `.cargo/config.toml` had set `-C target-cpu=native` for
+  `aarch64-unknown-linux-gnu` since 1.0.0. Under `cross` rustc runs on the x86
+  runner, where `native` is `icelake-server`, so the ARM build was given an
+  x86 CPU and its AVX-512 features. rustc 1.98 ignored them (194,370 "not a
+  recognized feature for this target" lines in the v3.0.0 arm64 job); rustc
+  1.99.1 segfaults in fat-LTO codegen (`MCSchedModel::getReciprocalThroughput`),
+  which is what failed the 4.0.0 release. The block is gone: a config that
+  produces distributed binaries must not tie them to the build machine's CPU.
+  Not reproduced locally (the full aarch64 build needs `cross`'s C toolchain);
+  the release job is the test.
+
+### Security
+
+- **`russh` 0.63.3 -> 0.64.1** (#234). It fixes GHSA-4wc5-f2rc-q74m (unbounded
+  allocation in the agent-protocol *server*) and GHSA-j7h2-66j4-ghjf (signature
+  algorithm not checked by the SSH *server*); bridge-mcp is an SSH client and
+  runs neither, so neither applied. The fix that does apply: rekey read and time
+  limits are now enforced. 0.64 also drops the parser for the legacy ed25519
+  key format that russh wrote before 0.43 — such keys now fail to load; keys
+  from `ssh-keygen` are unaffected.
+
+### Changed
+
+- **OpenTelemetry 0.33** (#241): `opentelemetry`, `opentelemetry_sdk` and
+  `opentelemetry-otlp` 0.32 -> 0.33.1, `tracing-opentelemetry` 0.33 -> 0.34.0,
+  bumped together — Dependabot's four one-crate PRs (#230-#233) could not build,
+  each leaving two `opentelemetry` versions in the graph. `dependabot.yml` now
+  groups these crates so they arrive as one PR.
+- **Minor and patch updates** (#236): `tokio` 1.53.2, `tokio-util` 0.7.20,
+  `serde_json` 1.0.154, `uuid` 1.28.0, `zeroize` 1.9.1, `inventory` 0.3.25,
+  `syn` 3.0.8; dev-only `proptest` 1.12.0 and `insta` 1.49.0.
+- `fuzz/Cargo.lock` re-resolved: it still pinned `russh` 0.63.1.
+
+## [4.0.0] - 2026-10-16
+
+**4.0.0 is a major release because of the `### BREAKING` list below, not
+because of the protocol.** bridge-mcp still speaks MCP revision `2026-07-28`
+only, exactly as 3.0.0 did. What breaks: configuration that used to load
+(sanitizer patterns, `ssh_net_equip_config` host tags), the CLI contract
+(exit codes, the destructive-tool prompt, undeclared arguments), MCP `isError`
+on a failed remote command, the `audit.log` wire format, and the library API.
+Read that list before upgrading.
+
 Found by running 3.0.0 against a live Raspberry Pi K3s host rather than by
 reading it. Every item below was reproduced before the fix and measured after.
 
@@ -1003,11 +1108,22 @@ tests and a serialisation test.
   exits on the returned code. The collision test now walks the function instead
   of asserting `!(0..=5).contains(&6)`.
 - **`bridge-mcp tool <name>` rejects arguments the tool does not declare**,
-  exiting 5. Any invocation passing an extra key stops working. They used to be
+  exiting 1. Any invocation passing an extra key stops working. They used to be
   parsed and dropped in silence, and the keys most likely to be mistyped are the
   reduction params — `jq_fitler=…` returned the full unreduced output, which
   looks exactly like a working call. A close miss now names its fix
   ("Did you mean `jq_filter`?"). `--json-args` is unaffected.
+
+- **An MCP `tools/call` now refuses arguments the tool does not declare, and
+  reduction params its output kind cannot use** — the same refusal as the CLI
+  item above, on the other door (#161). `#[serde(deny_unknown_fields)]` is on
+  every handler argument struct, so documented aliases (`ssh_pkg_remove`
+  `name` for `package`) still deserialize; a `jq_filter`, `columns`, `limit`
+  or `output_format` that the tool's `OutputKind` cannot apply is refused
+  with the kind named and its reduction strategy quoted. Found by
+  `ssh_firewall_status limit=3` returning 66,443 characters over MCP.
+  **Migration:** a client that sent extra keys must drop them; read the
+  tool's schema (`mcp_describe_tool`) for the parameters it accepts.
 
 - **(lib API) `SessionExecResult::exit_code` is now `Option<u32>`, and the
   `ssh_session_exec` JSON `exit_code` can be `null`.** `None`/`null` means the
@@ -1244,7 +1360,7 @@ tests and a serialisation test.
   config value. Known restriction, not a defect of this change.
 
   Established by unit test and mutation testing, not on a host — see the note
-  under `[Unreleased]`.
+  under `[4.0.0]`.
 
 - **`ssh_exec` and `ssh_exec_multi` now exit 6 when the remote command exits
   non-zero — but they do not call it an error.** `bridge-mcp tool ssh_exec
@@ -1397,7 +1513,7 @@ tests and a serialisation test.
 
   Established by unit test, running the generated script under `bash` against
   stub `curl` and `sleep` binaries — not on a host; AWX is configured on no
-  machine this was written on. See the note under `[Unreleased]`.
+  machine this was written on. See the note under `[4.0.0]`.
 
 - **`ssh_net_equip_config` now refuses any host whose `tags` do not contain
   `network-equipment`, and refuses `sudo` outright.** **An existing config that
@@ -1432,8 +1548,8 @@ tests and a serialisation test.
   other 398 tools on that pipeline are unchanged — the 77 direct handlers do
   not implement the trait and never took `sudo` through this path at all; the
   one tool that sets it `false` also stops advertising the param, which on the
-  CLI is what makes `sudo=true` fail at parse time (exit 5) rather than
-  mid-pipeline.
+  CLI is what makes `sudo=true` fail at parse time (exit 1, before any
+  connection) rather than mid-pipeline.
 
   **Both refusals are audited, and so is every other `validate` rejection.**
   Step 4 of the `StandardTool` pipeline now writes a `command_denied` event
@@ -2627,6 +2743,93 @@ role and the AD cmdlets, absent on that server.
   1.2.1 also completes CredSSP against Server 2025. The `[patch.crates-io]`
   used while those releases were pending is gone; the lockfile resolves both
   from the registry.
+
+### Merged in this cycle without a CHANGELOG line
+
+Recorded at release time from the pull requests themselves (#142 to #227):
+these merged without touching this file. Nothing below was re-measured for
+this entry; each line says what its PR measured.
+
+**Security**
+
+- **The destructive confirmation prompt could be forged (#171, #173).**
+  `confirm_destructive_request` put a client-chosen command inside a fixed
+  three-backtick fence, and `ssh_exec`'s `command` may carry real newlines: a
+  command could close the fence and show the operator a benign `**Command:**`
+  section and a "this is a dry run" line. Since 3.0.0 this prompt is the whole
+  of `require_elicitation_on_destructive`. The fence is now one backtick longer
+  than the longest run in the content, which CommonMark cannot close, for the
+  command and the JSON arguments (#171) and for a tool name that is not a plain
+  identifier (#173; not reachable from a client today, since an unknown name
+  never gets a prompt).
+- **stdio and HTTP disagreed on the same bytes (#171, #175).** HTTP went
+  through `serde_json::Value`, which keeps the last of two duplicate members,
+  so `{"method":"tools/list","method":"tools/call"}` was refused on stdio and
+  dispatched as `tools/call` on HTTP. HTTP now calls the same `parse_incoming`.
+  And a JSON-RPC positional array (`["2.0",1,"tools/call",{…}]`) deserialized
+  into a complete `tools/call`, refused only by a textual `starts_with('[')`
+  guard; `JsonRpcMessage`'s `Deserialize` now refuses a sequence at the level
+  of the type (#175).
+- **`ssh_pkg_list` `filter` chose grep's options (#171).** It was pasted into
+  `grep -i {}` with no `-e`, so `-rf<file>` read the SSH user's home
+  recursively into the output of a `read_only` tool. The filter is validated,
+  passed as `-e`, and a leading hyphen is refused; `--` now precedes every
+  package-manager operand.
+- **`ssh_net_equip_show_interfaces` and `ssh_net_equip_show_run` passed the
+  interface name and config section to the device unvalidated (#167):**
+  `eth0; id` went through verbatim, and `validate_builtin` skips the whitelist
+  for specialised tools. `validate_identifier` now refuses anything but
+  letters, digits, space and `/._-:`; it refuses rather than escapes, since no
+  escaping is correct across a POSIX shell, a Cisco CLI and JunOS.
+- **Smaller defects from the same fuzz pass (#171):** `validate_network_target`
+  accepted a leading hyphen and `interface` / `server` / `record_type` had no
+  validator (`dig '-f/etc/passwd'`); `history://recent?since=100000000d`
+  reached chrono's panicking constructors and, with `panic = "abort"`, killed
+  the bridge; `AuthConfig` accepted unknown fields (`passphraze` loaded
+  silently and surfaced later as `SshKeyInvalid`); YAML parse errors printed
+  three source lines around the fault, close enough to a `password:` to echo
+  it, and now print line and column only; `build_top_command` wrapped
+  `count + 1` to `head -n 0`; `entropy_threshold: .nan` left the entropy
+  detector enabled and redacting nothing, and is now refused at load.
+- **`rustls` 0.23.43 -> 0.23.45, RUSTSEC-2026-0285 (#212):** TLS 1.3
+  handshake messages accepted at the wrong encryption level. Superseded by
+  the 0.23.46 bump under **Fixed** above.
+- **`russh` 0.62.7 -> 0.63.1 (#157, #160).** The bump merged unbuilt and
+  `main` did not compile. `check_server_key` now receives a
+  `PublicKeyOrCertificate`, and **a CA-signed host certificate is refused**:
+  `known_hosts` pins a bare key and cannot judge a CA. `hardened_preferred`
+  advertises no certificate algorithm, so a conforming server never offers
+  one. `chacha20` 0.10.1 (yanked) -> 0.10.2.
+
+**Fixed**
+
+- **Twenty-three AWX tools ignored `timeout_seconds` (#165).** The schema
+  published it; the handlers passed `awx.api_timeout` regardless. It is now
+  honoured, and a value outside the published `1..=3600` is refused rather
+  than clamped.
+- **`ssh_config` parsing (#177):** a `Host *` block followed by another `Host`
+  line was finalised as a real host named `*`; `Port 0` was taken at face
+  value and produced a host that could never connect, and now warns and falls
+  back to 22 like any other invalid port.
+
+**Development only — no change to the shipped binary's behaviour**
+
+- `cargo test` no longer rotates the developer's real
+  `~/.local/share/bridge-mcp/audit.log` (#227); twenty Makefile targets no
+  longer report success when the tool they wrap failed, so `make ci` cannot go
+  green on an open advisory (#162); the dev profile builds with
+  `line-tables-only` and dependencies without debuginfo (#225).
+- Tests and CI: clippy 1.99 `assert_is_empty` (#221), host-key decision
+  matrix (#166), daemon readiness probe (#163), two `dead_code` warnings on a
+  default build (#149), mutation score published by CI (#164), three red
+  workflows greened (#199).
+- Fuzz: shell dictionary and asserting targets (#170, #172, #176), eight mute
+  targets deleted and 34 seeded (#177). Live-probe harness and Raspberry
+  campaigns (#188, #195, #211). README: five claims the tree did not support
+  (#150).
+- Dependencies: `dirs` 6 -> 7 (#215), `syn` 2 -> 3 (#144), `uuid` (#156),
+  `rust-minor-patch` groups (#213, #217), `actions/setup-python` 6 -> 7
+  (#143), `actions/labeler` 5 -> 7 (#142).
 
 ## [3.0.0] - 2026-08-26
 
@@ -5204,7 +5407,10 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.0.2...HEAD
+[4.0.2]: https://github.com/muchiny/bridge-mcp/compare/v4.0.1...v4.0.2
+[4.0.1]: https://github.com/muchiny/bridge-mcp/compare/v4.0.0...v4.0.1
+[4.0.0]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/muchiny/bridge-mcp/compare/v1.20.0...v3.0.0
 [1.20.0]: https://github.com/muchiny/bridge-mcp/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/muchiny/bridge-mcp/compare/v1.18.0...v1.19.0

@@ -68,9 +68,15 @@ fn hardened_options() -> serde_saphyr::Options {
         // does not exist here. Line and column survive, and they are what the
         // operator actually needs.
         with_snippet: false,
-        // serde-saphyr 2.0 emits comment events by default under a small
-        // buffering budget, which refuses a commented config. We never read
-        // comments, so do not capture them.
+        // Comments are read and validated but not retained. serde-saphyr 2.0
+        // retains them by default (feature `comments`) and budgets the
+        // retention: past `max_buffered_comment_events` (32) consecutive
+        // comments ahead of a nested key it refuses the input — "too many
+        // consecutive comments before resolving collection entry" — so a
+        // well-commented config.yaml stopped loading. Nothing here reads
+        // comments (no `Commented<T>` anywhere), and with emission off the
+        // comment budget no longer applies. Pinned by
+        // `long_comment_blocks_parse_in_every_position`.
         emit_comments: false,
         budget: serde_saphyr::budget! {
             max_reader_input_bytes: Some(MAX_YAML_BYTES),
@@ -151,22 +157,6 @@ mod tests {
     }
 
     #[test]
-    fn long_comment_blocks_parse_in_every_position() {
-        // serde-saphyr 2.0 buffers comment events under a budget; a commented
-        // config with a long block before a nested key was refused.
-        let block = "# commentaire\n".repeat(64);
-        let docs = [
-            format!("{block}k: v\n"),
-            format!("outer:\n{block}  k: v\n"),
-            format!("outer:\n  - a\n{block}  - b\n"),
-        ];
-        for doc in docs {
-            let v: serde_json::Value = parse_yaml(&doc).expect("long comment block must parse");
-            assert!(v.is_object());
-        }
-    }
-
-    #[test]
     fn small_input_round_trips() {
         let v: serde_json::Value = parse_yaml("k: v\n").expect("parse");
         assert_eq!(v["k"], "v");
@@ -195,5 +185,40 @@ mod tests {
         let huge = "a: 1\n".repeat(MAX_YAML_BYTES / 5 + 1);
         let err = parse_yaml_documents::<serde_json::Value>(&huge).unwrap_err();
         assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    /// A long comment block, wherever it sits, is ordinary config prose.
+    /// serde-saphyr 2.0 retains comments by default and budgets them
+    /// (`max_buffered_comment_events`, 32 by default), so a parser that keeps
+    /// them can refuse a file for being well documented.
+    fn commented_block(indent: &str) -> String {
+        format!("{indent}# one line of a long explanation\n").repeat(200)
+    }
+
+    #[test]
+    fn long_comment_blocks_parse_in_every_position() {
+        let yaml = format!(
+            "{top}hosts:\n{nested}  web:\n{deeper}    hostname: h\n    tags:\n{item}      - a\n{item}      - b\n{top}security:\n{nested}  mode: standard\n",
+            top = commented_block(""),
+            nested = commented_block("  "),
+            deeper = commented_block("    "),
+            item = commented_block("      "),
+        );
+        let value: serde_json::Value = parse_yaml(&yaml).unwrap();
+        assert_eq!(value["hosts"]["web"]["tags"][1], "b");
+        assert_eq!(value["security"]["mode"], "standard");
+
+        let docs: Vec<serde_json::Value> =
+            parse_yaml_documents(&format!("{yaml}---\n{}a: 1\n", commented_block(""))).unwrap();
+        assert_eq!(docs.len(), 2);
+    }
+
+    /// The shipped example is mostly comments (a 167-line run among them); it
+    /// must survive the parser every config goes through.
+    #[test]
+    fn shipped_example_config_parses() {
+        let text = include_str!("../../config/config.example.yaml");
+        let value: serde_json::Value = parse_yaml(text).unwrap();
+        assert!(value.get("hosts").is_some());
     }
 }

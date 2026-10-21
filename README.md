@@ -11,10 +11,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2026--07--28-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
 
-**A Rust MCP server for secure remote infrastructure management — 476 tools, 9 protocols.**
+**An MCP server that lets an AI assistant manage your machines over SSH — safely.**
+476 tools in 77 groups, a command whitelist and blacklist, secret redaction, an
+audit log, and a confirmation before anything destructive.
 
 ```
-Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──►  Your Infrastructure
+MCP client (Claude Code, …)  ◄── MCP over stdio ──►  bridge-mcp  ◄── SSH ──►  your hosts
 ```
 
 </div>
@@ -24,13 +26,15 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 ## Table of Contents
 
 - [Features](#features)
-- [Hero Workflows](#hero-workflows)
-- [Quick Start](#quick-start)
-- [Architecture](#architecture)
-- [Configuration](#configuration)
+- [Quick Start](#quick-start) — from download to a first tool call
+- [Using it from an MCP client](#using-it-from-an-mcp-client)
+- [Upgrading to 4.0.0](#upgrading-to-400)
+- [Examples](#examples)
+- [Configuration reference](#configuration-reference)
+- [Tool parameters](#tool-parameters)
 - [Tool Groups](#tool-groups)
 - [MCP Prompts & Resources](#mcp-prompts--resources)
-- [CLI Usage](#cli-usage)
+- [CLI](#cli)
 - [Daemon Mode](#daemon-mode)
 - [Protocol Support](#protocol-support)
 - [Troubleshooting](#troubleshooting)
@@ -41,324 +45,416 @@ Claude Code  ◄──JSON-RPC──►  Bridge MCP  ◄──9 protocols──�
 
 ## Features
 
-- **476 tools, 77 groups** — manage Linux, Windows, Docker, Kubernetes, Podman, AWX, databases, LDAP, network equipment, certificates, and more
-- **9 protocol adapters** — SSH, WinRM, PSRP (PowerShell Remoting), Telnet, K8s Exec, Serial, AWS SSM, Azure, GCP
-- **Security-first** — command whitelist/blacklist, 63 secret-redaction patterns + entropy detection, tamper-proof session recording, MCP confirmation before destructive operations (on by default)
-- **Auto-discovery** — reads `~/.ssh/config` automatically, merges with YAML config
-- **Smart output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV mode (60-80% token savings), pagination via `ssh_output_fetch`, per-client size limits (see [Token-efficient output](#token-efficient-output))
-- **Progressive MCP discovery** — `tools/list` returns four meta-tools (`mcp_list_tool_groups`, `mcp_search_tools`, `mcp_describe_tool` to browse the registry on demand, `mcp_call_tool` to invoke what you found) instead of loading all 476 schemas up front
-- **MCP 2026-07-28 (Modern) only** — `server/discover` opens the connection, per-request `_meta` carries the revision and client capabilities, notifications are opt-in via `subscriptions/listen`. A pre-Modern client sending `initialize` gets `-32022` and cannot fall forward — see [Protocol Support](#protocol-support)
-- **MCP Tasks extension** — declared under `capabilities.extensions` as `io.modelcontextprotocol/tasks`, enabling polled async execution, cancellation and progress notifications for long-running operations. The SERVER decides which calls become tasks (see `task_policy::LONG_RUNNING_TOOLS`); 2026-07-28 removed per-tool `execution.taskSupport` entirely, and no tool advertises it
-- **CLI + MCP** — all tools available as CLI commands (10-32x token savings) or via MCP JSON-RPC
-- **Daemon mode** — Unix-socket transport for multi-client local usage; built-in `WinRmPool` (120 s TTL) and `K8sExecPool` (300 s TTL) amortize TLS handshakes across calls
-- **9500+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy
-
----
-
-## Hero Workflows
-
-Four end-to-end recipes that show why this exists. Every command runs through one CLI binary; all 476 tools sit behind the same flag conventions (`--jq`, `--columns`, `--limit`, `--output-format`).
-
-### 1. Diagnose a Linux service in 4 commands
-
-```bash
-bridge-mcp status                                       # check host reachability
-bridge-mcp tool ssh_service_status host=web1 service=nginx
-bridge-mcp tool ssh_service_logs   host=web1 service=nginx lines=200
-bridge-mcp tool ssh_journal_query  host=web1 unit=nginx priority=err since="-1h"
-```
-
-Built-in validation rejects unknown hosts before any SSH bytes leave your machine; outputs are sanitized through 63 secret-redaction patterns + entropy detection.
-
-### 2. Inspect Kubernetes with 80% fewer tokens
-
-```bash
-# Dump all pods → 50 KB JSON. Pipe through server-side jq → ~6 KB TSV.
-bridge-mcp --jq '.items[] | [.metadata.name, .status.phase, .spec.nodeName]' \
-  --output-format=tsv \
-  tool ssh_k8s_get host=k8s resource=pods namespace=default
-
-bridge-mcp tool ssh_k8s_describe host=k8s resource=pod name=api-7d-xyz namespace=default
-bridge-mcp tool ssh_k8s_logs     host=k8s pod=api-7d-xyz container=app tail=100
-```
-
-Filtering happens **server-side, before truncation** — you never lose data to the output cap. Same pattern works for `ssh_docker_inspect`, `ssh_helm_status`, `ssh_awx_*`, etc.
-
-### 3. Cross-platform: Windows + Linux from one CLI
-
-```bash
-# Linux host
-bridge-mcp tool ssh_service_status   host=web1 service=postgres
-# Windows host (WinRM/PSRP under the hood — no agent install on the target)
-bridge-mcp tool ssh_win_service_status host=appsrv service=W3SVC
-bridge-mcp tool ssh_iis_restart        host=appsrv name=DefaultAppPool
-bridge-mcp tool ssh_win_event_query    host=appsrv log=System level=Error since="-1h"
-```
-
-13 Windows tool groups (services, events, AD, IIS, scheduled tasks, registry, Hyper-V, …) map cleanly onto the same `ssh_*` namespace, no protocol switch in your prompts.
-
-### 4. Audited destructive ops with confirmation
-
-```yaml
-# config.yaml
-security:
-  require_elicitation_on_destructive: true   # DEFAULT. Confirm any destructive_hint:true tool
-audit:
-  enabled: true
-  path: /var/log/bridge-mcp/audit.log        # absolute, or ~/… (expanded to $HOME)
-```
-
-Session recording (tamper-proof asciinema/JSON) is driven at runtime by the
-`ssh_recording_*` tools plus the `MCP_RECORDING_KEY` env var — not a config
-section.
-
-```jsonc
-// Over MCP. The gate is MCP-only — see the note below the snippet.
-{"method": "tools/call",
- "params": {"name": "ssh_helm_rollback",
-            "arguments": {"host": "k8s", "release": "api", "revision": 7}}}
-```
-
-The server answers `resultType: "input_required"` carrying an
-`elicitation/create` request and a signed `requestState`; the client gathers the
-confirmation and RETRIES the same call under a new id with the answer attached.
-Nothing runs until then, and the audit log records the args, sanitized stdout,
-exit code and duration of the call that finally executes.
-
-> **The CLI is not covered by this gate.** `bridge-mcp tool ssh_helm_rollback …`
-> has no client to ask and never prompts. Confirmation is an MCP-mode control;
-> the CLI's protection is the blacklist and the audit log.
-
-The dispatcher distinguishes `read_only` vs `mutating` vs `mutating_idempotent` vs `destructive` per tool (audited via `tests/annotation_audit.rs`), so confirmations only fire when state actually changes.
+- **476 tools, 77 groups** — Linux, Windows, Docker, Kubernetes/K3s, Podman, AWX, Ansible, databases, LDAP, network equipment, certificates and more. Only 8 core groups are on by default; you opt into the rest.
+- **SSH everywhere, more transports when built in** — every build speaks SSH. WinRM, PSRP (PowerShell Remoting), Telnet, Kubernetes exec, serial, AWS SSM, Azure and GCP are cargo features. **The release binaries and the Docker image are built with `--features full`: they are SSH only** (see [Install](#1-install)).
+- **Security first** — command whitelist and blacklist, built-in secret-redaction patterns plus entropy detection on every output, an audit log, and a confirmation before any destructive tool runs (on by default, over MCP and on the CLI).
+- **Token-efficient output** — server-side `jq_filter` / `yq_filter` / `columns` / `limit`, TSV output (60-80% fewer tokens on lists), pagination of truncated output with `ssh_output_fetch`, per-client size limits.
+- **Two ways to list tools** — `full` (default: every enabled tool's schema) or `progressive` (four meta-tools to search, describe and call tools on demand).
+- **MCP 2026-07-28 (Modern) only** — `server/discover` opens the connection; a pre-Modern client sending `initialize` gets `-32022`. See [Protocol Support](#protocol-support).
+- **CLI + MCP** — every tool is also a CLI command (`bridge-mcp tool <name> key=value`), for scripts and for agents that prefer a shell.
+- **Daemon mode** — a Unix-socket daemon keeps SSH connections warm between CLI calls.
+- **10,000+ tests** — `#![forbid(unsafe_code)]`, Rust 2024 edition, strict clippy.
 
 ---
 
 ## Quick Start
 
+Five steps, about five minutes. You need: a Linux or macOS machine to run
+bridge-mcp on (there is no Windows build of the bridge itself), and SSH key
+access to at least one host.
+
 ### 1. Install
 
 ```bash
-# Linux x86_64 (recommended)
-curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-x86_64.tar.gz | tar xz
-sudo mv bridge-mcp /usr/local/bin/
+# Linux x86_64. Other builds: bridge-mcp-linux-arm64, bridge-mcp-macos-arm64, bridge-mcp-macos-x86_64
+curl -fsSLO https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-x86_64.tar.gz
+curl -fsSLO https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-x86_64.tar.gz.sha256
+sha256sum -c bridge-mcp-linux-x86_64.tar.gz.sha256   # macOS: shasum -a 256 -c …
+tar xzf bridge-mcp-linux-x86_64.tar.gz
+sudo install -m 0755 bridge-mcp /usr/local/bin/
+bridge-mcp --version
 ```
+
+> **Windows hosts over WinRM or PSRP need a source build.** The release
+> binaries and the Docker image are SSH only: a config with `protocol: winrm`
+> or `protocol: psrp` fails to load in them. Windows hosts that run OpenSSH work
+> with any build (`os_type: windows`). For WinRM/PSRP, do step 2 first, then:
+>
+> ```bash
+> git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp
+> make install      # Rust 1.99+; builds --features full,winrm,psrp into ~/.local/bin/bridge-mcp
+> ```
+>
+> `make install` refuses to install a binary that cannot load your config, which
+> is why the config comes first.
 
 <details>
-<summary>Other platforms & methods</summary>
+<summary>Docker, Claude Code plugin, Claude Desktop bundle</summary>
+
+**Docker** (`linux/amd64`, SSH only). The image runs `bridge-mcp` as user
+`bridge` (home `/home/bridge`) and contains no config. Mount yours, and write
+key paths as the container sees them:
 
 ```bash
-# Linux aarch64 (Raspberry Pi, ARM servers)
-curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-linux-arm64.tar.gz | tar xz
-sudo mv bridge-mcp /usr/local/bin/
-
-# macOS (Apple Silicon)
-curl -fsSL https://github.com/muchiny/bridge-mcp/releases/latest/download/bridge-mcp-macos-arm64.tar.gz | tar xz
-sudo mv bridge-mcp /usr/local/bin/
-
-# Docker
 docker pull ghcr.io/muchiny/bridge-mcp:latest
-
-# From source
-git clone https://github.com/muchiny/bridge-mcp && cd bridge-mcp && make release
+docker run -i --rm \
+  -v ~/.config/bridge-mcp:/home/bridge/.config/bridge-mcp:ro \
+  -v ~/.ssh:/home/bridge/.ssh:ro \
+  ghcr.io/muchiny/bridge-mcp:latest serve
+# in config.yaml: auth: { type: key, path: /home/bridge/.ssh/id_ed25519 }
 ```
 
-**Claude Desktop (DXT):** download the `.dxt` file from [Releases](https://github.com/muchiny/bridge-mcp/releases/latest) and drag-and-drop into Claude Desktop.
+The mounted config and key must be readable by the container user and keep
+their strict modes (`0600`).
+
+**Claude Code plugin.** It adds the `/bridge-mcp:bridge` and
+`/bridge-mcp:discover` skills and a session hook that downloads the release
+binary when `bridge-mcp` is not on your `PATH`, and it registers the MCP
+server itself — skip step 4's `claude mcp add`, or you get the server twice. It
+uses your default config path (step 2).
+
+```bash
+claude plugin marketplace add muchiny/bridge-mcp
+claude plugin install bridge-mcp@muchiny
+```
+
+**Claude Desktop bundle.** Each release also ships `.dxt` and `.mcpb` bundles,
+one per platform. If yours does not install, use the JSON configuration in
+step 4 instead.
 
 </details>
 
-> **Claude Code plugin (one command).** Install the plugin from the marketplace — it registers the `/bridge-mcp:bridge` and `/bridge-mcp:discover` skills, the MCP server, and a binary-bootstrap hook:
->
-> ```bash
-> claude plugin marketplace add muchiny/bridge-mcp
-> claude plugin install bridge-mcp@muchiny
-> cargo install --git https://github.com/muchiny/bridge-mcp --features full   # the binary the plugin drives
-> ```
->
-> The skills auto-trigger when you mention a remote host, Docker, Kubernetes, services, logs, ports, etc.
+### 2. Write a config
 
-### 2. Configure
+bridge-mcp reads one YAML file:
+
+| Platform | Default path |
+|---|---|
+| Linux | `~/.config/bridge-mcp/config.yaml` (or `$XDG_CONFIG_HOME/bridge-mcp/config.yaml`) |
+| macOS | `~/Library/Application Support/bridge-mcp/config.yaml` |
+| Any | the path given with `bridge-mcp --config <path> …` |
+
+A complete starting config (Linux path shown):
 
 ```bash
 mkdir -p ~/.config/bridge-mcp
-cp config/config.example.yaml ~/.config/bridge-mcp/config.yaml
-chmod 600 ~/.config/bridge-mcp/config.yaml   # required — the server rejects
-                                             # group/other-readable config (it may hold secrets)
-```
-
-> The config may contain SSH keys, sudo passwords and tokens, so bridge-mcp
-> refuses to start if `config.yaml` is group- or world-accessible (max `0640`).
-> A fresh `cp` usually lands at `0644` — run the `chmod` above.
-
-Edit `~/.config/bridge-mcp/config.yaml` with your hosts:
-
-```yaml
+cat > ~/.config/bridge-mcp/config.yaml <<'YAML'
 hosts:
-  my-server:
+  my-server:                        # the name you pass as host=my-server
     hostname: 192.168.1.100
-    port: 22
     user: admin
     auth:
       type: key
-      path: ~/.ssh/id_ed25519
+      path: ~/.ssh/id_ed25519       # must exist, chmod 600
     description: "My server"
-```
 
-> **Tip:** Hosts from `~/.ssh/config` are auto-discovered — you may not need to configure anything.
-
-**Recommended safe defaults** — add these so Claude confirms before anything
-irreversible and every action is logged:
-
-```yaml
 security:
-  mode: standard                             # blacklist + whitelist for ssh_exec
-  require_elicitation_on_destructive: true   # DEFAULT; set false to run destructive tools unconfirmed
-audit:
-  enabled: true
-  path: ~/.local/share/bridge-mcp/audit.log  # ~ expands to $HOME; absolute paths also fine
+  mode: standard                    # the default: ssh_exec runs only whitelisted commands
+  whitelist:
+    - '^(uptime|hostname|whoami|df -h|free -m)$'
+    - '^(ls|cat|head|tail|grep|journalctl)( [^;&|`$<>]*)?$'
+YAML
+chmod 600 ~/.config/bridge-mcp/config.yaml
 ```
 
-Only the 8 core tool groups are enabled by default (secure-by-default) — opt
-into the rest under `tool_groups` (see [Tool Groups](#tool-groups); the example
-config ships ready-to-use K3s and Docker profiles).
+Three rules the loader enforces, each of which stops the server with exit code 5:
 
-### 3. Add to Claude Code
+- **The file must be private** — no group-write and no access for others (`0600` or `0640`).
+- **Every key file must exist and be `0600`** (or `0400`).
+- **Every key must be spelled exactly** — unknown keys are rejected, not ignored.
 
-Add to `~/.claude/settings.json`:
+And one the SSH layer enforces: **host keys are checked strictly by default.**
+Connect once by hand so the host is in `~/.ssh/known_hosts`:
+
+```bash
+ssh admin@192.168.1.100 true
+```
+
+> **Why a whitelist?** `ssh_exec` runs any command you give it, so in the
+> default `standard` mode it only runs commands that match a `whitelist` entry —
+> with an empty whitelist it refuses everything. The specialised tools
+> (`ssh_metrics`, `ssh_service_status`, `ssh_docker_ps`, …) build their own
+> commands and are checked against the blacklist only. Anchor every entry
+> (`^…$`): the whole command line is matched, so `^ls` alone would also accept
+> `ls; rm -rf ~`. `mode: permissive` drops the whitelist check entirely.
+
+### 3. Check it from the shell
+
+```bash
+bridge-mcp validate                                          # config loads? prints host and tool counts
+bridge-mcp tool ssh_metrics host=my-server 'metrics=["load","memory"]'   # SSH and auth work?
+```
+
+`validate` opens no connection; `ssh_metrics` does. If either fails, see
+[Troubleshooting](#troubleshooting).
+
+### 4. Connect your MCP client
+
+**Claude Code:**
+
+```bash
+claude mcp add --scope user ssh-bridge -- bridge-mcp serve
+claude mcp list          # ssh-bridge should read ✔ Connected
+```
+
+Add `--config /absolute/path/config.yaml` before `serve` for a non-default
+config. Everything after `--` is the server's command line.
+
+> **Connected but no tools?** bridge-mcp only speaks MCP 2026-07-28. Recent
+> Claude Code negotiates it by default (its changelog says so from 2.1.292).
+> Older versions open with the Legacy handshake and see zero tools: set
+> `MCP_PROTOCOL_NEGOTIATION=auto` in **Claude Code's** environment — the `env`
+> block of `~/.claude/settings.json` (or a project's `.claude/settings.json`), or
+> `export` it before starting `claude` —
+> then restart. Passing it with `claude mcp add -e` sets it for bridge-mcp,
+> which ignores it.
+
+**Claude Desktop and other stdio clients** — add a server entry (for Claude
+Desktop on macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "ssh-bridge": {
-      "command": "bridge-mcp"
+      "command": "/usr/local/bin/bridge-mcp",
+      "args": ["serve"]
     }
   }
 }
 ```
 
-> **Your MCP host must speak MCP 2026-07-28.** bridge-mcp 3.x removed the
-> `initialize` handshake; a host that opens with `initialize` receives
-> `-32022 Unsupported protocol version` and the connection is dead. If your
-> host is not there yet, stay on **v1.20.0** — the last release that speaks the
-> Legacy handshake. There is no 2.x to fall back to: `2.0.0` through `2.2.0`
-> were written but never tagged or published, and those numbers are burnt (see
-> the note under the 2.2.0 heading in [CHANGELOG.md](CHANGELOG.md)). The
-> CLI-as-tool mode (`bridge-mcp tool …`) is unaffected either way, because it
-> never speaks JSON-RPC at all.
+Use the absolute path: desktop apps do not inherit your shell's `PATH`. The
+client must speak MCP 2026-07-28 — a client that opens with `initialize` gets
+`-32022 Unsupported protocol version` and no tools. If yours does not yet,
+**v1.20.0** is the last release that speaks the Legacy handshake (2.x was never
+published). The CLI (`bridge-mcp tool …`) works either way.
 
-> **Claude Code needs one setting, or it sends the Legacy handshake.** Measured
-> on 2.1.239: it implements 2026-07-28 fully, but defaults stdio servers to the
-> Legacy path, so it opens with `initialize` and sees ZERO tools. Turn
-> negotiation on:
->
-> ```json
-> { "env": { "MCP_PROTOCOL_NEGOTIATION": "auto" } }
-> ```
->
-> in `.claude/settings.json` (or `settings.local.json`), then restart. Verify
-> with `claude mcp list` — the server should read `✔ Connected`. Check your own
-> client's behaviour before assuming; the symptom of getting this wrong is an
-> empty tool list, not an error message.
+### 5. Use it
 
-### 4. Verify
+Ask your assistant: *"What is the load and memory use on my-server?"* It calls
+`ssh_metrics` for you. From here:
 
-Restart Claude Code, then ask: *"Check the health of my-server"* — or run:
-
-```bash
-bridge-mcp status
-```
+- Turn on the tool groups you need (Docker, Kubernetes, Windows, …) — see
+  [Enabling tool groups](#enabling-tool-groups).
+- Read [Destructive tools](#destructive-tools-and-confirmation) before
+  relying on confirmations: they depend on your client.
 
 ---
 
-## Architecture
+## Using it from an MCP client
 
-Bridge MCP sits between Claude Code and your infrastructure. It routes commands through 9 protocol adapters with built-in security validation, output sanitization, and audit logging.
+### What the client sees
 
-```mermaid
-graph LR
-    CC[MCP client<br/>Claude Code · Claude Desktop · scripts]
-    CC -->|JSON-RPC over stdio,<br/>Unix socket or HTTP| BR[Bridge MCP]
-
-    BR --> VAL[Validator<br/>blacklist · whitelist · confirmation gate]
-    VAL --> ER[Executor Router]
-
-    subgraph TIER1["Tier 1 — remote shells"]
-        ER -->|SSH| T1A[Linux / Windows<br/>Docker · K8s · Network]
-        ER -->|WinRM| T1B[Windows]
-        ER -->|PSRP| T1C[PowerShell Remoting]
-        ER -->|Telnet| T1D[Legacy devices]
-    end
-
-    subgraph TIER2["Tier 2 — attached targets"]
-        ER -->|K8s API| T2A[Pod exec]
-        ER -->|Serial| T2B[Serial devices]
-    end
-
-    subgraph TIER3["Tier 3 — cloud, not air-gapped"]
-        ER -->|SSM · Azure · GCP| T3A[Cloud instances]
-    end
-
-    T1A & T1B & T1C & T1D & T2A & T2B & T3A --> SAN[Sanitizer + Audit<br/>63 patterns · entropy · audit.log]
-    SAN --> CC
-```
-
-The validator runs **before** the command leaves the machine; the sanitizer runs
-**after**, on what comes back (`src/domain/use_cases/execute_command.rs`), so a
-secret in stdout is redacted on the return path rather than filtered on the way
-out. Tier numbering matches the protocol feature flags in `Cargo.toml`; SSH is
-always compiled in, every other adapter is opt-in.
-
----
-
-## Configuration
-
-Config file: `~/.config/bridge-mcp/config.yaml` — see [config.example.yaml](config/config.example.yaml) for full reference.
-
-<details>
-<summary><strong>Authentication methods</strong></summary>
-
-| Method | Config | Notes |
-|--------|--------|-------|
-| SSH Key | `type: key` + `path: ~/.ssh/id_ed25519` | Recommended. Supports optional `passphrase`. |
-| SSH Agent | `type: agent` | Uses `SSH_AUTH_SOCK`. Recommended. |
-| Password | `type: password` + `password: "..."` | Avoid if possible. |
-
-Verify your SSH access first: `ssh user@hostname "echo OK"`
-
-</details>
-
-<details>
-<summary><strong>Security rules</strong></summary>
-
-Three modes control which commands Claude can run:
-
-| Mode | Behavior |
-|------|----------|
-| `strict` | Only whitelisted commands allowed (safest) |
-| `standard` | Whitelist for `ssh_exec`, built-in tools only check blacklist (default) |
-| `permissive` | Only blacklist checked (most open) |
-
-The **blacklist is always checked first** — matched commands are always denied.
+| `tool_groups.listing` | `tools/list` returns | Use it when |
+|---|---|---|
+| `full` (default) | every tool of the enabled groups (43 with the defaults), plus the four meta-tools below | few groups enabled; the model sees every schema up front |
+| `progressive` | only the four meta-tools | many groups enabled; schemas are fetched on demand instead of costing tokens in every session |
 
 ```yaml
-security:
-  mode: standard
-  whitelist:
-    - "^docker\\s+(ps|logs|inspect).*"
-    - "^kubectl\\s+(get|describe|logs).*"
-    - "^(ls|cat|head|tail|grep|df|free)\\s*.*"
-  blacklist:
-    - "rm\\s+(-[a-zA-Z]*r|--(recursive|force))"
-    - "mkfs\\."
-    - "dd\\s+if="
-    - "curl.*\\|.*sh"
+tool_groups:
+  listing: progressive
 ```
 
-</details>
+The four meta-tools, available in both modes:
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `mcp_list_tool_groups` | — | Enabled groups with their tool counts |
+| `mcp_search_tools` | `query` (required), `group`, `limit` (default 20, max 200) | Keyword search over enabled tools, with read-only / destructive hints |
+| `mcp_describe_tool` | `name` | One tool's full schema, output kind and reduction strategy |
+| `mcp_call_tool` | `name`, `arguments` | Calls any enabled tool by name — the tool's own confirmation and filters apply |
+
+Groups that are not enabled are invisible to all four.
+
+### Enabling tool groups
+
+Only `core`, `file_ops`, `directory`, `process`, `monitoring`, `network`,
+`systemd` and `sessions` are on by default. Turn others on, or defaults off,
+then restart the MCP server (reconnect it in your client):
+
+```yaml
+tool_groups:
+  groups:
+    docker: true
+    kubernetes: true
+    journald: true
+    sessions: false     # turn a default group off
+```
+
+Names are listed under [Tool Groups](#tool-groups). **A misspelled group name is
+silently ignored**, so check with `bridge-mcp list-tools --groups-only`. Calling
+a tool whose group is off returns "registered but its group … is not enabled".
+
+### Destructive tools and confirmation
+
+45 tools are annotated destructive (`destructiveHint: true`), **`ssh_exec`
+among them**: `ssh_file_write`, `ssh_process_kill`, `ssh_service_stop`,
+`ssh_k8s_delete`, `ssh_helm_rollback`, `ssh_win_service_stop`, … With
+`security.require_elicitation_on_destructive: true` (the default):
+
+- **Over MCP**, the server asks the client to confirm before running the tool
+  (the 2026-07-28 *elicitation* round trip). A client that does not declare the
+  `elicitation` capability gets a refusal saying so — the tool never runs
+  unconfirmed. Going through `mcp_call_tool` does not bypass this.
+- **On the CLI**, `bridge-mcp tool` prompts `Proceed? [y/N]` on a terminal.
+  Without a terminal (scripts, CI) it refuses with exit code 4 unless you pass
+  `--yes`. Every decision is written to the audit log.
+- **Over HTTP** (`serve-http`), destructive tools are refused outright.
+
+`ssh_exec_multi`, `ssh_session_exec` and `ssh_pty_exec` also run commands you
+write but are not annotated destructive, so they are never asked about — the
+whitelist is their only gate.
+
+The blacklist is checked **after** the confirmation: a blacklisted command
+asks, then is refused anyway. The built-in blacklist denies `systemctl stop` and
+`systemctl disable`, so `ssh_service_stop` (after asking) and
+`ssh_service_disable` are refused unless you replace the blacklist.
+
+Setting `require_elicitation_on_destructive: false` turns confirmations off for
+MCP **and** the CLI. Don't, unless every caller is trusted.
+
+### Output size
+
+Most tools take filters that run on the server, before truncation — see
+[Tool parameters](#tool-parameters). Output past `max_output` (default 40,000
+characters; Claude clients get 80,000) is cut, and over MCP the result carries
+an `output_id`: `ssh_output_fetch output_id=… offset=…` returns the rest.
+`save_output=/path` writes the full output to a file **on the machine running
+bridge-mcp**.
+
+---
+
+## Upgrading to 4.0.0
+
+4.0.0 changes behaviour that scripts and configs rely on. The protocol does not
+change (still MCP 2026-07-28 only). Read the
+[`### BREAKING` list in the changelog](CHANGELOG.md#400---2026-10-16) first; the
+items most people hit:
+
+- **Configs that used to load may not:** sanitizer patterns over 512 bytes, more
+  than 50 of them, or a set that does not compile together; `ssh_net_equip_config`
+  now requires the host to be tagged `network-equipment`.
+- **Undeclared arguments are refused**, over MCP and on the CLI (exit 1), instead
+  of being dropped — a typo like `jq_fitler=` used to return unfiltered output.
+- **A failed remote command is reported:** `bridge-mcp tool` exits 6, and the MCP
+  result carries `isError: true` for tools whose command the bridge built.
+- **Destructive tools prompt on the CLI** (exit 4 without a terminal; `--yes` for scripts).
+- **`audit.log` format and the library API changed** — see the changelog.
+
+---
+
+## Examples
+
+CLI calls; the same tools are what your MCP client calls. Global flags go
+**before** the first `key=value`.
+
+**Diagnose a Linux service** (`systemd` is on by default; `journald` is not):
+
+```bash
+bridge-mcp tool ssh_service_status host=web1 service=nginx
+bridge-mcp tool ssh_service_logs   host=web1 service=nginx lines=200
+bridge-mcp tool ssh_journal_query  host=web1 unit=nginx priority=err since="-1h"
+```
+
+**Inspect Kubernetes with a fraction of the tokens** (enable `kubernetes`). Ask
+kubectl for JSON, filter it on the server, return TSV:
+
+```bash
+bridge-mcp --jq '.items[] | [.metadata.name, .status.phase, .spec.nodeName]' --output-format tsv \
+  tool ssh_k8s_get host=k8s resource=pods namespace=default output=json
+bridge-mcp tool ssh_k8s_describe host=k8s resource=pod name=api-7d-xyz namespace=default
+bridge-mcp tool ssh_k8s_logs     host=k8s pod=api-7d-xyz container=app tail=100
+```
+
+**Windows and Linux from one CLI** (enable `windows_services`, `windows_events`,
+`iis`; the host needs `os_type: windows`, and WinRM/PSRP need a
+[source build](#1-install)):
+
+```bash
+bridge-mcp tool ssh_service_status     host=web1 service=postgres
+bridge-mcp tool ssh_win_service_status host=appsrv name=W3SVC
+bridge-mcp tool ssh_win_event_query    host=appsrv log=System count=20
+```
+
+**Scripted, audited change.** `ssh_helm_rollback` is destructive: on a terminal
+it asks, in a script it needs `--yes`, and the audit log records the decision,
+the arguments, the sanitized output and the exit code:
+
+```bash
+bridge-mcp --yes tool ssh_helm_rollback host=k8s release=api revision=7
+```
+
+---
+
+## Configuration reference
+
+One YAML file, looked up in this order:
+
+1. `--config <path>` / `-c <path>` (a global flag; every subcommand accepts it);
+2. `<config_dir>/bridge-mcp/config.yaml` — `~/.config/bridge-mcp/` on Linux (`$XDG_CONFIG_HOME` if set), `~/Library/Application Support/bridge-mcp/` on macOS;
+3. `<config_dir>/mcp-ssh-bridge/config.yaml`, the location before the rename, used only when (2) does not exist.
+
+No environment variable selects the file. Every subcommand loads and validates
+it before doing anything, and exits **5** if it cannot. `bridge-mcp validate`
+checks a file without contacting any host; `bridge-mcp config-diff` shows what
+it changes from the defaults. [`config/config.example.yaml`](config/config.example.yaml)
+is a commented example of nearly every key.
+
+File-level rules:
+
+- **Unknown keys are rejected** at every level — a typo stops the server rather than being ignored.
+- **Permissions:** no group-write, no access for others (`0600` or `0640`). Key files: `0600` or `0400`.
+- **No `${VAR}` interpolation** — `${WIN_PASSWORD}` is sent as those exact characters.
+- **`~` is expanded** only in `hosts.*.auth.path` (key auth), `audit.path` and `ssh_config.path`.
+- **Hot reload:** `bridge-mcp serve` watches the file. `security.mode`, `whitelist` and `blacklist` apply live; `security.sanitize` needs a restart. `serve-http` does not watch it.
+- **Size:** at most 1 MiB, 50 levels of nesting, 100 anchors, 1,000 aliases, 10,000 nodes.
+
+Top-level sections: `hosts` (required), `security`, `limits`, `audit`,
+`sessions`, `tool_groups`, `ssh_config`, `http`, `awx`, `rbac`. There is no
+`recording:` section — session recording is driven by the `recording` tool
+group and the `MCP_RECORDING_KEY` environment variable — and OpenTelemetry is
+configured with `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_SERVICE_NAME`.
+
+### `hosts.<alias>`
+
+At least one host is required (hosts imported through `ssh_config` count).
+
+| Key | Values | Default | What it does |
+|---|---|---|---|
+| `hostname` | string, required | — | Address to connect to |
+| `user` | string, required | — | Remote login user |
+| `auth` | map, required | — | How to authenticate — see the next table |
+| `port` | integer | `22` | TCP port. Not remapped for WinRM/PSRP: set `5985` or `5986` yourself |
+| `description` | string | — | Free text shown to the model in the host list |
+| `host_key_verification` | `strict`, `acceptnew`, `"off"` | `strict` | `strict` refuses hosts missing from `~/.ssh/known_hosts`; `acceptnew` records them on first use and refuses a changed key; `"off"` skips the check (testing only — quote it, YAML reads a bare `off` as a boolean). Lowercase only: `AcceptNew` is rejected |
+| `proxy_jump` | alias of another host | — | Tunnels SSH through that host (bastion). Not with `socks_proxy`, not on WinRM/PSRP hosts |
+| `socks_proxy` | map: `hostname` (required), `port` (`1080`), `version` (`socks5`/`socks4`, default `socks5`), `username`, `password` | — | Tunnels SSH through a SOCKS proxy |
+| `sudo_password` | string | — | Sent to `sudo` on stdin (never on the command line), over SSH only. Without it, `sudo=true` needs passwordless sudo |
+| `tags` | list of strings | `[]` | Free-form labels. `network-equipment` is required by `ssh_net_equip_config` |
+| `os_type` | `linux`, `windows` | `linux` | Selects command semantics and which tools accept the host. Not inferred from `protocol` |
+| `shell` | `posix`, `cmd`, `powershell` (alias `pwsh`) | `posix` on Linux, `cmd` on Windows | Shell used for escaping |
+| `protocol` | `ssh`; `winrm`, `psrp`, `telnet`, `k8sexec`, `serial`, `ssm`, `azure`, `gcp` with the matching cargo feature | `ssh` | Transport. Release binaries only have `ssh` |
+| `winrm_use_tls` | bool (feature `winrm`) | `true` only on port `5986` | HTTPS or HTTP for WinRM/PSRP |
+| `winrm_accept_invalid_certs` | bool (feature `winrm`) | `false` | Accept self-signed certificates |
+| `winrm_operation_timeout_secs` | integer (feature `winrm`) | `60` | WS-Management operation timeout |
+| `winrm_max_envelope_size` | integer (feature `winrm`) | `153600` | Maximum SOAP envelope, bytes |
+| `retry` | map | — | Accepted but not used in 4.0.0; use `limits.retry_*` |
+
+**`auth`** is a map tagged by `type`:
+
+| `type` | Other keys | Notes |
+|---|---|---|
+| `key` | `path` (required), `passphrase` | Recommended. The file must exist and be `0600`/`0400` |
+| `agent` | — | Uses `SSH_AUTH_SOCK` |
+| `password` | `password` (required) | SSH password. On WinRM/PSRP this is HTTP Basic — use TLS |
+| `ntlm` | `password` (required), `domain` | WinRM/PSRP only (feature `winrm`) |
+| `certificate` | `cert_path`, `key_path` (both required, PEM, not `~`-expanded) | WinRM/PSRP only (feature `winrm`) |
+| `kerberos` | — | Accepted, but no current build can connect with it |
+
+`key` and `agent` are rejected on WinRM/PSRP hosts.
 
 <details>
-<summary><strong>Advanced hosts (jump hosts, SOCKS proxy, Windows, sudo)</strong></summary>
-
-**Jump hosts (bastion):**
+<summary><strong>Host examples: bastion, SOCKS proxy, Windows, WinRM, sudo, network equipment</strong></summary>
 
 ```yaml
 hosts:
@@ -367,157 +463,216 @@ hosts:
     user: admin
     auth: { type: agent }
 
-  internal-db:
+  internal-db:                      # reached through the bastion
     hostname: 10.0.0.5
-    proxy_jump: bastion
     user: deploy
+    proxy_jump: bastion
     auth: { type: key, path: ~/.ssh/id_ed25519 }
-```
 
-**SOCKS proxy:**
-
-```yaml
-hosts:
   behind-proxy:
     hostname: 10.0.0.50
     user: deploy
-    socks_proxy:
-      hostname: proxy.corp.com
-      port: 1080
-      version: socks5
+    socks_proxy: { hostname: proxy.corp.com, port: 1080, version: socks5 }
     auth: { type: key, path: ~/.ssh/id_ed25519 }
-```
 
-> `proxy_jump` and `socks_proxy` are mutually exclusive on the same host.
-
-**Windows servers** — set `os_type: windows` so tools use Windows/PowerShell
-command semantics (the 74 Windows-specific tools live in the 13 Windows groups;
-enable them under `tool_groups` like any other group):
-
-```yaml
-hosts:
-  windows-dc:
+  windows-dc:                       # Windows with OpenSSH: works with any build
     hostname: 192.168.1.200
     user: Administrator
     os_type: windows
     shell: powershell
     auth: { type: key, path: ~/.ssh/id_ed25519 }
-```
 
-**Sudo support:**
+  windows-app:                      # WinRM over HTTPS: needs a --features winrm build
+    hostname: 192.168.1.201
+    port: 5986
+    user: Administrator
+    protocol: winrm
+    os_type: windows
+    auth: { type: ntlm, password: "change-me", domain: CORP }
 
-```yaml
-hosts:
   prod-server:
     hostname: 192.168.1.100
     user: deploy
-    sudo_password: "your-sudo-password"
+    sudo_password: "your-sudo-password"   # used by tools called with sudo=true
     auth: { type: key, path: ~/.ssh/id_ed25519 }
-```
 
-**SSH config auto-discovery** — hosts from `~/.ssh/config` are merged automatically. To exclude specific hosts:
-
-```yaml
-ssh_config:
-  enabled: true
-  exclude: [personal-server]
+  core-switch:
+    hostname: 10.0.0.2
+    user: netadmin
+    tags: [network-equipment]       # required by ssh_net_equip_config
+    auth: { type: password, password: "change-me" }
 ```
 
 </details>
 
-<details>
-<summary><strong>Limits, sanitization & audit</strong></summary>
+### `security`
 
-**Limits:**
+| Key | Values | Default | What it does |
+|---|---|---|---|
+| `mode` | `strict`, `standard` (alias `normal`), `permissive` | `standard` | `strict` and `standard` (identical in 4.0.0): free-form commands must match the whitelist. `permissive`: only the blacklist is checked |
+| `whitelist` | list of regexes | `[]` | Applies to free-form command tools: `ssh_exec`, `ssh_exec_multi`, `ssh_session_exec`, `ssh_canary_exec`, `ssh_rolling_exec`, `ssh_fleet_diff`. Matched against the whole command line — anchor with `^…$` |
+| `blacklist` | list of regexes | 32 built-in patterns | Checked for **every** tool; a match is denied. **Setting it replaces the built-in patterns** (`rm -rf /`, `mkfs`, `dd if=`, `reboot`, `shutdown`, `systemctl stop/disable`, `curl … \| sh`, `Remove-Item -Recurse`, `diskpart`, …) — copy them from `default_blacklist` in [`src/config/types.rs`](src/config/types.rs) if you want to extend them |
+| `require_elicitation_on_destructive` | bool | `true` | Confirmation before destructive tools, over MCP and on the CLI — see [Destructive tools](#destructive-tools-and-confirmation) |
+| `sanitize` | map | see below | Secret masking in tool output |
+| `sanitize_patterns` | list of regexes | `[]` | Legacy masking patterns, replaced with `[REDACTED]`. Count toward the `sanitize.custom_patterns` limits |
 
-```yaml
-limits:
-  command_timeout_seconds: 60
-  connection_timeout_seconds: 10
-  max_concurrent_commands: 5
-  max_output_chars: 40000          # this is the default; 0 = unlimited
-  rate_limit_per_second: 0         # 0 = disabled
-  retry_attempts: 3
-  client_overrides:                # Per-client output limits
-    - name_contains: claude
-      max_output_chars: 80000
-```
+**`security.sanitize`:**
 
-Truncated outputs include an `output_id` — use `ssh_output_fetch` to retrieve the full content page by page.
+| Key | Values | Default | What it does |
+|---|---|---|---|
+| `enabled` | bool | `true` | Masks secrets in every tool output |
+| `custom_patterns` | list of `{pattern, replacement, description}` | `[]` | Extra regexes; `replacement` defaults to `[REDACTED]` and accepts `$1` groups. At most 50 patterns (with `sanitize_patterns`), 512 bytes each, and the set must compile together, or the config does not load |
+| `disable_builtin` | list of categories | `[]` | Turns off built-in families: `ansible`, `aws`, `azure`, `certificates`, `database`, `discord`, `docker`, `gcp`, `generic`, `github`, `gitlab`, `hashicorp`, `jwt`, `k3s`, `kubeconfig`, `openai`, `slack` |
+| `entropy_detection` | bool | `true` | Also masks high-entropy tokens no pattern matched |
+| `entropy_threshold` | number, 0–8 | `4.5` | Bits per character. Tokens shorter than `2^threshold` (23 by default) are never flagged |
+| `entropy_min_length` | integer | `16` | Minimum token length checked (the effective floor is the larger of this and `2^threshold`) |
+| `entropy_whitelist` | list of strings | `[]` | Strings never flagged |
+| `entropy_hex_threshold` | number, 0–8 | unset | Separate threshold for hex-only tokens; 40-character git SHAs are skipped |
 
-**Output sanitization** — 63 built-in regex patterns + Shannon entropy detection for secrets:
+### `limits`
 
-```yaml
-security:
-  sanitize:
-    enabled: true
-    entropy_detection: true
-    entropy_threshold: 4.5
-    custom_patterns:
-      - pattern: "INTERNAL_[A-Z0-9]{32}"
-        replacement: "[INTERNAL_REDACTED]"
-```
+| Key | Default | What it does |
+|---|---|---|
+| `command_timeout_seconds` | `1800` | Timeout of one command (tools accept `timeout_seconds` to override it) |
+| `connection_timeout_seconds` | `10` | Timeout to open an SSH connection |
+| `keepalive_interval_seconds` | `30` | SSH keepalive interval, also the inactivity timeout |
+| `max_concurrent_commands` | `5` | Commands running at once, across the whole server |
+| `rate_limit_per_second` | `10` | Requests per second per host; `0` turns it off |
+| `retry_attempts` | `3` | Attempts for a failed connection or command |
+| `retry_initial_delay_ms` | `100` | First delay between retries |
+| `max_output_chars` | `40000` | Characters returned per call before truncation; `0` = no limit |
+| `client_overrides` | built-in list | Per-client `max_output_chars`, matched on the MCP client name: entries `{name_contains, match_mode: prefix\|exact\|contains, max_output_chars}`, first match wins. Built in: `claude`/`cline` 80000, `cursor`/`windsurf`/`copilot`/`zed` 50000, `continue` 30000. **Setting it replaces the built-in list** |
+| `max_output_bytes` | `10485760` | Bytes collected from one command (10 MiB) |
+| `output_cache_ttl_seconds` | `300` | How long truncated output stays fetchable with `ssh_output_fetch` |
+| `output_cache_max_entries` | `100` | Truncated outputs kept |
+| `sftp_write_threshold_bytes` | `65536` | Above this, `ssh_file_write` uses SFTP; `0` = always |
+| `max_tasks` | `50` | Concurrent async MCP tasks |
+| `max_task_ttl_ms` | `3600000` | Longest task TTL a client may request |
+| `task_poll_interval_ms` | `2000` | Poll interval suggested to clients for tasks |
+| `client_request_timeout_seconds`, `sampling_max_tokens` | `120`, `4096` | Accepted but not used in 4.0.0 |
 
-**Destructive-op confirmation** — **on by default.** Before any tool annotated
-`destructive_hint: true` (`ssh_terraform_apply`, `ssh_k8s_delete`,
-`ssh_cron_remove`, `ssh_win_update_reboot`, …) executes, the server answers
-`resultType: "input_required"` with an `elicitation/create` request and an
-integrity-protected `requestState`. The client gathers the confirmation and
-retries the same call under a new id with the answer attached; only then does
-the tool run.
+### `audit`
 
-The gate reads `_meta["io.modelcontextprotocol/clientCapabilities"].elicitation`
-**on the request that calls the tool**, and is fail-closed: a request that does
-not declare elicitation is refused rather than executed unconfirmed.
+| Key | Default | What it does |
+|---|---|---|
+| `enabled` | `true` | Writes one JSON line per tool call (arguments, sanitized output, exit code, duration, confirmations) |
+| `path` | `~/.local/share/bridge-mcp/audit.log` (macOS: `~/Library/Application Support/bridge-mcp/audit.log`) | Log location; `~` is expanded |
+| `max_size_mb` | `100` | Rotates the log at this size; `0` turns rotation off |
+| `retain_days` | `30` | At each rotation, **deletes** this log's rotated archives older than N days; `0` keeps them all |
 
-Two properties worth knowing before you rely on it:
+### `sessions`
 
-- **An answer counts only with the `requestState` the server signed for that
-  exact call.** Without that binding a client could send
-  `inputResponses: {"confirm_destructive": {"action": "accept"}}` on its FIRST
-  call and confirm on the user's behalf. The state binds the tool name AND its
-  arguments, so a confirmation for `ssh_exec rm /tmp/x` cannot authorise
-  `ssh_exec rm /`.
-- **This flag is the WHOLE confirmation policy.** Nineteen handlers used to ask
-  a second time on their own, independently of it. They no longer do — one
-  question per operation. If you had the flag off and relied on the per-handler
-  prompt, turn it on.
+Persistent shells opened with `ssh_session_create`:
 
-**MCP mode only.** `bridge-mcp tool …` on the CLI has no client to ask and never
-prompts, so do not treat the CLI as covered by this control:
+| Key | Default | What it does |
+|---|---|---|
+| `max_sessions` | `10` | Open shells at most |
+| `idle_timeout_seconds` | `300` | Closes a shell idle this long |
+| `max_age_seconds` | `3600` | Closes a shell this old, even in use |
 
-```yaml
-security:
-  require_elicitation_on_destructive: true  # default: true — set false to opt OUT
-```
+### `tool_groups`
 
-**Audit logging:**
+| Key | Values | Default | What it does |
+|---|---|---|---|
+| `groups` | map of group name to `true`/`false` | `{}` | Turns groups on or off. Unlisted groups are on only if they are among the 8 defaults (`core`, `file_ops`, `directory`, `process`, `monitoring`, `network`, `systemd`, `sessions`). **Unknown names are silently ignored** |
+| `listing` | `full`, `progressive` | `full` | What `tools/list` returns — see [What the client sees](#what-the-client-sees) |
 
-```yaml
-audit:
-  enabled: true
-  path: ~/.local/share/bridge-mcp/audit.log
-  max_size_mb: 100
-  retain_days: 30
-```
+### `ssh_config`
 
-**Session recording** — asciinema v2 format with HMAC-SHA256 hash-chain (SOC2,
-HIPAA, PCI-DSS). This is **not** a YAML config section (the schema rejects
-unknown keys); it is driven at runtime by the `ssh_recording_*` tools (enable
-the `recording` tool group) with the HMAC key supplied via the
-`MCP_RECORDING_KEY` environment variable. Recordings are written as `.cast`
-files.
+| Key | Default | What it does |
+|---|---|---|
+| `enabled` | `false` | Imports hosts from your OpenSSH client config. **Off by default**: it would hand your whole SSH inventory to the model |
+| `path` | `~/.ssh/config` | File to read |
+| `exclude` | `[]` | Aliases not to import |
 
-</details>
+Only `Host`, `HostName`, `Port`, `User`, `IdentityFile` and `ProxyJump` are
+read; wildcard `Host` blocks and blocks without `HostName` are skipped. An
+`IdentityFile` that exists becomes key auth, otherwise the agent is used.
+Imported hosts get `host_key_verification: acceptnew`. A host defined in YAML
+wins over an imported one with the same alias.
+
+### `http` (only for `serve-http`)
+
+| Key | Default | What it does |
+|---|---|---|
+| `bind` | `127.0.0.1:3000` | Listen address (`serve-http --bind` overrides it). A non-loopback address is refused unless `oauth.enabled` or `allow_unsafe_bind` |
+| `max_body_size` | `1048576` | Largest request body, bytes |
+| `allowed_origins` | `http(s)://localhost`, `http(s)://127.0.0.1`, `http(s)://[::1]` | Accepted `Origin` values (DNS-rebinding protection) |
+| `allow_unsafe_bind` | `false` | Allows a non-loopback bind without OAuth (same as `--insecure-bind`) |
+| `oauth` | disabled | Bearer-token auth. camelCase keys: `enabled`, `issuer`, `audience`, `clientId`, `requiredScopes`, `staticKeys` (list of `{kid, publicKeyPem}`, required when enabled), `jwksUri` (not implemented: refused without `staticKeys`) |
+
+`http.session_timeout_seconds` and `http.max_sessions` were retired in 3.0.0
+and are rejected.
+
+### `awx` (for the `awx` tool group)
+
+| Key | Default | What it does |
+|---|---|---|
+| `ssh_host` | required | Host alias the AWX API calls run from (as `curl` over SSH) |
+| `url` | required | AWX base URL, e.g. `https://awx.internal` |
+| `token` | required | AWX OAuth2 token; masked in output |
+| `api_timeout` | `30` | Seconds per API request (tools accept `timeout_seconds`, 1–3600) |
+| `verify_ssl` | `true` | `false` for self-signed certificates |
+
+### `rbac`
+
+Not enforced. `rbac.enabled: true` is **rejected at load** so that nobody
+believes roles protect anything; `default_role` and `roles` are accepted and
+ignored.
+
+---
+
+## Tool parameters
+
+Every tool documents its own arguments: `bridge-mcp describe-tool <name>` on
+the CLI, `mcp_describe_tool` over MCP. On top of those, most tools accept the
+parameters below. They behave the same over MCP and on the CLI (where each one
+is a `key=value` pair; arrays and objects are written as JSON). A parameter the
+tool does not declare is refused — check `describe-tool` first.
+
+| Parameter | Type | Declared by | Default | What it does |
+|---|---|---|---|---|
+| `host` | string | 415 of 476 tools | required where declared | Host alias from the config |
+| `timeout_seconds` | integer | 432 | `limits.command_timeout_seconds` | Per-call timeout |
+| `max_output` | integer (characters) | 404 | `limits.max_output_chars` or the client override | Truncation limit for this call; `0` = none |
+| `save_output` | path | 372 | — | Writes the full, untruncated output to this file **on the machine running bridge-mcp** (mode `0600`, overwritten, `..` refused) |
+| `sudo` | bool | 327 | `false` | Runs the command under `sudo -n` (or with the host's `sudo_password` on stdin) |
+| `sudo_user` | string | 327 | `root` | User to sudo to (`[A-Za-z0-9._-]`) |
+| `jq_filter` | jq expression | 141 | — | Filters JSON output on the server, before truncation |
+| `yq_filter` | jq expression | 81 | — | Same, on YAML output |
+| `columns` | array of header names | 106 | — | Keeps only these columns of tabular output (case-insensitive) |
+| `limit` | integer ≥ 1 | 173 | — | Caps rows, array items, YAML documents or filter results |
+| `output_format` | `json`, `tsv` | 142 | `json` | `tsv` prints each array the filter returns as a tab-separated row — 60-80% fewer tokens on lists |
+
+Which reduction parameters a tool takes depends on its **output kind**, shown by
+`describe-tool` with its reduction strategy:
+
+| Output kind | Tools | `jq_filter` | `yq_filter` | `columns` | `limit` | `output_format` |
+|---|---|---|---|---|---|---|
+| `RawText` | 308 | — | — | — | — | — |
+| `Tabular` | 26 | — | — | ✓ | ✓ | — |
+| `Json` | 61 | ✓ | — | — | ✓ | ✓ |
+| `Yaml` | 1 | — | ✓ | — | ✓ | ✓ |
+| `Auto` | 80 | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+A reduction parameter the output kind does not support is refused. For a
+`RawText` tool, narrow the command itself, or use `save_output`. Some tools
+produce JSON only when asked: `ssh_k8s_get` needs `output=json` for `jq_filter`.
+
+**Pagination.** Truncated output is cut keeping its start and end. Over MCP (or
+on the CLI with the [daemon](#daemon-mode) running), the result carries an
+`output_id`; `ssh_output_fetch output_id=<id> offset=<chars>` (optional `limit`)
+returns the rest, for `limits.output_cache_ttl_seconds` (300 s). A plain CLI
+call has no cache: use `save_output=` or `max_output=0` instead.
 
 ---
 
 ## Tool Groups
 
-476 tools organized in 77 groups. Secure by default: only the eight core groups
-(`core`, `file_ops`, `directory`, `process`, `monitoring`, `network`, `systemd`,
+476 tools organized in 77 groups. Only the eight core groups (`core`,
+`file_ops`, `directory`, `process`, `monitoring`, `network`, `systemd`,
 `sessions`) are enabled out of the box — everything else (containers, K8s,
-Windows, cloud, …) is opt-in. Enable the groups you need, or disable defaults:
+Windows, cloud, …) is opt-in ([how](#enabling-tool-groups)):
 
 ```yaml
 tool_groups:
@@ -531,7 +686,7 @@ tool_groups:
 <summary><strong>Linux & cross-platform groups (43 groups)</strong></summary>
 
 Representative tools per group — larger groups (e.g. `kubernetes` has 83,
-`awx` 43) list only the common ones. For the full set of any group, run
+`awx` 43) list only the common ones. For the full set, enable the group and run
 `bridge-mcp list-tools --group <name>`.
 
 | Group | Tools |
@@ -639,15 +794,15 @@ Representative tools per group — larger groups (e.g. `kubernetes` has 83,
 <details>
 <summary><strong>Pre-built prompts</strong></summary>
 
-| Prompt | Description | Required args |
-|--------|-------------|---------------|
-| `system-health` | Full system health check (CPU, memory, disk, services) | `host` |
-| `deploy` | Step-by-step deployment workflow | `host`, `service` |
-| `security-audit` | Security posture assessment | `host` |
-| `troubleshoot` | Systematic troubleshooting guide | `host`, `symptom` |
-| `docker-health` | Docker/container health assessment | `host` |
-| `k8s-overview` | Kubernetes cluster state overview | `host` |
-| `backup-verify` | Backup integrity verification | `host` |
+| Prompt | Description | Arguments (* = required) |
+|--------|-------------|--------------------------|
+| `system-health` | Full system health check (CPU, memory, disk, services) | `host`* |
+| `deploy` | Step-by-step deployment workflow | `host`*, `app`*, `version` |
+| `security-audit` | Security posture assessment | `host`*, `scope` |
+| `troubleshoot` | Systematic troubleshooting guide | `host`* |
+| `docker-health` | Docker/container health assessment | `host`* |
+| `k8s-overview` | Kubernetes cluster state overview | `host`*, `namespace` |
+| `backup-verify` | Backup integrity verification | `host`*, `path` |
 
 </details>
 
@@ -658,291 +813,148 @@ Representative tools per group — larger groups (e.g. `kubernetes` has 83,
 |-------------|-------------|
 | `metrics://{host}` | System metrics (CPU, memory, disk, network, load) as JSON |
 | `file://{host}/{+path}` | Remote file content |
-| `log://{host}/{+path}` | Last lines of a log file |
+| `log://{host}/{+path}` | Last lines of a log file (`?lines=N`) |
 | `health://{host}` | Health check summary for a host (connectivity, load, key services) |
-| `history://{host}` | Recent command history captured by the bridge for that host |
+| `history://recent` | Recent command history captured by the bridge (`?host=<alias>&since=<duration>&limit=N`) |
 | `services://{host}` | Snapshot of active systemd services on the host |
 
 </details>
 
 ---
 
-## CLI Usage
+## CLI
 
-The binary works standalone (outside MCP mode) with **10-32x token savings** for AI agent workflows.
-
-### Basic commands
-
-```bash
-bridge-mcp status                       # Show configured hosts & security
-bridge-mcp exec <host> "<command>"      # Execute a command directly
-bridge-mcp history [--limit 20]         # Show command history
-bridge-mcp upload <host> <local> <remote>   # SFTP upload
-bridge-mcp download <host> <remote> <local> # SFTP download
-bridge-mcp validate                     # Validate config file
-bridge-mcp config-diff                  # Compare config vs defaults
-```
-
-### Tool invocation (all 476 MCP tools)
+The same binary runs every tool from a shell — for scripts, and for agents that
+would rather call a command than load MCP schemas (10-32x fewer tokens).
 
 ```bash
-# Invoke any tool with key=value pairs
-bridge-mcp tool ssh_docker_ps host=prod
-bridge-mcp tool ssh_exec host=prod command="df -h"
-
-# Or with JSON arguments
+bridge-mcp tool ssh_docker_ps host=prod                       # any enabled tool, key=value arguments
 bridge-mcp tool ssh_k8s_get --json-args '{"host":"k8s","resource":"pods","namespace":"default"}'
-
-# JSON output (for scripting/parsing)
-bridge-mcp --json tool ssh_docker_ps host=prod
+bridge-mcp --json tool ssh_docker_ps host=prod                # the whole MCP result as JSON
+bridge-mcp list-tools --groups-only                           # enabled groups
+bridge-mcp list-tools --search kubernetes                     # keyword search
+bridge-mcp describe-tool ssh_docker_ps                        # schema, output kind, reduction strategy
 ```
 
-### Progressive discovery
+### Subcommands
 
-From the CLI:
+| Subcommand | What it does |
+|---|---|
+| `serve` | MCP server over stdio. Also what `bridge-mcp` with no subcommand runs |
+| `serve-http` | MCP server over Streamable HTTP (`POST /mcp`). `-b/--bind`, `--insecure-bind` |
+| `tool` (alias `t`) | Runs one enabled tool: `<name> [key=value …]` or `--json-args '<json>'` |
+| `describe-tool` (alias `dt`) | One tool's schema, output kind, reduction strategy and annotations |
+| `list-tools` | Enabled tools: `--groups-only`, `-g/--group <g>`, `-s/--search <kw>` |
+| `validate` | Checks the config without contacting a host; prints host and tool counts and security warnings |
+| `config-diff` | What your config changes from the defaults |
+| `status` | Configured hosts and security settings (no connection) |
+| `exec` | `<host> "<command>"` — one shell command. `-t/--timeout` (default 120 s), `-w/--working-dir`. Goes through the whitelist/blacklist but not the destructive prompt |
+| `upload`, `download` | SFTP: `<host> <local> <remote>` / `<host> <remote> <local>`; `--mode overwrite\|append\|resume\|fail-if-exists`, `--chunk-size`, `--verify-checksum`, `-p/--progress` |
+| `history` | In-memory history of the current process — empty for a fresh CLI call; read the audit log instead |
+| `daemon start\|stop\|status` | See [Daemon Mode](#daemon-mode) |
+| `completions <shell>` | `bash`, `zsh`, `fish`, `elvish` or `powershell` |
 
-```bash
-bridge-mcp list-tools --groups-only       # 77 groups (~2K tokens)
-bridge-mcp list-tools --group docker      # Tools in a group (~500 tokens)
-bridge-mcp list-tools --search kubernetes # Keyword search
-bridge-mcp describe-tool ssh_docker_ps    # Full schema for 1 tool (~200 tokens)
-```
-
-From an MCP client (Claude Desktop / Claude Code), the same progressive-discovery pattern is available as three top-level tools so the model can walk the registry without loading all 476 schemas up front:
-
-| Tool | Purpose | Typical cost |
-|---|---|---|
-| `mcp_list_tool_groups` | List the 77 groups with counts | ~2 K tokens |
-| `mcp_search_tools` | Keyword search (`query`, `group?`, `limit=20`) | ~3 K tokens / page |
-| `mcp_describe_tool` | Full schema + reduction strategy for one tool | ~500 tokens |
-
-### Token-efficient output
-
-Every tool automatically exposes reduction parameters based on its output type. Server-side filtering runs **before** truncation, so you never lose data to the output cap. Use `describe-tool <name>` — its top-of-output **Reduction Strategy** line tells you exactly which params apply.
-
-| Output kind | Available params | Strategy | Example tools |
-|---|---|---|---|
-| **Tabular** | `columns`, `limit` | Pick columns + cap rows | `docker_ps`, `service_list`, `process_list` |
-| **Json** | `jq_filter`, `output_format`, `limit` | jq + TSV for 60-80% savings | `docker_inspect`, `k8s_get`, `ansible_facts` |
-| **Yaml** | `yq_filter`, `output_format`, `limit` | yq + TSV | kubectl/helm YAML output |
-| **Auto** | All of the above | Tool auto-detects JSON vs tabular | `vault_status`, mixed outputs |
-| **RawText** | — | `save_output=/path` then read the file locally | `ssh_exec`, logs, arbitrary commands |
-
-**Common params** available on every tool: `host`, `timeout_seconds`, `max_output`, `save_output`.
-
-```bash
-# Filter JSON with jq + TSV output (60-80% token savings on list data)
-bridge-mcp tool ssh_k8s_get host=k8s resource=pods \
-  jq_filter='.items[] | [.metadata.name, .status.phase]' output_format=tsv
-
-# Pick columns from tabular output
-bridge-mcp tool ssh_docker_ps host=prod columns='["NAMES","STATUS","IMAGE"]' limit=20
-
-# Or use the ergonomic global flags (equivalent)
-bridge-mcp --jq '.items[] | {name, phase}' --output-format=tsv tool ssh_k8s_get host=k8s resource=pods
-bridge-mcp --columns NAMES,STATUS,IMAGE --limit 20 tool ssh_docker_ps host=prod
-
-# Persist full untruncated output to a file
-bridge-mcp tool ssh_docker_logs host=prod container=nginx save_output=/tmp/nginx.log
-```
-
-**Pagination.** Truncated results print `[output_id: abc123]`. Fetch the rest with:
-
-```bash
-bridge-mcp tool ssh_output_fetch output_id=abc123 offset=40000
-```
+Every subcommand loads the config first, so even `list-tools` needs a valid one.
 
 ### Global flags
 
-| Flag | Description |
-|------|-------------|
-| `--config` / `-c` | Path to config file |
-| `--json` | JSON output for all commands |
-| `--dry-run` | Preview without executing |
+| Flag | Effect |
+|---|---|
+| `-c, --config <path>` | Config file to use |
+| `--yes` | Confirms destructive tools in advance (scripts, CI). Recorded in the audit log |
+| `--dry-run` | `tool` and `exec` only: print what would run, without checking or running it |
+| `--json` | JSON output; with `tool`, the whole MCP result (`content`, `isError`, …) |
+| `--jq <expr>` | Same as `jq_filter=<expr>` |
+| `--columns a,b,c` | Same as `columns='["a","b","c"]'` |
+| `--limit <n>` | Same as `limit=<n>` |
+| `--output-format json\|tsv` | Same as `output_format=…` |
+
+**Put flags before the first `key=value`.** `tool` reads everything after it as
+tool arguments, so `bridge-mcp tool ssh_docker_ps host=prod --json` fails with
+exit 5 (`Invalid argument '--json'`). `bridge-mcp --json tool …` and
+`bridge-mcp tool ssh_docker_ps --json host=prod` both work. Write `columns` as
+JSON (`columns='["NAMES","STATUS"]'`) or use `--columns NAMES,STATUS`: a bare
+`columns=NAMES,STATUS` is not split.
+
+There is no `--timeout`, `--max-output` or `--save-output` flag: use the tool
+parameters `timeout_seconds=`, `max_output=` and `save_output=`. Logs go to
+stderr; `RUST_LOG=error` silences them.
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Tool/command execution error |
-| 2 | CLI usage error (unknown tool, bad args) |
-| 3 | SSH connection error |
-| 4 | Security denial |
-| 5 | Configuration error |
-| 6 | The remote command exited non-zero on the target host |
+| 1 | Tool or bridge error — including an undeclared argument or a value of the wrong type |
+| 2 | Usage error — unknown tool (or a tool whose group is off), bad flag |
+| 3 | Unknown host or SSH connection error |
+| 4 | Security denial — whitelist/blacklist, or a destructive tool not confirmed (no terminal and no `--yes`) |
+| 5 | Configuration error — config fails to load; also a malformed `key=value` or `--json-args` |
+| 6 | The remote command ran and exited non-zero |
 
-**Codes 3, 4 and 6 are specific to `bridge-mcp tool`.** Code 2 is also clap's
-usage-error code, so every subcommand exits 2 on a bad flag or subcommand name.
-Beyond that, every other subcommand exits 1 for any error of its own
-(`bridge-mcp exec …` on an unknown host is 1, not 3). The one other exception
-is code 5 for a configuration file that fails to load, which applies to every
-subcommand. Details below.
-
-Codes 1-5 are the bridge's *own* failures: it could not run your command.
-Code 6 means the opposite — the command ran on the target host and exited
-non-zero. The distinction matters because before this release `bridge-mcp tool`
-exited **0** in that case, so `bridge-mcp tool … && next` ran `next` after a
-failure.
-
-In the CLI's output the remote command's own exit code is not a separate
-field; it appears in the result text as the `[exit:N]` prefix (an MCP result
-also carries it in `_meta`, see below). `--json` marks the call
-`"isError": true` — **except for the tools whose command you wrote yourself**,
-which report the code without the verdict. See the next section.
-
-**Which tools emit 6 — read this before relying on it.** Code 6 comes from the
-shared `StandardTool` pipeline, which is most of the catalogue but not all of
-it. 52 handlers run their remote command outside that pipeline; seven of them
-now report a code of their own, 42 of the `ssh_awx_*` family raise a **bridge
-error** instead (see below the tables), and the remaining three **still exit 0
-when the remote command fails**:
-
-| Emits 6 outside the pipeline | When |
-|---|---|
-| `ssh_exec` | any non-zero exit |
-| `ssh_exec_multi` | **single host only** — see below |
-| `ssh_file_write` | any non-zero exit **on the shell path** — content whose length reaches `sftp_write_threshold_bytes` (64 KiB by default; `0` means every write) goes over SFTP, which runs no remote process and so has no code to report |
-| `ssh_disk_usage` | only without `path` (with one, the command is `du … && df …`, which exits 1 from an unreadable subdirectory while still answering) |
-| `ssh_tail` | only without `grep` (with one, exit 1 means "no match", which is not a failure) |
-| `ssh_session_exec` | any non-zero exit **that the bridge read and that fits an `i32`**. When no code representable as an unsigned 32-bit integer was read (begin marker missing, or a code line that is not a decimal `u32`, such as a negative PowerShell `$LASTEXITCODE`), the JSON `exit_code` is `null` and nothing is reported: exit 0, not a guess. A code that was read but is larger than `i32::MAX` is in the JSON but is likewise not reported, so the CLI exits 0 for it |
-| `ssh_awx_job_follow` | the job it followed did not finish `successful` (`failed`, `error`, `canceled`, a refused status request, or still running at `max_wait`). Unlike `ssh_exec`, it also marks the call an error: the script is the bridge's own |
-
-| Still exits 0 on a remote failure | Count | When |
-|---|---|---|
-| `ssh_find`, `ssh_metrics`, `ssh_metrics_multi` | 3 | any non-zero exit |
-| `ssh_exec_multi` across 2+ hosts | — | see below |
-
-**The other 42 `ssh_awx_*` tools are not in that table, and never emit 6
-either.** They route their response through
-`AwxCommandBuilder::parse_checked_response` and propagate its error with `?`. An
-HTTP status >= 400 has always raised `BridgeError::AwxApi`; since the fix in this
-cycle a **curl transport failure** (connection refused, timeout, DNS — curl
-writes `%{http_code}` = `000`) raises it too, as `AwxApi { status: 0 }`, where
-`status` is not an HTTP status but the mark of "curl obtained none". That is a
-bridge error, so it **exits 1**, not 6. The call is arguable — curl did run on
-the target host and exit non-zero — but the curl command is the bridge's own, not
-one you wrote, so failing to reach the AWX API is counted as the bridge failing
-to run your request rather than as your request failing. Non-zero either way.
-
-The live-host sweep that found this measured 44 affected tools, and all 44 are
-pipeline tools, so the measured defect is closed — but the defect *class* is
-not, and the handlers still listed above as exiting 0 are its unmeasured
-remainder (CHANGELOG has the chain). The seven that now emit 6 were brought into
-line later in the same cycle, by unit test (mutation testing covers only some of
-them; the CHANGELOG says which) rather than on a host — so they have left the remainder without ever having been measured on one. Until
-it is closed, treat exit 6 as "this tool told me the remote command failed",
-never exit 0 as "the remote command succeeded".
-
-**Tools whose command you wrote emit 6 without marking the call an error.**
-You wrote their command, and plenty of ordinary commands exit non-zero *as
-their answer*: `grep` matching nothing exits 1, `diff` finding a difference
-exits 1, `test` exits 1 for false, `systemctl is-active` exits 3 for a stopped
-unit. So the code reaches `$?` — your `&&` stops, which is what a shell caller
-expects — but the MCP result does **not** carry `"isError": true`, because
-nothing here can establish that your command failed. The criterion is who wrote the
-command and whether a non-zero exit is an answer, not the tool name, and it has
-three positions. Where the command is the caller's (`ssh_exec`,
-`ssh_exec_multi`, `ssh_session_exec`), the code is a fact and no verdict is set.
-Where the bridge built the command and counts a non-zero exit as a failure, both
-the code and the verdict are set. Where the bridge built the command but a
-non-zero exit is an answer (`systemctl is-active` exits 3 for a stopped unit),
-or the handler reports nothing (`ssh_find`, `ssh_metrics`,
-`ssh_metrics_multi`), neither is set.
-
-**`ssh_exec_multi` reports a code only for a single host.** Across two or more
-it reports nothing, deliberately: the per-host `failed` counter cannot tell
-"the command exited non-zero" from "the host was unreachable", and mapping it
-onto exit 6 would make 6 mean "the bridge could not reach a host" — the exact
-conflation 6 was created to remove. Read the per-host `exit_code` values in the
-JSON result instead.
-
-Two further limits:
-
-- **Only the `tool` subcommand distinguishes 6, and only `tool` maps the
-  bridge's own failures onto 3 and 4** (2 is clap's usage code on every subcommand). `bridge-mcp exec` exits 1 on a failed remote
-  command, as it always has. Every other subcommand (`exec`, `status`,
-  `history`, `describe-tool`, `list-tools`, `validate`, `config-diff`, `upload`,
-  `download`, `daemon`, `serve`) exits 1 for any error of its own, whatever its
-  class — an unknown host under `exec` is 1, not 3. A configuration file that
-  fails to load for any reason — absent, unreadable, malformed, a referenced
-  SSH key file missing — exits 5 for every subcommand, `completions` included, since that happens
-  before any of them runs.
-- **Under a daemon, the code travels in a vendor `_meta` key.** With
-  `bridge-mcp daemon` running, the CLI forwards the call and reads the MCP
-  result back. The remote exit code is carried on that result under
-  `_meta["io.github.muchiny/remote-exit-code"]` (also when `summarize=true`),
-  and the CLI reads it, so the daemon path gives the same exit codes as the
-  direct path — 6 for a remote failure, 1 for a bridge refusal, including for
-  `ssh_exec` and `ssh_exec_multi`. The guarantee is for this project's own
-  CLI-over-daemon path: an MCP client that does not read that vendor key still
-  sees only `"isError"`. **It also requires the daemon serving the call to be
-  this build or later.** A daemon started from an earlier build accepts the same
-  protocol revision and reports the same crate version, but answers without the
-  key, and `ssh_exec` then exits 0 again. The CLI compares the daemon's build
-  revision to its own and prints a `warning:` on stderr when they differ (or
-  when the daemon reports none); restart the daemon when you see it.
+Codes 3, 4 and 6 are specific to `tool`; other subcommands exit 1 on their own
+errors. Not every tool reports 6, and through a daemon 2, 3 and 4 become 1 — see
+[docs/cli-exit-codes.md](docs/cli-exit-codes.md) before a script relies on it.
 
 ### Shell completions
 
 ```bash
 bridge-mcp completions bash > ~/.bash_completion.d/bridge-mcp
-bridge-mcp completions zsh > ~/.zfunc/_bridge-mcp
+bridge-mcp completions zsh  > ~/.zfunc/_bridge-mcp
 bridge-mcp completions fish > ~/.config/fish/completions/bridge-mcp.fish
 ```
 
-### Claude Code integration (optional)
+### Claude Code: prefer the CLI
 
-If you use [Claude Code](https://claude.com/claude-code), copy the provided rule and skill to get CLI-aware assistance:
+To have Claude Code call the CLI through Bash instead of MCP tools (fewer
+tokens), copy the provided rule and skill into your project:
 
 ```bash
-# Copy the CLI rule (tells Claude to prefer CLI over MCP for token efficiency)
-mkdir -p .claude/rules
+mkdir -p .claude/rules .claude/skills/bridge
 cp config/claude-code/rules/cli-bridge.md .claude/rules/
-
-# Copy the /bridge skill (interactive CLI workflows and config help)
-mkdir -p .claude/skills/bridge
 cp config/claude-code/skills/bridge/SKILL.md .claude/skills/bridge/
 ```
 
-This enables:
-
-- Claude automatically uses the CLI via Bash instead of MCP tools
-- `/bridge` command for interactive tool discovery and config management
-- `/bridge config` for guided configuration setup
-- `/bridge docker` to explore tools in a group
+This adds the `/bridge` command (`/bridge config` for guided setup,
+`/bridge docker` to explore a group).
 
 ---
 
 ## Daemon Mode
 
-In addition to the default stdio transport, the bridge can run as a long-lived daemon listening on a Unix socket. Multiple local clients (Claude Code, Claude Desktop, scripts) can connect concurrently to the same daemon, each getting an isolated MCP session that shares the same audit log, output cache, and connection pools.
+A long-lived daemon keeps SSH connections, the output cache and connection
+pools warm between CLI calls:
 
 ```bash
-# Start the daemon (foreground; Ctrl-C to stop). Socket defaults to
-# $XDG_RUNTIME_DIR/bridge-mcp.sock — override with --socket-path.
-bridge-mcp daemon start --socket-path /tmp/bridge-mcp.sock
-bridge-mcp daemon status          # check whether a daemon is running
-bridge-mcp daemon stop            # SIGTERM a running daemon
-
-# Regular CLI invocations auto-detect the socket and forward their tool
-# calls to the daemon, skipping the SSH handshake on subsequent calls.
+bridge-mcp daemon start      # foreground; Ctrl-C to stop
+bridge-mcp daemon status
+bridge-mcp daemon stop
 ```
 
-**Built-in connection pools** kick in automatically when you build with the corresponding feature flags:
+The socket is `$XDG_RUNTIME_DIR/bridge-mcp.sock`, or `/tmp/bridge-mcp-$UID.sock`
+when `XDG_RUNTIME_DIR` is unset. `bridge-mcp tool` forwards its calls to a
+daemon **at that default path only** — a daemon started with a custom
+`--socket-path` is not used by the CLI. Through the daemon:
 
-| Pool | Default TTL | Effect |
-|---|---|---|
-| `WinRmPool` (`--features winrm`) | 120 s | Reuses the per-host `reqwest::Client` so back-to-back WinRM calls skip the TLS handshake. |
-| `K8sExecPool` (`--features k8s-exec`) | 300 s | Caches the `kube::Client` (kubeconfig walk + auth-plugin refresh) across `ssh_k8s_*` calls. |
+- truncated output gets an `output_id`, and `ssh_output_fetch` works;
+- exit codes 2, 3 and 4 become 1 ([details](docs/cli-exit-codes.md));
+- destructive tools are refused even with `--yes`, because the daemon's own
+  confirmation gate applies and the CLI cannot answer it.
 
-Both pools clean up idle entries automatically; nothing is required to enable them beyond compiling the relevant feature.
+MCP clients do not connect to the daemon: they start their own `bridge-mcp serve`.
+After upgrading, restart the daemon — the CLI warns on stderr when the daemon
+was built from a different revision.
+
+With the matching cargo features, two pools amortize handshakes: `WinRmPool`
+(`--features winrm`, 120 s TTL, reuses the HTTP client per host) and
+`K8sExecPool` (`--features k8s-exec`, 300 s TTL, caches the Kubernetes client).
 
 ---
 
 ## Protocol Support
 
-bridge-mcp 3.x implements **MCP revision `2026-07-28`** and only that revision.
+Since 3.0, bridge-mcp implements **MCP revision `2026-07-28`** and only that
+revision. This section is for client implementers; using the server needs none of it.
 
 | | |
 |---|---|
@@ -1018,52 +1030,79 @@ confirms forever. A single stdio process needs nothing.
 
 ## Troubleshooting
 
+Logs go to **stderr** (your MCP client usually keeps them in its server log);
+set `RUST_LOG=debug` for more, `RUST_LOG=error` for less.
+
 <details>
-<summary><strong>Common issues</strong></summary>
+<summary><strong>Startup and configuration</strong></summary>
 
-**"Unknown host: xxx"** — The host alias is not in your config. Run `ssh_status` or `bridge-mcp status` to see configured hosts.
+**`Failed to load config from …` (exit 5)** — the line below it says why:
 
-**"Command denied"** — The command doesn't match a whitelist pattern (strict/standard mode) or matches a blacklist pattern. Check your `security` config.
+- `Configuration file not found` — wrong path. On macOS the default is
+  `~/Library/Application Support/bridge-mcp/config.yaml`, not `~/.config`.
+- `has permissions 0644; expected no group-write/other access` — `chmod 600` the config.
+- `SSH key file … has permissions …; expected 0600` — `chmod 600` the key; a
+  missing key file also stops the load.
+- ``unknown field `…` `` — a misspelled or retired key (`rbac.enabled: true`,
+  `http.max_sessions` and `http.session_timeout_seconds` are rejected too).
+- ``unknown variant `…` `` — a value in the wrong case, e.g. `AcceptNew` instead of `acceptnew`.
+- `At least one host must be defined` — `hosts:` is empty (and `ssh_config` import is off by default).
 
-**"SSH connection failed"** — Verify: (1) the host is reachable (`ping hostname`), (2) SSH works manually (`ssh user@host`), (3) key permissions are correct (`chmod 600 ~/.ssh/id_*`).
+**The MCP server shows "connected" but the model has no tools** — the client
+used the Legacy handshake: see the note in [step 4](#4-connect-your-mcp-client).
+With `listing: progressive` you see four `mcp_*` tools: that is expected.
 
-**"Unknown host key"** — Add it: `ssh-keyscan hostname >> ~/.ssh/known_hosts`
+**`-32022 Unsupported protocol version`** — the client opened with `initialize`
+or declared a revision this server does not speak; `data.supported` lists the
+one it does (`2026-07-28`).
 
-**The server connects but exposes no tools** — Expected in progressive listing
-mode: `tools/list` returns only the four meta-tools, and every enabled tool
-still dispatches by its own name. If you see *nothing at all*, the client is on the Legacy
-handshake — see the `MCP_PROTOCOL_NEGOTIATION` note in [Quick Start](#quick-start).
+**`-32602 missing _meta[…/protocolVersion]`** — every request in this revision
+must carry `protocolVersion` and `clientCapabilities` in `_meta`.
 
-**`-32022 Unsupported protocol version`** — The client opened with `initialize`
-or declared a revision this server does not speak. `data.supported` lists what
-it does.
+</details>
 
-**`-32602 missing _meta[…/protocolVersion]`** — Both `protocolVersion` and
-`clientCapabilities` are REQUIRED on every request in this revision. A client
-sending neither is answered on the version first, because that is the one that
-tells it which era it got wrong.
+<details>
+<summary><strong>Tool calls</strong></summary>
 
-**`-32602 requestState is not valid for this request`** — A confirmation was
+**`Command denied: Command not in whitelist (standard mode)`** — `ssh_exec` (and
+the other free-form command tools) run only whitelisted commands. Add an
+anchored regex under `security.whitelist`, or use a specialised tool.
+
+**`Command denied: Command matches blacklist pattern: …`** — the command, or the
+command a tool built, matches the blacklist. Built-in examples:
+`ssh_service_stop` and `ssh_service_disable` (`systemctl stop|disable`).
+
+**``Unknown argument `x` for tool `y`. Did you mean `z`?``** — check the tool's
+arguments with `describe-tool` / `mcp_describe_tool`. Note that some tools name
+the same thing differently (`ssh_service_status service=…`, `ssh_service_disable name=…`).
+
+**``Tool `x` is registered but its group `y` is not enabled``** (on the CLI:
+`MCP unknown tool`, exit 2) — enable the group under `tool_groups.groups`.
+
+**``… did not declare the `elicitation` capability``** — the tool is destructive
+and your client cannot show a confirmation. Use a client that supports MCP
+elicitation, or the CLI, where you confirm on the terminal or with `--yes`.
+
+**CLI exits 4 on a destructive tool** — no terminal to ask on: add `--yes`
+(before the tool name) once you mean it.
+
+**`Unknown host: x`** (exit 3) — the alias is not in your config:
+`bridge-mcp status` lists them.
+
+**SSH connection failed / unknown host key** — check `ssh user@host` works by
+hand first: that also records the host key in `~/.ssh/known_hosts`, which the
+default `strict` verification requires (or set `host_key_verification:
+acceptnew` on that host).
+
+**`Output cache is not available`** — `ssh_output_fetch` from a plain CLI call:
+use `save_output=` or `max_output=0`, or run the [daemon](#daemon-mode).
+
+**`-32602 requestState is not valid for this request`** — a confirmation was
 replayed onto a different call, arrived after its 5-minute TTL, or was signed by
-another process. The last case is the one that surprises people: without
-`MCP_REQUEST_STATE_KEY`, each process signs with its own startup key, so a fleet
-behind one address refuses every retry. Re-send the original request with no
-`requestState` and no `inputResponses` to start a fresh round trip.
-
-**A destructive tool runs without asking** — Check `security.require_elicitation
-_on_destructive` (default `true`) and that the tool is annotated
-`destructive_hint: true` (`mcp_describe_tool` shows it). Note the CLI is never
-covered: `bridge-mcp tool …` has no client to ask.
-
-**Host key verification modes:**
-
-| Mode | Behavior |
-|------|----------|
-| `Strict` (default) | Rejects unknown and changed host keys |
-| `AcceptNew` | Accepts new keys, rejects changed keys |
-| `Off` | Accepts all keys (testing only) |
-
-Set per-host: `host_key_verification: AcceptNew`
+another process. Without `MCP_REQUEST_STATE_KEY`, each process signs with its
+own startup key, so several instances behind one address refuse each other's
+retries. Re-send the original request without `requestState` and
+`inputResponses` to start over.
 
 </details>
 
@@ -1073,20 +1112,19 @@ Set per-host: `host_key_verification: AcceptNew`
 
 ```bash
 make build              # Debug build
-make release            # Optimized release with LTO
-make test               # Run tests (uses nextest if available)
-make lint               # Clippy with strict warnings
-make ci                 # Quick CI (fmt-check, lint, test, audit, typos)
-make ci-full            # Full CI (ci + hack + geiger)
-make dxt                # Build DXT package for Claude Desktop
+make release            # Optimized build with RELEASE_FEATURES (full,winrm,psrp) into target/release/
+make install            # make release, check it loads your config, copy to ~/.local/bin
+make test               # Tests (nextest if installed) + doctests
+make ci                 # fmt-check, lint (pinned + stable + no-default), test, doc, audit, deny, typos, markdownlint
+make help               # Every target
 ```
 
-Rust edition 2024, MSRV 1.98+. `#![forbid(unsafe_code)]`. 9500+ tests.
+Rust edition 2024, MSRV 1.99+, `#![forbid(unsafe_code)]`, 10,000+ tests.
 
 **Adding a new tool — 3 steps:** annotate the struct with `#[mcp_tool]` (or
 `#[mcp_standard_tool]`), add the `mod` + `pub use` line, and (only if
 introducing a new group) update `ToolGroupsConfig`. The `inventory` crate
-auto-registers the handler at compile time — no test asserts a tool count.
+auto-registers the handler at compile time.
 
 Two things are NOT automatic, and both fail loudly rather than silently:
 
@@ -1097,10 +1135,11 @@ Two things are NOT automatic, and both fail loudly rather than silently:
 - A new *group* must also be added to the hardcoded `known_groups` list in
   `tests/tool_filtering.rs`, which enumerates all 77 by name.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history. There is no separate
-threat-model document: the security design lives in [Configuration](#configuration)
-— the *Security rules* and *Limits, sanitization & audit* sections — and in
-[Protocol Support](#protocol-support) for the destructive-confirmation gate.
+See [CHANGELOG.md](CHANGELOG.md) for version history and
+[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) for releases. There is no
+separate threat-model document: the security design lives in
+[`security`](#security), [Destructive tools](#destructive-tools-and-confirmation)
+and [Protocol Support](#protocol-support).
 
 ---
 

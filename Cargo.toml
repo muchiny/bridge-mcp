@@ -3,9 +3,9 @@ members = [".", "crates/bridge-mcp-macros"]
 
 [package]
 name = "bridge-mcp"
-version = "3.0.0"
+version = "4.0.2"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 description = "MCP server that bridges Claude Code to air-gapped environments via SSH"
 authors = ["muchiny"]
 license = "MIT"

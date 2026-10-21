@@ -43,11 +43,13 @@ config.yaml
 *.lcov
 lcov.info
 coverage/
-tarpaulin-report.html
 
-# Fuzzing
+# Fuzzing. fuzz/ is its own Cargo workspace, so its builds land in fuzz/target/,
+# not in the root /target/ above.
 fuzz/corpus/
 fuzz/artifacts/
+/fuzz/target/
+/fuzz/coverage/
 
 # Mutation testing
 mutants.out/
@@ -56,6 +58,7 @@ mutants.out.old/
 # SBOM (cargo-cyclonedx)
 *.cdx.json
 bom.xml
+bom.json
 
 # Profiling / flamegraph
 perf.data*
@@ -103,8 +106,10 @@ tests/ssh_test_config.yaml
 # Claude Code
 .claude/
 
-# MCP server config (local paths)
-.mcp.json
+# MCP server config of THIS checkout (absolute local paths). Anchored on
+# purpose: unanchored, it also hid plugin/.mcp.json, the file plugin.json points
+# to, so the published plugin never registered its MCP server.
+/.mcp.json
 
 # Node.js
 node_modules/
@@ -113,15 +118,13 @@ node_modules/
 # Docker
 docker-compose.override.yml
 
-# Migration scripts (one-off)
-migrate_handlers.py
-bump-psrp-1.1.sh
-
 # Snapshot testing (insta) - only ignore pending reviews
 *.snap.new
 
-# Release artifacts (cross-compilation)
+# Release artifacts: `make release-all` writes releases/, `make dxt` and
+# `make mcpb` write dist/.
 releases/
+/dist/
 
 # Geiger reports
 geiger-report.txt

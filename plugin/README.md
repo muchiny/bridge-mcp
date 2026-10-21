@@ -27,8 +27,9 @@ hosts:
 
 ### MCP Server
 
-The plugin registers `bridge-mcp` as an MCP server, exposing all 476 tools
-directly to Claude Code for remote server management.
+The plugin registers `bridge-mcp` as an MCP server (`plugin/.mcp.json`), started
+with your default config. It exposes the tools of the groups that config
+enables — 8 groups by default, out of 77.
 
 ### Skills
 

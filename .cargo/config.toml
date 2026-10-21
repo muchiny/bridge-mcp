@@ -13,6 +13,11 @@ test-all = "nextest run"
 # Faster incremental builds
 incremental = true
 
-[target.aarch64-unknown-linux-gnu]
-# Link-time optimizations for release builds
-rustflags = ["-C", "target-cpu=native"]
+# No `target-cpu` here, for any target. `native` means "the CPU of the machine
+# running rustc": under `cross` (release.yml) that is the x86 runner, so the
+# aarch64 release binary was handed an x86 CPU (`icelake-server`, AVX-512).
+# rustc 1.98 ignored it (~194,000 "not a recognized feature" lines in the
+# v3.0.0 arm64 job); rustc 1.99.1 segfaults on it in fat-LTO codegen, which
+# is what failed the v4.0.0 release. Even on a native ARM
+# build it would tie the shipped binary to the build machine's CPU. To tune a
+# local build for the host it runs on, use RUSTFLAGS="-C target-cpu=native".

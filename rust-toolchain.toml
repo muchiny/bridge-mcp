@@ -1,16 +1,17 @@
 # Local development toolchain. Pinned to the MSRV so a post-MSRV feature can
 # never slip in unnoticed on a dev machine.
 #
-# RAISED 1.94.0 -> 1.98.0 on 2026-09-03, forced rather than chosen: `winrm-rs`
-# 1.2.0 declares `rust-version = "1.98.0"`, and cargo refuses the dependency
-# outright on an older compiler ("rustc 1.94.0 is not supported by the
-# following package"). 1.2.0 is where RUSTSEC-2026-0190/0185/0098 are fixed, so
-# staying behind meant carrying three advisories.
+# RAISED 1.98.0 -> 1.99.1 on 2026-10-17, chosen rather than forced: the
+# maintainer runs the current stable and wants the project on it. Nothing in
+# the code needs 1.99. The crate is not on crates.io, so the only people a
+# higher MSRV affects build from source, and `rustup update` covers them.
+# (1.94.0 -> 1.98.0 on 2026-09-03 was forced: `winrm-rs` 1.2.0 declares
+# `rust-version = "1.98.0"` and carries the fixes for RUSTSEC-2026-0190/0185/0098.)
 #
-# WHAT THIS COSTS, stated plainly: 1.98.0 IS the current stable, so the MSRV
-# guard is temporarily vacuous — the `MSRV (1.98)` CI job and the Clippy job
-# now compile with the same rustc, and a 1.98-only feature would pass both. The
-# guard comes back the first time stable moves past 1.98. Until then, nothing
+# WHAT THIS COSTS, stated plainly: 1.99.1 IS the current stable, so the MSRV
+# guard is temporarily vacuous — the `MSRV (1.99)` CI job and the Clippy job
+# now compile with the same rustc, and a 1.99-only feature would pass both. The
+# guard comes back the first time stable moves past 1.99. Until then, nothing
 # in CI can tell you that this crate still builds for a consumer one release
 # behind, because there is no such consumer left within the MSRV.
 #
@@ -20,5 +21,5 @@
 # +<channel>` and the RUSTUP_TOOLCHAIN env var beat this file — every workflow
 # therefore sets RUSTUP_TOOLCHAIN explicitly. Do not drop those env blocks.
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "bridge-mcp": {
+      "command": "bridge-mcp",
+      "args": [],
+      "env": { "RUST_LOG": "warn" }
+    }
+  }
+}

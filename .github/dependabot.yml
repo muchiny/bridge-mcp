@@ -11,6 +11,13 @@ updates:
       - "dependencies"
       - "rust"
     groups:
+      # The OpenTelemetry crates share types (KeyValue, …) and only compile at
+      # matching versions: bumped one at a time, every PR breaks the build.
+      # Listed first so a dependency lands in this group, not rust-minor-patch.
+      opentelemetry:
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
       rust-minor-patch:
         update-types:
           - "minor"
