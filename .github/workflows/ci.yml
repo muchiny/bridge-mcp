@@ -194,6 +194,39 @@ jobs:
       - name: Binary embeds this checkout's commit
         run: make verify-install BIN=target/debug/bridge-mcp
 
+  hardening:
+    # Informatif : compte les violations des lints durcis (rust-hardening.md) et
+    # vérifie la baseline cargo-vet. Ne bloque jamais ; à rendre bloquant
+    # quand les compteurs sont à zéro.
+    name: Hardening (informatif)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-vet@0.10.2
+      - name: Lints durcis (comptage)
+        run: |
+          cargo clippy --locked --all-targets --all-features --message-format=short -- \
+            -W clippy::unwrap_used -W clippy::expect_used -W clippy::panic -W clippy::todo -W clippy::unimplemented -W clippy::indexing_slicing -W clippy::arithmetic_side_effects -W clippy::as_conversions 2> hardening.txt
+          # bash -e : un échec de compilation fait échouer l'étape (pas de `|| true`)
+          {
+            echo '### Lints durcis (non bloquant)'
+            echo '```'
+            sed -nE 's/^[^ ]+ (warning|error): //p' hardening.txt | sort | uniq -c | sort -rn
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: cargo vet (baseline d'exemptions)
+        run: cargo vet --locked
+
   msrv:
     name: MSRV (1.99)
     runs-on: ubuntu-latest

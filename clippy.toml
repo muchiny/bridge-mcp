@@ -18,3 +18,5 @@ too-large-for-stack = 200
 # in src/lib.rs + src/main.rs so tests/, benches/, examples/ stay unaffected)
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
