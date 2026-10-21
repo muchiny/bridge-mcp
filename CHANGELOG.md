@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-10-21
+
+Minor release: the Claude Code plugin finally ships its MCP server, and the
+dependency tree is tighter (the legacy rustls 0.21 stack is gone from the
+lockfile). No tool added or removed, no configuration key added or removed.
+
 ### Fixed
 
 - **The Claude Code plugin now registers its MCP server.** `plugin.json` has
@@ -25,6 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/fuzz/coverage/` (fuzz/ is its own workspace) and `bom.json` are ignored;
   entries for files nothing produces any more are gone. `.claude/rules/protocol-adapters.md`
   is no longer tracked, like every other file under the ignored `.claude/`.
+- **`russh-sftp` 2.1 -> 3.0** (#248). The SFTP client now bounds a packet to
+  `max_packet_len` (256 KiB) before allocating, instead of `u32::MAX`.
+- **`aws-sdk-ssm` builds with `default-features = false`** plus
+  `default-https-client` and `rt-tokio` (#248). The `ssm`/`cloud` features no
+  longer pull the legacy rustls 0.21 connector, so rustls 0.21, hyper 0.14 and
+  h2 0.3 are gone from `Cargo.lock`. Not exercised against a live AWS endpoint.
+- Lockfile refresh (#248): `webpki-roots` 1.0.10 and `rustls-webpki` 0.103.16
+  fix RUSTSEC-2026-0381, -0382 and -0383.
+
+### Security
+
+- `deny.toml`: seven advisory ignores (RUSTSEC-2026-0098, -0099, -0104, -0258,
+  -0346, -0349, -0382) and their nine `skip` entries are removed; only
+  RUSTSEC-2023-0071 (RSA, via russh) remains ignored. `multiple-versions`,
+  `wildcards` and `unknown-git` are now `deny`.
+- `supply-chain/` holds a `cargo vet` exemption baseline (588 exemptions, no
+  audits yet), and CI gains an informational `hardening` job that counts the
+  hardened clippy lints without blocking.
 
 ## [4.0.2] - 2026-10-17
 
@@ -5407,7 +5431,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.0.2...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/muchiny/bridge-mcp/compare/v4.0.2...v4.1.0
 [4.0.2]: https://github.com/muchiny/bridge-mcp/compare/v4.0.1...v4.0.2
 [4.0.1]: https://github.com/muchiny/bridge-mcp/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/muchiny/bridge-mcp/compare/v3.0.0...v4.0.0
