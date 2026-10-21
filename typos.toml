@@ -60,6 +60,8 @@ BRE = "BRE"
 extend-exclude = [
     "target/",
     "*.lock",
+    # généré par `cargo vet` : noms de crates (flate2, writeable), pas de la prose
+    "supply-chain/",
     "PLAN.md",
     # Internal French research/planning artifact — prose, not shipped docs
     "docs/feature-research-2026-06.md",
