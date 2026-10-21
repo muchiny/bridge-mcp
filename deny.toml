@@ -30,46 +30,11 @@ yanked = "deny"
 # Transitive dependency from russh -> rsa crate
 # Safe for local use, timing attack requires network observation
 ignore = [
-    "RUSTSEC-2023-0071",   # Marvin Attack on RSA — transitive from russh, no upstream fix
-    # Re-triggered by the v1.19.0 dep bumps: the kube 4.0 / AWS stack re-introduced
-    # rustls 0.21 -> rustls-webpki 0.101.7 via aws-smithy-http-client. ONLY reachable
-    # under the optional `ssm`/`cloud` AWS feature (default + air-gapped builds are
-    # clean). The patched webpki (>=0.103.12) requires rustls 0.23, which the pinned
-    # aws-smithy stack cannot reach via cargo update. AWS endpoints present trusted
-    # certs; these are reachable only after certificate misissuance.
-    "RUSTSEC-2026-0098",   # webpki URI name constraints — transitive via aws-smithy rustls 0.21
-    "RUSTSEC-2026-0099",   # webpki wildcard name constraint — transitive via aws-smithy rustls 0.21
-    "RUSTSEC-2026-0104",   # webpki CRL IssuingDistributionPoint panic — transitive via aws-smithy rustls 0.21
-    # h2 unbounded empty DATA frames (published 2026-08-18), patched in h2
-    # >=0.4.16 ONLY. This lockfile is already on 0.4.16, so the entry below
-    # suppresses exactly one remaining match: h2 0.3.27, which has no patched
-    # release on its own major line and is pulled transitively by
-    # aws-smithy-http-client 1.1.13 -> aws-smithy-runtime -> aws-config /
-    # aws-sdk-ssm. Same shape and same reachability as the webpki entries
-    # above: OPTIONAL `ssm`/`cloud` features only — default, `full` and
-    # air-gapped builds never compile it. `cargo-deny` cannot scope an
-    # advisory ignore to a version (the crate@version form is for yanked
-    # crates only), so removing this entry is the check that the aws-smithy
-    # stack has moved off h2 0.3.
-    "RUSTSEC-2026-0258",   # h2 0.3 unbounded empty DATA frames — transitive via aws-smithy, no 0.3 fix
-    # rustls advisories published 2026-10-14. Four were raised; two are gone from
-    # the lockfile because rustls 0.23.45 -> 0.23.46 fixes them (RUSTSEC-2026-0347
-    # ECH buffered data, RUSTSEC-2026-0348 brotli cert decompression — both 0.23-only
-    # features). The two below match the OTHER rustls in the tree, 0.21.12, for which
-    # there is NO fix on its own major line: every one of the four advisories says
-    # "upgrade to >=0.23.46". Same chain and same reachability as the webpki and h2
-    # entries above: aws-smithy-http-client 1.1.13 -> hyper-rustls 0.24.2 ->
-    # tokio-rustls 0.24.1 -> rustls 0.21.12, pulled by aws-config / aws-sdk-ssm under
-    # the OPTIONAL `ssm`/`cloud` features. Measured: `full` is
-    # ["cli","mimalloc","http","jq","otel"] and RELEASE_FEATURES is `full,winrm,psrp`,
-    # so no shipped binary compiles rustls 0.21 at all — `cargo audit` reads the
-    # lockfile, not the feature graph, which is why the gate reddens anyway.
-    # 0346 additionally requires something to Debug-print client session values, which
-    # this crate never does. As with h2 0.3, cargo-deny cannot scope an ignore to a
-    # version, so removing these two entries is the check that the aws-smithy stack
-    # has left rustls 0.21.
-    "RUSTSEC-2026-0346",   # rustls Debug impls expose TLS secrets — transitive via aws-smithy rustls 0.21
-    "RUSTSEC-2026-0349",   # rustls ServerHello KEX downgrade — transitive via aws-smithy rustls 0.21
+    "RUSTSEC-2023-0071",   # Marvin Attack on RSA — transitive from russh, no upstream fix ; revue avant 2027-01-19
+    # 2026-10-21: the webpki/rustls 0.21/h2 0.3 entries (RUSTSEC-2026-0098, -0099,
+    # -0104, -0258, -0346, -0349, -0382) were removed: `aws-sdk-ssm` now builds with
+    # `default-features = false` + `default-https-client`, which drops the legacy
+    # rustls 0.21 connector. `cargo deny` reports no match for them any more.
     # Verified no longer matched (kept here as historical context):
     # - RUSTSEC-2025-0134 (rustls-pemfile unmaintained)
     # - RUSTSEC-2026-0049 (rustls-webpki CRL matching)
@@ -112,8 +77,8 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 # Bans - deny or allow specific crates
 # =============================================================================
 [bans]
-multiple-versions = "warn"
-wildcards = "warn"
+multiple-versions = "deny"
+wildcards = "deny"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
@@ -124,7 +89,71 @@ deny = [
 ]
 
 # Skip duplicate version checks for these crates
-skip = []
+skip = [
+    { crate = "base16ct@0.2.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "base64@0.22.1", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "bitflags@1.3.2", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "block-buffer@0.10.4", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "const-oid@0.9.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "cpufeatures@0.2.17", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "crypto-bigint@0.5.5", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "crypto-common@0.1.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "curve25519-dalek@4.1.3", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "der@0.7.10", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "digest@0.10.7", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "ecdsa@0.16.9", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "ed25519@2.2.3", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "ed25519-dalek@2.2.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "elliptic-curve@0.13.8", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "ff@0.13.1", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "fiat-crypto@0.2.9", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "generic-array@0.14.9", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "getrandom@0.2.17", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "getrandom@0.3.4", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "granit-parser@0.0.7", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "group@0.13.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "hashbrown@0.14.5", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "hkdf@0.12.4", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "hmac@0.12.1", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "nix@0.26.4", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "num-bigint@0.4.8", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "p256@0.13.2", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "p384@0.13.1", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "pem-rfc7468@0.7.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "pkcs1@0.7.5", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "pkcs8@0.10.2", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "primeorder@0.13.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "r-efi@5.3.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "rand@0.8.8", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "rand@0.9.5", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "rand_chacha@0.3.1", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "rand_core@0.6.4", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "rand_core@0.9.5", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "rfc6979@0.4.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "rsa@0.9.10", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "sec1@0.7.3", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "serde-saphyr@0.0.29", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "sha1@0.10.7", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "sha2@0.10.9", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "signature@2.2.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "spki@0.7.3", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "syn@2.0.119", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "thiserror@1.0.69", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "thiserror-impl@1.0.69", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "tower-http@0.6.11", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "untrusted@0.7.1", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows-sys@0.52.0", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows-sys@0.60.2", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows-targets@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_aarch64_gnullvm@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_aarch64_msvc@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_i686_gnu@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_i686_gnullvm@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_i686_msvc@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_x86_64_gnu@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_x86_64_gnullvm@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+    { crate = "windows_x86_64_msvc@0.52.6", reason = "doublon transitif, version plus ancienne ; revue avant 2027-01-19" },
+]
 
 # Skip tree (ignore entire dependency subtrees)
 skip-tree = []
@@ -134,6 +163,6 @@ skip-tree = []
 # =============================================================================
 [sources]
 unknown-registry = "deny"
-unknown-git = "warn"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []

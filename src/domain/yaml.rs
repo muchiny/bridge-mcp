@@ -68,6 +68,10 @@ fn hardened_options() -> serde_saphyr::Options {
         // does not exist here. Line and column survive, and they are what the
         // operator actually needs.
         with_snippet: false,
+        // serde-saphyr 2.0 emits comment events by default under a small
+        // buffering budget, which refuses a commented config. We never read
+        // comments, so do not capture them.
+        emit_comments: false,
         budget: serde_saphyr::budget! {
             max_reader_input_bytes: Some(MAX_YAML_BYTES),
             max_anchors: MAX_ANCHORS,
@@ -143,6 +147,22 @@ mod tests {
         match out {
             Err(BridgeError::Config(msg)) => assert!(msg.contains("too large")),
             other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_comment_blocks_parse_in_every_position() {
+        // serde-saphyr 2.0 buffers comment events under a budget; a commented
+        // config with a long block before a nested key was refused.
+        let block = "# commentaire\n".repeat(64);
+        let docs = [
+            format!("{block}k: v\n"),
+            format!("outer:\n{block}  k: v\n"),
+            format!("outer:\n  - a\n{block}  - b\n"),
+        ];
+        for doc in docs {
+            let v: serde_json::Value = parse_yaml(&doc).expect("long comment block must parse");
+            assert!(v.is_object());
         }
     }
 
