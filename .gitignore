@@ -43,6 +43,9 @@ config.yaml
 *.lcov
 lcov.info
 coverage/
+# SonarQube Cloud (CI-only outputs; the scanner works in .scannerwork/)
+clippy-report.json
+.scannerwork/
 
 # Fuzzing. fuzz/ is its own Cargo workspace, so its builds land in fuzz/target/,
 # not in the root /target/ above.
