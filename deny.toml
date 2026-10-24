@@ -31,6 +31,14 @@ yanked = "deny"
 # Safe for local use, timing attack requires network observation
 ignore = [
     "RUSTSEC-2023-0071",   # Marvin Attack on RSA — transitive from russh, no upstream fix ; revue avant 2027-01-19
+    # Timing leaks in crypto-bigint 0.5.5 (secret-dependent branches). Only 0.5.5 is
+    # concerned: 0.7.5 -> 0.7.6 (russh) is fixed in Cargo.lock. 0.5.5 comes from
+    # jsonwebtoken 11.1.0 -> p256/p384 0.13, and the 0.5 line has no patch (the fix
+    # starts at 0.7.6). Not reachable: src/mcp/transport/oauth.rs only VERIFIES JWTs
+    # with RSA public keys (DecodingKey::from_rsa_*); EncodingKey exists in tests
+    # only, and p256/p384 never handle a secret integer. Remove when jsonwebtoken
+    # moves to p256/p384 0.14 (crypto-bigint 0.7).
+    "RUSTSEC-2026-0387",   # crypto-bigint 0.5.5 via jsonwebtoken, no patch on 0.5, unreachable (verify-only RSA) ; revue avant 2027-01-24
     # 2026-10-21: the webpki/rustls 0.21/h2 0.3 entries (RUSTSEC-2026-0098, -0099,
     # -0104, -0258, -0346, -0349, -0382) were removed: `aws-sdk-ssm` now builds with
     # `default-features = false` + `default-https-client`, which drops the legacy

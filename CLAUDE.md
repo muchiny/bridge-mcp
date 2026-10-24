@@ -44,7 +44,7 @@ section) live in
 
 ## Known Advisories
 
-1 advisory ignored in `deny.toml` + `.cargo/audit.toml` (keep both in sync). Details
+2 advisories ignored in `deny.toml` + `.cargo/audit.toml` (keep both in sync). Details
 and removal conditions in `.claude/rules/advisories.md`, loaded when you touch those
 files.
 
