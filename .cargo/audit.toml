@@ -9,6 +9,10 @@ ignore = [
     # Severity: 5.9 (medium) - not critical for CLI tool
     # No fixed version available
     "RUSTSEC-2023-0071",
+    # Timing leaks in crypto-bigint 0.5.5, pulled by jsonwebtoken -> p256/p384 0.13
+    # (no patch on the 0.5 line). Unreachable: the bridge only verifies JWTs with RSA
+    # public keys. Same list as deny.toml ; revue avant 2027-01-24
+    "RUSTSEC-2026-0387",
     # 2026-10-21: the webpki/rustls 0.21/h2 0.3 entries were removed — aws-sdk-ssm
     # now builds without the legacy rustls connector. Same list as deny.toml.
 ]
