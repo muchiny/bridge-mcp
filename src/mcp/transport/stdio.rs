@@ -91,7 +91,7 @@ impl SessionReader for StdioSessionReader {
             return match McpServer::parse_incoming(trimmed) {
                 Ok(msg) => Some(Ok(msg)),
                 Err(e) => {
-                    error!(code = e.code, message = %e.message, "Rejecting message");
+                    error!(code = e.code, reason = %e.message, "Rejecting message");
                     Some(Err(e))
                 }
             };
@@ -124,7 +124,7 @@ impl SessionWriter for StdioSessionWriter {
             return Ok(());
         };
 
-        debug!(message = %json_str, "Sending message");
+        debug!(payload = %json_str, "Sending message");
 
         self.stdout.write_all(json_str.as_bytes()).await?;
         self.stdout.write_all(b"\n").await?;

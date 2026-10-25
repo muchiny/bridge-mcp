@@ -849,7 +849,7 @@ async fn handle_post(
     // header-only middleware — but it IS still before dispatch, and before
     // the body is deserialised into typed messages.
     if let Err(e) = check_modern_headers(&headers, &body) {
-        warn!(code = e.code, message = %e.message, "Header validation failed");
+        warn!(code = e.code, reason = %e.message, "Header validation failed");
         return bad_request(body.get("id").cloned(), e);
     }
 

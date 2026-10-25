@@ -144,15 +144,13 @@ impl ToolHandler for SshUploadHandler {
             });
         }
 
-        let metadata = std::fs::metadata(local_path).map_err(|e| BridgeError::FileTransfer {
-            reason: format!("Cannot read file metadata: {e}"),
-        })?;
+        let size = crate::ssh::local_file_len(local_path).await?;
 
         info!(
             host = %args.host,
             local = %args.local_path,
             remote = %args.remote_path,
-            size = metadata.len(),
+            size,
             mode = %mode_str,
             "Uploading file via SFTP"
         );

@@ -18,3 +18,4 @@ pub use sftp::{
     DEFAULT_CHUNK_SIZE, DirectoryTransferResult, RemoteDirEntry, SftpClient, TransferMode,
     TransferOptions, TransferProgress, TransferResult,
 };
+pub(crate) use sftp::{create_parent_dirs, local_file_len};

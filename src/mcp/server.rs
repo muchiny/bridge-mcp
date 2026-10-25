@@ -1961,7 +1961,7 @@ impl McpServer {
                     // already discriminated: `-32700` for malformed JSON,
                     // `-32600` for an array body. Re-deriving it here would
                     // flatten both into a parse error again.
-                    error!(code = e.code, message = %e.message, "Rejecting incoming line");
+                    error!(code = e.code, reason = %e.message, "Rejecting incoming line");
                     let response = JsonRpcResponse::error(None, e);
                     let _ = tx.send(WriterMessage::Response(Box::new(response))).await;
                     continue;
