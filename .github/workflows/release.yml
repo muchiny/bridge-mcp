@@ -35,10 +35,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Compare tag against the crate version
         env:
           TAG: ${{ github.ref_name }}
@@ -61,14 +63,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       # No rust-cache in this workflow: it publishes artifacts, and restoring
       # a branch-writable cache into a publishing pipeline is a
       # cache-poisoning vector (zizmor cache-poisoning). Clean builds only.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest
       - run: cargo nextest run --all-targets --all-features
@@ -86,7 +90,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # cargo-audit reads .cargo/audit.toml and cargo-deny reads deny.toml;
@@ -99,7 +103,7 @@ jobs:
             echo "::error::RUSTSEC ignore lists differ between deny.toml and .cargo/audit.toml"
             exit 1
           fi
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories licenses bans sources
 
@@ -113,12 +117,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-semver-checks
       - name: Run cargo-semver-checks
@@ -161,12 +167,13 @@ jobs:
             archive: tar.gz
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       # Matrix values reach the shell through env rather than `${{ }}`
@@ -180,7 +187,7 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cross
 
@@ -194,13 +201,13 @@ jobs:
         if: matrix.cross
         env:
           TARGET: ${{ matrix.target }}
-        run: cross build --release --features full --target "$TARGET"
+        run: cross build --release --locked --features full --target "$TARGET"
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --features full --target "$TARGET"
+        run: cargo build --release --locked --features full --target "$TARGET"
 
       - name: Package
         env:
@@ -212,7 +219,7 @@ jobs:
           sha256sum "$archive" > "${archive}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
           path: |
@@ -228,12 +235,12 @@ jobs:
       id-token: write # OIDC identity for the build-provenance attestation
       attestations: write # record the provenance attestation on the repo
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true
@@ -241,7 +248,7 @@ jobs:
       - name: List artifacts
         run: ls -lh artifacts/
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-cyclonedx
 
@@ -289,7 +296,7 @@ jobs:
       # packages existed, so `subject-path` matched only the tarballs and every
       # other published file shipped with no provenance at all.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             artifacts/${{ env.BINARY_NAME }}-*.tar.gz
@@ -298,7 +305,7 @@ jobs:
             artifacts/${{ env.BINARY_NAME }}-sbom.cdx.json
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           generate_release_notes: true
           files: artifacts/*
