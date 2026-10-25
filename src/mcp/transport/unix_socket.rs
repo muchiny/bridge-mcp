@@ -104,7 +104,7 @@ impl Transport for UnixSocketTransport {
         self.shutdown.cancel();
         // Best-effort cleanup: remove the socket file. Ignore errors —
         // we're exiting.
-        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = tokio::fs::remove_file(&self.socket_path).await;
     }
 
     /// `accept()` here returns `None` for exactly one reason: the token
@@ -154,7 +154,7 @@ impl SessionReader for UnixSessionReader {
             return match McpServer::parse_incoming(trimmed) {
                 Ok(msg) => Some(Ok(msg)),
                 Err(e) => {
-                    warn!(code = e.code, message = %e.message, line = %trimmed, "Unix session rejected a line");
+                    warn!(code = e.code, reason = %e.message, line = %trimmed, "Unix session rejected a line");
                     Some(Err(e))
                 }
             };
@@ -185,7 +185,7 @@ impl SessionWriter for UnixSessionWriter {
             return Ok(());
         };
 
-        debug!(message = %json_str, "Unix session sending message");
+        debug!(payload = %json_str, "Unix session sending message");
 
         self.writer
             .write_all(json_str.as_bytes())

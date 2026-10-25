@@ -472,11 +472,7 @@ impl SftpClient {
 
         // Determine starting offset for resume mode
         let start_offset = if options.mode == TransferMode::Resume {
-            if local_path.exists() {
-                std::fs::metadata(local_path).map_or(0, |m| m.len())
-            } else {
-                0
-            }
+            tokio::fs::metadata(local_path).await.map_or(0, |m| m.len())
         } else {
             0
         };
@@ -601,7 +597,7 @@ impl SftpClient {
             if let Some(permissions) = remote_metadata.permissions {
                 use std::os::unix::fs::PermissionsExt;
                 let perms = std::fs::Permissions::from_mode(permissions);
-                std::fs::set_permissions(local_path, perms).ok();
+                tokio::fs::set_permissions(local_path, perms).await.ok();
             }
         }
 
@@ -716,20 +712,25 @@ impl SftpClient {
             vec![(local_path.to_path_buf(), remote_path.to_string())];
 
         while let Some((local_dir, remote_dir)) = stack.pop() {
-            let read_dir =
-                std::fs::read_dir(&local_dir).map_err(|e| BridgeError::FileTransfer {
-                    reason: format!("Cannot read local directory {}: {e}", local_dir.display()),
-                })?;
+            let mut read_dir =
+                tokio::fs::read_dir(&local_dir)
+                    .await
+                    .map_err(|e| BridgeError::FileTransfer {
+                        reason: format!("Cannot read local directory {}: {e}", local_dir.display()),
+                    })?;
 
-            for entry_result in read_dir {
-                let entry = match entry_result {
-                    Ok(e) => e,
+            loop {
+                let entry = match read_dir.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => break,
                     Err(e) => {
                         errors.push(format!(
                             "Error reading entry in {}: {e}",
                             local_dir.display()
                         ));
-                        continue;
+                        // A failed `next_entry` is not advanced past: retrying
+                        // it would spin on the same error.
+                        break;
                     }
                 };
 
@@ -746,7 +747,7 @@ impl SftpClient {
 
                 let remote_entry_path = format!("{remote_dir}/{file_name}");
 
-                let file_type = match entry.file_type() {
+                let file_type = match entry.file_type().await {
                     Ok(ft) => ft,
                     Err(e) => {
                         errors.push(format!(
@@ -822,12 +823,14 @@ impl SftpClient {
         let mut errors: Vec<String> = Vec::new();
 
         // Create the root local directory
-        std::fs::create_dir_all(local_path).map_err(|e| BridgeError::FileTransfer {
-            reason: format!(
-                "Cannot create local directory {}: {e}",
-                local_path.display()
-            ),
-        })?;
+        tokio::fs::create_dir_all(local_path)
+            .await
+            .map_err(|e| BridgeError::FileTransfer {
+                reason: format!(
+                    "Cannot create local directory {}: {e}",
+                    local_path.display()
+                ),
+            })?;
         directories_created += 1;
 
         // Stack of (remote_dir, local_dir)
@@ -855,7 +858,7 @@ impl SftpClient {
 
                 if entry.is_dir {
                     // Create local directory and push to stack
-                    if let Err(e) = std::fs::create_dir_all(&local_entry_path) {
+                    if let Err(e) = tokio::fs::create_dir_all(&local_entry_path).await {
                         errors.push(format!(
                             "Cannot create local directory {}: {e}",
                             local_entry_path.display()

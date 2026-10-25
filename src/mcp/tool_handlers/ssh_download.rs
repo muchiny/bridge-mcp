@@ -148,9 +148,11 @@ impl ToolHandler for SshDownloadHandler {
 
         // Create parent directories if needed
         if let Some(parent) = local_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| BridgeError::FileTransfer {
-                reason: format!("Cannot create directory: {e}"),
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| BridgeError::FileTransfer {
+                    reason: format!("Cannot create directory: {e}"),
+                })?;
         }
 
         // Reject symlink targets to prevent symlink-based path traversal attacks

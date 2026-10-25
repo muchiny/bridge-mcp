@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Six `tracing` events no longer carry two `message` fields.** The transports
+  (stdio, Unix socket, HTTP) and the server read loop logged a `message = %…`
+  field next to the event's own message, so one of the two was shadowed. The
+  field is now `reason` on the rejection events and `payload` on the
+  "sending message" debug events. Anything that greps structured logs for
+  `message=` on those lines must follow.
+- **Local file operations in async paths no longer block the runtime.**
+  Transfers (`ssh_upload`, `ssh_download`, SFTP directory sync, the CLI
+  upload/download) and the Unix-socket shutdown use `tokio::fs`. One
+  behaviour shift: a read error while walking a local directory during a
+  directory upload now stops that directory's walk (it is reported in the
+  transfer's error list) instead of skipping the one entry.
+
 ## [4.1.0] - 2026-10-21
 
 Minor release: the Claude Code plugin finally ships its MCP server, and the

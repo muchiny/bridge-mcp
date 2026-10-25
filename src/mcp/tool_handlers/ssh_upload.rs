@@ -84,6 +84,12 @@ impl SshUploadHandler {
     }"#;
 }
 
+fn metadata_error(e: &std::io::Error) -> BridgeError {
+    BridgeError::FileTransfer {
+        reason: format!("Cannot read file metadata: {e}"),
+    }
+}
+
 #[async_trait]
 impl ToolHandler for SshUploadHandler {
     fn name(&self) -> &'static str {
@@ -144,9 +150,9 @@ impl ToolHandler for SshUploadHandler {
             });
         }
 
-        let metadata = std::fs::metadata(local_path).map_err(|e| BridgeError::FileTransfer {
-            reason: format!("Cannot read file metadata: {e}"),
-        })?;
+        let metadata = tokio::fs::metadata(local_path)
+            .await
+            .map_err(|e| metadata_error(&e))?;
 
         info!(
             host = %args.host,
