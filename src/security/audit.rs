@@ -1641,7 +1641,7 @@ impl AuditWriterTask {
             }
             if let Ok(json) = serde_json::to_string(&event) {
                 let line = format!("{json}\n");
-                let line_len = line.len() as u64;
+                let line_len = u64::try_from(line.len()).unwrap_or(u64::MAX);
                 // Clone file handle for spawn_blocking
                 if let Ok(mut file) = self.file.try_clone() {
                     let written = tokio::task::spawn_blocking(move || {
@@ -1789,7 +1789,7 @@ fn rename_with_timestamp(path: &Path, now: DateTime<Utc>) -> std::io::Result<Pat
     let mut suffix: u32 = 1;
     while rotated_path.exists() {
         rotated_path = path.with_file_name(format!("{base_name}.{timestamp}.{suffix}"));
-        suffix += 1;
+        suffix = suffix.saturating_add(1);
     }
 
     std::fs::rename(path, &rotated_path)?;
@@ -1825,9 +1825,13 @@ fn is_own_rotated_archive(name: &str, live_file_name: &str) -> bool {
     // Byte-wise so a multibyte filename can never panic on a slice boundary.
     let timestamp = timestamp.as_bytes();
     let timestamp_ok = timestamp.len() == 15
-        && timestamp[8] == b'_'
-        && timestamp[..8].iter().all(u8::is_ascii_digit)
-        && timestamp[9..].iter().all(u8::is_ascii_digit);
+        && timestamp.get(8) == Some(&b'_')
+        && timestamp
+            .get(..8)
+            .is_some_and(|d| d.iter().all(u8::is_ascii_digit))
+        && timestamp
+            .get(9..)
+            .is_some_and(|d| d.iter().all(u8::is_ascii_digit));
 
     let counter_ok = match counter {
         None => true,
@@ -1880,7 +1884,13 @@ fn cleanup_old_audit_files(
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return;
     };
-    let cutoff = now - chrono::Duration::days(i64::from(retain_days));
+    // A retention so long that the cutoff leaves the representable range
+    // means nothing is old enough to delete.
+    let Some(cutoff) = chrono::Duration::try_days(i64::from(retain_days))
+        .and_then(|retention| now.checked_sub_signed(retention))
+    else {
+        return;
+    };
 
     let entries = match std::fs::read_dir(parent) {
         Ok(entries) => entries,
@@ -1910,7 +1920,7 @@ fn cleanup_old_audit_files(
             let modified: DateTime<Utc> = modified.into();
             if modified < cutoff {
                 match std::fs::remove_file(entry.path()) {
-                    Ok(()) => removed += 1,
+                    Ok(()) => removed = removed.saturating_add(1),
                     Err(e) => warn!(
                         error = %e,
                         archive = %entry.path().display(),

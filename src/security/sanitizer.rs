@@ -564,10 +564,10 @@ impl Sanitizer {
     /// so tier 1 can consult them without evaluating the full set. No operator
     /// pattern means no set: the default configuration pays nothing.
     fn custom_detection_set(regex_patterns: &[String], start: usize) -> CustomSet {
-        if regex_patterns.len() <= start {
+        let Some(custom) = regex_patterns.get(start..).filter(|c| !c.is_empty()) else {
             return CustomSet::Absent;
-        }
-        match RegexSet::new(&regex_patterns[start..]) {
+        };
+        match RegexSet::new(custom) {
             Ok(set) => CustomSet::Built(set),
             Err(e) => {
                 error!(
@@ -601,8 +601,9 @@ impl Sanitizer {
         enabled: bool,
         entropy_detector: EntropyDetector,
     ) -> Self {
-        let mut patterns = Vec::with_capacity(defs.len() + custom.len());
-        let mut regex_patterns = Vec::with_capacity(defs.len() + custom.len());
+        let capacity = defs.len().saturating_add(custom.len());
+        let mut patterns = Vec::with_capacity(capacity);
+        let mut regex_patterns = Vec::with_capacity(capacity);
 
         // Add builtin patterns
         for def in defs {
@@ -1710,7 +1711,7 @@ impl Sanitizer {
                 CustomSet::Built(ref set) => set
                     .matches(text_ref)
                     .into_iter()
-                    .map(|i| i + self.custom_start)
+                    .map(|i| i.saturating_add(self.custom_start))
                     .collect(),
                 CustomSet::Unbuilt => (self.custom_start..self.patterns.len()).collect(),
             };

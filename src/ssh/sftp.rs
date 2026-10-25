@@ -75,7 +75,7 @@ const _: () = {
     assert!(MIN_CHUNK_SIZE <= DEFAULT_CHUNK_SIZE);
     assert!(DEFAULT_CHUNK_SIZE <= MAX_CHUNK_SIZE);
     // A clamped chunk always fits a `usize` allocation, 32-bit targets included.
-    assert!(MAX_CHUNK_SIZE <= u32::MAX as u64);
+    assert!(MAX_CHUNK_SIZE <= 0xFFFF_FFFF);
 };
 
 /// Clamp a caller-supplied chunk size into `MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE`.
@@ -209,6 +209,52 @@ async fn list_local_dir(
     Ok(entries)
 }
 
+/// Buffer length for a (clamped) chunk size.
+///
+/// `MAX_CHUNK_SIZE` is asserted above to fit a `u32`, so the conversion cannot
+/// fail on any supported target; `usize::MAX` is the unreachable fallback.
+fn chunk_len(chunk_size: u64) -> usize {
+    usize::try_from(clamp_chunk_size(chunk_size)).unwrap_or(usize::MAX)
+}
+
+/// `total + n`, saturating: a byte counter must never wrap.
+fn add_len(total: u64, n: usize) -> u64 {
+    total.saturating_add(u64::try_from(n).unwrap_or(u64::MAX))
+}
+
+/// Milliseconds since `start`, saturating at `u64::MAX`.
+fn elapsed_ms(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `u64` to `f64` for display ratios. Rounding above 2^53 is harmless there.
+#[expect(clippy::cast_precision_loss)]
+#[allow(
+    clippy::as_conversions,
+    reason = "display ratio, no lossless u64 -> f64"
+)]
+fn ratio_operand(n: u64) -> f64 {
+    n as f64
+}
+
+/// Progress as a percentage; a zero-length total reads as complete.
+fn percentage(done: u64, total: u64) -> f64 {
+    if total > 0 {
+        (ratio_operand(done) / ratio_operand(total)) * 100.0
+    } else {
+        100.0
+    }
+}
+
+/// Throughput in bytes per second; zero when no time has elapsed.
+fn throughput(bytes: u64, duration_ms: u64) -> f64 {
+    if duration_ms > 0 {
+        (ratio_operand(bytes) / ratio_operand(duration_ms)) * 1000.0
+    } else {
+        0.0
+    }
+}
+
 /// Transfer mode for file operations
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -340,11 +386,7 @@ impl SftpClient {
     ///
     /// # Errors
     /// Returns an error if the transfer fails
-    #[expect(
-        clippy::too_many_lines,
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss
-    )]
+    #[expect(clippy::too_many_lines)]
     pub async fn upload_file<F>(
         &self,
         local_path: &Path,
@@ -446,7 +488,7 @@ impl SftpClient {
                 })?;
         }
 
-        let chunk_size = options.effective_chunk_size() as usize;
+        let chunk_size = chunk_len(options.effective_chunk_size());
         let mut reader = BufReader::with_capacity(chunk_size, local_file);
         let mut buffer = vec![0u8; chunk_size];
         let mut total_written = start_offset;
@@ -476,7 +518,9 @@ impl SftpClient {
                 break;
             }
 
-            let data = &buffer[..n];
+            let data = buffer.get(..n).ok_or_else(|| BridgeError::FileTransfer {
+                reason: "Read returned more bytes than the buffer holds".to_string(),
+            })?;
 
             // Update checksum
             if let Some(ref mut h) = hasher {
@@ -491,18 +535,14 @@ impl SftpClient {
                     reason: format!("Write error: {e}"),
                 })?;
 
-            total_written += n as u64;
+            total_written = add_len(total_written, n);
 
             // Progress callback
             if let Some(ref mut callback) = progress_callback {
                 callback(TransferProgress {
                     bytes_transferred: total_written,
                     total_bytes: file_size,
-                    percentage: if file_size > 0 {
-                        (total_written as f64 / file_size as f64) * 100.0
-                    } else {
-                        100.0
-                    },
+                    percentage: percentage(total_written, file_size),
                 });
             }
         }
@@ -523,13 +563,9 @@ impl SftpClient {
                 reason: format!("Close error: {e}"),
             })?;
 
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let bytes_transferred = total_written - start_offset;
-        let bytes_per_second = if duration_ms > 0 {
-            (bytes_transferred as f64 / duration_ms as f64) * 1000.0
-        } else {
-            0.0
-        };
+        let duration_ms = elapsed_ms(start);
+        let bytes_transferred = total_written.saturating_sub(start_offset);
+        let bytes_per_second = throughput(bytes_transferred, duration_ms);
 
         let checksum = hasher.map(|h| const_hex::encode(h.finalize()));
 
@@ -554,11 +590,7 @@ impl SftpClient {
     ///
     /// # Errors
     /// Returns an error if the transfer fails
-    #[expect(
-        clippy::too_many_lines,
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss
-    )]
+    #[expect(clippy::too_many_lines)]
     pub async fn download_file<F>(
         &self,
         remote_path: &str,
@@ -639,7 +671,7 @@ impl SftpClient {
                 })?,
         };
 
-        let chunk_size = options.effective_chunk_size() as usize;
+        let chunk_size = chunk_len(options.effective_chunk_size());
         let mut writer = BufWriter::with_capacity(chunk_size, local_file);
         let mut buffer = vec![0u8; chunk_size];
         let mut total_read = start_offset;
@@ -667,7 +699,9 @@ impl SftpClient {
                 break;
             }
 
-            let data = &buffer[..n];
+            let data = buffer.get(..n).ok_or_else(|| BridgeError::FileTransfer {
+                reason: "Read returned more bytes than the buffer holds".to_string(),
+            })?;
 
             // Update checksum
             if let Some(ref mut h) = hasher {
@@ -682,18 +716,14 @@ impl SftpClient {
                     reason: format!("Write error: {e}"),
                 })?;
 
-            total_read += n as u64;
+            total_read = add_len(total_read, n);
 
             // Progress callback
             if let Some(ref mut callback) = progress_callback {
                 callback(TransferProgress {
                     bytes_transferred: total_read,
                     total_bytes: file_size,
-                    percentage: if file_size > 0 {
-                        (total_read as f64 / file_size as f64) * 100.0
-                    } else {
-                        100.0
-                    },
+                    percentage: percentage(total_read, file_size),
                 });
             }
         }
@@ -714,13 +744,9 @@ impl SftpClient {
             }
         }
 
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let bytes_transferred = total_read - start_offset;
-        let bytes_per_second = if duration_ms > 0 {
-            (bytes_transferred as f64 / duration_ms as f64) * 1000.0
-        } else {
-            0.0
-        };
+        let duration_ms = elapsed_ms(start);
+        let bytes_transferred = total_read.saturating_sub(start_offset);
+        let bytes_per_second = throughput(bytes_transferred, duration_ms);
 
         let checksum = hasher.map(|h| const_hex::encode(h.finalize()));
 
@@ -802,7 +828,6 @@ impl SftpClient {
     ///
     /// # Errors
     /// Returns an error if the local directory cannot be read or if the transfer fails.
-    #[expect(clippy::cast_possible_truncation)]
     pub async fn upload_directory(
         &self,
         local_path: &Path,
@@ -818,7 +843,7 @@ impl SftpClient {
 
         // Create the root remote directory
         self.mkdir_recursive(remote_path).await?;
-        directories_created += 1;
+        directories_created = directories_created.saturating_add(1);
 
         // Stack of (local_dir, remote_dir)
         let mut stack: Vec<(std::path::PathBuf, String)> =
@@ -837,7 +862,7 @@ impl SftpClient {
                             ));
                             continue;
                         }
-                        directories_created += 1;
+                        directories_created = directories_created.saturating_add(1);
                         stack.push((entry.path, remote_entry_path));
                     }
                     LocalEntryKind::File => {
@@ -852,8 +877,9 @@ impl SftpClient {
                             .await
                         {
                             Ok(result) => {
-                                files_transferred += 1;
-                                bytes_transferred += result.bytes_transferred;
+                                files_transferred = files_transferred.saturating_add(1);
+                                bytes_transferred =
+                                    bytes_transferred.saturating_add(result.bytes_transferred);
                             }
                             Err(e) => {
                                 errors.push(format!(
@@ -868,7 +894,7 @@ impl SftpClient {
             }
         }
 
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let duration_ms = elapsed_ms(start);
 
         Ok(DirectoryTransferResult {
             files_transferred,
@@ -885,7 +911,6 @@ impl SftpClient {
     ///
     /// # Errors
     /// Returns an error if the remote directory cannot be read or if the transfer fails.
-    #[expect(clippy::cast_possible_truncation)]
     pub async fn download_directory(
         &self,
         remote_path: &str,
@@ -903,7 +928,7 @@ impl SftpClient {
         create_local_dir(local_path)
             .await
             .map_err(|reason| BridgeError::FileTransfer { reason })?;
-        directories_created += 1;
+        directories_created = directories_created.saturating_add(1);
 
         // Stack of (remote_dir, local_dir)
         let mut stack: Vec<(String, std::path::PathBuf)> =
@@ -934,7 +959,7 @@ impl SftpClient {
                         errors.push(reason);
                         continue;
                     }
-                    directories_created += 1;
+                    directories_created = directories_created.saturating_add(1);
                     stack.push((entry.path, local_entry_path));
                 } else {
                     let options = TransferOptions::default();
@@ -948,8 +973,9 @@ impl SftpClient {
                         .await
                     {
                         Ok(result) => {
-                            files_transferred += 1;
-                            bytes_transferred += result.bytes_transferred;
+                            files_transferred = files_transferred.saturating_add(1);
+                            bytes_transferred =
+                                bytes_transferred.saturating_add(result.bytes_transferred);
                         }
                         Err(e) => {
                             errors.push(format!("Failed to download {}: {e}", entry.path));
@@ -959,7 +985,7 @@ impl SftpClient {
             }
         }
 
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let duration_ms = elapsed_ms(start);
 
         Ok(DirectoryTransferResult {
             files_transferred,
@@ -980,7 +1006,6 @@ impl SftpClient {
     ///
     /// Returns an error if the remote path contains traversal components or the
     /// SFTP write fails.
-    #[expect(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     pub async fn write_bytes(
         &self,
         data: &[u8],
@@ -1004,18 +1029,15 @@ impl SftpClient {
             .map_err(sftp_error)?;
 
         // Clamped: a zero chunk made this loop spin forever.
-        let chunk = clamp_chunk_size(chunk_size) as usize;
-        let mut offset = 0;
+        let chunk = chunk_len(chunk_size);
 
-        while offset < data.len() {
-            let end = (offset + chunk).min(data.len());
+        for part in data.chunks(chunk) {
             remote_file
-                .write_all(&data[offset..end])
+                .write_all(part)
                 .await
                 .map_err(|e| BridgeError::FileTransfer {
                     reason: format!("Write error: {e}"),
                 })?;
-            offset = end;
         }
 
         remote_file
@@ -1032,13 +1054,9 @@ impl SftpClient {
                 reason: format!("Close error: {e}"),
             })?;
 
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let bytes_transferred = data.len() as u64;
-        let bytes_per_second = if duration_ms > 0 {
-            (bytes_transferred as f64 / duration_ms as f64) * 1000.0
-        } else {
-            0.0
-        };
+        let duration_ms = elapsed_ms(start);
+        let bytes_transferred = add_len(0, data.len());
+        let bytes_per_second = throughput(bytes_transferred, duration_ms);
 
         Ok(TransferResult {
             bytes_transferred,

@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   come before its upload errors in that list, and a directory of a million
   entries holds about 200 MB of paths while it is walked.
 
+### Changed
+
+- **`src/security/` and `src/ssh/sftp.rs` no longer carry panicking indexing,
+  unchecked arithmetic or silent `as` casts** (60 findings of the
+  `indexing_slicing`, `arithmetic_side_effects` and `as_conversions` lints the
+  Sonar job enables). Counters saturate, slices go through `get()` / `chunks()`,
+  conversions use `try_from`. No behaviour change on any reachable input; the
+  inputs that differ are the ones that used to panic or wrap (a retention above
+  ~96 million days now deletes nothing instead of aborting the bridge; a read
+  that returns more bytes than its buffer is a `FileTransfer` error).
+
 ## [4.1.0] - 2026-10-21
 
 Minor release: the Claude Code plugin finally ships its MCP server, and the
