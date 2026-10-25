@@ -20,7 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upload/download) and the Unix-socket shutdown use `tokio::fs`. One
   behaviour shift: a read error while walking a local directory during a
   directory upload now stops that directory's walk (it is reported in the
-  transfer's error list) instead of skipping the one entry.
+  transfer's error list) instead of skipping the one entry. A directory is also
+  now listed in full before its entries are processed, so its listing errors
+  come before its upload errors in that list, and a directory of a million
+  entries holds about 200 MB of paths while it is walked.
 
 ## [4.1.0] - 2026-10-21
 

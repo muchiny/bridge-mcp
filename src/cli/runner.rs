@@ -1394,18 +1394,13 @@ async fn run_upload_in_context(
         });
     }
 
-    let metadata =
-        tokio::fs::metadata(local_path)
-            .await
-            .map_err(|e| BridgeError::FileTransfer {
-                reason: format!("Cannot read file metadata: {e}"),
-            })?;
+    let size = crate::ssh::local_file_len(local_path).await?;
 
     info!(
         host = %host,
         local = %local_path.display(),
         remote = %remote_path,
-        size = metadata.len(),
+        size,
         mode = %mode,
         "Uploading file via SFTP"
     );
@@ -1600,13 +1595,7 @@ async fn run_download_in_context(
     let local_path = Path::new(&expanded_path);
 
     // Create parent directories if needed
-    if let Some(parent) = local_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| BridgeError::FileTransfer {
-                reason: format!("Cannot create directory: {e}"),
-            })?;
-    }
+    crate::ssh::create_parent_dirs(local_path).await?;
 
     info!(
         host = %host,

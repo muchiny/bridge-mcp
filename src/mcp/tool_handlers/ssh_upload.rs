@@ -84,12 +84,6 @@ impl SshUploadHandler {
     }"#;
 }
 
-fn metadata_error(e: &std::io::Error) -> BridgeError {
-    BridgeError::FileTransfer {
-        reason: format!("Cannot read file metadata: {e}"),
-    }
-}
-
 #[async_trait]
 impl ToolHandler for SshUploadHandler {
     fn name(&self) -> &'static str {
@@ -150,15 +144,13 @@ impl ToolHandler for SshUploadHandler {
             });
         }
 
-        let metadata = tokio::fs::metadata(local_path)
-            .await
-            .map_err(|e| metadata_error(&e))?;
+        let size = crate::ssh::local_file_len(local_path).await?;
 
         info!(
             host = %args.host,
             local = %args.local_path,
             remote = %args.remote_path,
-            size = metadata.len(),
+            size,
             mode = %mode_str,
             "Uploading file via SFTP"
         );

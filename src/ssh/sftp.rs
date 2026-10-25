@@ -94,6 +94,121 @@ pub const fn clamp_chunk_size(chunk_size: u64) -> u64 {
     }
 }
 
+/// Size of a local file about to be uploaded.
+///
+/// # Errors
+/// Returns a [`BridgeError::FileTransfer`] when the metadata cannot be read.
+pub(crate) async fn local_file_len(path: &Path) -> Result<u64> {
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .map_err(|e| BridgeError::FileTransfer {
+            reason: format!("Cannot read file metadata: {e}"),
+        })
+}
+
+/// Create the parent directories of a local download target.
+///
+/// # Errors
+/// Returns a [`BridgeError::FileTransfer`] when they cannot be created.
+pub(crate) async fn create_parent_dirs(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| BridgeError::FileTransfer {
+                reason: format!("Cannot create directory: {e}"),
+            })?;
+    }
+    Ok(())
+}
+
+/// Create a local directory; the error is the message to report.
+async fn create_local_dir(path: &Path) -> std::result::Result<(), String> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|e| format!("Cannot create local directory {}: {e}", path.display()))
+}
+
+/// Bytes already on disk for a resumed download; zero when absent or unreadable.
+async fn local_resume_offset(path: &Path) -> u64 {
+    tokio::fs::metadata(path).await.map_or(0, |m| m.len())
+}
+
+/// Restore the remote permission bits on a downloaded file (best effort).
+#[cfg(unix)]
+async fn apply_local_permissions(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .await
+        .ok();
+}
+
+/// What a local directory entry is, for the upload walk. A symlink is neither:
+/// `DirEntry::file_type` does not follow it, so it is never uploaded.
+#[derive(Debug, PartialEq, Eq)]
+enum LocalEntryKind {
+    Dir,
+    File,
+    Other,
+}
+
+/// One entry of a local directory.
+#[derive(Debug)]
+struct LocalEntry {
+    path: std::path::PathBuf,
+    name: String,
+    kind: LocalEntryKind,
+}
+
+/// List `dir`, skipping entries whose path contains one of the `exclude`
+/// patterns. A per-entry failure is appended to `errors`; a failing directory
+/// iteration ends the listing (a failed `next_entry` is not advanced past, so
+/// retrying it would spin on the same error).
+async fn list_local_dir(
+    dir: &Path,
+    exclude: &[String],
+    errors: &mut Vec<String>,
+) -> Result<Vec<LocalEntry>> {
+    let mut read_dir = tokio::fs::read_dir(dir)
+        .await
+        .map_err(|e| BridgeError::FileTransfer {
+            reason: format!("Cannot read local directory {}: {e}", dir.display()),
+        })?;
+
+    let mut entries = Vec::new();
+    loop {
+        let entry = match read_dir.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(e) => {
+                errors.push(format!("Error reading entry in {}: {e}", dir.display()));
+                break;
+            }
+        };
+
+        let path = entry.path();
+        if exclude
+            .iter()
+            .any(|pat| path.to_string_lossy().contains(pat.as_str()))
+        {
+            continue;
+        }
+
+        let kind = match entry.file_type().await {
+            Ok(ft) if ft.is_dir() => LocalEntryKind::Dir,
+            Ok(ft) if ft.is_file() => LocalEntryKind::File,
+            Ok(_) => LocalEntryKind::Other,
+            Err(e) => {
+                errors.push(format!("Cannot read file type for {}: {e}", path.display()));
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        entries.push(LocalEntry { path, name, kind });
+    }
+    Ok(entries)
+}
+
 /// Transfer mode for file operations
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -472,7 +587,7 @@ impl SftpClient {
 
         // Determine starting offset for resume mode
         let start_offset = if options.mode == TransferMode::Resume {
-            tokio::fs::metadata(local_path).await.map_or(0, |m| m.len())
+            local_resume_offset(local_path).await
         } else {
             0
         };
@@ -595,9 +710,7 @@ impl SftpClient {
         if options.preserve_permissions {
             #[cfg(unix)]
             if let Some(permissions) = remote_metadata.permissions {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(permissions);
-                tokio::fs::set_permissions(local_path, perms).await.ok();
+                apply_local_permissions(local_path, permissions).await;
             }
         }
 
@@ -712,81 +825,45 @@ impl SftpClient {
             vec![(local_path.to_path_buf(), remote_path.to_string())];
 
         while let Some((local_dir, remote_dir)) = stack.pop() {
-            let mut read_dir =
-                tokio::fs::read_dir(&local_dir)
-                    .await
-                    .map_err(|e| BridgeError::FileTransfer {
-                        reason: format!("Cannot read local directory {}: {e}", local_dir.display()),
-                    })?;
+            for entry in list_local_dir(&local_dir, exclude, &mut errors).await? {
+                let remote_entry_path = format!("{remote_dir}/{}", entry.name);
 
-            loop {
-                let entry = match read_dir.next_entry().await {
-                    Ok(Some(e)) => e,
-                    Ok(None) => break,
-                    Err(e) => {
-                        errors.push(format!(
-                            "Error reading entry in {}: {e}",
-                            local_dir.display()
-                        ));
-                        // A failed `next_entry` is not advanced past: retrying
-                        // it would spin on the same error.
-                        break;
-                    }
-                };
-
-                let entry_path = entry.path();
-                let file_name = entry.file_name().to_string_lossy().to_string();
-
-                // Check exclude patterns (simple contains check)
-                if exclude
-                    .iter()
-                    .any(|pat| entry_path.to_string_lossy().contains(pat.as_str()))
-                {
-                    continue;
-                }
-
-                let remote_entry_path = format!("{remote_dir}/{file_name}");
-
-                let file_type = match entry.file_type().await {
-                    Ok(ft) => ft,
-                    Err(e) => {
-                        errors.push(format!(
-                            "Cannot read file type for {}: {e}",
-                            entry_path.display()
-                        ));
-                        continue;
-                    }
-                };
-
-                if file_type.is_dir() {
-                    // Create remote directory and push to stack
-                    if let Err(e) = self.mkdir_recursive(&remote_entry_path).await {
-                        errors.push(format!(
-                            "Cannot create remote directory {remote_entry_path}: {e}"
-                        ));
-                        continue;
-                    }
-                    directories_created += 1;
-                    stack.push((entry_path, remote_entry_path));
-                } else if file_type.is_file() {
-                    let options = TransferOptions::default();
-                    match self
-                        .upload_file::<fn(TransferProgress)>(
-                            &entry_path,
-                            &remote_entry_path,
-                            &options,
-                            None,
-                        )
-                        .await
-                    {
-                        Ok(result) => {
-                            files_transferred += 1;
-                            bytes_transferred += result.bytes_transferred;
+                match entry.kind {
+                    LocalEntryKind::Dir => {
+                        // Create remote directory and push to stack
+                        if let Err(e) = self.mkdir_recursive(&remote_entry_path).await {
+                            errors.push(format!(
+                                "Cannot create remote directory {remote_entry_path}: {e}"
+                            ));
+                            continue;
                         }
-                        Err(e) => {
-                            errors.push(format!("Failed to upload {}: {e}", entry_path.display()));
+                        directories_created += 1;
+                        stack.push((entry.path, remote_entry_path));
+                    }
+                    LocalEntryKind::File => {
+                        let options = TransferOptions::default();
+                        match self
+                            .upload_file::<fn(TransferProgress)>(
+                                &entry.path,
+                                &remote_entry_path,
+                                &options,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(result) => {
+                                files_transferred += 1;
+                                bytes_transferred += result.bytes_transferred;
+                            }
+                            Err(e) => {
+                                errors.push(format!(
+                                    "Failed to upload {}: {e}",
+                                    entry.path.display()
+                                ));
+                            }
                         }
                     }
+                    LocalEntryKind::Other => {}
                 }
             }
         }
@@ -823,14 +900,9 @@ impl SftpClient {
         let mut errors: Vec<String> = Vec::new();
 
         // Create the root local directory
-        tokio::fs::create_dir_all(local_path)
+        create_local_dir(local_path)
             .await
-            .map_err(|e| BridgeError::FileTransfer {
-                reason: format!(
-                    "Cannot create local directory {}: {e}",
-                    local_path.display()
-                ),
-            })?;
+            .map_err(|reason| BridgeError::FileTransfer { reason })?;
         directories_created += 1;
 
         // Stack of (remote_dir, local_dir)
@@ -858,11 +930,8 @@ impl SftpClient {
 
                 if entry.is_dir {
                     // Create local directory and push to stack
-                    if let Err(e) = tokio::fs::create_dir_all(&local_entry_path).await {
-                        errors.push(format!(
-                            "Cannot create local directory {}: {e}",
-                            local_entry_path.display()
-                        ));
+                    if let Err(reason) = create_local_dir(&local_entry_path).await {
+                        errors.push(reason);
                         continue;
                     }
                     directories_created += 1;
@@ -2034,5 +2103,198 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- local filesystem helpers (no SFTP session needed) ----
+
+    #[tokio::test]
+    async fn local_file_len_reports_the_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.bin");
+        std::fs::write(&file, b"12345").unwrap();
+        assert_eq!(local_file_len(&file).await.unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn local_file_len_of_a_missing_file_is_a_transfer_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = local_file_len(&dir.path().join("absent"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::FileTransfer { reason } if reason.starts_with("Cannot read file metadata: ")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_parent_dirs_creates_the_missing_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a/b/c/file.txt");
+        create_parent_dirs(&target).await.unwrap();
+        assert!(dir.path().join("a/b/c").is_dir());
+        assert!(!target.exists(), "only the parents are created");
+    }
+
+    #[tokio::test]
+    async fn create_parent_dirs_fails_when_a_parent_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let err = create_parent_dirs(&blocker.join("sub/file.txt"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::FileTransfer { reason } if reason.starts_with("Cannot create directory: ")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_local_dir_creates_nested_and_reports_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("x/y");
+        create_local_dir(&nested).await.unwrap();
+        assert!(nested.is_dir());
+
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let reason = create_local_dir(&blocker.join("sub")).await.unwrap_err();
+        assert!(
+            reason.starts_with("Cannot create local directory ") && reason.contains("blocker"),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_resume_offset_is_the_file_size_or_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("partial");
+        std::fs::write(&file, vec![0u8; 42]).unwrap();
+        assert_eq!(local_resume_offset(&file).await, 42);
+        assert_eq!(local_resume_offset(&dir.path().join("absent")).await, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_local_permissions_sets_the_mode_and_tolerates_a_missing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        apply_local_permissions(&file, 0o640).await;
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+        // Best effort: a vanished file is not an error.
+        apply_local_permissions(&dir.path().join("absent"), 0o600).await;
+    }
+
+    fn names(entries: &[LocalEntry]) -> Vec<String> {
+        let mut names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn list_local_dir_classifies_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut errors = Vec::new();
+
+        let entries = list_local_dir(dir.path(), &[], &mut errors).await.unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(names(&entries), ["a.txt", "sub"]);
+        let kind_of = |name: &str| &entries.iter().find(|e| e.name == name).unwrap().kind;
+        assert_eq!(kind_of("a.txt"), &LocalEntryKind::File);
+        assert_eq!(kind_of("sub"), &LocalEntryKind::Dir);
+        assert!(
+            entries.iter().all(|e| e.path.starts_with(dir.path())),
+            "paths are rooted in the listed directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_local_dir_skips_entries_matching_an_exclude_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.txt"), b"k").unwrap();
+        std::fs::write(dir.path().join("drop.log"), b"d").unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        let mut errors = Vec::new();
+        let exclude = vec![".log".to_string(), "node_modules".to_string()];
+
+        let entries = list_local_dir(dir.path(), &exclude, &mut errors)
+            .await
+            .unwrap();
+
+        assert_eq!(names(&entries), ["keep.txt"]);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_local_dir_never_follows_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"s").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("to_dir")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("to_file"))
+            .unwrap();
+        let mut errors = Vec::new();
+
+        let entries = list_local_dir(dir.path(), &[], &mut errors).await.unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries.iter().all(|e| e.kind == LocalEntryKind::Other),
+            "a symlink is neither uploaded nor descended into: {entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_local_dir_of_a_missing_directory_is_a_transfer_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut errors = Vec::new();
+        let err = list_local_dir(&dir.path().join("absent"), &[], &mut errors)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::FileTransfer { reason } if reason.starts_with("Cannot read local directory ")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_local_dir_matches_exclude_patterns_against_the_full_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("vendored");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(parent.join("a.txt"), b"a").unwrap();
+        std::fs::write(parent.join("b.txt"), b"b").unwrap();
+        let mut errors = Vec::new();
+
+        // The pattern names the directory being listed, not the entries: the
+        // old walk tested `entry.path()`, so every entry below it is excluded.
+        let entries = list_local_dir(&parent, &["vendored".to_string()], &mut errors)
+            .await
+            .unwrap();
+
+        assert!(entries.is_empty(), "{entries:?}");
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_local_dir_treats_a_dangling_symlink_as_other() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join("dangling")).unwrap();
+        let mut errors = Vec::new();
+
+        let entries = list_local_dir(dir.path(), &[], &mut errors).await.unwrap();
+
+        assert_eq!(names(&entries), ["dangling"]);
+        assert_eq!(entries[0].kind, LocalEntryKind::Other);
+        assert!(errors.is_empty(), "{errors:?}");
     }
 }
