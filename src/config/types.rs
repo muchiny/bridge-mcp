@@ -470,7 +470,7 @@ pub enum ShellType {
     Posix,
     /// Windows `cmd.exe` -- caret escaping, double-quote wrapping
     Cmd,
-    /// `PowerShell` (`pwsh` / `powershell.exe`) -- single-quote with doubling
+    /// `PowerShell` (`pwsh` / `powershell.exe`) -- single-quoted, every PowerShell single-quote character doubled
     #[serde(alias = "pwsh")]
     PowerShell,
 }

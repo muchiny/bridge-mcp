@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot check: X.509 v1/v2, RSA keys under 2048 or over 8192 bits, P-521 —
   re-issue such a certificate (`New-SelfSignedCertificate` makes X.509 v3
   RSA-2048).
+- **PowerShell quoting covers every single-quote character PowerShell
+  recognises.** Values passed to the Windows tools are wrapped in `'…'` with
+  U+0027, U+2018, U+2019, U+201A and U+201B each doubled, as PowerShell's own
+  `CodeGeneration.EscapeSingleQuotedStringContent` does. A value holding none
+  of them is sent unchanged.
 
 ### Fixed
 

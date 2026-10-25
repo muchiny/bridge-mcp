@@ -9,7 +9,9 @@ use crate::config::ShellType;
 ///
 /// - **Posix**: wraps in single quotes, escapes internal `'` with `'\''`.
 /// - **Cmd**: wraps in double quotes, escapes `& | < > ^` with caret `^`.
-/// - **`PowerShell`**: wraps in single quotes, doubles internal `'`.
+/// - **`PowerShell`**: wraps in `'`; each of U+0027, U+2018, U+2019, U+201A and
+///   U+201B is doubled, as PowerShell's `CodeGeneration.EscapeSingleQuotedStringContent`
+///   does (any of the five ends a verbatim string).
 ///
 /// # Examples
 ///
@@ -37,8 +39,41 @@ pub fn escape(s: &str, shell: ShellType) -> String {
                 .replace('"', "^\"");
             format!("\"{escaped}\"")
         }
-        ShellType::PowerShell => format!("'{}'", s.replace('\'', "''")),
+        ShellType::PowerShell => format!("'{}'", escape_ps_single_quoted_content(s)),
     }
+}
+
+/// The single-quote characters of the Windows PowerShell Language
+/// Specification 3.0, section 2.3.5.2. Any of them opens or closes a verbatim
+/// string.
+pub const PS_SINGLE_QUOTES: [char; 5] =
+    ['\u{0027}', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+
+/// Escape text for the inside of a `PowerShell` verbatim (single-quoted)
+/// string, without adding the outer quotes.
+///
+/// Every character of `s` is emitted, and a second time when it is one of
+/// [`PS_SINGLE_QUOTES`]. This is what
+/// `CodeGeneration.EscapeSingleQuotedStringContent` does: U+201C to U+201E
+/// are left alone.
+///
+/// # Examples
+///
+/// ```
+/// use bridge_mcp::domain::use_cases::shell::escape_ps_single_quoted_content;
+///
+/// assert_eq!(escape_ps_single_quoted_content("it\u{2019}s"), "it\u{2019}\u{2019}s");
+/// ```
+#[must_use]
+pub fn escape_ps_single_quoted_content(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        out.push(c);
+        if PS_SINGLE_QUOTES.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Build a "change directory then run command" one-liner.
@@ -184,6 +219,93 @@ mod tests {
     #[test]
     fn test_powershell_escape_with_single_quote() {
         assert_eq!(escape("it's", ShellType::PowerShell), "'it''s'");
+    }
+
+    #[test]
+    fn ps_single_quotes_are_the_five_of_the_grammar() {
+        assert_eq!(
+            PS_SINGLE_QUOTES,
+            ['\u{0027}', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}']
+        );
+    }
+
+    #[test]
+    fn powershell_escape_doubles_every_single_quote_character() {
+        for q in PS_SINGLE_QUOTES {
+            assert_eq!(
+                escape(&format!("a{q}b"), ShellType::PowerShell),
+                format!("'a{q}{q}b'"),
+                "U+{:04X}",
+                u32::from(q)
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_escape_mixed_quotes_at_both_ends() {
+        assert_eq!(
+            escape("'\u{2019}x\u{2018}\u{201A}\u{201B}'", ShellType::PowerShell),
+            "'''\u{2019}\u{2019}x\u{2018}\u{2018}\u{201A}\u{201A}\u{201B}\u{201B}'''"
+        );
+    }
+
+    #[test]
+    fn powershell_escape_leaves_double_quote_characters_alone() {
+        let s = "a\"\u{201C}\u{201D}\u{201E}b";
+        assert_eq!(escape(s, ShellType::PowerShell), format!("'{s}'"));
+    }
+
+    #[test]
+    fn powershell_escape_hostile_value_stays_one_literal() {
+        assert_eq!(
+            escape(
+                "a\u{2019}; Write-Output pwned; \u{2019}",
+                ShellType::PowerShell
+            ),
+            "'a\u{2019}\u{2019}; Write-Output pwned; \u{2019}\u{2019}'"
+        );
+    }
+
+    #[test]
+    fn powershell_escape_edge_values() {
+        assert_eq!(escape("", ShellType::PowerShell), "''");
+        assert_eq!(escape("a'", ShellType::PowerShell), "'a'''");
+        assert_eq!(
+            escape("\u{201B}\u{201B}\u{201B}", ShellType::PowerShell),
+            "'\u{201B}\u{201B}\u{201B}\u{201B}\u{201B}\u{201B}'"
+        );
+        assert_eq!(
+            escape("\u{2018}", ShellType::PowerShell),
+            "'\u{2018}\u{2018}'"
+        );
+        assert_eq!(
+            escape("\u{201A}", ShellType::PowerShell),
+            "'\u{201A}\u{201A}'"
+        );
+        assert_eq!(
+            escape("\u{201B}", ShellType::PowerShell),
+            "'\u{201B}\u{201B}'"
+        );
+    }
+
+    #[test]
+    fn powershell_escape_keeps_other_characters_as_they_are() {
+        assert_eq!(escape("a`b", ShellType::PowerShell), "'a`b'");
+        assert_eq!(escape("a\nb", ShellType::PowerShell), "'a\nb'");
+        assert_eq!(escape("\u{1F600}", ShellType::PowerShell), "'\u{1F600}'");
+        assert_eq!(
+            escape("\u{1F600}\u{2019}", ShellType::PowerShell),
+            "'\u{1F600}\u{2019}\u{2019}'"
+        );
+    }
+
+    #[test]
+    fn escape_ps_single_quoted_content_adds_no_outer_quotes() {
+        assert_eq!(
+            escape_ps_single_quoted_content("it\u{2019}s"),
+            "it\u{2019}\u{2019}s"
+        );
+        assert_eq!(escape_ps_single_quoted_content(""), "");
     }
 
     // ===== cd_and_run =====

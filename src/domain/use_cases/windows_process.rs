@@ -91,6 +91,14 @@ impl WindowsProcessCommandBuilder {
 mod tests {
     use super::*;
 
+    #[test]
+    fn by_name_keeps_a_unicode_quote_inside_the_literal() {
+        assert_eq!(
+            WindowsProcessCommandBuilder::by_name("a\u{2019}; Write-Output pwned; \u{2019}"),
+            "Get-Process -Name 'a\u{2019}\u{2019}; Write-Output pwned; \u{2019}\u{2019}'"
+        );
+    }
+
     // ── list ────────────────────────────────────────────────────────
 
     #[test]

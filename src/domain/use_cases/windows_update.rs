@@ -127,6 +127,16 @@ impl WindowsUpdateCommandBuilder {
 mod tests {
     use super::*;
 
+    #[test]
+    fn search_keeps_a_unicode_quote_inside_the_literal() {
+        assert_eq!(
+            WindowsUpdateCommandBuilder::build_search_command(
+                "KB\u{2019}; Write-Output pwned; \u{2019}"
+            ),
+            "Get-WindowsUpdate -Title '.*KB\u{2019}\u{2019}; Write-Output pwned; \u{2019}\u{2019}.*' | Select-Object KB,Title,Size | Format-Table -AutoSize"
+        );
+    }
+
     // ── validate_kb_id ──────────────────────────────────────────────
 
     #[test]

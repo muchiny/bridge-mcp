@@ -407,6 +407,14 @@ mod shape_tests {
 // PowerShell : it's  ->  'it''s'
 // ```
 //
+// PowerShell has five single-quote characters, not one: U+0027, U+2018,
+// U+2019, U+201A and U+201B each open and close a verbatim string, and a
+// pair of them (any two of the five) stands for the SECOND character of the
+// pair. It also has four double-quote characters: U+0022, U+201C, U+201D and
+// U+201E. The sets are spelled out here (`PS_SQ`, `PS_DQ`) and deliberately
+// not imported from the crate under test, so this oracle stays independent of
+// the code it checks.
+//
 // Handing the second to [`shell_words`] yields `["its"]` — it reads `'it'` as
 // a finished word and `'s'` as a continuation, silently dropping the
 // apostrophe. So the POSIX oracle would report "did not survive as one word"
@@ -420,15 +428,46 @@ mod shape_tests {
 // their behaviour one refactor away from the Windows rules, and nothing in the
 // type system would notice.
 
+/// The single-quote characters of the `PowerShell` grammar.
+const PS_SQ: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+
+/// The double-quote characters of the `PowerShell` grammar.
+const PS_DQ: [char; 4] = ['"', '\u{201C}', '\u{201D}', '\u{201E}'];
+
+/// Read the body of a verbatim string whose opening quote was just consumed.
+///
+/// A single-quote character followed by another one is one literal character,
+/// the second of the two; a lone one closes the string. Returns `false` when
+/// the input ends first.
+fn read_verbatim(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, cur: &mut String) -> bool {
+    loop {
+        match chars.next() {
+            Some(q) if PS_SQ.contains(&q) => {
+                if let Some(&next) = chars.peek().filter(|n| PS_SQ.contains(n)) {
+                    chars.next();
+                    cur.push(next);
+                } else {
+                    return true;
+                }
+            }
+            Some(other) => cur.push(other),
+            None => return false,
+        }
+    }
+}
+
 /// Split a `PowerShell` command into words, or `None` when a control operator
 /// appears outside quotes.
 ///
 /// The mirror of [`shell_words`] for `pwsh`. Differences from POSIX, all of
 /// them consequences of PowerShell's own grammar rather than choices:
 ///
-/// * inside single quotes, `''` is a literal quote — there is no backslash
-///   escape at all, and a backslash is an ordinary character (which is what
-///   makes `'C:\Windows'` work);
+/// * any of the five single-quote characters opens a verbatim string; inside
+///   it a pair of them is one literal character (the second of the two), a
+///   lone one closes it, there is no backslash escape at all, and a backslash
+///   is an ordinary character (which is what makes `'C:\Windows'` work);
+/// * any of the four double-quote characters opens and closes an expandable
+///   string;
 /// * the escape character outside and inside double quotes is the BACKTICK,
 ///   not the backslash;
 /// * `@` and `,` are operators (`@{...}`, `@(...)`, and the comma that builds
@@ -451,30 +490,19 @@ pub fn powershell_words(input: &str) -> Option<Vec<String>> {
             // Control operators and expansions: not a plain word list.
             ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '(' | ')' | '{' | '}' | '@' | ','
             | '$' => return None,
-            // Single quotes: everything literal, `''` is one quote.
-            '\'' => {
+            // Single quotes: everything literal, a pair is its second character.
+            q if PS_SQ.contains(&q) => {
                 has_word = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => {
-                            if chars.peek() == Some(&'\'') {
-                                chars.next();
-                                cur.push('\'');
-                            } else {
-                                break;
-                            }
-                        }
-                        None => return None,
-                        Some(q) => cur.push(q),
-                    }
+                if !read_verbatim(&mut chars, &mut cur) {
+                    return None;
                 }
             }
             // Double quotes: expansions are syntax, backtick escapes.
-            '"' => {
+            q if PS_DQ.contains(&q) => {
                 has_word = true;
                 loop {
                     match chars.next() {
-                        Some('"') => break,
+                        Some(e) if PS_DQ.contains(&e) => break,
                         Some('$') => return None,
                         Some('`') => match chars.next() {
                             Some(e) => cur.push(e),
@@ -528,28 +556,17 @@ pub fn powershell_shape(command: &str) -> Option<ShellShape> {
 
     while let Some(c) = chars.next() {
         match c {
-            '\'' => {
+            q if PS_SQ.contains(&q) => {
                 in_literal = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => {
-                            if chars.peek() == Some(&'\'') {
-                                chars.next();
-                                cur.push('\'');
-                            } else {
-                                break;
-                            }
-                        }
-                        None => return None,
-                        Some(q) => cur.push(q),
-                    }
+                if !read_verbatim(&mut chars, &mut cur) {
+                    return None;
                 }
             }
-            '"' => {
+            q if PS_DQ.contains(&q) => {
                 in_literal = true;
                 loop {
                     match chars.next() {
-                        Some('"') => break,
+                        Some(e) if PS_DQ.contains(&e) => break,
                         // An expansion inside double quotes is syntax.
                         Some('$') => {
                             flush!();
@@ -763,6 +780,55 @@ mod powershell_tests {
             powershell_words(r"'C:\Windows\Temp'").as_deref(),
             Some(&[r"C:\Windows\Temp".to_string()][..])
         );
+    }
+
+    #[test]
+    fn every_single_quote_character_opens_and_closes() {
+        assert_eq!(
+            powershell_words("\u{2019}abc'").as_deref(),
+            Some(&["abc".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn a_pair_of_quote_characters_is_its_second() {
+        assert_eq!(
+            powershell_words("'a\u{2019}'b'").as_deref(),
+            Some(&["a'b".to_string()][..])
+        );
+        assert_eq!(
+            powershell_words("'a'\u{2019}b'").as_deref(),
+            Some(&["a\u{2019}b".to_string()][..])
+        );
+        assert_eq!(
+            powershell_words("'a\u{2019}\u{2019}b'").as_deref(),
+            Some(&["a\u{2019}b".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn an_unpaired_unicode_quote_ends_the_literal() {
+        assert!(powershell_words("Get-Process -Name 'a\u{2019}; Write-Output x; \u{2019}'").is_none());
+    }
+
+    #[test]
+    fn unicode_double_quotes_are_expandable_strings() {
+        assert_eq!(
+            powershell_words("\u{201C}a\u{201D}").as_deref(),
+            Some(&["a".to_string()][..])
+        );
+        assert!(powershell_words("\u{201C}$x\u{201D}").is_none());
+    }
+
+    #[test]
+    fn the_shape_scanner_reads_the_same_quotes() {
+        let benign = powershell_shape("Get-Process -Name 'ab'").expect("scannable");
+        let doubled = powershell_shape("Get-Process -Name 'a\u{2019}\u{2019}b'").expect("scannable");
+        assert_eq!(benign.skeleton, doubled.skeleton);
+        assert_eq!(doubled.literals.last().map(String::as_str), Some("a\u{2019}b"));
+        let split = powershell_shape("Get-Process -Name 'a\u{2019}; Write-Output x; \u{2019}'")
+            .expect("scannable");
+        assert_ne!(benign.skeleton, split.skeleton);
     }
 
     #[test]
