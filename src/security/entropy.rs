@@ -86,17 +86,17 @@ impl EntropyDetector {
     /// inert; it only binds the opt-in hex path, where the threshold (e.g.
     /// 3.1, floor about 8.6) is low enough for 16 to be the real floor.
     #[must_use]
-    #[expect(clippy::cast_precision_loss)]
     pub fn shannon_entropy(s: &str) -> f64 {
         if s.is_empty() {
             return 0.0;
         }
 
-        let len = s.len() as f64;
+        let len = f64::from(u32::try_from(s.len()).unwrap_or(u32::MAX));
         let mut freq: HashMap<u8, u32> = HashMap::new();
 
         for &byte in s.as_bytes() {
-            *freq.entry(byte).or_insert(0) += 1;
+            let count = freq.entry(byte).or_insert(0_u32);
+            *count = count.saturating_add(1);
         }
 
         freq.values().fold(0.0_f64, |entropy, &count| {
@@ -122,8 +122,9 @@ impl EntropyDetector {
             if self.should_redact(token) {
                 out.push_str(&text[copied_up_to..start]);
                 out.push_str(ENTROPY_REDACTED);
-                let token_end = start + token.len();
-                copied_up_to = token_end + Self::base64_padding_after(text, token_end, token);
+                let token_end = start.saturating_add(token.len());
+                copied_up_to =
+                    token_end.saturating_add(Self::base64_padding_after(text, token_end, token));
             }
         }
         out.push_str(&text[copied_up_to..]);
@@ -193,7 +194,7 @@ impl EntropyDetector {
         let base64_shaped = token
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
-        if !base64_shaped || !(token.len() + run).is_multiple_of(4) {
+        if !base64_shaped || !token.len().saturating_add(run).is_multiple_of(4) {
             return 0;
         }
         let after_run = rest[run..].chars().next();

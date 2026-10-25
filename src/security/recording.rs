@@ -208,7 +208,7 @@ impl SessionRecorder {
         writeln!(session.file, "{event_json}")
             .map_err(|e| format!("Failed to write event: {e}"))?;
 
-        session.event_count += 1;
+        session.event_count = session.event_count.saturating_add(1);
         Ok(())
     }
 
@@ -319,12 +319,12 @@ impl SessionRecorder {
             let arr: Vec<serde_json::Value> =
                 serde_json::from_str(&line).map_err(|e| format!("Invalid event line: {e}"))?;
 
-            if arr.len() >= 3 {
+            if let [time, event_type, data, rest @ ..] = arr.as_slice() {
                 events.push(RecordingEvent {
-                    time: arr[0].as_f64().unwrap_or(0.0),
-                    event_type: arr[1].as_str().unwrap_or("o").to_string(),
-                    data: arr[2].as_str().unwrap_or("").to_string(),
-                    hash: arr.get(3).and_then(|v| v.as_str()).map(String::from),
+                    time: time.as_f64().unwrap_or(0.0),
+                    event_type: event_type.as_str().unwrap_or("o").to_string(),
+                    data: data.as_str().unwrap_or("").to_string(),
+                    hash: rest.first().and_then(|v| v.as_str()).map(String::from),
                 });
             }
         }
@@ -346,7 +346,7 @@ impl SessionRecorder {
         }
 
         // Check if hash chain is present
-        if events[0].hash.is_none() {
+        if events.first().is_some_and(|first| first.hash.is_none()) {
             return Ok(VerifyResult {
                 valid: true,
                 total_events: events.len(),
@@ -356,7 +356,7 @@ impl SessionRecorder {
         }
 
         let mut last_hash = Self::compute_hash(key, "genesis", "");
-        let mut verified = 0;
+        let mut verified: usize = 0;
 
         for (i, event) in events.iter().enumerate() {
             let event_data = format!("{:.6}:{}:{}", event.time, event.event_type, event.data);
@@ -365,7 +365,7 @@ impl SessionRecorder {
             match &event.hash {
                 Some(h) if h == &expected_hash => {
                     last_hash = expected_hash;
-                    verified += 1;
+                    verified = verified.saturating_add(1);
                 }
                 Some(_) => {
                     return Ok(VerifyResult {
