@@ -1,25 +1,13 @@
 # zizmor configuration — https://docs.zizmor.sh/configuration/
 #
-# unpinned-uses: tag-pinning (ref-pin) is accepted for the well-known,
-# actively-maintained owners already vetted in these workflows; anything
-# new/unknown must be hash-pinned. Tightening everything to hash-pin is
-# possible later (Dependabot keeps SHA pins fresh) but is a 100+ line churn
-# with no marginal benefit while the owner list stays this short.
+# unpinned-uses: every action is hash-pinned, whatever its owner. A tag moves
+# (and a branch such as dtolnay/rust-toolchain@stable moves daily); a commit
+# SHA does not. Each pin carries its tag in a trailing `# vX.Y.Z` comment, and
+# Dependabot (github-actions ecosystem) keeps both the SHA and the comment
+# fresh. Release and publish workflows run with write tokens, so a hijacked
+# tag there would ship a tampered binary.
 rules:
   unpinned-uses:
     config:
       policies:
-        "actions/*": ref-pin
-        "github/*": ref-pin
-        "docker/*": ref-pin
-        "aquasecurity/*": ref-pin
-        "astral-sh/*": ref-pin
-        "crate-ci/*": ref-pin
-        "DavidAnson/*": ref-pin
-        "dorny/*": ref-pin
-        "dtolnay/*": ref-pin
-        "EmbarkStudios/*": ref-pin
-        "softprops/*": ref-pin
-        "Swatinem/*": ref-pin
-        "taiki-e/*": ref-pin
         "*": hash-pin
