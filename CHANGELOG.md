@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **winrm-rs 1.4.1.** With `winrm_accept_invalid_certs: true`, winrm-rs up to
+  1.4.0 accepted the TLS handshake without checking its signature, so a party
+  in the middle holding only the server's public certificate could relay the
+  NTLM or Kerberos authentication to the real host. 1.4.1 verifies it. It
+  also refuses, under `winrm_accept_invalid_certs`, listener certificates it
+  cannot check: X.509 v1/v2, RSA keys under 2048 or over 8192 bits, P-521 —
+  re-issue such a certificate (`New-SelfSignedCertificate` makes X.509 v3
+  RSA-2048).
+
 ### Fixed
 
+- **A `WinRM` command now stops at `command_timeout_seconds`.** Since
+  winrm-rs 1.3.0 `run_powershell` has no overall time limit, and the `WinRM`
+  adapter ignored the bridge's limits, so a command that never returned held
+  the tool call forever. It is now stopped at `command_timeout_seconds` (or
+  the per-call `timeout_seconds`), terminated, its remote shell deleted, and
+  the call returns a timeout error, as over SSH.
 - **Six `tracing` events no longer carry two `message` fields.** The transports
   (stdio, Unix socket, HTTP) and the server read loop logged a `message = %…`
   field next to the event's own message, so one of the two was shadowed. The
@@ -27,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **winrm-rs 1.2.2 → 1.4.1: behaviour the bridge passes through.** NTLM over
+  plain HTTP now seals the messages; several NTLM failures that were
+  authentication errors now surface as execution errors; response bodies are
+  capped at 2 MiB by default (`4 × max(winrm_max_envelope_size, 512 KiB)`);
+  PowerShell warning, verbose and debug records now reach stderr. See the
+  winrm-rs 1.3.0 "Upgrading from 1.2.x" notes for the full list.
+- **Dependencies: the six open Dependabot updates in one change.**
+  `crypto-bigint` 0.7.6 → 0.7.10 (0.7.6 was yanked, which turned the
+  required `Deny` check red on every branch), `aws-sdk-ssm` 1.130.0, and the
+  last workflow steps still on older pins: `actions/checkout` 7.0.1,
+  `actions/download-artifact` 8.0.2, `Swatinem/rust-cache` 2.9.3,
+  `actions/github-script` 9.0.0, `softprops/action-gh-release` 3.0.3. The
+  `cargo vet` exemptions follow the four crate versions.
 - **`src/security/` and `src/ssh/sftp.rs` no longer carry panicking indexing,
   unchecked arithmetic or silent `as` casts** (60 findings of the
   `indexing_slicing`, `arithmetic_side_effects` and `as_conversions` lints the
