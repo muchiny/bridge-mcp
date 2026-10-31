@@ -10,7 +10,7 @@ pub mod pool;
 pub use pool::{WinRmPool, WinRmPoolConfig};
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::debug;
 
@@ -94,6 +94,25 @@ pub fn build_winrm_config(
     Ok((winrm_cfg, credentials))
 }
 
+/// What a cancellable run returns once the bridge's time limit stopped it.
+///
+/// The run's token is cancelled both by the client (through its parent token)
+/// and by the time limit, so winrm-rs answers `Cancelled` either way; only a
+/// stop the client did not ask for is a timeout. A run that finished, or
+/// failed on its own, before the stop landed keeps its own result.
+fn after_time_limit(
+    result: std::result::Result<winrm_rs::CommandOutput, winrm_rs::WinrmError>,
+    client_cancelled: bool,
+    seconds: u64,
+) -> Result<winrm_rs::CommandOutput> {
+    match result {
+        Err(winrm_rs::WinrmError::Cancelled) if !client_cancelled => {
+            Err(BridgeError::SshTimeout { seconds })
+        }
+        other => other.map_err(BridgeError::from),
+    }
+}
+
 /// An active `WinRM` connection wrapping `winrm_rs::WinrmClient`.
 ///
 /// Unlike the previous implementation (hand-rolled SOAP with `cmd.exe /c`),
@@ -122,63 +141,86 @@ impl WinRmConnection {
 
     /// Execute a `PowerShell` command via `WinRM`.
     ///
-    /// Uses `WinrmClient::run_powershell()` which encodes the script as
-    /// UTF-16LE base64 and runs it via `powershell.exe -EncodedCommand`.
-    /// This correctly handles all `PowerShell` syntax — unlike the previous
-    /// `cmd.exe /c` approach that broke on PS-specific commands.
+    /// Uses `WinrmClient::run_powershell_with_timeout()`, which encodes the
+    /// script as UTF-16LE base64 and runs it via
+    /// `powershell.exe -EncodedCommand`. This correctly handles all
+    /// `PowerShell` syntax — unlike the previous `cmd.exe /c` approach that
+    /// broke on PS-specific commands.
+    ///
+    /// The command is bounded by `limits.command_timeout_seconds`, like an
+    /// SSH command: since winrm-rs 1.3.0 a plain `run_powershell` has no
+    /// overall time limit and would wait for a silent command forever. On
+    /// expiry winrm-rs terminates the command and deletes the remote shell.
     ///
     /// # Errors
     ///
     /// Returns an error if the `WinRM` request fails (auth, timeout, SOAP fault).
-    pub async fn exec(&mut self, command: &str, _limits: &LimitsConfig) -> Result<CommandOutput> {
-        let start = Instant::now();
-
-        debug!(
-            host = %self.host_name,
-            command = %command,
-            "Executing WinRM PowerShell command"
-        );
-
-        let output = self.client.run_powershell(&self.host_name, command).await?;
-
-        #[allow(clippy::cast_possible_truncation)]
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: u32::try_from(output.exit_code).unwrap_or(1),
-            duration_ms,
-        })
+    pub async fn exec(&mut self, command: &str, limits: &LimitsConfig) -> Result<CommandOutput> {
+        self.exec_with_cancel(command, limits, None).await
     }
 
     /// Execute with cancellation token propagation.
     ///
     /// When a `CancellationToken` is provided (from MCP `notifications/cancelled`),
     /// uses `WinrmClient::run_powershell_with_cancel()` so the operation can be
-    /// interrupted mid-flight.
+    /// interrupted mid-flight. With or without a token, the command is
+    /// stopped once `limits.command_timeout_seconds` have elapsed; on either
+    /// stop winrm-rs terminates the command and deletes the remote shell.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::SshTimeout` when the time limit is reached,
+    /// `BridgeError::Cancelled` when the token is cancelled, and the mapped
+    /// `WinRM` error when the request fails.
     pub async fn exec_with_cancel(
         &mut self,
         command: &str,
         limits: &LimitsConfig,
         token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<CommandOutput> {
-        let Some(token) = token else {
-            return self.exec(command, limits).await;
-        };
-
         let start = Instant::now();
+        let time_limit = Duration::from_secs(limits.command_timeout_seconds);
 
         debug!(
             host = %self.host_name,
             command = %command,
-            "Executing WinRM PowerShell command (with cancel)"
+            cancellable = token.is_some(),
+            "Executing WinRM PowerShell command"
         );
 
-        let output = self
-            .client
-            .run_powershell_with_cancel(&self.host_name, command, token)
-            .await?;
+        // The winrm-rs futures are boxed: inlined, they put ~20 KB into every
+        // future that awaits a connection (`clippy::large_futures`).
+        let output = match token {
+            None => {
+                Box::pin(self.client.run_powershell_with_timeout(
+                    &self.host_name,
+                    command,
+                    time_limit,
+                ))
+                .await?
+            }
+            Some(token) => {
+                // winrm-rs has no call that takes both a token and a time
+                // limit: a child token stops the command on either.
+                let stop = token.child_token();
+                let mut run = Box::pin(self.client.run_powershell_with_cancel(
+                    &self.host_name,
+                    command,
+                    stop.clone(),
+                ));
+                tokio::select! {
+                    result = &mut run => result?,
+                    () = tokio::time::sleep(time_limit) => {
+                        stop.cancel();
+                        after_time_limit(
+                            run.await,
+                            token.is_cancelled(),
+                            limits.command_timeout_seconds,
+                        )?
+                    }
+                }
+            }
+        };
 
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -344,6 +386,135 @@ mod tests {
         let conn = WinRmConnection::from_parts("test-host", client);
         assert_eq!(conn.host_name(), "test-host");
         assert!(!conn.failed);
+    }
+
+    /// A `WinRM` endpoint that accepts the TCP connection and never answers,
+    /// the shape of a host whose command never returns. Since winrm-rs 1.3.0
+    /// `run_powershell` has no overall time limit, so only the bridge's own
+    /// `command_timeout_seconds` can end such a call. The listener must be
+    /// kept alive for as long as the connection is used.
+    async fn silent_endpoint() -> (tokio::net::TcpListener, WinRmConnection) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut host = test_host_config();
+        host.hostname = "127.0.0.1".to_string();
+        host.port = listener.local_addr().unwrap().port();
+        host.winrm_use_tls = Some(false);
+        // Bounds winrm-rs' clean-up after the stop, so the test stays short.
+        host.winrm_operation_timeout_secs = Some(1);
+        let (cfg, creds) = build_winrm_config(&host).unwrap();
+        let client = Arc::new(winrm_rs::WinrmClient::new(cfg, creds).unwrap());
+        (
+            listener,
+            WinRmConnection::from_parts(&host.hostname, client),
+        )
+    }
+
+    fn one_second_limit() -> LimitsConfig {
+        LimitsConfig {
+            command_timeout_seconds: 1,
+            ..LimitsConfig::default()
+        }
+    }
+
+    fn finished_output() -> winrm_rs::CommandOutput {
+        winrm_rs::CommandOutput {
+            stdout: b"done".to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        }
+    }
+
+    #[test]
+    fn after_time_limit_reports_its_own_stop_as_a_timeout() {
+        let result = after_time_limit(Err(winrm_rs::WinrmError::Cancelled), false, 7);
+        assert!(
+            matches!(result, Err(BridgeError::SshTimeout { seconds: 7 })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn after_time_limit_keeps_a_client_cancellation() {
+        let result = after_time_limit(Err(winrm_rs::WinrmError::Cancelled), true, 7);
+        assert!(matches!(result, Err(BridgeError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
+    fn after_time_limit_returns_output_that_beat_the_stop() {
+        let output = after_time_limit(Ok(finished_output()), false, 7).unwrap();
+        assert_eq!(output.stdout, b"done");
+    }
+
+    #[test]
+    fn after_time_limit_maps_a_failure_of_the_command_itself() {
+        let result = after_time_limit(
+            Err(winrm_rs::WinrmError::AuthFailed("denied".to_string())),
+            false,
+            7,
+        );
+        assert!(
+            matches!(result, Err(BridgeError::SshAuth { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_stops_at_command_timeout_when_the_host_never_answers() {
+        let (_listener, mut conn) = silent_endpoint().await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            conn.exec("Start-Sleep 3600", &one_second_limit()),
+        )
+        .await
+        .expect("exec ignored limits.command_timeout_seconds");
+
+        assert!(
+            matches!(result, Err(BridgeError::SshTimeout { seconds: 1 })),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_with_cancel_stops_at_command_timeout_when_never_cancelled() {
+        let (_listener, mut conn) = silent_endpoint().await;
+        let token = tokio_util::sync::CancellationToken::new();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            conn.exec_with_cancel("Start-Sleep 3600", &one_second_limit(), Some(token)),
+        )
+        .await
+        .expect("exec_with_cancel ignored limits.command_timeout_seconds");
+
+        assert!(
+            matches!(result, Err(BridgeError::SshTimeout { seconds: 1 })),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_with_cancel_reports_a_client_cancellation_as_cancelled() {
+        let (_listener, mut conn) = silent_endpoint().await;
+        let token = tokio_util::sync::CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            canceller.cancel();
+        });
+        let limits = LimitsConfig {
+            command_timeout_seconds: 60,
+            ..LimitsConfig::default()
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            conn.exec_with_cancel("Start-Sleep 3600", &limits, Some(token)),
+        )
+        .await
+        .expect("exec_with_cancel ignored the cancellation");
+
+        assert!(matches!(result, Err(BridgeError::Cancelled)), "{result:?}");
     }
 
     #[test]
