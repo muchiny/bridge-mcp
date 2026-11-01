@@ -21,6 +21,9 @@ use bridge_mcp::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry}
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
+    // Before any TLS client exists (see the function for why).
+    bridge_mcp::install_tls_provider();
+
     // Parse command line arguments
     let cli = Cli::parse();
 

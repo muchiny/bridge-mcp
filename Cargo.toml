@@ -30,16 +30,16 @@ http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper-util", "dep:tokio-
 mimalloc = ["dep:mimalloc"]
 
 # Protocol adapters (Tier 1)
-winrm = ["dep:winrm-rs"]
+winrm = ["dep:winrm-rs", "dep:rustls"]
 psrp = ["dep:psrp-rs", "winrm"]
 telnet = []
 # Protocol adapters (Tier 2)
-k8s-exec = ["dep:kube", "dep:k8s-openapi"]
+k8s-exec = ["dep:kube", "dep:k8s-openapi", "dep:rustls"]
 serial = ["dep:tokio-serial"]
 
 # Protocol adapters (Tier 3 — Cloud-only, non air-gapped)
-ssm = ["dep:aws-sdk-ssm", "dep:aws-config"]
-azure = ["dep:reqwest"]
+ssm = ["dep:aws-sdk-ssm", "dep:aws-config", "dep:rustls"]
+azure = ["dep:reqwest", "dep:rustls"]
 # GCP wraps the `gcloud` CLI — no Rust deps, but `gcloud` must be installed on the bridge host
 gcp = []
 cloud = ["ssm", "azure", "gcp"]
@@ -133,6 +133,11 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 winrm-rs = { version = "1.4.1", optional = true }
 # PSRP adapter (optional) — PowerShell Remoting Protocol via psrp-rs
 psrp-rs = { version = "2.0.2", optional = true, default-features = false }
+
+# Process-wide rustls crypto provider, installed at start-up by
+# `bridge_mcp::install_tls_provider` in every build with a rustls client
+# (winrm, k8s-exec, ssm, azure): see that function for why.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"], optional = true }
 
 # HTTP client — used by Azure adapter (reqwest is also a transitive dep of winrm-rs)
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }

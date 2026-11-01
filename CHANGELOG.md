@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A build with a `WinRM` client next to the AWS or Azure one, or with
+  `k8s-exec` alone, no longer panics when it builds a TLS client.** rustls
+  chooses a crypto provider by itself only when exactly one of its providers
+  is compiled in. `winrm` enables `ring`, `ssm` and `azure` enable
+  `aws_lc_rs`, and a `k8s-exec` build without them has neither, so the
+  `ClientConfig::builder()` of kube-client and hyper-rustls panicked ("Could
+  not automatically determine the process-level CryptoProvider"). winrm-rs
+  1.x hid the first case by installing `ring` when a `WinRM` client was
+  built, so it depended on which client came first; winrm-rs 2 installs
+  nothing. The bridge now installs aws-lc-rs, already in every build through
+  russh, at start-up (`install_tls_provider`), and the `WinRM` client uses
+  it.
 - **A `WinRM` command now stops at `command_timeout_seconds`.** Since
   winrm-rs 1.3.0 `run_powershell` has no overall time limit, and the `WinRM`
   adapter ignored the bridge's limits, so a command that never returned held
