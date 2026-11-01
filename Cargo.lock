@@ -1548,6 +1548,7 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -3876,9 +3877,9 @@ dependencies = [
 
 [[package]]
 name = "psrp-rs"
-version = "2.0.2"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d00dd7644658709141700442d02db05c7e1d734db4c931a41bc838e2f8ce041d"
+checksum = "1b43b9905d758bef3c743c16961b50ae8cb059fe3c7de78a193b27f3558660db"
 dependencies = [
  "aes",
  "async-trait",
@@ -3886,7 +3887,6 @@ dependencies = [
  "quick-xml",
  "rand 0.8.8",
  "rsa 0.9.10",
- "sha1 0.10.7",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -4250,7 +4250,6 @@ dependencies = [
  "pkcs1 0.7.5",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
- "sha1 0.10.7",
  "signature 2.2.0",
  "spki 0.7.3",
  "subtle",
@@ -6196,23 +6195,28 @@ dependencies = [
 
 [[package]]
 name = "winrm-rs"
-version = "1.4.1"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df6fff1601d8a438ac9838929f7d310e101f35361318d8879dd402de34d0fbbd"
+checksum = "fa4e9b6b41cfbb3bcf41b6a6ab4ee157ed4bdd94fdbf9404eda86fb409b70c88"
 dependencies = [
  "base64 0.23.1",
- "hmac 0.13.0",
+ "http",
+ "hyper-util",
+ "idna",
  "md-5",
  "md4",
  "rand 0.10.3",
  "reqwest",
  "rustls",
+ "rustls-platform-verifier",
  "secrecy",
  "sha2 0.11.1",
  "subtle",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "uuid",
  "webpki-roots",

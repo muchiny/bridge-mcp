@@ -1409,7 +1409,7 @@ version = "0.1.24"
 criteria = "safe-to-deploy"
 
 [[exemptions.psrp-rs]]
-version = "2.0.2"
+version = "4.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.quick-error]]
@@ -2285,7 +2285,7 @@ version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.winrm-rs]]
-version = "1.4.1"
+version = "2.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.wit-bindgen]]

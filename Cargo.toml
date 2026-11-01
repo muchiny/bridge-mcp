@@ -130,9 +130,9 @@ tokio-stream = { version = "0.1", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # WinRM adapter (optional) — wraps winrm-rs for WS-Man/SOAP over HTTPS
-winrm-rs = { version = "1.4.1", optional = true }
+winrm-rs = { version = "2.0.1", optional = true }
 # PSRP adapter (optional) — PowerShell Remoting Protocol via psrp-rs
-psrp-rs = { version = "2.0.2", optional = true, default-features = false }
+psrp-rs = { version = "4.0.0", optional = true, default-features = false }
 
 # Process-wide rustls crypto provider, installed at start-up by
 # `bridge_mcp::install_tls_provider` in every build with a rustls client

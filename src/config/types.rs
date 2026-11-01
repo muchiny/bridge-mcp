@@ -344,6 +344,7 @@ pub struct HostConfig {
     /// Override TLS auto-detection for `WinRM`/PSRP (ignored for other protocols).
     ///
     /// By default, TLS is auto-detected from the port: 5986 = HTTPS, 5985 = HTTP.
+    /// `auth: password` (Basic) is refused without HTTPS.
     #[cfg(feature = "winrm")]
     #[serde(default)]
     pub winrm_use_tls: Option<bool>,
@@ -351,7 +352,10 @@ pub struct HostConfig {
     /// Accept invalid TLS certificates for `WinRM`/PSRP endpoints.
     ///
     /// Set to `true` for self-signed certificates in test environments.
-    /// Default: `false`.
+    /// Default: `false`. Without it, the server certificate must chain to a
+    /// public root: winrm-rs checks the roots it bundles, not the bridge host's
+    /// certificate store. Refused with `auth: password` (Basic), which would
+    /// send the password to an unverified server.
     #[cfg(feature = "winrm")]
     #[serde(default)]
     pub winrm_accept_invalid_certs: Option<bool>,

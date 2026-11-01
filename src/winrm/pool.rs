@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use super::{WinRmConnection, build_winrm_config};
+use super::{WinRmConnection, build_winrm_client};
 use crate::config::{HostConfig, LimitsConfig};
 use crate::error::Result;
 
@@ -73,7 +73,7 @@ impl WinRmPool {
     /// **Fast path**: if a cached `WinrmClient` exists and is fresh,
     /// wraps it in a new `WinRmConnection` (zero network cost).
     ///
-    /// **Cold path**: calls `build_winrm_config()` to map bridge config
+    /// **Cold path**: calls `build_winrm_client()` to map bridge config
     /// to `winrm-rs` types, creates a new `WinrmClient`, caches it,
     /// and returns the connection.
     ///
@@ -104,9 +104,8 @@ impl WinRmPool {
             }
         }
 
-        // Cold path: build new WinrmClient via build_winrm_config().
-        let (winrm_config, credentials) = build_winrm_config(host_config)?;
-        let client = Arc::new(winrm_rs::WinrmClient::new(winrm_config, credentials)?);
+        // Cold path: build new WinrmClient via build_winrm_client().
+        let client = build_winrm_client(host_config)?;
 
         {
             let mut guard = self.inner.write().await;
