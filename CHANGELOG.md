@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   U+0027, U+2018, U+2019, U+201A and U+201B each doubled, as PowerShell's own
   `CodeGeneration.EscapeSingleQuotedStringContent` does. A value holding none
   of them is sent unchanged.
+- **`working_dir` is quoted for the host's shell on every exec path.**
+  `ssh_exec_multi` and `bridge-mcp exec` used POSIX quoting on every host. On a
+  cmd host, `working_dir` now goes into `cd /d "…"` without carets, and
+  characters `cmd.exe` cannot quote are refused before anything is sent.
 
 ### Fixed
 
@@ -31,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tool call forever. It is now stopped at `command_timeout_seconds` (or
   the per-call `timeout_seconds`), terminated, its remote shell deleted, and
   the call returns a timeout error, as over SSH.
+- On cmd hosts, a `working_dir` containing `&` or `^` works (carets inside
+  double quotes used to become part of the path).
+- On PowerShell hosts, a `working_dir` that does not exist stops the call
+  (`Set-Location -ErrorAction Stop`). The command used to run anyway, in the
+  shell's default directory.
 - **Six `tracing` events no longer carry two `message` fields.** The transports
   (stdio, Unix socket, HTTP) and the server read loop logged a `message = %…`
   field next to the event's own message, so one of the two was shadowed. The
@@ -70,6 +79,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inputs that differ are the ones that used to panic or wrap (a retention above
   ~96 million days now deletes nothing instead of aborting the bridge; a read
   that returns more bytes than its buffer is a `FileTransfer` error).
+- On cmd hosts, `working_dir` refuses `"`, `%`, `!`, `$`, a backtick,
+  U+201C–U+201E and control characters.
+- On PowerShell hosts, `working_dir` uses `Set-Location -LiteralPath`: `[`,
+  `]`, `*` and `?` in a directory name are literal, so a wildcard that used to
+  resolve to one directory no longer does.
+
+### Deprecated
+
+- `domain::use_cases::shell::cd_and_run`; use `try_cd_and_run`.
 
 ## [4.1.0] - 2026-10-21
 

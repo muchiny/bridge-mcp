@@ -23,7 +23,7 @@ use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::security::RateLimiter;
 use crate::ssh::{is_retryable_error_for, with_retry_if};
 
-use super::utils::shell_escape;
+use crate::domain::use_cases::shell;
 
 /// Arguments for `ssh_exec_multi` tool
 #[derive(Debug, Deserialize)]
@@ -512,10 +512,34 @@ async fn execute_on_host(
     let wrapped_command = &elevated.command;
 
     // Build the actual command (with optional cd)
-    let full_command = working_dir.as_ref().map_or_else(
-        || wrapped_command.clone(),
-        |dir| format!("cd {} && {}", shell_escape(dir), wrapped_command),
-    );
+    let full_command = match working_dir.as_deref() {
+        None => wrapped_command.clone(),
+        Some(dir) => {
+            match shell::try_cd_and_run(dir, wrapped_command, host_config.effective_shell()) {
+                Ok(line) => line,
+                Err(e) => {
+                    // Per-host refusal, before any connection: the host's shell
+                    // cannot quote this directory.
+                    let reason = match &e {
+                        BridgeError::CommandDenied { reason } => reason.clone(),
+                        _ => e.to_string(),
+                    };
+                    execute_use_case.log_denied("ssh_exec_multi", &host_name, &command, &reason);
+                    if fail_fast {
+                        cancel_token.cancel();
+                    }
+                    return HostResult {
+                        host: host_name,
+                        success: false,
+                        exit_code: None,
+                        output: None,
+                        error: Some(reason),
+                        duration_ms: Some(elapsed_ms(&start)),
+                    };
+                }
+            }
+        }
+    };
 
     // Build limits with optional timeout override
     let mut limits = config.limits.clone();
@@ -796,6 +820,54 @@ mod tests {
         assert_eq!(
             result.is_error, None,
             "le verdict n'est pas posé : {result:?}"
+        );
+    }
+
+    /// `ctx_permissive_with_exit(0)` with `server1` made a Windows/cmd host.
+    fn ctx_windows_cmd() -> ToolContext {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        let host = config.hosts.get_mut("server1").expect("server1");
+        host.os_type = OsType::Windows;
+        host.shell = None;
+        ctx.config = Arc::new(config);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn multi_working_dir_follows_each_host_shell() {
+        let ctx = ctx_windows_cmd();
+        SshExecMultiHandler
+            .execute(
+                Some(json!({"hosts": ["server1"], "command": "cd", "working_dir": "C:\\a&b"})),
+                &ctx,
+            )
+            .await
+            .expect("result");
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "cd /d \"C:\\a&b\" && cd");
+    }
+
+    #[tokio::test]
+    async fn multi_refuses_cmd_working_dir_with_percent_for_that_host() {
+        let ctx = ctx_windows_cmd();
+        let result = SshExecMultiHandler
+            .execute(
+                Some(json!({"hosts": ["server1"], "command": "cd", "working_dir": "C:\\%OS%"})),
+                &ctx,
+            )
+            .await
+            .expect("result");
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ToolContent::Text { text } => text.clone(),
+            other => panic!("contenu texte attendu, obtenu {other:?}"),
+        };
+        assert!(text.contains("cannot quote"), "{text}");
+        assert_eq!(
+            ctx.connection_pool.mock_calls().len(),
+            0,
+            "nothing was sent"
         );
     }
 

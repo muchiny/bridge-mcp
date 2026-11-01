@@ -207,10 +207,27 @@ impl ToolHandler for SshExecHandler {
         let command = &elevated.command;
 
         // Build the actual command (with optional cd, shell-aware)
-        let full_command = args.working_dir.as_ref().map_or_else(
-            || command.clone(),
-            |dir| shell::cd_and_run(dir, command, effective_shell),
-        );
+        let full_command = match args.working_dir.as_deref() {
+            None => command.clone(),
+            Some(dir) => match shell::try_cd_and_run(dir, command, effective_shell) {
+                Ok(line) => line,
+                Err(e) => {
+                    // Refused before any connection: the shell cannot quote
+                    // this directory, and the policy check above never saw it.
+                    let reason = match &e {
+                        BridgeError::CommandDenied { reason } => reason.clone(),
+                        _ => e.to_string(),
+                    };
+                    ctx.execute_use_case.log_denied(
+                        self.name(),
+                        &args.host,
+                        &args.command,
+                        &reason,
+                    );
+                    return Err(e);
+                }
+            },
+        };
 
         // Get retry config
         let retry_config = limits.retry_config();
@@ -371,6 +388,74 @@ mod tests {
                 duration_ms: 1,
             },
         )
+    }
+
+    /// `ctx_permissive_with_exit(0)` with `server1` made a Windows host, with
+    /// the given `shell:` override (`None` falls back to cmd).
+    fn ctx_windows(shell: Option<ShellType>) -> crate::ports::ToolContext {
+        let mut ctx = ctx_permissive_with_exit(0);
+        let mut config = (*ctx.config).clone();
+        let host = config.hosts.get_mut("server1").expect("server1");
+        host.os_type = crate::config::OsType::Windows;
+        host.shell = shell;
+        ctx.config = std::sync::Arc::new(config);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn working_dir_with_unicode_quote_stays_in_literal() {
+        let ctx = ctx_windows(Some(ShellType::PowerShell));
+        SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "Get-Location",
+                              "working_dir": "C:\\x\u{2019}; Write-Output pwned; \u{2019}"})),
+                &ctx,
+            )
+            .await
+            .expect("result");
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].0,
+            "Set-Location -LiteralPath 'C:\\x\u{2019}\u{2019}; Write-Output pwned; \u{2019}\u{2019}' -ErrorAction Stop; Get-Location"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_working_dir_keeps_ampersand_literal() {
+        let ctx = ctx_windows(None);
+        SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "cd", "working_dir": "C:\\a&b"})),
+                &ctx,
+            )
+            .await
+            .expect("result");
+        assert_eq!(
+            ctx.connection_pool.mock_calls()[0].0,
+            "cd /d \"C:\\a&b\" && cd"
+        );
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_refuses_cmd_working_dir_with_percent() {
+        let ctx = ctx_windows(None);
+        let err = SshExecHandler
+            .execute(
+                Some(json!({"host": "server1", "command": "cd", "working_dir": "C:\\%OS%"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::CommandDenied { reason } if reason.contains("U+0025")),
+            "{err:?}"
+        );
+        assert_eq!(
+            ctx.connection_pool.mock_calls().len(),
+            0,
+            "nothing was sent"
+        );
     }
 
     #[tokio::test]
