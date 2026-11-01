@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::config::{AuditConfig, Config, ShellType};
+use crate::config::{AuditConfig, Config};
 use crate::domain::ExecuteCommandUseCase;
 use crate::domain::output_truncator::truncate_chars;
 use crate::domain::use_cases::shell;
@@ -963,10 +963,23 @@ async fn run_exec_in_context(
     limits.command_timeout_seconds = timeout;
 
     // Build the actual command (with optional cd)
-    let full_command = working_dir.map_or_else(
-        || command.to_string(),
-        |dir| format!("cd {} && {}", shell::escape(dir, ShellType::Posix), command),
-    );
+    let full_command = match working_dir {
+        None => command.to_string(),
+        Some(dir) => match shell::try_cd_and_run(dir, command, host_config.effective_shell()) {
+            Ok(line) => line,
+            Err(e) => {
+                // Refused before any connection: the host's shell cannot
+                // quote this directory.
+                let reason = match &e {
+                    BridgeError::CommandDenied { reason } => reason.clone(),
+                    _ => e.to_string(),
+                };
+                ctx.execute_use_case
+                    .log_denied("ssh_exec", host, command, &reason);
+                return Err(e);
+            }
+        },
+    };
 
     // Get retry config
     let retry_config = limits.retry_config();
@@ -2512,6 +2525,38 @@ mod tests {
             },
         );
         config
+    }
+
+    #[tokio::test]
+    async fn cli_exec_working_dir_follows_host_shell() {
+        use crate::config::SecurityMode;
+
+        let mut config = test_config_with_host("server1", "192.0.2.1");
+        config.security = SecurityConfig {
+            mode: SecurityMode::Permissive,
+            blacklist: vec![],
+            ..SecurityConfig::default()
+        };
+        let host = config.hosts.get_mut("server1").expect("server1");
+        host.os_type = OsType::Windows;
+        host.shell = None;
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                duration_ms: 1,
+            },
+        );
+
+        run_exec_in_context(&ctx, "server1", "cd", 30, Some("C:\\a&b"), false)
+            .await
+            .expect("exec");
+
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "cd /d \"C:\\a&b\" && cd");
     }
 
     #[tokio::test]

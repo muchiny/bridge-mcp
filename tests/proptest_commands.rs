@@ -92,6 +92,7 @@ proptest! {
 
     /// cd_and_run must always produce a non-empty command.
     #[test]
+    #[expect(deprecated, reason = "the legacy form stays pinned until it is removed")]
     fn cd_and_run_never_empty(dir in "\\PC+", cmd in "\\PC+") {
         prop_assert!(!shell::cd_and_run(&dir, &cmd, ShellType::Posix).is_empty());
         prop_assert!(!shell::cd_and_run(&dir, &cmd, ShellType::Cmd).is_empty());

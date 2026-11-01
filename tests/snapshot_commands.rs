@@ -264,6 +264,10 @@ fn snapshot_shell_escape_special_chars() {
 }
 
 #[test]
+#[expect(
+    deprecated,
+    reason = "the legacy form stays pinned until it is removed"
+)]
 fn snapshot_cd_and_run_all_shells() {
     use bridge_mcp::config::ShellType;
     use bridge_mcp::domain::use_cases::shell;

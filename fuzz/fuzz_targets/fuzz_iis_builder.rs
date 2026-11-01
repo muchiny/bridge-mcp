@@ -16,7 +16,8 @@ use bridge_mcp::domain::use_cases::iis::{validate_site_name, IisCommandBuilder};
 //
 // PowerShell, not `/bin/sh`. This builder escapes through
 // `shell::escape(s, ShellType::PowerShell)`, which emits `'...'` with the
-// quote DOUBLED (`it's` -> `'it''s'`). The POSIX reader parses that as two
+// quote DOUBLED (each of the five PowerShell single-quote characters; `it's` ->
+// `'it''s'`). The POSIX reader parses that as two
 // adjacent words and yields `its`, silently dropping the apostrophe — so
 // reusing the POSIX oracle here would have been red on healthy code for every
 // value containing a quote. Hence `*_ps`.

@@ -31,4 +31,16 @@ fuzz_target!(|data: &str| {
         "escaping {data:?} did not round-trip: {escaped:?} reads back as {:?}",
         words[0]
     );
+
+    // The same outcome for the PowerShell escape, read back by the PowerShell
+    // reader (five single-quote characters, four double-quote characters).
+    let ps = bridge_mcp::domain::use_cases::shell::escape(
+        data,
+        bridge_mcp::config::ShellType::PowerShell,
+    );
+    assert_eq!(
+        bridge_mcp_fuzz::powershell_words(&ps),
+        Some(vec![data.to_string()]),
+        "PowerShell escaping of {data:?} did not round-trip: {ps:?}"
+    );
 });
