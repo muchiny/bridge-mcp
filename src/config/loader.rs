@@ -204,17 +204,14 @@ pub fn validate_config(config: &Config) -> Result<()> {
             });
         }
 
-        // Warn about Basic auth over plain HTTP (credentials exposed)
+        // A host whose Basic auth the WinRM adapter refuses: say so at load,
+        // with the adapter's own reason, instead of at the first tool call.
+        // A warning, not an error: the other hosts stay usable.
         #[cfg(feature = "winrm")]
         if protocol_is_winrm_like(host)
-            && matches!(host.auth, super::types::AuthConfig::Password { .. })
-            && !host.winrm_use_tls.unwrap_or(host.port == 5986)
+            && let Some(reason) = crate::winrm::basic_auth_refusal(host)
         {
-            warn!(
-                host = %name,
-                "WinRM Basic auth over plain HTTP exposes credentials in cleartext; \
-                 set winrm_use_tls: true or use NTLM/Kerberos auth"
-            );
+            warn!(host = %name, "this WinRM/PSRP host will be refused: {reason}");
         }
 
         // Validate key path exists and permissions (for key auth)

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### BREAKING
+
+- **winrm-rs 2.0.1 and psrp-rs 4.0.0: `auth: password` (Basic) needs
+  verified HTTPS.** A `WinRM` or PSRP host with `auth: password` is refused
+  when its client is built, with a configuration error that names the fix,
+  over plain HTTP (port 5985 or `winrm_use_tls: false`) and with
+  `winrm_accept_invalid_certs: true`. Over plain HTTP, Basic sent the
+  password and every message in clear; with an unverified certificate it
+  sent the password to whoever answered. Use `auth: ntlm`, which works on
+  the stock `Enable-PSRemoting` listener and seals the messages, or Basic
+  over HTTPS with a server certificate that chains to a public root
+  (winrm-rs checks the roots it bundles, not the bridge host's certificate
+  store, as 1.x did). The config loader warns at start-up about each host
+  that will be refused. `auth: certificate` without HTTPS is refused the
+  same way, with winrm-rs's reason.
+- **`WinRM` and PSRP no longer go through the proxy environment variables**
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`): winrm-rs 2 reads
+  them only when asked, and the bridge does not ask. A Windows host that was
+  reached through such a proxy must be reachable directly.
+- **A `WinRM` or PSRP `hostname` must be bare and canonical**: a host name,
+  a dotted-quad IPv4 address, or a bracketed IPv6 literal in RFC 5952 form.
+  A shortened IPv4 form (`10.1`) or an unbracketed IPv6 address is refused
+  at the first request, before anything is sent; it is reported as an
+  authentication failure.
+
 ### Security
 
 - **winrm-rs 1.4.1.** With `winrm_accept_invalid_certs: true`, winrm-rs up to
@@ -29,6 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A build with a `WinRM` client next to the AWS or Azure one, or with
+  `k8s-exec` alone, no longer panics when it builds a TLS client.** rustls
+  chooses a crypto provider by itself only when exactly one of its providers
+  is compiled in. `winrm` enables `ring`, `ssm` and `azure` enable
+  `aws_lc_rs`, and a `k8s-exec` build without them has neither, so the
+  `ClientConfig::builder()` of kube-client and hyper-rustls panicked ("Could
+  not automatically determine the process-level CryptoProvider"). winrm-rs
+  1.x hid the first case by installing `ring` when a `WinRM` client was
+  built, so it depended on which client came first; winrm-rs 2 installs
+  nothing. The bridge now installs aws-lc-rs, already in every build through
+  russh, at start-up (`install_tls_provider`), and the `WinRM` client uses
+  it.
+- **A `WinRM` client that winrm-rs refuses is reported as a configuration
+  error with its reason.** It read as "SSH authentication failed for
+  unknown@WinRM".
 - **A `WinRM` command now stops at `command_timeout_seconds`.** Since
   winrm-rs 1.3.0 `run_powershell` has no overall time limit, and the `WinRM`
   adapter ignored the bridge's limits, so a command that never returned held
@@ -58,6 +98,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **winrm-rs 1.4.1 → 2.0.1 and psrp-rs 2.0.2 → 4.0.0: behaviour the bridge
+  passes through**, besides the BREAKING items above. A `WinRM` command runs
+  `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile
+  -NonInteractive`: profile scripts no longer load (aliases, `PATH` or
+  modules a profile set up are gone), and a command that prompts fails at
+  once instead of waiting. NTLM refuses a server whose Type 2 message
+  negotiates less than Windows does (a proxy or a non-Windows server). SOAP
+  bodies are no longer traced by default. A PSRP command that fails with a terminating
+  error (`throw`, `-ErrorAction Stop`) reports the exception message instead
+  of "unknown error". PSRP
+  gives up after three client-side timeouts in a row, at most 3 ×
+  (`winrm_operation_timeout_secs` + 10 s), instead of retrying forever.
+  Base64 from the host is read as strictly as .NET reads it. See the
+  "Upgrading from 1.x" notes of winrm-rs 2.0.0 and "Upgrading from 3.x" of
+  psrp-rs 4.0.0. `rustls` is a direct optional dependency, for
+  `install_tls_provider`; the `cargo vet` exemptions follow the two crates.
 - **winrm-rs 1.2.2 → 1.4.1: behaviour the bridge passes through.** NTLM over
   plain HTTP now seals the messages; several NTLM failures that were
   authentication errors now surface as execution errors; response bodies are

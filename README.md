@@ -435,7 +435,7 @@ At least one host is required (hosts imported through `ssh_config` count).
 | `shell` | `posix`, `cmd`, `powershell` (alias `pwsh`) | `posix` on Linux, `cmd` on Windows | Shell used for escaping |
 | `protocol` | `ssh`; `winrm`, `psrp`, `telnet`, `k8sexec`, `serial`, `ssm`, `azure`, `gcp` with the matching cargo feature | `ssh` | Transport. Release binaries only have `ssh` |
 | `winrm_use_tls` | bool (feature `winrm`) | `true` only on port `5986` | HTTPS or HTTP for WinRM/PSRP |
-| `winrm_accept_invalid_certs` | bool (feature `winrm`) | `false` | Accept self-signed certificates |
+| `winrm_accept_invalid_certs` | bool (feature `winrm`) | `false` | Accept a certificate that fails verification (self-signed, internal CA). Refused with `auth: password`. Without it the certificate must chain to a public root: winrm-rs checks the roots it bundles, not the bridge host's store |
 | `winrm_operation_timeout_secs` | integer (feature `winrm`) | `60` | WS-Management operation timeout |
 | `winrm_max_envelope_size` | integer (feature `winrm`) | `153600` | Maximum SOAP envelope, bytes |
 | `retry` | map | — | Accepted but not used in 4.0.0; use `limits.retry_*` |
@@ -446,7 +446,7 @@ At least one host is required (hosts imported through `ssh_config` count).
 |---|---|---|
 | `key` | `path` (required), `passphrase` | Recommended. The file must exist and be `0600`/`0400` |
 | `agent` | — | Uses `SSH_AUTH_SOCK` |
-| `password` | `password` (required) | SSH password. On WinRM/PSRP this is HTTP Basic — use TLS |
+| `password` | `password` (required) | SSH password. On WinRM/PSRP this is HTTP Basic, refused over plain HTTP and with `winrm_accept_invalid_certs`: use `ntlm` there |
 | `ntlm` | `password` (required), `domain` | WinRM/PSRP only (feature `winrm`) |
 | `certificate` | `cert_path`, `key_path` (both required, PEM, not `~`-expanded) | WinRM/PSRP only (feature `winrm`) |
 | `kerberos` | — | Accepted, but no current build can connect with it |

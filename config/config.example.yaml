@@ -123,7 +123,7 @@ hosts:
   #     password: "${WIN_PASSWORD}"
   #     domain: CORP              # optional NTLM domain
   #   winrm_use_tls: true         # default: auto (true if port=5986)
-  #   winrm_accept_invalid_certs: true  # for self-signed certs
+  #   winrm_accept_invalid_certs: true  # for self-signed certs (not with type: password)
 
   # Example: Windows Server via WinRM with Kerberos (requires --features winrm)
   # windows-kerberos:

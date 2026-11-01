@@ -24,6 +24,36 @@ pub use ::inventory;
 /// `use bridge_mcp::{mcp_tool, mcp_standard_tool};`.
 pub use bridge_mcp_macros::{mcp_standard_tool, mcp_tool};
 
+/// Install aws-lc-rs as the process-wide rustls crypto provider.
+///
+/// Call it once at start-up, before any TLS client is built. rustls picks a
+/// provider from its crate features only when exactly one is enabled, and
+/// several crates here call `ClientConfig::builder()`, which panics when it
+/// cannot (kube-client, hyper-rustls, tokio-tungstenite):
+/// - with `winrm` next to `ssm` or `azure`, winrm-rs enables `ring` and the
+///   AWS SDK and reqwest enable `aws_lc_rs`, so rustls has two;
+/// - a `k8s-exec` build without either has none.
+///
+/// winrm-rs 1.x hid the first case by installing `ring` when a `WinRM` client
+/// was built, so it depended on which client came first; 2.x no longer
+/// installs anything and uses the provider installed here. aws-lc-rs is
+/// already in every build (russh).
+///
+/// A no-op in builds without a rustls client, and when a provider is
+/// already installed, which is then kept.
+pub fn install_tls_provider() {
+    #[cfg(any(
+        feature = "winrm",
+        feature = "k8s-exec",
+        feature = "ssm",
+        feature = "azure"
+    ))]
+    {
+        // `Err` only means a provider is already installed.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+}
+
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod config;
@@ -105,3 +135,27 @@ pub use mcp::protocol::{
     PromptsGetParams, ResourcesReadParams, SamplingCreateMessageParams,
     SamplingCreateMessageResult, TaskCancelParams, TaskGetParams,
 };
+
+#[cfg(all(
+    test,
+    any(
+        feature = "winrm",
+        feature = "k8s-exec",
+        feature = "ssm",
+        feature = "azure"
+    )
+))]
+mod tls_provider_tests {
+    #[test]
+    fn install_tls_provider_lets_rustls_build_a_client_config() {
+        super::install_tls_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        // Panics with both rustls providers compiled in and none installed,
+        // which is what kube-client and hyper-rustls hit.
+        let _config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        // A second call keeps the installed provider instead of failing.
+        super::install_tls_provider();
+    }
+}

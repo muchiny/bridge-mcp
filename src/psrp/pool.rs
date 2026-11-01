@@ -46,7 +46,7 @@ impl Default for PsrpPoolConfig {
 /// Cache of `WinrmClient` instances for PSRP hosts, keyed by host name.
 ///
 /// Follows the same pattern as `WinRmPool`: `Arc<RwLock<HashMap>>` with
-/// fast/cold path lookup. Reuses `crate::winrm::build_winrm_config()`
+/// fast/cold path lookup. Reuses `crate::winrm::build_winrm_client()`
 /// for the bridge → `winrm-rs` config mapping.
 #[derive(Clone)]
 pub struct PsrpPool {
@@ -73,7 +73,7 @@ impl PsrpPool {
     /// Fetch or create a `PsrpConnection` for `host_name`.
     ///
     /// **Fast path**: cached `WinrmClient` still fresh — clone Arc, return.
-    /// **Cold path**: `build_winrm_config()` → `WinrmClient::new()` → cache.
+    /// **Cold path**: `build_winrm_client()` (`build_winrm_config()` → `WinrmClient::new()`) → cache.
     ///
     /// # Errors
     ///
@@ -101,9 +101,8 @@ impl PsrpPool {
             }
         }
 
-        // Cold path: build new WinrmClient via build_winrm_config().
-        let (winrm_config, credentials) = crate::winrm::build_winrm_config(host_config)?;
-        let client = Arc::new(winrm_rs::WinrmClient::new(winrm_config, credentials)?);
+        // Cold path: build new WinrmClient via build_winrm_client().
+        let client = crate::winrm::build_winrm_client(host_config)?;
 
         {
             let mut guard = self.inner.write().await;

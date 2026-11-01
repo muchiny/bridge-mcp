@@ -18,6 +18,48 @@ use crate::config::{HostConfig, LimitsConfig};
 use crate::error::{BridgeError, Result};
 use crate::ssh::CommandOutput;
 
+/// Refusal of `auth: password` (Basic) over plain HTTP.
+const BASIC_OVER_HTTP: &str = "`password` (Basic) over plain HTTP would send the password and \
+     every message in clear; use `ntlm`, which works on the same listener and seals the \
+     messages, or HTTPS (port 5986 or `winrm_use_tls: true`) with a server certificate that \
+     chains to a public root";
+
+/// Refusal of `auth: password` (Basic) with `winrm_accept_invalid_certs`.
+const BASIC_UNVERIFIED: &str = "`password` (Basic) with `winrm_accept_invalid_certs` would send \
+     the password to a server whose certificate is not verified; use `ntlm`, or a server \
+     certificate that chains to a public root (winrm-rs checks the roots it bundles, not the \
+     bridge host's certificate store)";
+
+/// Whether `host_config` reaches `WinRM` over HTTPS: `winrm_use_tls` when set,
+/// else port 5986.
+#[must_use]
+pub fn winrm_uses_tls(host_config: &HostConfig) -> bool {
+    host_config
+        .winrm_use_tls
+        .unwrap_or(host_config.port == 5986)
+}
+
+/// Why `auth: password` (Basic) is refused for `host_config`, if it is.
+///
+/// Over plain HTTP the password and every SOAP body would cross in clear;
+/// with `winrm_accept_invalid_certs` the password would go to a server nobody
+/// verified. winrm-rs 2 refuses both too, but in terms of its own settings,
+/// which the bridge does not expose. [`build_winrm_config`] refuses the host
+/// with this reason, and the config loader warns with it, so the two cannot
+/// disagree.
+#[must_use]
+pub fn basic_auth_refusal(host_config: &HostConfig) -> Option<&'static str> {
+    if !matches!(host_config.auth, crate::config::AuthConfig::Password { .. }) {
+        None
+    } else if !winrm_uses_tls(host_config) {
+        Some(BASIC_OVER_HTTP)
+    } else if host_config.winrm_accept_invalid_certs.unwrap_or(false) {
+        Some(BASIC_UNVERIFIED)
+    } else {
+        None
+    }
+}
+
 /// Build a `winrm_rs::WinrmConfig` + `winrm_rs::WinrmCredentials` from a bridge `HostConfig`.
 ///
 /// This is the canonical mapping from bridge config types to `winrm-rs` types and is
@@ -30,16 +72,21 @@ use crate::ssh::CommandOutput;
 ///
 /// # Errors
 ///
-/// Returns `BridgeError::ConfigInvalid` when `auth` is `Key` or `Agent` (SSH-only).
+/// Returns `BridgeError::ConfigInvalid` when `auth` is `Key` or `Agent` (SSH-only),
+/// or `password` refused by [`basic_auth_refusal`].
 pub fn build_winrm_config(
     host_config: &HostConfig,
 ) -> Result<(winrm_rs::WinrmConfig, winrm_rs::WinrmCredentials)> {
-    let use_tls = host_config
-        .winrm_use_tls
-        .unwrap_or(host_config.port == 5986);
+    if let Some(reason) = basic_auth_refusal(host_config) {
+        return Err(BridgeError::ConfigInvalid {
+            field: "auth".to_string(),
+            reason: reason.to_string(),
+        });
+    }
+    let use_tls = winrm_uses_tls(host_config);
 
     let mut winrm_cfg = winrm_rs::WinrmConfig {
-        port: host_config.port,
+        port: Some(host_config.port),
         use_tls,
         accept_invalid_certs: host_config.winrm_accept_invalid_certs.unwrap_or(false),
         operation_timeout_secs: host_config.winrm_operation_timeout_secs.unwrap_or(60),
@@ -92,6 +139,31 @@ pub fn build_winrm_config(
     };
 
     Ok((winrm_cfg, credentials))
+}
+
+/// Build the `winrm_rs::WinrmClient` for `host_config`, shared by the `WinRM`
+/// and PSRP pools.
+///
+/// winrm-rs checks the settings when the client is built, before anything is
+/// sent. It refuses `auth: password` (Basic) over plain HTTP, where the
+/// password and every SOAP body would cross in clear, and over HTTPS with
+/// `winrm_accept_invalid_certs`; it refuses `auth: certificate` without TLS
+/// or without a usable certificate and key. Those are configuration errors:
+/// they are reported with winrm-rs's reason, not as an authentication failure
+/// that names no one.
+///
+/// # Errors
+///
+/// `BridgeError::ConfigInvalid` when [`build_winrm_config`] refuses the host
+/// or winrm-rs refuses the client.
+pub fn build_winrm_client(host_config: &HostConfig) -> Result<Arc<winrm_rs::WinrmClient>> {
+    let (config, credentials) = build_winrm_config(host_config)?;
+    winrm_rs::WinrmClient::new(config, credentials)
+        .map(Arc::new)
+        .map_err(|e| BridgeError::ConfigInvalid {
+            field: "auth".to_string(),
+            reason: e.to_string(),
+        })
 }
 
 /// What a cancellable run returns once the bridge's time limit stopped it.
@@ -274,11 +346,23 @@ mod tests {
         }
     }
 
+    /// `test_host_config` with NTLM, which winrm-rs accepts over plain HTTP
+    /// and with `winrm_accept_invalid_certs` (Basic is refused in both).
+    fn ntlm_host_config() -> HostConfig {
+        HostConfig {
+            auth: crate::config::AuthConfig::Ntlm {
+                password: crate::config::RedactedSecret::from("pass"),
+                domain: None,
+            },
+            ..test_host_config()
+        }
+    }
+
     #[test]
     fn test_build_winrm_config_password_basic() {
         let host = test_host_config();
         let (cfg, creds) = build_winrm_config(&host).unwrap();
-        assert_eq!(cfg.port, 5986);
+        assert_eq!(cfg.port, Some(5986));
         assert!(cfg.use_tls);
         assert!(!cfg.accept_invalid_certs);
         assert_eq!(cfg.operation_timeout_secs, 60);
@@ -347,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_build_winrm_config_tls_auto_detect() {
-        let mut host = test_host_config();
+        let mut host = ntlm_host_config();
         host.port = 5985;
         let (cfg, _) = build_winrm_config(&host).unwrap();
         assert!(!cfg.use_tls);
@@ -368,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_build_winrm_config_custom_options() {
-        let mut host = test_host_config();
+        let mut host = ntlm_host_config();
         host.winrm_accept_invalid_certs = Some(true);
         host.winrm_operation_timeout_secs = Some(120);
         host.winrm_max_envelope_size = Some(500_000);
@@ -376,6 +460,81 @@ mod tests {
         assert!(cfg.accept_invalid_certs);
         assert_eq!(cfg.operation_timeout_secs, 120);
         assert_eq!(cfg.max_envelope_size, 500_000);
+    }
+
+    #[test]
+    fn basic_auth_refusal_names_only_password_without_verified_https() {
+        let mut host = test_host_config();
+        assert_eq!(basic_auth_refusal(&host), None);
+        host.winrm_accept_invalid_certs = Some(true);
+        assert_eq!(basic_auth_refusal(&host), Some(BASIC_UNVERIFIED));
+        host.port = 5985;
+        assert_eq!(basic_auth_refusal(&host), Some(BASIC_OVER_HTTP));
+        host.winrm_use_tls = Some(true);
+        host.winrm_accept_invalid_certs = None;
+        assert_eq!(basic_auth_refusal(&host), None);
+        let mut ntlm = ntlm_host_config();
+        ntlm.port = 5985;
+        ntlm.winrm_accept_invalid_certs = Some(true);
+        assert_eq!(basic_auth_refusal(&ntlm), None);
+    }
+
+    #[test]
+    fn password_over_plain_http_is_refused() {
+        for (port, use_tls) in [(5985, None), (5986, Some(false))] {
+            let mut host = test_host_config();
+            host.port = port;
+            host.winrm_use_tls = use_tls;
+            let err = build_winrm_config(&host).unwrap_err();
+            assert!(
+                matches!(&err, BridgeError::ConfigInvalid { field, reason }
+                    if field == "auth" && reason.contains("plain HTTP")),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn password_with_invalid_certs_is_refused() {
+        let mut host = test_host_config();
+        host.winrm_accept_invalid_certs = Some(true);
+        let err = build_winrm_config(&host).unwrap_err();
+        assert!(
+            matches!(&err, BridgeError::ConfigInvalid { field, reason }
+                if field == "auth" && reason.contains("winrm_accept_invalid_certs")),
+            "{err:?}"
+        );
+        // Explicitly verified certificates keep Basic over HTTPS working.
+        host.winrm_accept_invalid_certs = Some(false);
+        assert!(build_winrm_client(&host).is_ok());
+    }
+
+    #[test]
+    fn build_winrm_client_reports_a_refusal_of_winrm_rs_as_a_config_error() {
+        // winrm-rs refuses certificate authentication without TLS when the
+        // client is built; it used to read as "SSH authentication failed
+        // for unknown@WinRM".
+        let mut host = test_host_config();
+        host.port = 5985;
+        host.auth = crate::config::AuthConfig::Certificate {
+            cert_path: "/nonexistent/cert.pem".to_string(),
+            key_path: "/nonexistent/key.pem".to_string(),
+        };
+        let Err(err) = build_winrm_client(&host) else {
+            panic!("winrm-rs accepted certificate authentication over plain HTTP");
+        };
+        assert!(
+            matches!(&err, BridgeError::ConfigInvalid { field, reason }
+                if field == "auth" && !reason.is_empty()),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn build_winrm_client_accepts_ntlm_over_plain_http() {
+        let mut host = ntlm_host_config();
+        host.port = 5985;
+        assert!(build_winrm_client(&host).is_ok());
     }
 
     #[test]
@@ -395,7 +554,8 @@ mod tests {
     /// kept alive for as long as the connection is used.
     async fn silent_endpoint() -> (tokio::net::TcpListener, WinRmConnection) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut host = test_host_config();
+        // NTLM: winrm-rs refuses Basic over plain HTTP.
+        let mut host = ntlm_host_config();
         host.hostname = "127.0.0.1".to_string();
         host.port = listener.local_addr().unwrap().port();
         host.winrm_use_tls = Some(false);
