@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-11-02
+
+**5.0.0 is a major release because of the eight items under `### BREAKING`.**
+Six are in the `WinRM` and PSRP adapters, which move to winrm-rs 2 and
+psrp-rs 4; one is `working_dir` on hosts whose shell is cmd or PowerShell; one
+is in the library API. Other hosts, and the other adapters, behave as in
+4.1.0. Before upgrading, run `bridge-mcp validate`: the config loader names
+each `WinRM` or PSRP host whose `auth: password` will be refused, and why.
+
+The count is eight by this bar: something that worked against 4.1.0 (a host
+entry, its network path, the server or certificate it talks to, the commands
+sent to it, or a crate calling the library) needs a change. Seven are wire or
+behaviour changes and one is in the library API. `cargo semver-checks`
+against v4.1.0 reports only the deprecation of `shell::cd_and_run`, because
+it does not see a public dependency moving to a new major version, which is
+what the library item is. Not counted, by the same bar: a PowerShell command
+that prompts, which now fails at once where it used to hang; and the renamed
+`tracing` fields, because diagnostic logs are not a stable interface (the
+audit log format is unchanged).
+
 ### BREAKING
 
 - **winrm-rs 2.0.1 and psrp-rs 4.0.0: `auth: password` (Basic) needs
@@ -30,10 +50,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a dotted-quad IPv4 address, or a bracketed IPv6 literal in RFC 5952 form.
   A shortened IPv4 form (`10.1`) or an unbracketed IPv6 address is refused
   at the first request, before anything is sent; it is reported as an
-  authentication failure.
+  authentication failure. Put the bare name in `hostname` and the port in
+  `port`, write an IPv4 address as a dotted quad and an IPv6 address in
+  brackets, in RFC 5952 form.
+- **`WinRM` commands no longer load PowerShell profiles.** winrm-rs 2 runs
+  `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile
+  -NonInteractive`, so aliases, `PATH` entries and modules a profile set up
+  are gone. A command that relied on one must set it up itself (an
+  `Import-Module …;` or a full path at the start of the command). PSRP
+  sessions did not load profiles before either.
+- **NTLM refuses a server whose Type 2 message negotiates less than Windows
+  does** (winrm-rs 2): typically an NTLM-terminating proxy or a non-Windows
+  server. Point the host entry at the Windows server itself, or use Basic
+  over verified HTTPS.
+- **Some listener certificates are refused.** With
+  `winrm_accept_invalid_certs: true`, winrm-rs 1.4.1 and later refuse a
+  certificate its verifier cannot check: X.509 v1 or v2, an RSA key under
+  2048 or over 8192 bits, a P-521 key. With NTLM over HTTPS, winrm-rs 1.3.0
+  and later refuse a certificate signed with Ed25519 or an unknown algorithm,
+  which has no channel binding (RFC 5929), verified or not. Re-issue the
+  listener certificate: `New-SelfSignedCertificate` makes X.509 v3 RSA-2048.
+- **`working_dir` on a host whose shell is cmd or PowerShell** (#264). On
+  cmd, a `working_dir` holding `"`, `%`, `!`, `$`, a backtick, U+201C–U+201E
+  or a control character is refused before anything is sent. On PowerShell,
+  `[`, `]`, `*` and `?` are literal (`Set-Location -LiteralPath`), so a
+  wildcard no longer resolves to a directory, and a directory that does not
+  exist stops the call instead of running the command in the default
+  directory. Give the literal path of an existing directory, or `cd` inside
+  the command. Details under Security, Fixed and Changed.
+- **(lib API, `winrm` and `psrp` features) `bridge_mcp::winrm`,
+  `bridge_mcp::psrp` and `BridgeError` take and return winrm-rs 2 and psrp-rs
+  4 types**: `build_winrm_config`, `WinRmConnection::from_parts`,
+  `PsrpConnection::from_parts`, and `From<winrm_rs::WinrmError>` /
+  `From<psrp_rs::PsrpError>` for `BridgeError`. `build_winrm_config` also
+  returns `ConfigInvalid` for the Basic cases above. A crate that names these
+  types moves to winrm-rs 2 and psrp-rs 4; `build_winrm_client` is new.
 
 ### Security
 
+- **tokio 1.54.1 and crypto-bigint 0.7.6 (0.7.10 in this release, see
+  Changed), which turned `cargo deny` green again** (#252). tokio 1.54.0 was yanked (RUSTSEC-2026-0384). crypto-bigint
+  0.7.5, through russh, had RUSTSEC-2026-0387, and the fixed version brings
+  ctutils 0.4.5 (RUSTSEC-2026-0385 is fixed from 0.4.4). crypto-bigint 0.5.5,
+  through jsonwebtoken and p256/p384 0.13, has the same advisory with no fix
+  on the 0.5 line: it is ignored in `deny.toml` and `.cargo/audit.toml`, to be
+  reviewed by 2027-01-24, because the bridge only verifies RSA JWTs with
+  public keys and never handles a secret integer through p256/p384.
 - **winrm-rs 1.4.1.** With `winrm_accept_invalid_certs: true`, winrm-rs up to
   1.4.0 accepted the TLS handshake without checking its signature, so a party
   in the middle holding only the server's public certificate could relay the
@@ -99,13 +161,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **winrm-rs 1.4.1 → 2.0.1 and psrp-rs 2.0.2 → 4.0.0: behaviour the bridge
-  passes through**, besides the BREAKING items above. A `WinRM` command runs
-  `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile
-  -NonInteractive`: profile scripts no longer load (aliases, `PATH` or
-  modules a profile set up are gone), and a command that prompts fails at
-  once instead of waiting. NTLM refuses a server whose Type 2 message
-  negotiates less than Windows does (a proxy or a non-Windows server). SOAP
-  bodies are no longer traced by default. A PSRP command that fails with a terminating
+  passes through**, besides the BREAKING items above. A `WinRM` command that
+  prompts (`Read-Host`, a confirmation) fails at once instead of waiting
+  (`-NonInteractive`). SOAP bodies are no longer traced by default. A PSRP command that fails with a terminating
   error (`throw`, `-ErrorAction Stop`) reports the exception message instead
   of "unknown error". PSRP
   gives up after three client-side timeouts in a row, at most 3 ×
@@ -120,13 +178,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capped at 2 MiB by default (`4 × max(winrm_max_envelope_size, 512 KiB)`);
   PowerShell warning, verbose and debug records now reach stderr. See the
   winrm-rs 1.3.0 "Upgrading from 1.2.x" notes for the full list.
-- **Dependencies: the six open Dependabot updates in one change.**
-  `crypto-bigint` 0.7.6 → 0.7.10 (0.7.6 was yanked, which turned the
-  required `Deny` check red on every branch), `aws-sdk-ssm` 1.130.0, and the
-  last workflow steps still on older pins: `actions/checkout` 7.0.1,
-  `actions/download-artifact` 8.0.2, `Swatinem/rust-cache` 2.9.3,
-  `actions/github-script` 9.0.0, `softprops/action-gh-release` 3.0.3. The
-  `cargo vet` exemptions follow the four crate versions.
+- **Dependencies: the six open Dependabot updates in one change**
+  (#262): `aws-sdk-ssm` 1.130.0 and the last workflow steps still on older
+  pins, `actions/checkout` 7.0.1, `actions/download-artifact` 8.0.2,
+  `Swatinem/rust-cache` 2.9.3, `actions/github-script` 9.0.0 and
+  `softprops/action-gh-release` 3.0.3. With them, `crypto-bigint` 0.7.6 →
+  0.7.10: 0.7.6 was yanked, which turned the required `Deny` check red on
+  every branch. The `cargo vet` exemptions follow the four crate versions.
 - **`src/security/` and `src/ssh/sftp.rs` no longer carry panicking indexing,
   unchecked arithmetic or silent `as` casts** (60 findings of the
   `indexing_slicing`, `arithmetic_side_effects` and `as_conversions` lints the
@@ -135,6 +193,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inputs that differ are the ones that used to panic or wrap (a retention above
   ~96 million days now deletes nothing instead of aborting the bridge; a read
   that returns more bytes than its buffer is a `FileTransfer` error).
+- **CI: SonarQube Cloud analysis, and every workflow action pinned to a
+  commit SHA** (#251, #253). A `sonar` job after `coverage` imports the
+  llvm-cov coverage and the Clippy report. Every `uses:` names a commit SHA,
+  with its tag as a comment so Dependabot keeps both current
+  (`dtolnay/rust-toolchain` is pinned on its `master` branch, `# master`,
+  with the toolchain given by `toolchain:`), and the zizmor policy is
+  `hash-pin` for every action. The release builds (`cross` and
+  `cargo`) run with `--locked`, and the registry-publish `curl` accepts only
+  HTTPS with TLS 1.2 or later.
 - On cmd hosts, `working_dir` refuses `"`, `%`, `!`, `$`, a backtick,
   U+201C–U+201E and control characters.
 - On PowerShell hosts, `working_dir` uses `Set-Location -LiteralPath`: `[`,
@@ -5569,7 +5636,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v5.0.0...HEAD
+[5.0.0]: https://github.com/muchiny/bridge-mcp/compare/v4.1.0...v5.0.0
 [4.1.0]: https://github.com/muchiny/bridge-mcp/compare/v4.0.2...v4.1.0
 [4.0.2]: https://github.com/muchiny/bridge-mcp/compare/v4.0.1...v4.0.2
 [4.0.1]: https://github.com/muchiny/bridge-mcp/compare/v4.0.0...v4.0.1
