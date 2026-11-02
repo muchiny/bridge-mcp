@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies: the five open Dependabot updates in one change.** Crates:
+  `uuid` 1.29.0, `notify` 8.2.1, `similar` 3.2.1, `aws-sdk-ssm` 1.131.0 and
+  `aws-smithy-schema` 1.1.0. In `notify`, the macOS FSEvents backend moves
+  from `fsevent-sys` to `objc2-core-services`, and on Linux an
+  `inotify_rm_watch` error while unwatching a deleted path is logged instead
+  of returned. Workflow steps: `astral-sh/setup-uv` 10.3.3,
+  `DavidAnson/markdownlint-cli2-action` 25.0.0 (markdownlint 0.42),
+  `SonarSource/sonarqube-scan-action` 8.4.0 and `taiki-e/install-action`
+  2.88.1. The `cargo vet` exemptions follow, and those of the crates that left
+  the lockfile (`fsevent-sys`, `windows-sys` 0.60, `windows-targets` 0.53 and
+  its eight `windows_*` 0.53 targets) are gone.
+
 ## [5.0.1] - 2026-11-02
 
 Patch release for the Docker image: the 5.0.0 image was never published.
