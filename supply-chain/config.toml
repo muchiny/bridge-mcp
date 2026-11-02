@@ -113,7 +113,7 @@ version = "1.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.aws-sdk-ssm]]
-version = "1.130.0"
+version = "1.131.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.aws-sdk-sso]]
@@ -169,7 +169,7 @@ version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.aws-smithy-schema]]
-version = "1.0.0"
+version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.aws-smithy-types]]
@@ -656,10 +656,6 @@ criteria = "safe-to-deploy"
 version = "1.3.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.fsevent-sys]]
-version = "4.1.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.futures]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
@@ -1129,7 +1125,7 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.notify]]
-version = "8.2.0"
+version = "8.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.notify-types]]
@@ -1166,6 +1162,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.num-traits]]
 version = "0.2.19"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-core-foundation]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-core-services]]
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
@@ -1765,7 +1769,7 @@ version = "2.7.0"
 criteria = "safe-to-run"
 
 [[exemptions.similar]]
-version = "3.2.0"
+version = "3.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.simple_asn1]]
@@ -2065,7 +2069,7 @@ version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
-version = "1.28.0"
+version = "1.29.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.valuable]]
@@ -2197,19 +2201,11 @@ version = "0.52.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-sys]]
-version = "0.60.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-sys]]
 version = "0.61.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-targets]]
 version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-targets]]
-version = "0.53.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-threading]]
@@ -2220,64 +2216,32 @@ criteria = "safe-to-deploy"
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.windows_aarch64_gnullvm]]
-version = "0.53.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.windows_aarch64_msvc]]
 version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_aarch64_msvc]]
-version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_i686_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.windows_i686_gnu]]
-version = "0.53.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.windows_i686_gnullvm]]
 version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_i686_gnullvm]]
-version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_i686_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.windows_i686_msvc]]
-version = "0.53.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.windows_x86_64_gnu]]
 version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_gnu]]
-version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_x86_64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.windows_x86_64_gnullvm]]
-version = "0.53.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.windows_x86_64_msvc]]
 version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_msvc]]
-version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.winnow]]
