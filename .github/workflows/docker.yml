@@ -115,6 +115,10 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          # Without it, trivy-action unsets `severity` for SARIF output, and
+          # `exit-code: 1` then fails on a finding of any severity: 5.0.0
+          # was blocked by an UNKNOWN one. MEDIUM goes to the table below.
+          limit-severities-for-sarif: true
           exit-code: 1
 
       - name: Trivy scan (MEDIUM — warn only)

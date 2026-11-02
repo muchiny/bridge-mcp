@@ -19,7 +19,11 @@ COPY . .
 RUN cargo build --release --features full
 
 # Stage 2: Runtime
-FROM alpine:3.20
+#
+# A supported Alpine branch (3.24: until 2028-06-01). An end-of-life branch
+# stops receiving fixes, and the Trivy gate in docker.yml then fails the
+# release: 5.0.0 was never published because 3.20 still shipped musl 1.2.5-r3.
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates openssh-client \
     && adduser -D -h /home/bridge bridge

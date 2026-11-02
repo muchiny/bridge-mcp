@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.1] - 2026-11-02
+
+Patch release for the Docker image: the 5.0.0 image was never published.
+The binaries are the 5.0.0 code; nothing else changes.
+
+### Fixed
+
+- **The Docker image is published again** (`ghcr.io/muchiny/bridge-mcp`). The
+  5.0.0 image stopped at the Trivy scan, before the push: its runtime stage
+  was `alpine:3.20`, out of support since 2026-04-01, where Trivy reports
+  CVE-2026-107891 in `musl` 1.2.5-r3 (severity unknown, fixed in 1.2.5-r4,
+  which 3.20 does not ship). The runtime stage is now `alpine:3.24`,
+  supported until 2028-06-01, where Trivy 0.69.3 finds nothing, with
+  `ca-certificates` and `openssh-client` installed. There is no 5.0.0 image:
+  the image tags go from 4.1.0 to 5.0.1.
+- **The image scan fails on CRITICAL and HIGH findings only, as the step's
+  name says.** With `format: sarif`, trivy-action drops the `severity`
+  filter unless `limit-severities-for-sarif` is set, so `exit-code: 1` failed
+  on a finding of any severity. It is now set: the uploaded SARIF holds
+  CRITICAL and HIGH, and MEDIUM stays in the warn-only table.
+
 ## [5.0.0] - 2026-11-02
 
 **5.0.0 is a major release because of the eight items under `### BREAKING`.**
@@ -5636,7 +5657,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v5.0.1...HEAD
+[5.0.1]: https://github.com/muchiny/bridge-mcp/compare/v5.0.0...v5.0.1
 [5.0.0]: https://github.com/muchiny/bridge-mcp/compare/v4.1.0...v5.0.0
 [4.1.0]: https://github.com/muchiny/bridge-mcp/compare/v4.0.2...v4.1.0
 [4.0.2]: https://github.com/muchiny/bridge-mcp/compare/v4.0.1...v4.0.2
