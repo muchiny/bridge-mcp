@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.88.1. The `cargo vet` exemptions follow, and those of the crates that left
   the lockfile (`fsevent-sys`, `windows-sys` 0.60, `windows-targets` 0.53 and
   its eight `windows_*` 0.53 targets) are gone.
+- **Dependencies: `aws-sdk-ssm` 1.133.0** (`ssm` feature), instead of the
+  1.132.0 Dependabot proposed. It brings `aws-smithy-runtime` 1.16.2,
+  `aws-smithy-types` 1.9.1, `aws-smithy-schema` 1.1.2 and the other
+  `aws-smithy-*` patch releases. The aws-sdk-rust releases of 2026-10-29 and
+  2026-10-30 list no change for SSM and nothing breaking. The `cargo vet`
+  exemptions follow.
 
 ## [5.0.1] - 2026-11-02
 
