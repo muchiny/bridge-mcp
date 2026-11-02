@@ -178,7 +178,7 @@ pub fn try_cd_and_run(dir: &str, cmd: &str, shell: ShellType) -> Result<String> 
 /// - **Cmd**: `cd /d "C:\path" && command`
 /// - **`PowerShell`**: `Set-Location 'C:\path'; command`
 #[deprecated(
-    since = "4.2.0",
+    since = "5.0.0",
     note = "use try_cd_and_run: the cmd form cannot quote every directory"
 )]
 #[must_use]
