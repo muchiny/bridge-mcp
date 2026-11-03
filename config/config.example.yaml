@@ -70,14 +70,16 @@ hosts:
 
   # Example: Windows Server (with OpenSSH)
   # os_type: windows enables Windows-specific tools and shell escaping.
-  # shell: powershell selects PowerShell (default for Windows is cmd).
+  # Over SSH the default shell for Windows is cmd (OpenSSH's own default);
+  # set shell: powershell if the host's OpenSSH DefaultShell is PowerShell.
+  # WinRM and PSRP hosts default to powershell and need no `shell`.
   # windows-dc:
   #   hostname: 192.168.1.200
   #   port: 22
   #   user: Administrator
   #   description: "Windows Domain Controller"
   #   os_type: windows
-  #   shell: powershell  # optional, default: cmd
+  #   shell: powershell  # optional, default over SSH: cmd
   #   auth:
   #     type: key
   #     path: ~/.ssh/id_ed25519

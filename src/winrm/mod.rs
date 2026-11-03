@@ -185,6 +185,256 @@ fn after_time_limit(
     }
 }
 
+/// Switches the console output encoding to UTF-8, without a byte-order mark,
+/// before the caller's text runs.
+///
+/// `powershell.exe` starts on the console's OEM code page (437 on an en-US
+/// Windows), whatever `WINRS_CODEPAGE` says, and the adapter decodes stdout as
+/// UTF-8: "héllo-€" came back as "h\u{FFFD}llo-?". Measured over `WinRM` with
+/// this switch: on Windows `PowerShell` 5.1 (Server 2025), its own strings and
+/// native programs' output (`cmd /c echo`) come back in UTF-8, its error
+/// records do not; on 4.0 (Server 2012 R2), native programs' output and error
+/// records do, its own strings do not. Nothing came back worse.
+///
+/// Only in `FullLanguage`: in Constrained Language Mode (a host under
+/// WDAC/AppLocker script enforcement) `New-Object` of this type is refused, so
+/// the switch would add "Cannot create type" to every command's stderr. A
+/// skipped `if` leaves `$?` true, where a caught exception would leave it
+/// false for a command that is only comments.
+const UTF8_OUTPUT_PREFIX: &str = "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false }";
+
+/// Makes the process exit code the native one when the caller's last
+/// statement failed.
+///
+/// `powershell.exe -EncodedCommand` exits 0 or 1 from `$?` and keeps a native
+/// program's code in `$LASTEXITCODE`: `cmd /c exit 3` reported 1. When the
+/// last statement succeeded, nothing changes (0); when it failed, the code is
+/// `$LASTEXITCODE` if a native program set a non-zero one, else 1. That is the
+/// last native program's code, not necessarily the last statement's:
+/// `cmd /c exit 3; Get-Item C:\nope` gives 3. A caller's own `exit N` ends the
+/// script first and keeps N.
+///
+/// `$LASTEXITCODE` is read through `Get-Variable`: until a native program has
+/// run it does not exist, and reading it bare under `Set-StrictMode` added
+/// "The variable '$LASTEXITCODE' cannot be retrieved" to the caller's errors.
+/// The blank line first ends a statement the caller left on a trailing
+/// backtick, which would otherwise continue onto this line.
+const EXIT_CODE_SUFFIX: &str = "\n\nif (-not $?) { $__bridge_mcp_native = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction Ignore; if ($__bridge_mcp_native -is [int] -and $__bridge_mcp_native -ne 0) { exit $__bridge_mcp_native } else { exit 1 } }";
+
+/// The script sent to `powershell.exe` for the caller's `command`.
+///
+/// What may be added depends on the command's [`ScriptShape`]:
+///
+/// - [`ScriptShape::Plain`]: [`UTF8_OUTPUT_PREFIX`] and `"; "` on the
+///   command's first line, so the line numbers in `PowerShell`'s errors do not
+///   move (on a line of its own it gave "At line:2" for a one-line command),
+///   then the command, then [`EXIT_CODE_SUFFIX`]. The prefix takes a line of
+///   its own above a first line that opens with `#requires`, which is only
+///   read as such as the first item on its line.
+/// - [`ScriptShape::Preamble`]: the command, then [`EXIT_CODE_SUFFIX`]. It
+///   keeps the console code page.
+/// - [`ScriptShape::NamedBlocks`]: the command as written, with the exit code
+///   and code page it had before the adapter added anything.
+fn powershell_script(command: &str) -> String {
+    match script_shape(command) {
+        ScriptShape::Plain => {
+            let separator = if opens_with_requires(command) {
+                "\n"
+            } else {
+                "; "
+            };
+            format!("{UTF8_OUTPUT_PREFIX}{separator}{command}{EXIT_CODE_SUFFIX}")
+        }
+        ScriptShape::Preamble => format!("{command}{EXIT_CODE_SUFFIX}"),
+        ScriptShape::NamedBlocks => command.to_owned(),
+    }
+}
+
+/// Whether `command`'s first line opens with `#requires` (any case).
+fn opens_with_requires(command: &str) -> bool {
+    command
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim_start()
+        .get(..9)
+        .is_some_and(|word| word.eq_ignore_ascii_case("#requires"))
+}
+
+/// What a `PowerShell` script's structure lets an adapter add around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScriptShape {
+    /// Statements only: text may go before and after them.
+    Plain,
+    /// Opens with a `using` statement or a `param` block (with the attributes
+    /// that may precede it), which only the start of a script accepts: text
+    /// may follow, nothing may come first.
+    Preamble,
+    /// Has `begin` / `process` / `end` / `dynamicparam` named blocks, which
+    /// nothing may follow and only a preamble may precede.
+    NamedBlocks,
+}
+
+/// The [`ScriptShape`] of `command`.
+///
+/// Leading blank space and comments (`#` lines, `#requires` included, and
+/// `<# … #>` blocks) are skipped, as the parser skips them. A script that
+/// opens with ordinary statements is [`ScriptShape::Plain`] whatever follows:
+/// a named block after a statement is already a parse error. After a
+/// preamble, finding where the `param` block ends would take a `PowerShell`
+/// lexer (its default values can hold strings, brackets and comments), so any
+/// `begin {`, `process {`, `end {` or `dynamicparam {` in the text, even in a
+/// function or a string, makes it [`ScriptShape::NamedBlocks`]: such a script
+/// is sent as written rather than broken.
+pub(crate) fn script_shape(command: &str) -> ScriptShape {
+    let Some(start) = skip_trivia(command) else {
+        // An unterminated block comment: a parse error whatever is added.
+        return ScriptShape::Plain;
+    };
+    if opens_named_block(start) {
+        ScriptShape::NamedBlocks
+    } else if !opens_preamble(start) {
+        ScriptShape::Plain
+    } else if mentions_named_block(command) {
+        ScriptShape::NamedBlocks
+    } else {
+        ScriptShape::Preamble
+    }
+}
+
+/// `text` without its leading blank space and comments; `None` when a block
+/// comment never ends.
+fn skip_trivia(text: &str) -> Option<&str> {
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("<#") {
+            let end = after.find("#>")?;
+            rest = after.get(end.saturating_add(2)..)?;
+        } else if rest.starts_with('#') {
+            rest = rest
+                .find('\n')
+                .and_then(|end| rest.get(end..))
+                .unwrap_or("");
+        } else {
+            return Some(rest);
+        }
+    }
+}
+
+/// What follows `keyword` when `text` opens with it (any case) as a whole
+/// word.
+fn after_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let head = text.get(..keyword.len())?;
+    let rest = text.get(keyword.len()..)?;
+    let word_goes_on = rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    (head.eq_ignore_ascii_case(keyword) && !word_goes_on).then_some(rest)
+}
+
+/// Whether `text` opens with a named block: its keyword, then `{`, with
+/// only blank space or comments between them.
+fn opens_named_block(text: &str) -> bool {
+    ["begin", "process", "end", "dynamicparam"]
+        .into_iter()
+        .any(|keyword| {
+            after_keyword(text, keyword)
+                .and_then(skip_trivia)
+                .is_some_and(|rest| rest.starts_with('{'))
+        })
+}
+
+/// Whether `text` opens with a `using` statement, a `param` block, or the
+/// attributes of one (`[CmdletBinding()]`, `[OutputType([string])]`, …).
+/// `[int]'5'` and `[Console]::Out` are expressions: no `param` follows them.
+fn opens_preamble(text: &str) -> bool {
+    if after_keyword(text, "using").is_some() || after_keyword(text, "param").is_some() {
+        return true;
+    }
+    let mut rest = text;
+    while rest.starts_with('[') {
+        match after_brackets(rest).and_then(skip_trivia) {
+            Some(after) => rest = after,
+            None => return false,
+        }
+    }
+    rest.len() < text.len() && after_keyword(rest, "param").is_some()
+}
+
+/// `text` after the bracketed group it opens with, nested brackets and
+/// brackets inside quoted strings included (`[ValidateSet('a]')]`); `None`
+/// when the group never closes.
+fn after_brackets(text: &str) -> Option<&str> {
+    let mut depth = 0_usize;
+    let mut quote: Option<char> = None;
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match quote {
+            // Inside a string: a doubled quote stays inside (`'it''s'`), and
+            // so does a backtick-escaped character in a double-quoted one.
+            Some(open) => {
+                if c == '`' && open == '"' {
+                    chars.next();
+                } else if quote_kind(c) == Some(open) {
+                    if chars
+                        .clone()
+                        .next()
+                        .is_some_and(|(_, n)| quote_kind(n) == Some(open))
+                    {
+                        chars.next();
+                    } else {
+                        quote = None;
+                    }
+                }
+            }
+            None => match c {
+                '[' => depth = depth.saturating_add(1),
+                ']' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return text.get(at.saturating_add(1)..);
+                    }
+                }
+                _ => quote = quote_kind(c),
+            },
+        }
+    }
+    None
+}
+
+/// The quote family `c` belongs to: `PowerShell` reads the typographic single
+/// quotes (U+2018 to U+201B) as `'` and the double ones (U+201C to U+201E) as
+/// `"`.
+fn quote_kind(c: char) -> Option<char> {
+    match c {
+        '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => Some('\''),
+        '"' | '\u{201C}' | '\u{201D}' | '\u{201E}' => Some('"'),
+        _ => None,
+    }
+}
+
+/// Whether a named block opens anywhere in `text`: its keyword as a whole
+/// word, not a variable (`$end`), a parameter (`-End`), a member (`.End`) or
+/// a scoped name (`$script:end`), then `{`.
+fn mentions_named_block(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["begin", "process", "end", "dynamicparam"]
+        .into_iter()
+        .any(|keyword| {
+            lower.match_indices(keyword).any(|(at, _)| {
+                let free = lower
+                    .get(..at)
+                    .and_then(|head| head.chars().next_back())
+                    .is_none_or(|c| {
+                        !(c.is_alphanumeric() || matches!(c, '_' | '-' | '$' | '.' | ':'))
+                    });
+                free && lower.get(at..).is_some_and(opens_named_block)
+            })
+        })
+}
+
 /// An active `WinRM` connection wrapping `winrm_rs::WinrmClient`.
 ///
 /// Unlike the previous implementation (hand-rolled SOAP with `cmd.exe /c`),
@@ -253,12 +503,17 @@ impl WinRmConnection {
         let start = Instant::now();
         let time_limit = Duration::from_secs(limits.command_timeout_seconds);
 
+        // Logged as the adapter received it, before the wrapping below: the
+        // audit log, the history and the security checks never see the
+        // prefix and suffix (nor the `Set-Location` a `working_dir` adds
+        // upstream).
         debug!(
             host = %self.host_name,
             command = %command,
             cancellable = token.is_some(),
             "Executing WinRM PowerShell command"
         );
+        let script = powershell_script(command);
 
         // The winrm-rs futures are boxed: inlined, they put ~20 KB into every
         // future that awaits a connection (`clippy::large_futures`).
@@ -266,7 +521,7 @@ impl WinRmConnection {
             None => {
                 Box::pin(self.client.run_powershell_with_timeout(
                     &self.host_name,
-                    command,
+                    &script,
                     time_limit,
                 ))
                 .await?
@@ -277,7 +532,7 @@ impl WinRmConnection {
                 let stop = token.child_token();
                 let mut run = Box::pin(self.client.run_powershell_with_cancel(
                     &self.host_name,
-                    command,
+                    &script,
                     stop.clone(),
                 ));
                 tokio::select! {
@@ -582,6 +837,193 @@ mod tests {
             stderr: Vec::new(),
             exit_code: 0,
         }
+    }
+
+    #[test]
+    fn powershell_script_wraps_a_plain_command_between_prefix_and_suffix() {
+        let script = powershell_script("cmd /c exit 3");
+        assert_eq!(
+            script,
+            format!("{UTF8_OUTPUT_PREFIX}; cmd /c exit 3{EXIT_CODE_SUFFIX}")
+        );
+    }
+
+    #[test]
+    fn powershell_script_keeps_the_callers_line_numbers() {
+        // PowerShell reports errors as "At line:N": the caller's line N must
+        // still be line N of the script sent.
+        let command = "Get-Date\n  Get-Item C:\\nope\r\n'third'";
+        let script = powershell_script(command);
+        let lines: Vec<&str> = script.lines().collect();
+        assert!(lines[0].starts_with(UTF8_OUTPUT_PREFIX));
+        assert!(lines[0].ends_with("; Get-Date"));
+        assert_eq!(lines[1], "  Get-Item C:\\nope");
+        assert_eq!(lines[2], "'third'");
+    }
+
+    #[test]
+    fn powershell_script_puts_the_prefix_above_a_leading_requires() {
+        for command in ["#requires -Version 3\nGet-Date", "  #REQUIRES -Version 3"] {
+            assert!(opens_with_requires(command), "{command:?}");
+            assert_eq!(
+                powershell_script(command),
+                format!("{UTF8_OUTPUT_PREFIX}\n{command}{EXIT_CODE_SUFFIX}"),
+            );
+        }
+        // Not on the first line, or not first on it: the prefix stays inline.
+        assert!(!opens_with_requires("\n#requires -Version 3"));
+        assert!(!opens_with_requires("Get-Date #requires"));
+        assert!(!opens_with_requires("#require"));
+        assert!(!opens_with_requires(""));
+    }
+
+    #[test]
+    fn powershell_script_prefix_sets_utf8_without_bom_in_full_language_only() {
+        // `UTF8Encoding $false`: `[Text.Encoding]::UTF8` would emit a BOM in
+        // front of stdout, which breaks a JSON or base64 reader. Measured in
+        // Constrained Language Mode on Server 2025 and 2012 R2: without the
+        // guard, every command got "Cannot create type" in stderr.
+        assert_eq!(
+            UTF8_OUTPUT_PREFIX,
+            "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') \
+             { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false }"
+        );
+    }
+
+    #[test]
+    fn powershell_script_suffix_maps_failure_to_the_native_code() {
+        // Checked on Windows Server 2025 (PowerShell 5.1) and 2012 R2 (4.0):
+        // `cmd /c exit 3` -> 3, `exit 7` -> 7, a failing cmdlet -> 1, a
+        // successful last statement -> 0, and under `Set-StrictMode` a
+        // failing cmdlet -> 1 with no error about `$LASTEXITCODE`.
+        assert_eq!(
+            EXIT_CODE_SUFFIX,
+            "\n\nif (-not $?) { $__bridge_mcp_native = Get-Variable -Name LASTEXITCODE \
+             -ValueOnly -ErrorAction Ignore; if ($__bridge_mcp_native -is [int] -and \
+             $__bridge_mcp_native -ne 0) { exit $__bridge_mcp_native } else { exit 1 } }"
+        );
+        // Never a bare read, which `Set-StrictMode` faults.
+        assert!(!EXIT_CODE_SUFFIX.contains("$LASTEXITCODE"));
+        // A trailing backtick in the caller's text continues onto the next
+        // line only: the blank line ends that statement before the suffix.
+        let script = powershell_script("Get-Date `");
+        assert!(script.contains("Get-Date `\n\nif (-not $?)"));
+    }
+
+    #[test]
+    fn powershell_script_adds_only_the_suffix_after_a_preamble() {
+        for command in [
+            "using namespace System.Text\n[StringBuilder]::new()",
+            "param($Name = 'x')\n$Name",
+            "Param (\n  [string]$Name\n)\n$Name",
+            "[CmdletBinding()]\nparam()\n'ok'",
+            "[OutputType([string])] param() 'ok'",
+            "[Diagnostics.CodeAnalysis.SuppressMessage('a', '')]\n[CmdletBinding()]\nparam()",
+            "#requires -Version 5\nusing namespace System",
+            "  <# header #>\n  # note\n  param()",
+            "using namespace Ünïcode",
+            // A function's own blocks are not named blocks of the script, but
+            // `ForEach-Object -Begin {}` and `$end` do not look like them.
+            "param($n)\n1..$n | ForEach-Object -Begin { $s = 0 } -Process { $s += $_ } -End { $s }",
+            "param()\n$end = 1; $x.End; $script:end",
+            // Brackets inside an attribute's quoted arguments.
+            "[ValidateSet('a]')]\nparam($x)",
+            "[Diagnostics.CodeAnalysis.SuppressMessage(\"x\", 'it''s ]')]\n[CmdletBinding()]\nparam()",
+            "[Alias(\"a`\"]\")]\nparam()",
+            "[ValidateSet(\u{2018}a]\u{2019})]\nparam($x)",
+        ] {
+            assert_eq!(script_shape(command), ScriptShape::Preamble, "{command:?}");
+            assert_eq!(
+                powershell_script(command),
+                format!("{command}{EXIT_CODE_SUFFIX}")
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_script_sends_named_blocks_as_written() {
+        for command in [
+            "begin { $n = 0 }\nprocess { $n++ }\nend { $n }",
+            "END{ 'done' }",
+            "dynamicparam {}",
+            "# a filter\nprocess\n{ $_ }",
+            "param()\nbegin {}\nend {}",
+            "[CmdletBinding()]\nparam([int]$x)\n\nEnd { $x }",
+            "using namespace System\nprocess { $_ }",
+            // Comments between the keyword and its brace.
+            "param()\nprocess # per item\n{ $_ }",
+            "param()\nbegin <# setup #> { }\nend { }",
+            "end <# c #>\n{ 'x' }",
+            // Over-detection, on purpose: a preamble then a function with
+            // blocks is sent as written too.
+            "param()\nfunction f { begin {} process {} }\nf",
+        ] {
+            assert_eq!(
+                script_shape(command),
+                ScriptShape::NamedBlocks,
+                "{command:?}"
+            );
+            assert_eq!(powershell_script(command), command);
+        }
+    }
+
+    #[test]
+    fn powershell_script_wraps_ordinary_commands() {
+        for command in [
+            "Get-Date",
+            "usingfoo",
+            "parameters",
+            "param-thing",
+            "$param = 1",
+            "[Console]::OutputEncoding.WebName",
+            "[int]'5'",
+            "[string[]]$a = 'x', 'y'",
+            "[unclosed",
+            "# just a comment",
+            "# using namespace X\nGet-Date",
+            "<# param() #> Get-Date",
+            "<# unterminated",
+            "",
+            "Write-Output 'using namespace X'",
+            "beginning",
+            "end",
+            "process-thing { }",
+            "Get-Process",
+            "éparam()",
+            // A named block after a statement is a parse error either way.
+            "Get-Date\nend { }",
+            // A function's blocks in a plain script.
+            "function f { begin {} process { $_ } }\n1 | f",
+        ] {
+            assert_eq!(script_shape(command), ScriptShape::Plain, "{command:?}");
+            assert!(
+                powershell_script(command).starts_with(UTF8_OUTPUT_PREFIX),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_brackets_skips_one_nested_group() {
+        assert_eq!(after_brackets("[a[b]c] d"), Some(" d"));
+        assert_eq!(after_brackets("[]"), Some(""));
+        assert_eq!(after_brackets("[a"), None);
+        assert_eq!(after_brackets("]a["), None);
+    }
+
+    #[test]
+    fn after_brackets_skips_quoted_strings() {
+        assert_eq!(after_brackets("['a]'] x"), Some(" x"));
+        assert_eq!(after_brackets("['it''s ]'] x"), Some(" x"));
+        assert_eq!(after_brackets("[\"a`\"]\"] x"), Some(" x"));
+        assert_eq!(after_brackets("[\"a\"\"]\"] x"), Some(" x"));
+        // A backtick is literal in single quotes: the quote after it closes.
+        assert_eq!(after_brackets("['a`'] x"), Some(" x"));
+        // Typographic quotes close the string they family-match.
+        assert_eq!(after_brackets("[\u{2018}a]\u{2019}] x"), Some(" x"));
+        assert_eq!(after_brackets("[\u{201C}a]\"] x"), Some(" x"));
+        // An unterminated string never closes the group.
+        assert_eq!(after_brackets("['a]"), None);
     }
 
     #[test]

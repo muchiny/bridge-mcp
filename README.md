@@ -432,7 +432,7 @@ At least one host is required (hosts imported through `ssh_config` count).
 | `sudo_password` | string | — | Sent to `sudo` on stdin (never on the command line), over SSH only. Without it, `sudo=true` needs passwordless sudo |
 | `tags` | list of strings | `[]` | Free-form labels. `network-equipment` is required by `ssh_net_equip_config` |
 | `os_type` | `linux`, `windows` | `linux` | Selects command semantics and which tools accept the host. Not inferred from `protocol` |
-| `shell` | `posix`, `cmd`, `powershell` (alias `pwsh`) | `posix` on Linux, `cmd` on Windows | Shell used for escaping |
+| `shell` | `posix`, `cmd`, `powershell` (alias `pwsh`) | `powershell` with `protocol: winrm` or `psrp`; otherwise `posix` on Linux, `cmd` on Windows | The shell the host runs commands in: decides how `working_dir` and persistent sessions work and whether `sudo` is accepted (`posix` only). WinRM and PSRP always run PowerShell: any other value there makes the loader warn |
 | `protocol` | `ssh`; `winrm`, `psrp`, `telnet`, `k8sexec`, `serial`, `ssm`, `azure`, `gcp` with the matching cargo feature | `ssh` | Transport. Release binaries only have `ssh` |
 | `winrm_use_tls` | bool (feature `winrm`) | `true` only on port `5986` | HTTPS or HTTP for WinRM/PSRP |
 | `winrm_accept_invalid_certs` | bool (feature `winrm`) | `false` | Accept a certificate that fails verification (self-signed, internal CA). Refused with `auth: password`. Without it the certificate must chain to a public root: winrm-rs checks the roots it bundles, not the bridge host's store |

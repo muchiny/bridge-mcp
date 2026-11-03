@@ -325,8 +325,10 @@ pub struct HostConfig {
 
     /// Shell type used on the remote host.
     ///
-    /// If not set, inferred from `os_type`: Linux -> posix, Windows -> cmd.
-    /// Override to `powershell` if the Windows host has `PowerShell` as default shell.
+    /// If not set, inferred from the protocol, then from `os_type`: `winrm` and
+    /// `psrp` -> powershell (they always run the command text in `PowerShell`);
+    /// otherwise Linux -> posix, Windows -> cmd. Override to `powershell` if a
+    /// Windows host reached over SSH has `PowerShell` as its `OpenSSH` default shell.
     #[serde(default)]
     pub shell: Option<ShellType>,
 
@@ -419,13 +421,43 @@ impl HostConfig {
 
     /// Resolve the effective shell type for this host.
     ///
-    /// If `shell` is explicitly set, use that. Otherwise, infer from `os_type`.
+    /// An explicit `shell` wins. Otherwise a protocol that runs the command
+    /// text in `PowerShell` ([`Self::protocol_runs_powershell`]) gives
+    /// `PowerShell`, and any other protocol falls back to `os_type`:
+    /// Linux -> `Posix`, Windows -> `Cmd` (the `OpenSSH` for Windows default).
     #[must_use]
     pub fn effective_shell(&self) -> ShellType {
-        self.shell.unwrap_or(match self.os_type {
-            OsType::Linux => ShellType::Posix,
-            OsType::Windows => ShellType::Cmd,
+        self.shell.unwrap_or_else(|| {
+            if self.protocol_runs_powershell() {
+                ShellType::PowerShell
+            } else {
+                match self.os_type {
+                    OsType::Linux => ShellType::Posix,
+                    OsType::Windows => ShellType::Cmd,
+                }
+            }
         })
+    }
+
+    /// Whether this host's protocol runs the command text in `PowerShell`
+    /// whatever the remote default shell is.
+    ///
+    /// `winrm` hands the text to `powershell.exe -EncodedCommand` and `psrp`
+    /// runs it as a `PowerShell` pipeline, so `cmd.exe` or POSIX syntax built
+    /// for them (`cd /d … &&`, `export …;`) cannot run there. Every other
+    /// protocol goes through a shell the host chooses (`OpenSSH`'s default
+    /// shell, an SSM document, a cloud run-command).
+    #[must_use]
+    pub fn protocol_runs_powershell(&self) -> bool {
+        #[cfg(feature = "winrm")]
+        if self.protocol == Protocol::WinRm {
+            return true;
+        }
+        #[cfg(feature = "psrp")]
+        if self.protocol == Protocol::Psrp {
+            return true;
+        }
+        false
     }
 
     /// Check if this host has a specific tag
@@ -465,8 +497,9 @@ pub enum OsType {
 /// Shell type used on the remote host.
 ///
 /// Controls argument escaping and session initialization.
-/// Inferred from `OsType` if not explicitly set:
-/// `Linux` -> `Posix`, `Windows` -> `Cmd`.
+/// Inferred if not explicitly set ([`HostConfig::effective_shell`]):
+/// `winrm` / `psrp` -> `PowerShell`, otherwise `Linux` -> `Posix`,
+/// `Windows` -> `Cmd`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellType {
@@ -2498,6 +2531,69 @@ hosts:
             "os_type": "windows"
         }"#;
         let host: HostConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(host.effective_shell(), ShellType::Cmd);
+    }
+
+    /// A host with the given `protocol` (and `os_type`, `shell` when given).
+    #[cfg(any(feature = "winrm", feature = "psrp"))]
+    fn host_with(protocol: &str, os_type: &str, shell: Option<&str>) -> HostConfig {
+        let shell = shell.map_or(String::new(), |s| format!(r#", "shell": "{s}""#));
+        let json = format!(
+            r#"{{"hostname": "test", "user": "admin", "auth": {{"type": "password", "password": "x"}},
+                "protocol": "{protocol}", "os_type": "{os_type}"{shell}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// `winrm` hands the text to `powershell.exe`, so with no explicit
+    /// `shell` its default is `PowerShell`, not the `cmd` an SSH Windows host
+    /// gets: `working_dir` built as `cd /d … &&` failed to parse there.
+    #[cfg(feature = "winrm")]
+    #[test]
+    fn test_effective_shell_winrm_defaults_to_powershell() {
+        let host = host_with("winrm", "windows", None);
+        assert!(host.protocol_runs_powershell());
+        assert_eq!(host.effective_shell(), ShellType::PowerShell);
+        // The protocol decides, not `os_type`: a WinRM host that forgot
+        // `os_type: windows` still gets the PowerShell `working_dir` form and
+        // no `export LC_ALL=C;` in front of standard tools.
+        assert_eq!(
+            host_with("winrm", "linux", None).effective_shell(),
+            ShellType::PowerShell
+        );
+    }
+
+    #[cfg(feature = "psrp")]
+    #[test]
+    fn test_effective_shell_psrp_defaults_to_powershell() {
+        let host = host_with("psrp", "windows", None);
+        assert!(host.protocol_runs_powershell());
+        assert_eq!(host.effective_shell(), ShellType::PowerShell);
+    }
+
+    /// An explicit `shell` still wins on `WinRM` (the loader warns about it).
+    #[cfg(feature = "winrm")]
+    #[test]
+    fn test_effective_shell_winrm_explicit_shell_wins() {
+        assert_eq!(
+            host_with("winrm", "windows", Some("cmd")).effective_shell(),
+            ShellType::Cmd
+        );
+    }
+
+    /// SSH keeps the `os_type` mapping: Windows `OpenSSH`'s default shell is
+    /// `cmd.exe`.
+    #[test]
+    fn test_effective_shell_ssh_windows_stays_cmd() {
+        let json = r#"{
+            "hostname": "test",
+            "user": "admin",
+            "auth": {"type": "agent"},
+            "protocol": "ssh",
+            "os_type": "windows"
+        }"#;
+        let host: HostConfig = serde_json::from_str(json).unwrap();
+        assert!(!host.protocol_runs_powershell());
         assert_eq!(host.effective_shell(), ShellType::Cmd);
     }
 
