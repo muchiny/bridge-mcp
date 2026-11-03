@@ -60,16 +60,24 @@ fuzz_target!(|data: &str| {
     }
     if !written.contains_key("shell") {
         // Not a constant: the closed answer here is the one INFERRED from
-        // `os_type`, and asserting a fixed `Posix` would be red on any Windows
-        // host config.
-        let inferred = match host.os_type {
-            OsType::Linux => ShellType::Posix,
-            OsType::Windows => ShellType::Cmd,
+        // the protocol, then `os_type`, and asserting a fixed `Posix` would be
+        // red on any Windows host config. WinRM and PSRP run PowerShell
+        // whatever `os_type` says, but this fuzz crate builds bridge-mcp
+        // without its `winrm` / `psrp` features: `protocol: winrm` does not
+        // parse here, so the PowerShell branch is never taken and that rule
+        // is covered by the unit tests of `config/types.rs` instead.
+        let inferred = if host.protocol_runs_powershell() {
+            ShellType::PowerShell
+        } else {
+            match host.os_type {
+                OsType::Linux => ShellType::Posix,
+                OsType::Windows => ShellType::Cmd,
+            }
         };
         assert_eq!(
             host.effective_shell(),
             inferred,
-            "an unspecified shell must follow os_type: {data:?}"
+            "an unspecified shell must follow the protocol, then os_type: {data:?}"
         );
     }
     if !written.contains_key("sudo_password") {

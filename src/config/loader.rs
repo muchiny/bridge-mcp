@@ -214,6 +214,28 @@ pub fn validate_config(config: &Config) -> Result<()> {
             warn!(host = %name, "this WinRM/PSRP host will be refused: {reason}");
         }
 
+        // WinRM and PSRP run the command text in PowerShell whatever `shell`
+        // says, so an explicit `cmd` or `posix` makes `working_dir` emit
+        // syntax PowerShell rejects (`cd /d "…" && …`, `cd '…' && …`), and
+        // `posix` also puts `export LC_ALL=C;` in front of every standard
+        // tool. The tools' own argument quoting does not follow `shell`. The
+        // value is honoured, as an explicit `shell` always is; a warning, not
+        // an error, keeps a config that loaded before loading now.
+        #[cfg(any(feature = "winrm", feature = "psrp"))]
+        if protocol_is_winrm_like(host)
+            && let Some(shell) = host.shell
+            && shell != super::types::ShellType::PowerShell
+        {
+            warn!(
+                host = %name,
+                shell = ?shell,
+                "hosts.{name}.shell is {shell:?}, but WinRM/PSRP run the command text in \
+                 PowerShell: working_dir (and, with posix, the locale prefix of standard \
+                 tools) will produce syntax PowerShell rejects. Remove `shell` (WinRM/PSRP \
+                 default to powershell) or set `shell: powershell`"
+            );
+        }
+
         // Validate key path exists and permissions (for key auth)
         if let super::types::AuthConfig::Key { path, .. } = &host.auth {
             let expanded = crate::path_utils::home_expand_or_input(path);
@@ -419,20 +441,14 @@ fn reject_settings_that_govern_nothing(config: &Config) -> Result<()> {
 /// Returns `true` when the host protocol is `WinRM` or `PSRP`.
 ///
 /// Used to guard validations that only apply to the WS-Management protocol
-/// family, without resorting to `#[cfg]`-gated `matches!` patterns.
+/// family. The two are exactly the protocols that run the command text in
+/// `PowerShell`, so this is [`HostConfig::protocol_runs_powershell`] under the
+/// name the validations read best with.
+///
+/// [`HostConfig::protocol_runs_powershell`]: super::types::HostConfig::protocol_runs_powershell
 #[cfg(any(feature = "winrm", feature = "psrp"))]
 fn protocol_is_winrm_like(host: &super::types::HostConfig) -> bool {
-    #[allow(unused_mut)]
-    let mut winrm_like = false;
-    #[cfg(feature = "winrm")]
-    {
-        winrm_like |= host.protocol == super::types::Protocol::WinRm;
-    }
-    #[cfg(feature = "psrp")]
-    {
-        winrm_like |= host.protocol == super::types::Protocol::Psrp;
-    }
-    winrm_like
+    host.protocol_runs_powershell()
 }
 
 /// Validate that the authentication method is compatible with the selected protocol.
@@ -1132,6 +1148,46 @@ http:
         let mut file = secure_temp_file();
         file.write_all(yaml.as_bytes()).unwrap();
         load_config(file.path())
+    }
+
+    /// A `WinRM` host with an explicit non-PowerShell `shell` still loads and
+    /// keeps it: the loader only warns. One without `shell` gets `PowerShell`.
+    #[cfg(feature = "winrm")]
+    #[test]
+    fn a_winrm_host_with_shell_cmd_loads_and_keeps_it() {
+        let config = load_yaml(
+            r#"
+hosts:
+  explicit:
+    hostname: "10.0.0.1"
+    port: 5986
+    user: Administrator
+    protocol: winrm
+    os_type: windows
+    shell: cmd
+    auth:
+      type: ntlm
+      password: "x"
+  inferred:
+    hostname: "10.0.0.2"
+    port: 5986
+    user: Administrator
+    protocol: winrm
+    os_type: windows
+    auth:
+      type: ntlm
+      password: "x"
+"#,
+        )
+        .expect("an explicit shell on a WinRM host is a warning, not an error");
+        assert_eq!(
+            config.hosts["explicit"].effective_shell(),
+            crate::config::ShellType::Cmd
+        );
+        assert_eq!(
+            config.hosts["inferred"].effective_shell(),
+            crate::config::ShellType::PowerShell
+        );
     }
 
     /// THE POSITIVE TWIN, and the reason the two rejections below mean

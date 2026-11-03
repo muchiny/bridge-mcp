@@ -26,6 +26,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aws-smithy-*` patch releases. The aws-sdk-rust releases of 2026-10-29 and
   2026-10-30 list no change for SSM and nothing breaking. The `cargo vet`
   exemptions follow.
+- **WinRM commands carry about 360 more characters.** The UTF-8 switch and the
+  exit-code line go with every command that is neither a preamble nor named
+  blocks. winrm-rs passes the script to `powershell.exe -EncodedCommand`,
+  UTF-16 then base64, on a command line WinRS caps at 8191 characters: the
+  longest command that fits is about 360 characters shorter than in 5.0.1
+  (some 2 600 instead of 3 000 ASCII characters).
+
+### Fixed
+
+- **WinRM and PSRP hosts default to `shell: powershell`.** Both protocols run
+  the command text in PowerShell, but a host without `shell` got the default of
+  its `os_type`, `cmd` on Windows, and `-w`/`working_dir` built
+  `cd /d "…" && …`, which Windows PowerShell rejects ("The token '&&' is not a
+  valid statement separator"). An explicit `shell` is still honoured, and the
+  loader now warns when it is not `powershell` on a WinRM or PSRP host. SSH
+  hosts keep `cmd` on Windows, OpenSSH's own default shell. `shell` decides
+  `working_dir`, persistent sessions, the `export LC_ALL=C;` prefix of standard
+  tools and whether `sudo` is accepted; the tools' own argument quoting does
+  not follow it.
+- **WinRM and PSRP report a native program's exit code.** `cmd /c exit 3`
+  reported 1 over WinRM (`powershell.exe` exits from `$?`) and 0 over PSRP (a
+  completed pipeline has no exit code). Both now apply one rule after the
+  caller's last statement: 0 if it succeeded, else `$LASTEXITCODE` when a
+  native program set a non-zero one, else 1. That is the last native
+  program's code, not necessarily the failing statement's:
+  `cmd /c exit 3; Get-Item C:\nope` gives 3. A failing last cmdlet now gives 1
+  over PSRP too, where it gave 0, `Set-StrictMode` included. Scripts with
+  `begin`/`process`/`end`/`dynamicparam` named blocks keep the old codes (1 or
+  0 over WinRM, 0 over PSRP): nothing may follow those blocks. An explicit
+  `exit N` keeps N over WinRM but still gives 0 over PSRP: psrp-rs declares no
+  host, so the server never passes `SetShouldExit` on.
+- **WinRM output is UTF-8.** `powershell.exe` wrote on the console's OEM code
+  page (437 on an en-US Windows) and the adapter decoded UTF-8: `"héllo-€"`
+  came back as `h�llo-?`. The script now switches `[Console]::OutputEncoding`
+  to UTF-8 without a byte-order mark first, on the command's first line so the
+  line numbers in PowerShell's errors do not move (a column on that line
+  does). Measured: on PowerShell 5.1 (Server 2025) its own strings and native
+  programs' output come back intact, its error records still do not; on 4.0
+  (Server 2012 R2) native programs' output and error records do, its own
+  strings still do not. The switch is skipped in Constrained Language Mode,
+  where it is refused, and left out when the command must open the script
+  (`using`, `param`, a named block such as `begin { }`). It is impossible over
+  PSRP, whose server process has no console: there PowerShell's strings were
+  already intact, a native program's non-ASCII output still is not. A
+  top-level `Write-Error`, which PowerShell labels with the whole script text,
+  now shows the added text too.
+- **PSRP runs scripts that end on `if`, `foreach`, `try` or `while`.** The
+  adapter appended `| Out-String` to the text, which does not parse after such
+  a statement ("An empty pipe element is not allowed") and formatted only the
+  last statement. `Out-String` is now a second command of the pipeline and
+  formats all of the script's output.
 
 ## [5.0.1] - 2026-11-02
 
