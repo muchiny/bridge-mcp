@@ -13,24 +13,28 @@ fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
 }
 
-/// Known multi-word commands that are valid binary specifications.
-const KNOWN_MULTI_WORD: &[&str] = &["docker compose"];
+/// The programs a caller-supplied `docker_bin` may name.
+const DOCKER_NAMES: &[&str] = &["docker", "podman", "podman-remote", "nerdctl"];
 
-/// Validate a binary path contains only safe characters.
-fn is_valid_binary_path(bin: &str) -> bool {
-    if KNOWN_MULTI_WORD.contains(&bin) {
-        return true;
-    }
-    !bin.is_empty()
-        && bin
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
-}
+/// The programs a caller-supplied `compose_bin` may name; the two-word forms
+/// are the CLI plugins.
+const COMPOSE_NAMES: &[&str] = &["docker-compose", "podman-compose"];
+const COMPOSE_PLUGINS: &[&str] = &["docker compose", "podman compose"];
+
+/// The root-owned directories the Docker CLI plugins (`docker-compose`) are
+/// installed in, accepted for the compose names only.
+const COMPOSE_PLUGIN_DIRS: &[&str] = &[
+    "/usr/libexec/docker/cli-plugins",
+    "/usr/lib/docker/cli-plugins",
+    "/usr/local/lib/docker/cli-plugins",
+];
 
 /// Generate the docker binary detection prefix.
 ///
-/// If `docker_bin` is provided, use it directly. Otherwise, auto-detect
-/// by probing for `docker` or `podman`.
+/// If `docker_bin` names a container CLI (`docker`, `podman`, `podman-remote`
+/// or `nerdctl`,
+/// see [`is_named_binary`](super::shell::is_named_binary)), use it directly;
+/// otherwise auto-detect by probing for `docker` or `podman`.
 #[must_use]
 pub fn docker_detect_prefix(docker_bin: Option<&str>) -> String {
     let Some(bin) = docker_bin else {
@@ -39,18 +43,22 @@ pub fn docker_detect_prefix(docker_bin: Option<&str>) -> String {
          else echo 'Docker/Podman not installed on host' >&2; echo false; fi) "
             .to_string();
     };
-    if is_valid_binary_path(bin) {
+    if super::shell::is_named_binary(bin, DOCKER_NAMES) {
         format!("{bin} ")
     } else {
-        // Invalid binary path, fall back to auto-detection
+        // Not a container CLI: fall back to auto-detection
         docker_detect_prefix(None)
     }
 }
 
 /// Generate the docker compose binary detection prefix.
 ///
-/// If `compose_bin` is provided, use it directly. Otherwise, auto-detect
-/// `docker compose` (v2 plugin) or `docker-compose` (v1 standalone).
+/// If `compose_bin` is `docker compose`, `podman compose` or names a compose
+/// CLI (`docker-compose`, `podman-compose`, bare, in a system directory or in
+/// a Docker CLI plugin directory, see
+/// [`is_named_binary_in`](super::shell::is_named_binary_in)), use it directly;
+/// otherwise auto-detect `docker compose` (v2 plugin) or `docker-compose`
+/// (v1 standalone).
 #[must_use]
 pub fn docker_compose_detect_prefix(compose_bin: Option<&str>) -> String {
     let Some(bin) = compose_bin else {
@@ -59,10 +67,12 @@ pub fn docker_compose_detect_prefix(compose_bin: Option<&str>) -> String {
          else echo 'docker compose / docker-compose not installed on host' >&2; echo false; fi) "
             .to_string();
     };
-    if is_valid_binary_path(bin) {
+    if COMPOSE_PLUGINS.contains(&bin)
+        || super::shell::is_named_binary_in(bin, COMPOSE_NAMES, COMPOSE_PLUGIN_DIRS)
+    {
         format!("{bin} ")
     } else {
-        // Invalid binary path, fall back to auto-detection
+        // Not a compose CLI: fall back to auto-detection
         docker_compose_detect_prefix(None)
     }
 }
@@ -260,7 +270,7 @@ impl DockerCommandBuilder {
 
     /// Build a docker compose command.
     ///
-    /// Constructs: `cd {project_dir} && {compose} [-f {file}] {action}
+    /// Constructs: `cd -- {project_dir} && {compose} [-f {file}] {action}
     /// [--detach] [--build] [--timeout {t}] [services...]`
     ///
     /// Action-specific flags:
@@ -280,7 +290,7 @@ impl DockerCommandBuilder {
     ) -> String {
         let prefix = docker_compose_detect_prefix(compose_bin);
         let escaped_dir = shell_escape(project_dir);
-        let mut cmd = format!("cd {escaped_dir} && {prefix}");
+        let mut cmd = format!("cd -- {escaped_dir} && {prefix}");
 
         if let Some(f) = file {
             let _ = write!(cmd, "-f {} ", shell_escape(f));
@@ -829,7 +839,7 @@ mod tests {
             false,
             None,
         );
-        assert!(cmd.starts_with("cd '/opt/app' && docker compose "));
+        assert!(cmd.starts_with("cd -- '/opt/app' && docker compose "));
         assert!(cmd.contains("up --detach"));
     }
 
@@ -972,7 +982,7 @@ mod tests {
             true,
             None,
         );
-        assert!(cmd.starts_with("cd '/home/deploy/myapp' && docker-compose "));
+        assert!(cmd.starts_with("cd -- '/home/deploy/myapp' && docker-compose "));
         assert!(cmd.contains("-f 'compose.yaml'"));
         assert!(cmd.contains("up --detach --build"));
         assert!(cmd.contains("'api'"));
@@ -999,7 +1009,7 @@ mod tests {
             false,
             None,
         );
-        assert!(cmd.contains("cd '/opt/my app'"));
+        assert!(cmd.contains("cd -- '/opt/my app'"));
     }
 
     #[test]
@@ -1172,6 +1182,21 @@ mod tests {
     // ── Security: Injection Prevention ────────────────────────────────
 
     #[test]
+    fn test_compose_project_dir_is_after_double_dash() {
+        let cmd = DockerCommandBuilder::build_compose_command(
+            Some("docker compose"),
+            "ps",
+            "-x",
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        assert!(cmd.starts_with("cd -- '-x' && "), "{cmd}");
+    }
+
+    #[test]
     fn test_docker_bin_injection_falls_back_to_autodetect() {
         let prefix = docker_detect_prefix(Some("echo pwned #"));
         assert!(prefix.contains("command -v docker"));
@@ -1185,18 +1210,63 @@ mod tests {
 
     #[test]
     fn test_valid_docker_binary_paths() {
-        assert!(is_valid_binary_path("docker"));
-        assert!(is_valid_binary_path("podman"));
-        assert!(is_valid_binary_path("/usr/bin/docker"));
-        assert!(is_valid_binary_path("docker compose"));
-        assert!(is_valid_binary_path("docker-compose"));
+        for bin in ["docker", "podman", "/usr/bin/docker"] {
+            assert_eq!(docker_detect_prefix(Some(bin)), format!("{bin} "));
+        }
+        for bin in [
+            "docker compose",
+            "docker-compose",
+            "/usr/local/bin/docker-compose",
+        ] {
+            assert_eq!(docker_compose_detect_prefix(Some(bin)), format!("{bin} "));
+        }
+    }
+
+    #[test]
+    fn test_podman_remote_and_compose_plugin_directories() {
+        assert_eq!(
+            docker_detect_prefix(Some("podman-remote")),
+            "podman-remote "
+        );
+        assert_eq!(
+            docker_detect_prefix(Some("/usr/bin/podman-remote")),
+            "/usr/bin/podman-remote "
+        );
+        for dir in COMPOSE_PLUGIN_DIRS {
+            let bin = format!("{dir}/docker-compose");
+            assert_eq!(docker_compose_detect_prefix(Some(&bin)), format!("{bin} "));
+            // The plugin directories are for the compose names only.
+            let docker = format!("{dir}/docker");
+            assert!(docker_detect_prefix(Some(&docker)).contains("command -v docker"));
+            let other = format!("{dir}/sh");
+            assert!(docker_compose_detect_prefix(Some(&other)).contains("docker compose version"));
+        }
+        assert!(docker_detect_prefix(Some("podman-remote-x")).contains("command -v docker"));
     }
 
     #[test]
     fn test_invalid_docker_binary_paths() {
-        assert!(!is_valid_binary_path("echo pwned #"));
-        assert!(!is_valid_binary_path("docker; rm -rf /"));
-        assert!(!is_valid_binary_path("$(whoami)"));
-        assert!(!is_valid_binary_path(""));
+        for bin in [
+            "echo pwned #",
+            "docker; rm -rf /",
+            "$(whoami)",
+            "",
+            "/bin/sh",
+            "python3",
+            "-docker",
+            "/tmp/docker",
+            "./docker",
+            "/home/u/bin/podman",
+            "docker-machine",
+        ] {
+            assert!(
+                docker_detect_prefix(Some(bin)).contains("command -v docker"),
+                "{bin}"
+            );
+            assert!(
+                docker_compose_detect_prefix(Some(bin)).contains("docker compose version"),
+                "{bin}"
+            );
+        }
     }
 }

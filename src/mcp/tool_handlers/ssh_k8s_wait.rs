@@ -111,6 +111,10 @@ impl StandardTool for K8sWaitTool {
     }"#;
 
     fn build_command(args: &SshK8sWaitArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[
+            ("resource", Some(args.resource.as_str())),
+            ("name", args.name.as_deref()),
+        ])?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -422,6 +426,33 @@ mod tests {
         assert!(
             result.is_err(),
             "expected rejection for flag-like namespace"
+        );
+    }
+
+    #[test]
+    fn test_option_like_resource_is_refused() {
+        let args: SshK8sWaitArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "resource": "-x", "condition": "x"}),
+        )
+        .unwrap();
+        let err = K8sWaitTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'resource' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_option_like_name_is_refused() {
+        let args: SshK8sWaitArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "resource": "x", "name": "-x", "condition": "x"}),
+        )
+        .unwrap();
+        let err = K8sWaitTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'name' must not start with '-'"),
+            "{err}"
         );
     }
 }

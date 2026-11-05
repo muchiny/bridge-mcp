@@ -95,6 +95,10 @@ impl StandardTool for K8sLocalpathInspectTool {
         args: &SshK8sLocalpathInspectArgs,
         _host_config: &HostConfig,
     ) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "pv",
+            Some(args.pv.as_str()),
+        )])?;
         if let Some(ctx) = args.context.as_deref() {
             validate_context(ctx)?;
         }
@@ -282,5 +286,16 @@ mod tests {
             save_output: None,
         };
         assert!(K8sLocalpathInspectTool::build_command(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_option_like_pv_is_refused() {
+        let args: SshK8sLocalpathInspectArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "pv": "-x"})).unwrap();
+        let err = K8sLocalpathInspectTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'pv' must not start with '-'"),
+            "{err}"
+        );
     }
 }

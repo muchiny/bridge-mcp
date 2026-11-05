@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use super::utils::shell_escape;
 use crate::config::HostConfig;
+use crate::domain::use_cases::backup_advanced::refuse_remote_archive;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -85,6 +86,7 @@ impl StandardTool for BackupRestoreTool {
     }"#;
 
     fn build_command(args: &SshBackupRestoreArgs, _host_config: &HostConfig) -> Result<String> {
+        refuse_remote_archive("archive_file", &args.archive_file)?;
         let mut parts = vec![format!("tar -xf {}", shell_escape(&args.archive_file))];
         if let Some(ref dest) = args.destination {
             parts.push(format!("-C {}", shell_escape(dest)));
@@ -94,7 +96,7 @@ impl StandardTool for BackupRestoreTool {
         }
         let tar_cmd = parts.join(" ");
         if let Some(ref dest) = args.destination {
-            Ok(format!("{tar_cmd} && ls -la {}", shell_escape(dest)))
+            Ok(format!("{tar_cmd} && ls -la -- {}", shell_escape(dest)))
         } else {
             Ok(tar_cmd)
         }
@@ -295,7 +297,7 @@ mod tests {
         let host_config = test_host_config();
         let cmd = BackupRestoreTool::build_command(&args, &host_config).unwrap();
         assert!(cmd.contains("tar -xf '/tmp/backup.tar' -C '/opt/restore'"));
-        assert!(cmd.contains("&& ls -la '/opt/restore'"));
+        assert!(cmd.contains("&& ls -la -- '/opt/restore'"));
     }
 
     #[test]
@@ -334,7 +336,7 @@ mod tests {
         assert!(cmd.contains("tar -xf '/tmp/backup.tar.gz'"));
         assert!(cmd.contains("-C '/opt/restore'"));
         assert!(cmd.contains("--strip-components=1"));
-        assert!(cmd.contains("&& ls -la '/opt/restore'"));
+        assert!(cmd.contains("&& ls -la -- '/opt/restore'"));
     }
 
     #[test]
@@ -348,5 +350,35 @@ mod tests {
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshBackupRestoreArgs"));
         assert!(debug_str.contains("test-host"));
+    }
+
+    #[test]
+    fn destination_listing_comes_after_end_of_options() {
+        let args = SshBackupRestoreArgs {
+            host: "server1".to_string(),
+            archive_file: "/tmp/backup.tar".to_string(),
+            destination: Some("-d".to_string()),
+            strip_components: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = BackupRestoreTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("-C '-d'"), "{cmd}");
+        assert!(cmd.contains("&& ls -la -- '-d'"), "{cmd}");
+    }
+
+    #[test]
+    fn test_build_command_refuses_remote_archive_name() {
+        let args: SshBackupRestoreArgs = serde_json::from_value(json!({
+            "host": "s", "archive_file": "exfil.example:etc.tar"
+        }))
+        .unwrap();
+        assert!(BackupRestoreTool::build_command(&args, &test_host_config()).is_err());
+        let ok: SshBackupRestoreArgs = serde_json::from_value(json!({
+            "host": "s", "archive_file": "/tmp/exfil.example:etc.tar"
+        }))
+        .unwrap();
+        assert!(BackupRestoreTool::build_command(&ok, &test_host_config()).is_ok());
     }
 }

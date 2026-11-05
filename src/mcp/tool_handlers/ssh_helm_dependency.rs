@@ -93,6 +93,10 @@ impl StandardTool for HelmDependencyTool {
     }"#;
 
     fn build_command(args: &SshHelmDependencyArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "chart_path",
+            Some(args.chart_path.as_str()),
+        )])?;
         HelmCommandBuilder::validate_dependency_subcommand(&args.subcommand)?;
         Ok(HelmCommandBuilder::build_dependency_command(
             args.helm_bin.as_deref(),
@@ -310,5 +314,19 @@ mod tests {
         };
         let result = HelmDependencyTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_option_like_chart_path_is_refused() {
+        let args: SshHelmDependencyArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "subcommand": "x", "chart_path": "-x"}),
+        )
+        .unwrap();
+        let err = HelmDependencyTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'chart_path' must not start with '-'"),
+            "{err}"
+        );
     }
 }

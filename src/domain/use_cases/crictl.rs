@@ -12,22 +12,15 @@ fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
 }
 
-fn is_valid_binary_path(bin: &str) -> bool {
-    !bin.is_empty()
-        && bin
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
-}
-
 /// Generate the crictl detection prefix.
 ///
 /// Prefers `k3s crictl`; falls back to a standalone `crictl` pinned to the
-/// k3s containerd socket. If `crictl_bin` is supplied and valid, uses it
-/// verbatim.
+/// k3s containerd socket. If `crictl_bin` names crictl (see
+/// [`is_named_binary`](super::shell::is_named_binary)), uses it verbatim.
 #[must_use]
 pub fn crictl_detect_prefix(crictl_bin: Option<&str>) -> String {
     if let Some(bin) = crictl_bin
-        && is_valid_binary_path(bin)
+        && super::shell::is_named_binary(bin, &["crictl"])
     {
         return format!("{bin} ");
     }
@@ -356,6 +349,25 @@ mod tests {
             prefix.contains("command -v"),
             "invalid bin should fall back to auto-detect"
         );
+    }
+
+    #[test]
+    fn test_detect_prefix_other_programs_and_foreign_dirs_fall_back() {
+        for bin in [
+            "/bin/sh",
+            "python3",
+            "k3s",
+            "-crictl",
+            "crictlx",
+            "crictl-ns",
+            "/tmp/crictl",
+            "./crictl",
+        ] {
+            let prefix = crictl_detect_prefix(Some(bin));
+            assert!(prefix.contains("command -v k3s"), "{bin}: {prefix}");
+            assert!(!prefix.starts_with(bin), "{bin}: {prefix}");
+        }
+        assert_eq!(crictl_detect_prefix(Some("crictl-1.31")), "crictl-1.31 ");
     }
 
     // ── validate_container_id ─────────────────────────────────────────────────

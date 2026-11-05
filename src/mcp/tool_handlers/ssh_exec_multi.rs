@@ -846,7 +846,7 @@ mod tests {
             .expect("result");
         let calls = ctx.connection_pool.mock_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "cd /d \"C:\\a&b\" && cd");
+        assert_eq!(calls[0].0, "cd /d \"C:\\a&b\" || exit /b 1 & cd");
     }
 
     #[tokio::test]

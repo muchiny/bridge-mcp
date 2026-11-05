@@ -15,18 +15,61 @@ use regex::Regex;
 use crate::config::ShellType;
 use crate::error::{BridgeError, Result};
 
+use super::shell::refuse_option_like;
+
+/// `SQL` comments (block, `-- ` and `#` line): replaced by a space before the
+/// deny list runs, so `DROP/**/TABLE t` is read as `DROP TABLE t`.
+#[allow(clippy::unwrap_used)] // static regex literal, exercised by the comment tests
+static SQL_COMMENTS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)/\*.*?\*/|--[^\n]*|#[^\n]*").unwrap());
+
+/// Block-comment delimiters (`/*`, `/*!`, `/*M!` (`MariaDB`), `/*+`, a version
+/// number after `/*!` or `/*M!`, and `*/`): replaced by a space with the comment text kept, so a
+/// keyword hidden in an executable comment (`/*!DROP*/ TABLE t`) or split by a
+/// nested `PostgreSQL` comment (`DROP /* /* */ */ TABLE t`) is read by the deny
+/// list.
+#[allow(clippy::unwrap_used)] // static regex literal, exercised by the comment tests
+static SQL_COMMENT_DELIMITERS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/\*(?:M?!|\+)?[0-9]*|\*/").unwrap());
+
+/// Words the `mysql` client runs as its own commands when they open a
+/// statement or a line (`system` runs a shell, `pager` pipes the output into
+/// one, `source`/`tee`/`ssl_session_data_print` read or write files, `connect`
+/// reconnects to a host of the caller's choosing).
+///
+/// The harmless commands (`use`, `status`, `print`, `go`, `clear`, `help`,
+/// `exit`, `quit`, `prompt`, `charset`, `warnings`, `rehash`, ...) are left out:
+/// they are common column names or only change client state, and
+/// `--binary-mode` disables the whole set anyway.
+const MYSQL_CLIENT_WORDS: &[&str] = &[
+    "system",
+    "source",
+    "tee",
+    "pager",
+    "edit",
+    "delimiter",
+    "connect",
+    "ssl_session_data_print",
+    "resetconnection",
+    "query_attributes",
+];
+
 /// Pre-compiled regexes for dangerous SQL pattern detection.
 /// Compiled once on first use, avoiding per-query regex compilation overhead.
 #[allow(clippy::unwrap_used)] // static regex literals, exercised by every SQL validation test
-static DANGEROUS_SQL_PATTERNS: LazyLock<[(Regex, &str); 7]> = LazyLock::new(|| {
+static DANGEROUS_SQL_PATTERNS: LazyLock<[(Regex, &str); 8]> = LazyLock::new(|| {
     [
         (
             Regex::new(r"(?i)\bDROP\s+DATABASE\b").unwrap(),
             "DROP DATABASE",
         ),
-        (Regex::new(r"(?i)\bDROP\s+TABLE\b").unwrap(), "DROP TABLE"),
+        (Regex::new(r"(?i)\bDROP\s+SCHEMA\b").unwrap(), "DROP SCHEMA"),
+        (Regex::new(r"(?i)\bDROP\s+TABLES?\b").unwrap(), "DROP TABLE"),
         (Regex::new(r"(?i)\bTRUNCATE\b").unwrap(), "TRUNCATE"),
-        (Regex::new(r"(?i)\bDELETE\s+FROM\b").unwrap(), "DELETE FROM"),
+        (
+            Regex::new(r"(?i)\bDELETE\s+(?:(?:IGNORE|LOW_PRIORITY|QUICK)\s+)*FROM\b").unwrap(),
+            "DELETE FROM",
+        ),
         (
             Regex::new(r"(?i)\bALTER\s+TABLE\b.*\bDROP\b").unwrap(),
             "ALTER TABLE ... DROP",
@@ -211,11 +254,17 @@ impl DatabaseCommandBuilder {
     /// lifetime of the DB process. The tempfile pattern keeps the password
     /// out of both argv and environ.
     ///
+    /// The `MySQL` command carries `--binary-mode`: with `-e` the client is
+    /// non-interactive, and that option turns off its command parser (`\!`,
+    /// `system`, `source`, `tee`, `pager`, `edit`, `connect`, ...), so a query
+    /// cannot make the client run a shell or touch a file whatever
+    /// [`Self::validate_client_query`] missed. Only `\C` and `delimiter` stay.
+    ///
     /// Resulting shape (`MySQL` with password):
     /// ```text
     /// TMPF=$(mktemp) && trap '...' EXIT && chmod 600 "$TMPF" && \
     /// printf '[client]\npassword=%s\n' '<pw>' > $TMPF && \
-    /// mysql --defaults-extra-file=$TMPF -h host -P 3306 -u user db -e 'query'
+    /// mysql --defaults-extra-file=$TMPF -h host -P 3306 -u user db --binary-mode -e 'query'
     /// ```
     #[must_use]
     #[expect(clippy::too_many_arguments)]
@@ -242,12 +291,12 @@ impl DatabaseCommandBuilder {
                     // --defaults-extra-file must be the FIRST mysql argument.
                     let _ = write!(
                         cmd,
-                        "mysql --defaults-extra-file=$TMPF -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} -e '{escaped_query}'"
+                        "mysql --defaults-extra-file=$TMPF -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode -e '{escaped_query}'"
                     );
                 } else {
                     let _ = write!(
                         cmd,
-                        "mysql -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} -e '{escaped_query}'"
+                        "mysql -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode -e '{escaped_query}'"
                     );
                 }
 
@@ -352,8 +401,14 @@ impl DatabaseCommandBuilder {
     /// **FIND-031:** uses the same tempfile pattern as
     /// [`Self::build_query_command`] to keep passwords out of argv/environ.
     ///
-    /// - `MySQL`: `mysql --defaults-extra-file=$TMPF ... < input_file`.
-    /// - `PostgreSQL`: `PGPASSFILE=$TMPF psql ... < input_file`.
+    /// - `MySQL`: `mysql --defaults-extra-file=$TMPF ... --binary-mode < input_file`.
+    ///   `--binary-mode` switches the client's own commands (`\!`, `system`,
+    ///   `source`, ...) off, so a `\! cmd` line in the file is not run in a
+    ///   shell; `mysqldump` output does not depend on them.
+    /// - `PostgreSQL`: `PGPASSFILE=$TMPF psql ... < input_file`. `psql` has no
+    ///   option that turns its backslash commands off: the file is run as a
+    ///   `psql` script, and a line starting with `\` (`\!`, `\copy`) acts on
+    ///   the remote host.
     #[must_use]
     pub fn build_restore_command(
         db_type: &DatabaseType,
@@ -376,12 +431,12 @@ impl DatabaseCommandBuilder {
                     write_mysql_password_tempfile(&mut cmd, password);
                     let _ = write!(
                         cmd,
-                        "mysql --defaults-extra-file=$TMPF -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} < {escaped_file}"
+                        "mysql --defaults-extra-file=$TMPF -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode < {escaped_file}"
                     );
                 } else {
                     let _ = write!(
                         cmd,
-                        "mysql -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} < {escaped_file}"
+                        "mysql -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode < {escaped_file}"
                     );
                 }
             }
@@ -404,15 +459,35 @@ impl DatabaseCommandBuilder {
 
     /// Validate a SQL query for dangerous patterns.
     ///
-    /// Rejects queries containing DROP DATABASE, DROP TABLE, TRUNCATE,
-    /// DELETE FROM, ALTER TABLE ... DROP, GRANT, REVOKE.
+    /// Rejects queries containing DROP DATABASE, DROP SCHEMA, DROP TABLE,
+    /// TRUNCATE, DELETE FROM, ALTER TABLE ... DROP, GRANT, REVOKE. The query
+    /// is checked as written, with its comments read as spaces, and with only
+    /// the comment delimiters read as spaces (the text inside kept), so
+    /// `DROP/**/TABLE t`, `DROP /* /* */ */ TABLE t` (`PostgreSQL` nests block
+    /// comments) and `/*!DROP*/ TABLE t` (`MySQL` runs the inside of a `/*!`
+    /// comment) and `/*M!100100DROP*/ TABLE t` (`MariaDB` runs the inside of a
+    /// `/*M!` comment) do not slip through. A `/*!` or `/*M!` comment is refused
+    /// outright.
+    ///
+    /// This is a best-effort guard against mistakes, not a security boundary:
+    /// other statements (`UPDATE` without `WHERE`, `INTO OUTFILE`,
+    /// `COPY ... TO PROGRAM`) are not inspected.
     ///
     /// # Errors
     ///
     /// Returns `BridgeError::CommandDenied` if the query matches a dangerous pattern.
     pub fn validate_query(query: &str) -> Result<()> {
+        if query.contains("/*!") || query.contains("/*M!") {
+            return Err(BridgeError::CommandDenied {
+                reason: "'query' must not contain a '/*!' or '/*M!' comment: MySQL and MariaDB \
+                         execute its content, which the dangerous-statement check cannot see"
+                    .to_string(),
+            });
+        }
+        let uncommented = SQL_COMMENTS.replace_all(query, " ");
+        let delimiters_only = SQL_COMMENT_DELIMITERS.replace_all(query, " ");
         for (re, name) in DANGEROUS_SQL_PATTERNS.iter() {
-            if re.is_match(query) {
+            if re.is_match(query) || re.is_match(&uncommented) || re.is_match(&delimiters_only) {
                 return Err(BridgeError::CommandDenied {
                     reason: format!(
                         "Dangerous SQL operation '{name}' is not allowed via ssh_db_query. \
@@ -424,6 +499,313 @@ impl DatabaseCommandBuilder {
 
         Ok(())
     }
+
+    /// Refuse a query the database client would run as one of its own
+    /// commands instead of sending it to the server.
+    ///
+    /// The `mysql` client runs `\! cmd` and `system cmd` in a shell, and
+    /// `source`, `tee`, `pager`, `edit`, `connect`, `ssl_session_data_print`
+    /// read or write files, spawn programs or reconnect. `psql -c` runs a
+    /// backslash command (`\! cmd`) when the string starts with a backslash.
+    ///
+    /// For `MySQL` the builders also pass `--binary-mode`, which switches the
+    /// client's command parser off; this check is the second layer. The
+    /// client's own lexer depends on the server's `sql_mode` and can change
+    /// partway through a query, so it is not modelled exactly: a query is
+    /// refused when a statement starts with a client command word (a statement
+    /// starts at the beginning of the query or after a `;` outside quotes and
+    /// comments, and leading whitespace and plain comments are skipped; a
+    /// column called `source` at the start of a line is fine), when it has a
+    /// backslash outside a quoted string (read both with and without backslash
+    /// escapes), and, whenever it has a backslash at all, when it also has a
+    /// backtick or more than one statement. A backslash inside a `'` or `"`
+    /// string of a single statement (`LIKE '50\%'`) and inside a `-- ` or `#`
+    /// comment is fine.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::CommandDenied` naming `query`.
+    pub fn validate_client_query(db_type: &DatabaseType, query: &str) -> Result<()> {
+        let found = match db_type {
+            DatabaseType::PostgreSQL => query.trim_start().starts_with('\\'),
+            DatabaseType::MySQL => mysql_has_client_command(query),
+        };
+        if found {
+            return Err(BridgeError::CommandDenied {
+                reason: "'query' must not contain a database client command (a backslash \
+                         command such as \\!, or system/source/tee/pager/edit/delimiter/connect \
+                         starting a statement): the client would run it on the remote host"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse a `PostgreSQL` database name that `libpq` would read as a
+    /// connection string.
+    ///
+    /// `psql -d`, `pg_dump` and `pg_restore` expand a database name holding
+    /// `=` (`dbname=x host=10.0.0.66`) or starting with `postgres://` /
+    /// `postgresql://` into connection parameters, which override `-h`/`-p`
+    /// and send the stored password to a host of the caller's choosing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::CommandDenied` naming `database`.
+    pub fn validate_postgres_database(database: &str) -> Result<()> {
+        let lower = database.trim_start().to_ascii_lowercase();
+        if database.contains('=')
+            || lower.starts_with("postgres://")
+            || lower.starts_with("postgresql://")
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: "'database' must be a database name: a value with '=' or starting \
+                         with postgres:// or postgresql:// is read as a connection string \
+                         that can redirect the connection"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate the connection arguments of a database tool.
+    ///
+    /// `db_host`, `db_user`, `database` (and, for `MySQL`, the `tables` that
+    /// `mysqldump` reads as positionals) must not start with `-`: the client
+    /// would read them as options (`--execute=...`, `--result-file=...`).
+    /// `db_password`, `db_host`, `db_user` and `database` must not contain a
+    /// newline, carriage return or NUL: they are written to a line-oriented
+    /// option or `pgpass` file, where a newline starts a new directive.
+    /// A `PostgreSQL` `database` must not be a connection string (see
+    /// [`Self::validate_postgres_database`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::CommandDenied` naming the offending argument.
+    pub fn validate_connection(
+        db_type: &DatabaseType,
+        db_host: Option<&str>,
+        db_user: Option<&str>,
+        database: &str,
+        db_password: Option<&str>,
+        tables: Option<&[String]>,
+    ) -> Result<()> {
+        for (arg, value) in [
+            ("db_host", db_host),
+            ("db_user", db_user),
+            ("database", Some(database)),
+        ] {
+            if let Some(v) = value {
+                refuse_option_like(arg, v)?;
+                refuse_line_break(arg, v)?;
+            }
+        }
+        if let Some(pw) = db_password {
+            refuse_line_break("db_password", pw)?;
+        }
+        if matches!(db_type, DatabaseType::PostgreSQL) {
+            Self::validate_postgres_database(database)?;
+        }
+        if matches!(db_type, DatabaseType::MySQL) {
+            for table in tables.unwrap_or_default() {
+                refuse_option_like("tables", table)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Refuse a value holding a newline, carriage return or NUL.
+fn refuse_line_break(arg: &str, value: &str) -> Result<()> {
+    if value.contains(['\n', '\r', '\0']) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "'{arg}' must not contain a newline, carriage return or NUL: it is written \
+                 to a line-oriented credentials file"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the `mysql` client could take `query` for one of its own commands.
+///
+/// See [`DatabaseCommandBuilder::validate_client_query`] for the rules.
+fn mysql_has_client_command(query: &str) -> bool {
+    if mysql_client_word_starts_statement(query) {
+        return true;
+    }
+    if !query.contains('\\') {
+        return false;
+    }
+    // The client's string state depends on `sql_mode`, which a `SET` earlier
+    // in the same query can change, and on whether a backtick is an escape
+    // context: with several statements or backticks next to a backslash the
+    // state cannot be known, so the backslash is refused.
+    let body = query.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
+    if query.contains('`') || body.contains(';') {
+        return true;
+    }
+    mysql_backslash_outside_string(query, true) || mysql_backslash_outside_string(query, false)
+}
+
+/// Whether a statement starts with one of [`MYSQL_CLIENT_WORDS`].
+///
+/// A statement starts at the beginning of the query and after each `;` outside
+/// a quoted string and outside a `-- `, `#` or plain `/* */` comment; the
+/// whitespace and plain comments before its first word are skipped. The scan
+/// runs with and without backslash escapes in strings, as
+/// [`mysql_backslash_outside_string`] does.
+fn mysql_client_word_starts_statement(query: &str) -> bool {
+    let chars: Vec<char> = query.chars().collect();
+    statement_starts_with_client_word(&chars, true)
+        || statement_starts_with_client_word(&chars, false)
+}
+
+/// One pass of [`mysql_client_word_starts_statement`].
+fn statement_starts_with_client_word(chars: &[char], backslash_escapes: bool) -> bool {
+    let mut i = 0;
+    let mut at_statement_start = true;
+    while i < chars.len() {
+        if at_statement_start {
+            i = skip_blanks_and_comments(chars, i);
+            let word: String = chars
+                .get(i..)
+                .unwrap_or_default()
+                .iter()
+                .copied()
+                .take_while(|&c| is_word_char(c))
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if MYSQL_CLIENT_WORDS.contains(&word.as_str()) {
+                return true;
+            }
+            at_statement_start = false;
+        }
+        let Some(&c) = chars.get(i) else { break };
+        let next = chars.get(i + 1).copied();
+        let after = chars.get(i + 2).copied();
+        match c {
+            '\'' | '"' | '`' => i = skip_quoted(chars, i, backslash_escapes),
+            ';' => {
+                at_statement_start = true;
+                i += 1;
+            }
+            '#' => i = skip_line(chars, i),
+            '-' if next == Some('-') && after.is_some_and(|a| a.is_ascii_whitespace()) => {
+                i = skip_line(chars, i);
+            }
+            '/' if next == Some('*') && !matches!(after, Some('!' | '+')) => {
+                i = skip_block_comment(chars, i);
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Index of the first character at or after `from` that is neither
+/// whitespace nor part of a plain comment (`-- `, `#`, `/* */`).
+fn skip_blanks_and_comments(chars: &[char], from: usize) -> usize {
+    let mut i = from;
+    while let Some(&c) = chars.get(i) {
+        let next = chars.get(i + 1).copied();
+        let after = chars.get(i + 2).copied();
+        if c.is_whitespace() {
+            i += 1;
+        } else if c == '#'
+            || (c == '-' && next == Some('-') && after.is_some_and(|a| a.is_ascii_whitespace()))
+        {
+            i = skip_line(chars, i);
+        } else if c == '/' && next == Some('*') && !matches!(after, Some('!' | '+')) {
+            i = skip_block_comment(chars, i);
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// Index just past the quoted string (or backtick name) opening at `from`
+/// (or the end of the text).
+fn skip_quoted(chars: &[char], from: usize, backslash_escapes: bool) -> usize {
+    let Some(&quote) = chars.get(from) else {
+        return chars.len();
+    };
+    let mut i = from + 1;
+    while let Some(&d) = chars.get(i) {
+        i += 1;
+        if d == '\\' && backslash_escapes {
+            i += 1;
+        } else if d == quote {
+            return i;
+        }
+    }
+    chars.len()
+}
+
+/// Whether `query` has a backslash outside a quoted string and outside a
+/// `-- ` or `#` comment.
+///
+/// `backslash_escapes` says whether a backslash escapes the next character
+/// inside quotes (the client's default; off under `NO_BACKSLASH_ESCAPES`).
+/// Backticks are scanned like the other quotes, as the client does. `/*!` and
+/// `/*+` are text to the client (it runs short-form commands inside them), so
+/// they are not skipped; a plain `/* */` comment is. `--` opens a comment
+/// only before ASCII whitespace, as the client tests one byte.
+fn mysql_backslash_outside_string(query: &str, backslash_escapes: bool) -> bool {
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    while let Some(&c) = chars.get(i) {
+        let next = chars.get(i + 1).copied();
+        let after = chars.get(i + 2).copied();
+        match c {
+            '\'' | '"' | '`' => {
+                i += 1;
+                while let Some(&d) = chars.get(i) {
+                    i += 1;
+                    if d == '\\' && backslash_escapes {
+                        i += 1;
+                    } else if d == c {
+                        break;
+                    }
+                }
+            }
+            '\\' => return true,
+            '#' => i = skip_line(&chars, i),
+            '-' if next == Some('-') && after.is_some_and(|a| a.is_ascii_whitespace()) => {
+                i = skip_line(&chars, i);
+            }
+            '/' if next == Some('*') && !matches!(after, Some('!' | '+')) => {
+                i = skip_block_comment(&chars, i);
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Whether `c` can be part of a word of `SQL` text.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Index just past the `*/` closing the block comment that starts at `from`
+/// (or the end of the text).
+fn skip_block_comment(chars: &[char], from: usize) -> usize {
+    chars
+        .get(from + 2..)
+        .and_then(|rest| rest.windows(2).position(|w| w == ['*', '/']))
+        .map_or(chars.len(), |p| from + 2 + p + 2)
+}
+
+/// Index of the line break ending the comment that starts at `from`
+/// (or the end of the text).
+fn skip_line(chars: &[char], from: usize) -> usize {
+    chars
+        .get(from..)
+        .and_then(|rest| rest.iter().position(|&c| c == '\n'))
+        .map_or(chars.len(), |p| from + p)
 }
 
 #[cfg(test)]
@@ -845,7 +1227,7 @@ mod tests {
         // FIND-031: --defaults-extra-file pattern, no MYSQL_PWD env.
         assert!(cmd.contains("printf '[client]\\npassword=%s\\n' 'pass'"));
         assert!(cmd.contains(
-            "mysql --defaults-extra-file=$TMPF -h 'localhost' -P 3306 -u 'root' 'mydb' < '/tmp/dump.sql'"
+            "mysql --defaults-extra-file=$TMPF -h 'localhost' -P 3306 -u 'root' 'mydb' --binary-mode < '/tmp/dump.sql'"
         ));
     }
 
@@ -881,6 +1263,11 @@ mod tests {
         );
         assert!(!cmd.contains("MYSQL_PWD"));
         assert!(cmd.starts_with("mysql"));
+        // The client's own commands (`\!`, `system`) stay off for the file.
+        assert!(
+            cmd.ends_with("'mydb' --binary-mode < '/tmp/dump.sql'"),
+            "{cmd}"
+        );
     }
 
     // ============== Security: Injection Prevention Tests ==============
@@ -949,7 +1336,7 @@ mod tests {
             "mydb",
             "/tmp/dump.sql; cat /etc/shadow",
         );
-        assert!(cmd.contains("< '/tmp/dump.sql; cat /etc/shadow'"));
+        assert!(cmd.contains("--binary-mode < '/tmp/dump.sql; cat /etc/shadow'"));
     }
 
     // ============== validate_query Tests ==============
@@ -1342,6 +1729,310 @@ mod tests {
         assert!(
             pgpass_line(&cmd).contains(r"host\:with\:colons"),
             "pgpass colon escaping must survive: {cmd}"
+        );
+    }
+
+    // ============== Option injection, client commands, line breaks ==============
+
+    fn denied_naming(result: Result<()>, arg: &str) {
+        match result {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(reason.contains(arg), "reason should name {arg}: {reason}");
+            }
+            other => panic!("expected CommandDenied naming {arg}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_connection_refuses_dashed_identifiers() {
+        let my = DatabaseType::MySQL;
+        denied_naming(
+            DatabaseCommandBuilder::validate_connection(&my, None, None, "--execute=x", None, None),
+            "database",
+        );
+        denied_naming(
+            DatabaseCommandBuilder::validate_connection(&my, Some("-h"), None, "db", None, None),
+            "db_host",
+        );
+        denied_naming(
+            DatabaseCommandBuilder::validate_connection(&my, None, Some("-u"), "db", None, None),
+            "db_user",
+        );
+    }
+
+    #[test]
+    fn test_validate_connection_refuses_dashed_mysql_table_only() {
+        let tables = ["--result-file=/x".to_string()];
+        denied_naming(
+            DatabaseCommandBuilder::validate_connection(
+                &DatabaseType::MySQL,
+                None,
+                None,
+                "db",
+                None,
+                Some(tables.as_slice()),
+            ),
+            "tables",
+        );
+        // pg_dump reads the table as the value of `-t`.
+        assert!(
+            DatabaseCommandBuilder::validate_connection(
+                &DatabaseType::PostgreSQL,
+                None,
+                None,
+                "db",
+                None,
+                Some(tables.as_slice()),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_connection_accepts_ordinary_values() {
+        let tables = ["users".to_string(), "orders".to_string()];
+        assert!(
+            DatabaseCommandBuilder::validate_connection(
+                &DatabaseType::MySQL,
+                Some("db.example.com"),
+                Some("app"),
+                "my_db",
+                Some("p@ss'w\\ord #1"),
+                Some(tables.as_slice()),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_connection_refuses_line_breaks() {
+        let my = DatabaseType::MySQL;
+        for pw in ["x\n[client]\ntee=/tmp/o", "x\r!include /tmp/a", "x\0y"] {
+            denied_naming(
+                DatabaseCommandBuilder::validate_connection(&my, None, None, "db", Some(pw), None),
+                "db_password",
+            );
+        }
+        denied_naming(
+            DatabaseCommandBuilder::validate_connection(
+                &DatabaseType::PostgreSQL,
+                None,
+                None,
+                "db\nhost:5432:*:*:x",
+                None,
+                None,
+            ),
+            "database",
+        );
+    }
+
+    #[test]
+    fn test_client_query_refuses_mysql_commands() {
+        let my = DatabaseType::MySQL;
+        for q in [
+            r"\! id > /tmp/o",
+            "system id",
+            "SYSTEM id",
+            "SELECT 1; system id",
+            "SELECT 1;\npager cat > /tmp/o",
+            "source /etc/passwd",
+            "/*! \\! id */",
+            "SELECT 1 \\g",
+            // Under NO_BACKSLASH_ESCAPES the client closes the string at `\'`.
+            r"SELECT '\'; \! id; -- '",
+            // The client escapes a backslash inside backticks too: the string
+            // stays open at the escaped backtick and `\!` is outside it.
+            "SELECT `a\\`` \\! id > /tmp/p",
+            // Only ASCII whitespace after `--` makes a comment for the client.
+            "SELECT 1 --\u{a0}\\! id > /tmp/p",
+            // `SET sql_mode` flips the escape rule partway through the query.
+            "SET sql_mode='NO_BACKSLASH_ESCAPES', @x=\"\\\"\"; SELECT '\\'; \\! id > /tmp/p",
+            // Client commands that touch files or hosts.
+            "ssl_session_data_print /home/app/.ssh/authorized_keys",
+            "SSL_SESSION_DATA_PRINT /x",
+            "connect db otherhost",
+            "CONNECT db otherhost",
+            "resetconnection",
+            "query_attributes a b",
+            // A statement after a `;` (outside strings), blanks or comments.
+            "SELECT 1;\r\nSOURCE /etc/passwd",
+            "SELECT 1; /* c */ system id",
+            "SELECT 1;-- c\nsystem id",
+            "/* c */ system id",
+            "# c\nsystem id",
+            "SELECT 'a'; system id",
+            // Under NO_BACKSLASH_ESCAPES the string ends at `\'`.
+            "SELECT '\\'; system id; -- '",
+        ] {
+            denied_naming(
+                DatabaseCommandBuilder::validate_client_query(&my, q),
+                "query",
+            );
+        }
+    }
+
+    #[test]
+    fn test_client_query_accepts_mysql_queries() {
+        let my = DatabaseType::MySQL;
+        for q in [
+            "SELECT 1",
+            "SELECT source, system FROM t WHERE tee = 1",
+            // A command word at the start of a line is a column, not a command.
+            "SELECT id,\n       source,\n       COUNT(*)\nFROM events\nGROUP BY source",
+            "SELECT 1\n  system id",
+            "SELECT\nedit\nFROM t",
+            "SELECT 1 /* c */ system id",
+            // A hint, then a column called like a command.
+            "SELECT /*+ MAX_EXECUTION_TIME(1000) */ source FROM logs",
+            // A `;` inside a string or a comment does not start a statement.
+            "SELECT * FROM notes WHERE body = 'done; edit later'",
+            "SELECT 1 /* a; system */ FROM t",
+            "SELECT 1 -- a; system id\nFROM t",
+            "SELECT `a;system` FROM t",
+            r"SELECT * FROM t WHERE name LIKE '%\_x' AND b = 'a\\b'",
+            r"SELECT 'O\'Brien'",
+            "SELECT 1 -- \\! id\n",
+            "SELECT 1 /* \\! id */",
+            "SELECT a FROM t WHERE b = 'x\\ny'",
+            "SELECT 'a\\n';",
+            "SELECT 1;\nSELECT 2",
+            "SELECT `a;b` FROM t; SELECT `c`",
+            "SELECT 1 --\u{a0}not a command",
+            "SELECT 1 -- \\! id\nFROM t",
+            "SELECT 1 # \\! id",
+        ] {
+            assert!(
+                DatabaseCommandBuilder::validate_client_query(&my, q).is_ok(),
+                "{q}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_client_query_psql_backslash_command() {
+        let pg = DatabaseType::PostgreSQL;
+        denied_naming(
+            DatabaseCommandBuilder::validate_client_query(&pg, r"\! id"),
+            "query",
+        );
+        denied_naming(
+            DatabaseCommandBuilder::validate_client_query(&pg, "  \n\\copy t to '/x'"),
+            "query",
+        );
+        assert!(
+            DatabaseCommandBuilder::validate_client_query(&pg, r"SELECT 'a' ~ '\d+', E'\n'")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_query_sees_through_comments() {
+        for q in [
+            "DROP/**/TABLE users",
+            "DELETE/**/FROM t",
+            "DROP -- c\n TABLE t",
+            "DROP # c\n DATABASE d",
+            "DROP SCHEMA prod",
+            // MySQL runs the inside of `/*!` and `/*!NNNNN` comments.
+            "/*!DROP*/ TABLE users",
+            "/*!50000 DROP*/ TABLE t",
+            "SELECT 1 /*! 1 */",
+            // MariaDB runs the inside of `/*M!NNNNNN` comments.
+            "/*M!100100DROP*/ TABLE users",
+            "/*M!100100TRUNCATE*/ users",
+            "/*M!100100GRANT*/ ALL ON *.* TO x",
+            "SELECT 1 /*M! 1 */",
+            "DROP TABLES t",
+            "DELETE IGNORE FROM t",
+            "DELETE LOW_PRIORITY QUICK FROM t",
+            // PostgreSQL nests block comments.
+            "DROP /* /* */ */ TABLE users",
+            "DELETE /*+ x */ FROM t",
+        ] {
+            assert!(DatabaseCommandBuilder::validate_query(q).is_err(), "{q}");
+        }
+        assert!(DatabaseCommandBuilder::validate_query("SELECT 1 /* drop */ -- note").is_ok());
+        assert!(DatabaseCommandBuilder::validate_query("SELECT 'M!' /* M! */").is_ok());
+        assert!(DatabaseCommandBuilder::validate_query("SELECT /* x /* y */ */ 1").is_ok());
+        assert!(
+            DatabaseCommandBuilder::validate_query("SELECT /*+ MAX_EXECUTION_TIME(1000) */ 1")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_mysql_query_command_disables_client_commands() {
+        for password in [None, Some("pw")] {
+            let cmd = DatabaseCommandBuilder::build_query_command(
+                &DatabaseType::MySQL,
+                "localhost",
+                3306,
+                "root",
+                password,
+                "db",
+                "SELECT 1",
+                None,
+            );
+            assert!(cmd.contains(" --binary-mode -e 'SELECT 1'"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_mysql_restore_command_disables_client_commands() {
+        for password in [None, Some("pw")] {
+            let cmd = DatabaseCommandBuilder::build_restore_command(
+                &DatabaseType::MySQL,
+                "localhost",
+                3306,
+                "root",
+                password,
+                "db",
+                "/tmp/p.sql",
+            );
+            assert!(cmd.contains(" 'db' --binary-mode < '/tmp/p.sql'"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_validate_postgres_database_refuses_connection_strings() {
+        for db in [
+            "dbname=postgres host=10.0.0.66 port=5432",
+            "a=b",
+            "postgres://u@10.0.0.66/db",
+            "postgresql://10.0.0.66/db",
+            "PostgreSQL://10.0.0.66/db",
+            "  postgres://10.0.0.66/db",
+        ] {
+            denied_naming(
+                DatabaseCommandBuilder::validate_postgres_database(db),
+                "database",
+            );
+            denied_naming(
+                DatabaseCommandBuilder::validate_connection(
+                    &DatabaseType::PostgreSQL,
+                    None,
+                    None,
+                    db,
+                    None,
+                    None,
+                ),
+                "database",
+            );
+        }
+        for db in ["postgres", "my_db", "app-prod", "db.v2", "postgres_backup"] {
+            assert!(DatabaseCommandBuilder::validate_postgres_database(db).is_ok());
+        }
+        // The MySQL client does not read the database name as a connection string.
+        assert!(
+            DatabaseCommandBuilder::validate_connection(
+                &DatabaseType::MySQL,
+                None,
+                None,
+                "a=b",
+                None,
+                None,
+            )
+            .is_ok()
         );
     }
 }

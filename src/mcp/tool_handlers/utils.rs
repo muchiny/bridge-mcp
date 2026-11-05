@@ -110,25 +110,115 @@ pub fn shell_escape_for(s: &str, shell: ShellType) -> String {
     crate::domain::use_cases::shell::escape(s, shell)
 }
 
-/// Refuse a POSIX-only tool on a Windows host.
+/// Refuse a POSIX-only tool on a Windows host, or on any host whose commands
+/// do not run in a POSIX shell.
 ///
 /// The `file_ops` and `directory` builders emit `find`, `printf`, `stat` and
 /// friends, none of which exist on Windows. Without this the tool shipped a
 /// shell script Windows cannot run: over `WinRM` it came back as a PowerShell
 /// `CommandNotFoundException`, and over PSRP the error record failed the whole
-/// pipeline. Handlers built on `StandardTool` express the same rule with
-/// `OS_GUARD`; this is the equivalent for the hand-written ones.
+/// pipeline. Those builders also quote every argument for a POSIX shell, so the
+/// shell that will read the command is checked too ([`shell_mismatch`]):
+/// `os_type` alone let a `WinRM` host left at the default `os_type: linux` run
+/// them in `PowerShell`. Handlers built on `StandardTool` express the same rule
+/// with `OS_GUARD` and the same shell check; this is the equivalent for the
+/// hand-written ones.
 pub fn reject_posix_only_on_windows(
     host_config: &HostConfig,
     tool_name: &str,
 ) -> Option<crate::mcp::protocol::ToolCallResult> {
+    posix_only_refusal(host_config, tool_name).map(crate::mcp::protocol::ToolCallResult::error)
+}
+
+/// The refusal [`reject_posix_only_on_windows`] returns, as text, for callers
+/// that report it as an error rather than as a tool result (the `file://` and
+/// `log://` resources).
+///
+/// Stricter than the `StandardTool` shell guard on one point: an
+/// `os_type: windows` host is refused even when it declares `shell: posix`,
+/// because these commands also need the GNU tools (`find`, `stat`, `tail`,
+/// `du`) that a Windows host is not assumed to have.
+#[must_use]
+pub fn posix_only_refusal(host_config: &HostConfig, tool_name: &str) -> Option<String> {
     if host_config.os_type == crate::config::OsType::Windows {
-        return Some(crate::mcp::protocol::ToolCallResult::error(format!(
+        return Some(format!(
             "Tool '{tool_name}' is not available on Windows hosts — its command \
              is POSIX-only. Use the Windows-specific tools instead."
-        )));
+        ));
     }
-    None
+    shell_mismatch(tool_name, ShellType::Posix, host_config)
+}
+
+/// Why `tool`, whose command quotes its arguments for `tool_shell`, must not
+/// run on this host; `None` when the host's commands run in that shell
+/// ([`HostConfig::effective_shell`], which follows the protocol where the
+/// protocol fixes the interpreter).
+///
+/// Every builder quotes the caller's arguments for one shell: POSIX single
+/// quotes (`'` becomes `'\''`) for the Linux and unrestricted tools,
+/// `PowerShell`'s for the Windows ones. In another shell that quoting does not
+/// hold. `PowerShell` reads `'a'\''; whoami; #'` as the string `'a'`, a `\`, an
+/// empty string, then `;`, so `ssh_git_diff path="a'; whoami; #"` ran `whoami`
+/// on a `WinRM` host; `cmd.exe` does not treat `'` as a quote at all, so a `&`
+/// inside a quoted value ran a second command there. A built-in tool's
+/// command is not checked against the whitelist (`validate_builtin`), so
+/// nothing else stands between a tool argument and a command of the caller's
+/// choosing.
+#[must_use]
+pub fn shell_mismatch(
+    tool: &str,
+    tool_shell: ShellType,
+    host_config: &HostConfig,
+) -> Option<String> {
+    let host_shell = host_config.effective_shell();
+    if host_shell == tool_shell {
+        return None;
+    }
+    let hint = if tool_shell == ShellType::PowerShell && host_shell == ShellType::Cmd {
+        " If this host's commands do run in PowerShell (an OpenSSH DefaultShell set to \
+         PowerShell, say), set `shell: powershell` for it."
+    } else {
+        ""
+    };
+    Some(format!(
+        "Tool '{tool}' quotes its arguments for {}, but this host runs commands in {}, \
+         where that quoting does not hold: refused.{hint}",
+        shell_name(tool_shell),
+        shell_name(host_shell),
+    ))
+}
+
+/// Why the AWX tools must not run their `curl` on `host`, the host
+/// `awx.ssh_host` names; `None` when it is a Linux host running a POSIX shell.
+///
+/// Every AWX tool sends a `curl` command whose URL, token and JSON body are
+/// POSIX-quoted, and the JSON carries caller strings (a host name, extra
+/// variables): on any other shell that quoting does not hold, as for
+/// [`shell_mismatch`].
+#[must_use]
+pub fn awx_host_refusal(host: &str, host_config: &HostConfig) -> Option<String> {
+    let shell = host_config.effective_shell();
+    let what = if host_config.os_type == crate::config::OsType::Windows {
+        "a Windows host".to_string()
+    } else if shell == ShellType::Posix {
+        return None;
+    } else {
+        format!("a host whose commands run in {}", shell_name(shell))
+    };
+    Some(format!(
+        "`awx.ssh_host` is '{host}', {what}: the AWX tools send it POSIX-quoted `curl` \
+         commands, whose quoting does not hold there, so they are refused. Point \
+         `awx.ssh_host` at a Linux host."
+    ))
+}
+
+/// How a refusal names `shell`.
+const fn shell_name(shell: ShellType) -> &'static str {
+    match shell {
+        ShellType::Posix => "a POSIX shell",
+        ShellType::Cmd => "cmd.exe",
+        ShellType::PowerShell => "PowerShell",
+    }
 }
 
 /// Connect to a host, resolving jump host if configured.
@@ -648,6 +738,85 @@ pub fn parse_fixed_columns(
         headers: headers.iter().map(|h| h.to_lowercase()).collect(),
         rows,
     })
+}
+
+/// Fixtures shared by the shell-guard tests of the handlers, the pipeline and
+/// the resources.
+#[cfg(test)]
+pub(crate) mod guard_test_support {
+    use crate::config::HostConfig;
+    use crate::mcp::protocol::ToolContent;
+    use crate::ports::{ToolContext, ToolHandler};
+
+    /// A context whose only host, `target`, is built from its YAML-level
+    /// fields: `extra` is spliced into the JSON object, e.g.
+    /// `r#","shell":"powershell""#`. There is no executor behind it.
+    pub(crate) fn context_with_target(os_type: &str, extra: &str) -> ToolContext {
+        let json = format!(
+            r#"{{"hostname":"10.0.0.1","user":"u","auth":{{"type":"agent"}},"os_type":"{os_type}"{extra}}}"#
+        );
+        let host: HostConfig = serde_json::from_str(&json).expect("a host config deserializes");
+        let mut hosts = std::collections::HashMap::new();
+        hosts.insert("target".to_string(), host);
+        crate::ports::mock::create_test_context_with_hosts(hosts)
+    }
+
+    /// The smallest value `schema` accepts: the first `enum` value, else by
+    /// type 1, `"x"`, `false`, an array of one minimal item, or an object with
+    /// its `required` properties, each minimal.
+    pub(crate) fn minimal_value(schema: &serde_json::Value) -> serde_json::Value {
+        if let Some(first) = schema["enum"].as_array().and_then(|e| e.first()) {
+            return first.clone();
+        }
+        match schema["type"].as_str() {
+            Some("integer" | "number") => serde_json::json!(1),
+            Some("boolean") => serde_json::json!(false),
+            Some("array") => serde_json::json!([minimal_value(&schema["items"])]),
+            Some("object") => {
+                let mut object = serde_json::Map::new();
+                let required = schema["required"].as_array().cloned().unwrap_or_default();
+                for key in required.iter().filter_map(serde_json::Value::as_str) {
+                    object.insert(key.to_string(), minimal_value(&schema["properties"][key]));
+                }
+                serde_json::Value::Object(object)
+            }
+            _ => serde_json::json!("x"),
+        }
+    }
+
+    /// The text of the refusal `handler` returned for `args` without dialing
+    /// the host: the timeout turns a guard that let the call through into a
+    /// failure instead of a hang on a connection to 10.0.0.1.
+    pub(crate) async fn refusal(
+        handler: &dyn ToolHandler,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> String {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handler.execute(Some(args), ctx),
+        )
+        .await
+        .expect("the guard must refuse without dialing the host")
+        .expect("a refusal is a tool result, not an Err");
+        assert_eq!(result.is_error, Some(true));
+        let ToolContent::Text { text } = &result.content[0] else {
+            panic!("expected a text refusal");
+        };
+        // The refusal is a policy denial: one audit event, under the tool's
+        // name, with no command (none was built) and the same reason.
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let event = &events[0];
+        assert_eq!(event.event_type, "command_denied");
+        assert_eq!(event.tool_name.as_deref(), Some(handler.name()));
+        assert_eq!(event.command, "");
+        match &event.result {
+            crate::security::CommandResult::Denied { reason } => assert_eq!(reason, text),
+            r => panic!("expected Denied, got {r:?}"),
+        }
+        text.clone()
+    }
 }
 
 #[cfg(test)]
@@ -1522,6 +1691,201 @@ muchini  2411977  0.0  0.0   2772  1664 ?        S    22:06   0:00 [kworker]\n";
     #[test]
     fn reject_posix_only_on_windows_lets_a_linux_host_through() {
         assert!(reject_posix_only_on_windows(&host_with_os("linux"), "ssh_find").is_none());
+    }
+
+    /// A host from its YAML-level fields: `extra` is spliced into the JSON
+    /// object, e.g. `r#","shell":"powershell""#`.
+    fn host_from(os_type: &str, extra: &str) -> HostConfig {
+        let json = format!(
+            r#"{{"hostname":"h","user":"u","auth":{{"type":"agent"}},"os_type":"{os_type}"{extra}}}"#
+        );
+        serde_json::from_str(&json).expect("a host config deserializes")
+    }
+
+    /// The case that was exploited: a `WinRM` host left at the default
+    /// `os_type: linux` passed every OS check while `PowerShell` read the
+    /// POSIX-quoted arguments.
+    #[cfg(feature = "winrm")]
+    #[test]
+    fn posix_only_refusal_refuses_a_winrm_host_left_at_os_type_linux() {
+        let host = host_from("linux", r#","protocol":"winrm""#);
+        let refusal = posix_only_refusal(&host, "ssh_find").expect("WinRM runs PowerShell");
+        assert!(refusal.contains("ssh_find"), "{refusal}");
+        assert!(refusal.contains("PowerShell"), "{refusal}");
+    }
+
+    #[test]
+    fn posix_only_refusal_refuses_a_linux_host_whose_shell_is_powershell() {
+        let host = host_from("linux", r#","shell":"powershell""#);
+        let refusal = posix_only_refusal(&host, "ssh_tail").expect("PowerShell is not POSIX");
+        assert!(refusal.contains("a POSIX shell"), "{refusal}");
+        assert!(refusal.contains("PowerShell"), "{refusal}");
+    }
+
+    #[test]
+    fn awx_host_refusal_lets_a_posix_linux_host_through() {
+        assert!(awx_host_refusal("awx", &host_from("linux", "")).is_none());
+    }
+
+    #[test]
+    fn awx_host_refusal_refuses_windows_and_non_posix_hosts() {
+        let windows = awx_host_refusal("dc", &host_from("windows", r#","shell":"posix""#))
+            .expect("a Windows host is refused");
+        assert!(
+            windows.contains("'dc'") && windows.contains("Windows"),
+            "{windows}"
+        );
+        let pwsh = awx_host_refusal("box", &host_from("linux", r#","shell":"powershell""#))
+            .expect("a PowerShell host is refused");
+        assert!(
+            pwsh.contains("PowerShell") && pwsh.contains("awx.ssh_host"),
+            "{pwsh}"
+        );
+    }
+
+    /// The AWX guard follows the shell the protocol imposes, not `os_type` or
+    /// an explicit `shell`: a `WinRM` host left at `os_type: linux` runs
+    /// `PowerShell`, and so does a PSRP host that says `shell: posix`.
+    #[cfg(feature = "winrm")]
+    #[test]
+    fn awx_host_refusal_refuses_a_winrm_host_left_at_os_type_linux() {
+        let refusal = awx_host_refusal("w", &host_from("linux", r#","protocol":"winrm""#))
+            .expect("WinRM runs PowerShell");
+        assert!(
+            refusal.contains("PowerShell") && refusal.contains("awx.ssh_host"),
+            "{refusal}"
+        );
+    }
+
+    #[cfg(feature = "psrp")]
+    #[test]
+    fn awx_host_refusal_ignores_shell_posix_on_a_psrp_host() {
+        let host = host_from("linux", r#","protocol":"psrp","shell":"posix""#);
+        let refusal = awx_host_refusal("p", &host).expect("PSRP runs PowerShell");
+        assert!(refusal.contains("PowerShell"), "{refusal}");
+    }
+
+    #[cfg(feature = "ssm")]
+    #[test]
+    fn awx_host_refusal_follows_the_ssm_document() {
+        let pwsh = host_from(
+            "linux",
+            &format!(
+                r#","protocol":"ssm","description":"{}""#,
+                crate::config::SSM_POWERSHELL_DOCUMENT
+            ),
+        );
+        let refusal =
+            awx_host_refusal("s", &pwsh).expect("the PowerShell document runs PowerShell");
+        assert!(refusal.contains("PowerShell"), "{refusal}");
+        let posix = host_from(
+            "linux",
+            &format!(
+                r#","protocol":"ssm","description":"{}""#,
+                crate::config::SSM_SHELL_DOCUMENT
+            ),
+        );
+        assert!(awx_host_refusal("s", &posix).is_none());
+    }
+
+    /// Every `ssh_awx_*` tool refuses a Windows `awx.ssh_host` before sending
+    /// anything. The mock executor answers every command, so a tool that lost
+    /// its guard returns its usual output instead of the refusal and fails
+    /// here; the count fails if a new AWX tool is not covered.
+    #[tokio::test]
+    async fn every_awx_tool_refuses_a_windows_awx_host() {
+        let base = guard_test_support::context_with_target("windows", r#","shell":"powershell""#);
+        let mut config = (*base.config).clone();
+        config.awx = Some(crate::config::AwxConfig {
+            ssh_host: "target".to_string(),
+            url: "https://awx.test".to_string(),
+            token: crate::config::RedactedSecret::from("awx-token"),
+            api_timeout: 30,
+            verify_ssl: true,
+        });
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        let registry = crate::mcp::registry::create_all_enabled_registry();
+        let mut checked = 0;
+        for tool in registry.list_tools() {
+            if !tool.name.starts_with("ssh_awx_") {
+                continue;
+            }
+            let mut args = guard_test_support::minimal_value(&tool.input_schema);
+            // Tools that check their arguments further before the host lookup.
+            if tool.name == "ssh_awx_host_update" {
+                args["description"] = serde_json::json!("x");
+            }
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                registry.execute(&tool.name, Some(args.clone()), &ctx),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{}: timed out", tool.name))
+            .unwrap_or_else(|e| panic!("{} {args}: {e}", tool.name));
+            assert_eq!(result.is_error, Some(true), "{}", tool.name);
+            let crate::mcp::protocol::ToolContent::Text { text } = &result.content[0] else {
+                panic!("{}: expected a text refusal", tool.name);
+            };
+            assert!(
+                text.contains("`awx.ssh_host` is 'target'"),
+                "{}: {text}",
+                tool.name
+            );
+            // The refusal is audited under the registered name, for the AWX host.
+            let events = ctx.audit_logger.drain_for_test();
+            assert_eq!(events.len(), 1, "{}: {events:?}", tool.name);
+            assert_eq!(events[0].event_type, "command_denied", "{}", tool.name);
+            assert_eq!(
+                events[0].tool_name.as_deref(),
+                Some(tool.name.as_str()),
+                "{}",
+                tool.name
+            );
+            assert_eq!(events[0].host, "target", "{}", tool.name);
+            checked += 1;
+        }
+        assert_eq!(checked, 43, "AWX tools checked");
+    }
+
+    #[test]
+    fn shell_mismatch_is_none_when_the_shells_agree() {
+        assert!(shell_mismatch("t", ShellType::Posix, &host_from("linux", "")).is_none());
+        assert!(shell_mismatch("t", ShellType::Cmd, &host_from("windows", "")).is_none());
+        let pwsh = host_from("windows", r#","shell":"powershell""#);
+        assert!(shell_mismatch("t", ShellType::PowerShell, &pwsh).is_none());
+    }
+
+    /// A Windows tool on a Windows SSH host without `shell`: the host is
+    /// taken to be `cmd.exe`, and the refusal says how to declare `PowerShell`
+    /// when that is what the host really runs.
+    #[test]
+    fn shell_mismatch_tells_a_cmd_host_how_to_declare_powershell() {
+        let refusal = shell_mismatch(
+            "ssh_win_service_list",
+            ShellType::PowerShell,
+            &host_from("windows", ""),
+        )
+        .expect("cmd.exe is not PowerShell");
+        assert!(refusal.contains("ssh_win_service_list"), "{refusal}");
+        assert!(refusal.contains("cmd.exe"), "{refusal}");
+        assert!(refusal.contains("`shell: powershell`"), "{refusal}");
+    }
+
+    /// The hint is only for the one case it fixes: a POSIX tool on a
+    /// `PowerShell` host must not be told to declare `PowerShell`.
+    #[test]
+    fn shell_mismatch_gives_no_hint_outside_the_cmd_case() {
+        let host = host_from("linux", r#","shell":"powershell""#);
+        let refusal = shell_mismatch("t", ShellType::Posix, &host).expect("mismatch");
+        assert!(!refusal.contains("`shell: powershell`"), "{refusal}");
     }
 
     // ============== kubectl_output_is_table / helm_output_is_table ==============

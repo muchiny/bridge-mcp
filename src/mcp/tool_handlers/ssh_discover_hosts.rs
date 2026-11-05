@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::config::OsType;
 use crate::domain::use_cases::inventory::InventoryCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -92,6 +93,7 @@ impl StandardTool for DiscoverHostsTool {
         crate::domain::output_kind::OutputKind::Tabular;
 
     fn validate(args: &SshDiscoverHostsArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("network", &args.network)?;
         InventoryCommandBuilder::validate_network(&args.network)?;
         Ok(())
     }
@@ -389,5 +391,48 @@ mod tests {
         let dr = crate::domain::data_reduction::DataReductionArgs::default();
         let result = DiscoverHostsTool::post_process(result, &args, "", &dr);
         assert!(!result.content.is_empty());
+    }
+
+    fn test_host_config() -> HostConfig {
+        HostConfig {
+            hostname: "test".to_string(),
+            port: 22,
+            user: "test".to_string(),
+            auth: crate::config::AuthConfig::Agent,
+            description: None,
+            host_key_verification: crate::config::HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: crate::config::OsType::default(),
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_refuses_option_like_network() {
+        let args: SshDiscoverHostsArgs =
+            serde_json::from_value(json!({"host": "s", "network": "-iL/etc/passwd"})).unwrap();
+        let err = DiscoverHostsTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'network' must not start with '-'"),
+            "{err}"
+        );
     }
 }

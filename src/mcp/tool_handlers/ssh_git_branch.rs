@@ -89,7 +89,8 @@ impl StandardTool for GitBranchTool {
     }"#;
 
     fn validate(args: &SshGitBranchArgs, _host_config: &HostConfig) -> Result<()> {
-        GitCommandBuilder::validate_branch_action(&args.action)
+        GitCommandBuilder::validate_branch_action(&args.action)?;
+        GitCommandBuilder::validate_not_option("name", args.name.as_deref())
     }
 
     fn build_command(args: &SshGitBranchArgs, _host_config: &HostConfig) -> Result<String> {
@@ -246,6 +247,24 @@ mod tests {
         match result.unwrap_err() {
             BridgeError::McpInvalidRequest(_) => {}
             e => panic!("Expected McpInvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_option_shaped_name_is_refused() {
+        let handler = SshGitBranchHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1", "path": "/opt/repo", "action": "create", "name": "-D"
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'name'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
         }
     }
 }

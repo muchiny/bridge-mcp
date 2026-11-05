@@ -25,11 +25,14 @@ pub fn validate_cron_schedule(schedule: &str) -> Result<()> {
             ),
         });
     }
-    // Each field should only contain: digits, *, /, -, comma
+    // Each field should only contain: digits, *, /, -, comma. None starts
+    // with `-`: cronie reads a line that starts with one as "do not log this
+    // job", and no valid field does.
     for (i, field) in fields.iter().enumerate() {
-        if !field
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '*' | '/' | '-' | ','))
+        if field.starts_with('-')
+            || !field
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '*' | '/' | '-' | ','))
         {
             return Err(BridgeError::CommandDenied {
                 reason: format!(
@@ -55,6 +58,44 @@ pub fn validate_cron_comment(comment: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Validate that text going into a crontab line is a single line.
+///
+/// A crontab is parsed line by line: a newline in the command would start a
+/// second entry that no validator looked at.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] naming `what` if `text` contains a
+/// line feed or a carriage return.
+fn validate_single_line(what: &str, text: &str) -> Result<()> {
+    if text.contains(['\n', '\r']) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("Cron {what} must not contain newlines"),
+        });
+    }
+    Ok(())
+}
+
+/// `command` with every `%` that cron would not read as escaped written
+/// `\%`, which cron hands to the shell as a plain `%`. Cron reads a backslash
+/// as escaping the next character, so in `\\%` the `%` is not escaped; this
+/// follows the same rule.
+fn escape_cron_percent(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut escaped = false;
+    for c in command.chars() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '%' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Builds cron management commands for remote execution.
@@ -85,18 +126,21 @@ impl CronCommandBuilder {
 
     /// Build a command to add a cron job.
     ///
-    /// Constructs: `(crontab -l 2>/dev/null; echo "{schedule} {command}") | crontab -`
+    /// Constructs: `(crontab -l 2>/dev/null; printf '%s\n' "{schedule} {command}") | crontab -`
     ///
     /// # Errors
     ///
-    /// Returns [`BridgeError::CommandDenied`] if the schedule or comment is invalid.
+    /// Returns [`BridgeError::CommandDenied`] if the schedule, command or
+    /// comment is invalid or spans more than one line.
     pub fn build_add_command(
         schedule: &str,
         command: &str,
         user: Option<&str>,
         comment: Option<&str>,
     ) -> Result<String> {
+        validate_single_line("schedule", schedule)?;
         validate_cron_schedule(schedule)?;
+        validate_single_line("command", command)?;
         if let Some(c) = comment {
             validate_cron_comment(c)?;
         }
@@ -107,7 +151,10 @@ impl CronCommandBuilder {
             let _ = writeln!(cron_line, "# {c}");
         }
 
-        let _ = write!(cron_line, "{schedule} {command}");
+        // cron ends the command at an unescaped `%` and feeds the rest to it
+        // as stdin, so the job would not be the command the caller (and the
+        // whitelist) saw. Escaped, every `%` reaches the shell as written.
+        let _ = write!(cron_line, "{schedule} {}", escape_cron_percent(command));
 
         let crontab_cmd = if let Some(u) = user {
             format!("crontab -u {} -l", shell_escape(u))
@@ -122,16 +169,29 @@ impl CronCommandBuilder {
         };
 
         Ok(format!(
-            "({crontab_cmd} 2>/dev/null; echo {}) | {set_cmd}",
+            "({crontab_cmd} 2>/dev/null; printf '%s\\n' {}) | {set_cmd}",
             shell_escape(&cron_line)
         ))
     }
 
     /// Build a command to remove a cron job by pattern.
     ///
-    /// Constructs: `crontab -l | grep -v "{pattern}" | crontab -`
-    #[must_use]
-    pub fn build_remove_command(pattern: &str, user: Option<&str>) -> String {
+    /// Removes every line that contains `pattern` as a literal string
+    /// (`grep -F -v -e`). The filtered crontab is installed only when `crontab
+    /// -l` and `grep` both ran: an empty pipe stage used to install an empty
+    /// crontab when `grep` failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] if `pattern` is empty or spans
+    /// more than one line (a second, empty pattern would match every line).
+    pub fn build_remove_command(pattern: &str, user: Option<&str>) -> Result<String> {
+        if pattern.is_empty() {
+            return Err(BridgeError::CommandDenied {
+                reason: "Cron pattern must not be empty: it would remove every entry".to_string(),
+            });
+        }
+        validate_single_line("pattern", pattern)?;
         let crontab_cmd = if let Some(u) = user {
             format!("crontab -u {} -l", shell_escape(u))
         } else {
@@ -144,16 +204,27 @@ impl CronCommandBuilder {
             String::from("crontab -")
         };
 
-        format!(
-            "{crontab_cmd} | grep -v {} | {set_cmd}",
+        Ok(format!(
+            "if cur=$({crontab_cmd}); then \
+             new=$(printf '%s\\n' \"$cur\" | grep -F -v -e {}); rc=$?; \
+             if [ \"$rc\" -le 1 ]; then printf '%s\\n' \"$new\" | {set_cmd}; \
+             else echo 'cron remove aborted: grep failed' >&2; exit \"$rc\"; fi; \
+             else echo 'cron remove aborted: crontab -l failed' >&2; exit 1; fi",
             shell_escape(pattern)
-        )
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_field_starting_with_a_dash_is_refused() {
+        assert!(validate_cron_schedule("-0 * * * *").is_err());
+        assert!(validate_cron_schedule("0 * * * -1").is_err());
+        assert!(validate_cron_schedule("0-30/5 * * * 1-5").is_ok());
+    }
 
     #[test]
     fn test_list_default() {
@@ -218,22 +289,82 @@ mod tests {
         )
         .unwrap();
         // Comment and schedule must be on separate lines (real newline, not literal \n)
-        assert!(!cmd.contains("\\n"));
+        assert!(!cmd.contains("backup\\n"), "{cmd}");
         assert!(cmd.contains("# Daily backup\n0 3"));
     }
 
     #[test]
+    fn test_remove_refuses_patterns_that_match_every_line() {
+        for bad in ["", "x\n", "\n", "a\r"] {
+            let err = CronCommandBuilder::build_remove_command(bad, None).unwrap_err();
+            assert!(err.to_string().contains("Cron pattern"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_remove_installs_only_after_crontab_and_grep_ran() {
+        let cmd = CronCommandBuilder::build_remove_command("--bogus", Some("bob")).unwrap();
+        assert!(cmd.contains("grep -F -v -e '--bogus'"), "{cmd}");
+        assert!(
+            cmd.starts_with("if cur=$(crontab -u 'bob' -l); then"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("if [ \"$rc\" -le 1 ]; then"), "{cmd}");
+        assert!(cmd.contains("| crontab -u 'bob' -;"), "{cmd}");
+        assert!(cmd.contains("exit \"$rc\""), "{cmd}");
+    }
+
+    #[test]
+    fn test_add_refuses_a_command_that_spans_lines() {
+        for bad in ["a\n* * * * * evil", "a\r", "\n"] {
+            let err =
+                CronCommandBuilder::build_add_command("0 * * * *", bad, None, None).unwrap_err();
+            assert!(err.to_string().contains("Cron command"), "{err}");
+        }
+        let err =
+            CronCommandBuilder::build_add_command("0 * * *\n* *", "x", None, None).unwrap_err();
+        assert!(err.to_string().contains("Cron schedule"), "{err}");
+    }
+
+    #[test]
+    fn test_add_escapes_percent_for_cron() {
+        let cmd = CronCommandBuilder::build_add_command(
+            "0 * * * *",
+            r"mysql -D app %system id%x date +\%F",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains(r"mysql -D app \%system id\%x date +\%F"),
+            "{cmd}"
+        );
+        // Two backslashes escape each other, so the `%` after them is bare.
+        assert_eq!(escape_cron_percent(r"a\\%b"), r"a\\\%b");
+        assert_eq!(escape_cron_percent(r"a\\\%b"), r"a\\\%b");
+        assert_eq!(escape_cron_percent("100%"), r"100\%");
+    }
+
+    #[test]
+    fn test_add_prints_the_line_with_a_format() {
+        let cmd =
+            CronCommandBuilder::build_add_command("0 * * * *", "-n echo", None, None).unwrap();
+        assert!(cmd.contains("printf '%s\\n' '0 * * * * -n echo'"), "{cmd}");
+        assert!(!cmd.contains("echo '"), "{cmd}");
+    }
+
+    #[test]
     fn test_remove() {
-        let cmd = CronCommandBuilder::build_remove_command("backup.sh", None);
-        assert!(cmd.contains("grep -v 'backup.sh'"));
+        let cmd = CronCommandBuilder::build_remove_command("backup.sh", None).unwrap();
+        assert!(cmd.contains("grep -F -v -e 'backup.sh'"));
         assert!(cmd.contains("crontab -"));
     }
 
     #[test]
     fn test_remove_with_user() {
-        let cmd = CronCommandBuilder::build_remove_command("cleanup", Some("root"));
+        let cmd = CronCommandBuilder::build_remove_command("cleanup", Some("root")).unwrap();
         assert!(cmd.contains("-u 'root'"));
-        assert!(cmd.contains("grep -v 'cleanup'"));
+        assert!(cmd.contains("grep -F -v -e 'cleanup'"));
     }
 
     // ── validate_cron_schedule ─────────────────────────────────────
@@ -289,8 +420,8 @@ mod tests {
 
     #[test]
     fn test_remove_injection_in_pattern() {
-        let cmd = CronCommandBuilder::build_remove_command("backup.sh; rm -rf /", None);
-        assert!(cmd.contains("grep -v 'backup.sh; rm -rf /'"));
+        let cmd = CronCommandBuilder::build_remove_command("backup.sh; rm -rf /", None).unwrap();
+        assert!(cmd.contains("grep -F -v -e 'backup.sh; rm -rf /'"));
     }
 
     #[test]
@@ -336,8 +467,8 @@ mod tests {
 
     #[test]
     fn test_remove_pattern_with_special_chars() {
-        let cmd = CronCommandBuilder::build_remove_command("backup.*\\.sh", None);
-        assert!(cmd.contains("grep -v 'backup.*\\.sh'"));
+        let cmd = CronCommandBuilder::build_remove_command("backup.*\\.sh", None).unwrap();
+        assert!(cmd.contains("grep -F -v -e 'backup.*\\.sh'"));
     }
 
     #[test]

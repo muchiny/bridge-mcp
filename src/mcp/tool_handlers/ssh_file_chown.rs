@@ -88,12 +88,12 @@ impl StandardTool for FileChownTool {
     }
 
     fn build_command(args: &SshFileChownArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(FileOpsCommandBuilder::build_chown_command(
+        FileOpsCommandBuilder::build_chown_command(
             &args.path,
             &args.owner,
             args.group.as_deref(),
             args.recursive.unwrap_or(false),
-        ))
+        )
     }
 }
 

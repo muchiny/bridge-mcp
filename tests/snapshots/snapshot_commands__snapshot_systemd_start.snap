@@ -2,4 +2,4 @@
 source: tests/snapshot_commands.rs
 expression: "SystemdCommandBuilder::build_start_command(\"postgresql@14-main\")"
 ---
-systemctl start 'postgresql@14-main'
+systemctl start -- 'postgresql@14-main'

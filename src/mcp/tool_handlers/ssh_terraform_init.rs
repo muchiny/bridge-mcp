@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::terraform::TerraformCommandBuilder;
+use crate::domain::use_cases::terraform::{TerraformCommandBuilder, validate_terraform_dir};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -73,6 +73,10 @@ impl StandardTool for TerraformInitTool {
                 },
                 "required": ["host", "dir"]
             }"#;
+
+    fn validate(args: &SshTerraformInitArgs, _host_config: &HostConfig) -> Result<()> {
+        validate_terraform_dir(&args.dir)
+    }
 
     fn build_command(args: &SshTerraformInitArgs, _host_config: &HostConfig) -> Result<String> {
         TerraformCommandBuilder::build_init_command(
@@ -245,6 +249,19 @@ mod tests {
         assert_ne!(cmd, "");
         assert!(cmd.contains("terraform"));
         assert!(cmd.contains("init"));
+    }
+
+    #[test]
+    fn test_validate_refuses_traversal_and_empty_dir() {
+        let host = test_host_config();
+        for dir in ["/opt/../etc", "../../etc", ""] {
+            let args: SshTerraformInitArgs =
+                serde_json::from_value(json!({"host": "s", "dir": dir})).unwrap();
+            assert!(TerraformInitTool::validate(&args, &host).is_err(), "{dir}");
+        }
+        let ok: SshTerraformInitArgs =
+            serde_json::from_value(json!({"host": "s", "dir": "/opt/terraform"})).unwrap();
+        assert!(TerraformInitTool::validate(&ok, &host).is_ok());
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {

@@ -5,7 +5,7 @@
 use serde::Deserialize;
 
 use crate::config::{HostConfig, OsType};
-use crate::domain::use_cases::nginx::NginxCommandBuilder;
+use crate::domain::use_cases::nginx::{NginxCommandBuilder, validate_server};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -45,7 +45,7 @@ impl StandardTool for NginxTestTool {
             },
             "server": {
                 "type": "string",
-                "description": "Web server to test: nginx (default when omitted), apache2, or httpd. Custom servers (e.g. openresty) also accepted — the tool runs `<server> -t`."
+                "description": "Web server to test: nginx (default when omitted), apache2, or httpd. openresty is also accepted; any other value is refused."
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -69,6 +69,10 @@ impl StandardTool for NginxTestTool {
         Ok(NginxCommandBuilder::build_test_command(
             args.server.as_deref(),
         ))
+    }
+
+    fn validate(args: &SshNginxTestArgs, _host_config: &HostConfig) -> Result<()> {
+        validate_server(args.server.as_deref())
     }
 }
 
@@ -340,5 +344,13 @@ mod tests {
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_validate_refuses_a_program_as_server() {
+        let args: SshNginxTestArgs =
+            serde_json::from_value(json!({"host": "s", "server": "/tmp/payload.sh"})).unwrap();
+        let err = NginxTestTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("'server'"), "{err}");
     }
 }

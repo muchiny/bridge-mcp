@@ -83,6 +83,10 @@ impl StandardTool for K8sCordonTool {
     }"#;
 
     fn build_command(args: &SshK8sCordonArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "node",
+            Some(args.node.as_str()),
+        )])?;
         if let Some(ctx) = args.context.as_deref() {
             crate::domain::use_cases::kubernetes::validate_context(ctx)?;
         }
@@ -297,5 +301,16 @@ mod tests {
             "cordon must not emit uncordon: {cmd}"
         );
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_option_like_node_is_refused() {
+        let args: SshK8sCordonArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "node": "-x"})).unwrap();
+        let err = K8sCordonTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'node' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -37,13 +37,12 @@ impl MulticloudCommandBuilder {
     /// Azure: `az vm list --output json`
     #[must_use]
     pub fn build_multicloud_list_command(provider: &str) -> String {
-        let escaped = shell_escape(provider);
         match provider {
             "gcp" => "gcloud compute instances list --format=json 2>&1".to_string(),
             "azure" => "az vm list --output json 2>&1".to_string(),
             _ => format!(
-                "echo '--- Provider: {escaped} ---' && \
-                 aws ec2 describe-instances --output json 2>&1"
+                "{} && aws ec2 describe-instances --output json 2>&1",
+                Self::banner(&format!("--- Provider: {provider} ---"))
             ),
         }
     }
@@ -66,12 +65,16 @@ impl MulticloudCommandBuilder {
     pub fn build_multicloud_compare_command(provider1: &str, provider2: &str) -> String {
         let cmd1 = Self::build_provider_list_snippet(provider1);
         let cmd2 = Self::build_provider_list_snippet(provider2);
-        let esc1 = shell_escape(provider1);
-        let esc2 = shell_escape(provider2);
-        format!(
-            "echo '=== {esc1} ===' && {cmd1}; \
-             echo '=== {esc2} ===' && {cmd2}"
-        )
+        let banner1 = Self::banner(&format!("=== {provider1} ==="));
+        let banner2 = Self::banner(&format!("=== {provider2} ==="));
+        format!("{banner1} && {cmd1}; {banner2} && {cmd2}")
+    }
+
+    /// A `printf` that prints `text` and a newline, with `text` quoted once as
+    /// a single word (`printf '%s\n' 'text'`), so a caller-supplied provider
+    /// cannot leave the quotes nor be read as an option.
+    fn banner(text: &str) -> String {
+        format!("printf '%s\\n' {}", shell_escape(text))
     }
 
     /// Build the list snippet for a single provider (internal helper).
@@ -207,5 +210,19 @@ mod tests {
     fn test_provider_snippet_unknown_defaults_to_aws() {
         let cmd = MulticloudCommandBuilder::build_provider_list_snippet("unknown");
         assert!(cmd.contains("aws ec2"));
+    }
+
+    #[test]
+    fn test_banner_quotes_the_whole_text_once() {
+        let cmd = MulticloudCommandBuilder::build_multicloud_list_command("a'; id; '");
+        assert!(
+            cmd.starts_with("printf '%s\\n' '--- Provider: a'\\''; id; '\\'' ---' && aws ec2"),
+            "{cmd}"
+        );
+        let cmp = MulticloudCommandBuilder::build_multicloud_compare_command("aws", "gcp");
+        assert!(
+            cmp.starts_with("printf '%s\\n' '=== aws ===' && aws ec2"),
+            "{cmp}"
+        );
     }
 }

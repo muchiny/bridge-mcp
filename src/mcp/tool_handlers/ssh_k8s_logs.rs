@@ -125,6 +125,10 @@ impl StandardTool for K8sLogsTool {
     }"#;
 
     fn build_command(args: &SshK8sLogsArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "pod",
+            Some(args.pod.as_str()),
+        )])?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -511,5 +515,16 @@ mod tests {
         assert!(KubernetesCommandBuilder::validate_label_selector("app=nginx").is_ok());
         assert!(KubernetesCommandBuilder::validate_label_selector("-flag").is_err());
         assert!(KubernetesCommandBuilder::validate_label_selector("").is_err());
+    }
+
+    #[test]
+    fn test_option_like_pod_is_refused() {
+        let args: SshK8sLogsArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "pod": "-x"})).unwrap();
+        let err = K8sLogsTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'pod' must not start with '-'"),
+            "{err}"
+        );
     }
 }

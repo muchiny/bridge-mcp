@@ -62,7 +62,7 @@ impl SshSessionExecHandler {
             },
             "sudo": {
                 "type": "boolean",
-                "description": "Run the command with sudo (default: false)"
+                "description": "Run the command with sudo -n (default: false). Needs NOPASSWD: the host's sudo_password is never typed into a session; use ssh_exec with sudo for a password"
             },
             "sudo_user": {
                 "type": "string",
@@ -75,16 +75,16 @@ impl SshSessionExecHandler {
 
 /// Build the (possibly elevated) command to run in the session.
 ///
-/// Elevation is a domain decision: `privilege::elevate*` wraps the whole line
-/// (`sudo -n bash -c '<all>'`, or the `printf … | sudo -S -p '' bash -c
-/// 'exec 0</dev/null; <all>'` pipe form when the host has a `sudo_password`).
-/// Prefixing it here would only elevate the first process; see the docs of
-/// `domain::privilege::elevate`.
-fn build_command(
-    args: &SshSessionExecArgs,
-    session_host_config: Option<&HostConfig>,
-    effective_shell: ShellType,
-) -> String {
+/// Elevation is a domain decision: `privilege::elevate` wraps the whole line
+/// (`sudo -n bash -c '<all>'`). Prefixing it here would only elevate the
+/// first process; see the docs of `domain::privilege::elevate`.
+///
+/// The host's `sudo_password` is never typed into a session: the caller owns
+/// that shell, and a `sudo` or `printf` function or a `DEBUG` trap defined by
+/// an earlier `ssh_session_exec` would read it out of the line. `sudo -n`
+/// works under `NOPASSWD`; otherwise sudo refuses, and `ssh_exec` with
+/// `sudo: true` (which sends the password on the channel's stdin) is the way.
+fn build_command(args: &SshSessionExecArgs, effective_shell: ShellType) -> String {
     if effective_shell != ShellType::Posix {
         return args.command.clone();
     }
@@ -93,27 +93,7 @@ fn build_command(
         sudo: args.sudo.unwrap_or(false),
         sudo_user: args.sudo_user.clone(),
     };
-    // Only cloned when elevation is actually requested: `sudo_password` is a
-    // `RedactedSecret` and this keeps its lifetime as narrow as the sudo
-    // branch it's used in, not every Posix command on this session.
-    let sudo_password = if privilege.sudo {
-        session_host_config
-            .and_then(|h| h.sudo_password.clone())
-            .filter(|p| !p.is_empty())
-    } else {
-        None
-    };
-    if sudo_password.is_some() {
-        tracing::warn!(
-            "Using sudo with password via stdin. \
-             Consider configuring NOPASSWD in sudoers for better security."
-        );
-    }
-    crate::domain::privilege::elevate_with_password_via_pipe(
-        &args.command,
-        &privilege,
-        sudo_password.as_deref(),
-    )
+    crate::domain::privilege::elevate(&args.command, &privilege)
 }
 
 /// Record the outcome of a session command in the audit trail, and log it.
@@ -241,14 +221,14 @@ impl ToolHandler for SshSessionExecHandler {
             .timeout_seconds
             .unwrap_or(ctx.config.limits.command_timeout_seconds);
 
-        // Resolve host config for this session (needed for sudo and shell type)
+        // Resolve host config for this session (needed for the shell type)
         let session_host_config = session_host_name
             .as_ref()
             .and_then(|name| ctx.config.hosts.get(name));
         let effective_shell =
             session_host_config.map_or(ShellType::Posix, HostConfig::effective_shell);
 
-        let command = build_command(&args, session_host_config, effective_shell);
+        let command = build_command(&args, effective_shell);
 
         info!(
             session_id = %args.session_id,
@@ -346,6 +326,20 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    /// The line a session runs for `sudo: true` elevates with `sudo -n`; no
+    /// form of it carries a password, whatever the host config holds.
+    #[test]
+    fn a_session_elevates_without_a_password() {
+        let args: SshSessionExecArgs = serde_json::from_value(json!({
+            "session_id": "s", "command": "id", "sudo": true
+        }))
+        .expect("valid args");
+        let line = build_command(&args, ShellType::Posix);
+        assert!(line.starts_with("sudo -n bash -c "), "{line}");
+        assert!(!line.contains("sudo -S"), "{line}");
+        assert!(!line.contains("printf"), "{line}");
+    }
 
     /// Create a test context with permissive security so commands pass validation
     fn create_permissive_context() -> ToolContext {

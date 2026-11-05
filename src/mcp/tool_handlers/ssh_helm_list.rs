@@ -113,7 +113,7 @@ impl StandardTool for HelmListTool {
             },
             "kubeconfig": {
                 "type": "string",
-                "description": "Path to kubeconfig file (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
+                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or ~/.kube/ (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -134,6 +134,7 @@ impl StandardTool for HelmListTool {
         crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshHelmListArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::validate_kubeconfig_opt(args.kubeconfig.as_deref())?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -517,5 +518,28 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert_eq!(text, json_text);
+    }
+
+    #[test]
+    fn test_kubeconfig_outside_known_directories_is_refused() {
+        for bad in ["/tmp/kc", "/etc/rancher/k3s/../../../tmp/kc", "/home/u/kc"] {
+            let args: SshHelmListArgs =
+                serde_json::from_value(json!({"host": "h", "kubeconfig": bad})).unwrap();
+            let err = HelmListTool::build_command(&args, &test_host_config()).unwrap_err();
+            assert!(matches!(err, BridgeError::CommandDenied { .. }), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_kubeconfig_under_known_directory_is_kept() {
+        let args: SshHelmListArgs = serde_json::from_value(
+            json!({"host": "h", "kubeconfig": "/etc/rancher/rke2/rke2.yaml"}),
+        )
+        .unwrap();
+        let cmd = HelmListTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.contains("KUBECONFIG=/etc/rancher/rke2/rke2.yaml "),
+            "{cmd}"
+        );
     }
 }

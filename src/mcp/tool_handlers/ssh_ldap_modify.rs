@@ -82,6 +82,10 @@ impl StandardTool for LdapModifyTool {
             args.uri.as_deref(),
         ))
     }
+
+    fn validate(args: &SshLdapModifyArgs, _host_config: &HostConfig) -> Result<()> {
+        LdapCommandBuilder::validate_ldif(&args.ldif)
+    }
 }
 
 /// Handler for the `ssh_ldap_modify` tool.
@@ -175,5 +179,24 @@ mod tests {
         let cmd = LdapModifyTool::build_command(&args, &host).unwrap();
         assert_ne!(cmd, "");
         assert!(cmd.contains("ldapmodify"));
+    }
+
+    #[tokio::test]
+    async fn test_refuses_ldif_file_value() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshLdapModifyHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "ldif": "dn: cn=x\nsn:< file:///etc/shadow"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            crate::error::BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("'ldif'"));
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }

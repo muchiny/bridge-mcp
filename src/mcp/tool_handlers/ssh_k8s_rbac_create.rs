@@ -176,6 +176,9 @@ impl StandardTool for K8sRbacCreateTool {
             ],
         )?;
         validate_rbac_name(&args.name)?;
+        if let Some(out) = args.output.as_deref() {
+            crate::domain::use_cases::kubernetes::validate_kubectl_output(out)?;
+        }
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -554,5 +557,15 @@ mod tests {
             }
             e => panic!("Expected CommandDenied, got: {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_file_reading_output_is_refused() {
+        let args: SshK8sRbacCreateArgs = serde_json::from_value(
+            json!({"host": "h", "kind": "role", "name": "r", "output": "go-template-file=/etc/shadow"}),
+        )
+        .unwrap();
+        let err = K8sRbacCreateTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("output"), "{err}");
     }
 }

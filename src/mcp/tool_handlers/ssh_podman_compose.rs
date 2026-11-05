@@ -27,7 +27,11 @@ pub struct SshPodmanComposeArgs {
 
 impl_common_args!(SshPodmanComposeArgs);
 
-#[mcp_standard_tool(name = "ssh_podman_compose", group = "podman", annotation = "mutating")]
+#[mcp_standard_tool(
+    name = "ssh_podman_compose",
+    group = "podman",
+    annotation = "destructive"
+)]
 pub struct PodmanComposeTool;
 
 impl StandardTool for PodmanComposeTool {
@@ -37,7 +41,9 @@ impl StandardTool for PodmanComposeTool {
 
     const DESCRIPTION: &'static str = "Run `podman compose` commands on a remote host to manage \
         multi-container stacks. Pass the subcommand as action (e.g. 'up -d', 'down', 'ps', \
-        'logs', 'restart', 'pull'). Specify file if the compose file is not the default \
+        'logs --tail 100', 'restart', 'pull'): a subcommand, then only its known flags and \
+        service names, separated by spaces, no quoting. Output files, env files and \
+        'logs -f' are refused. Can remove containers and volumes (down -v, rm). Specify file if the compose file is not the default \
         (compose.yaml or docker-compose.yml in the working directory). For viewing individual \
         container logs use ssh_podman_logs. For Docker Compose stacks use ssh_docker_compose \
         instead.";
@@ -51,7 +57,7 @@ impl StandardTool for PodmanComposeTool {
             },
             "action": {
                 "type": "string",
-                "description": "Compose action to run (e.g. 'up -d', 'down', 'ps', 'logs')"
+                "description": "Compose subcommand with its flags and service names, separated by spaces, no quotes or backslashes (e.g. 'up -d', 'down', 'ps', 'logs --tail 100 web'). Only a short list of flags per subcommand is accepted; output/file flags and 'logs -f' are refused."
             },
             "file": {
                 "type": "string",
@@ -75,6 +81,10 @@ impl StandardTool for PodmanComposeTool {
         },
         "required": ["host", "action"]
     }"#;
+
+    fn validate(args: &SshPodmanComposeArgs, _host_config: &HostConfig) -> Result<()> {
+        PodmanCommandBuilder::validate_compose_action(&args.action)
+    }
 
     fn build_command(args: &SshPodmanComposeArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(PodmanCommandBuilder::build_compose_command(
@@ -284,5 +294,118 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_action_with_shell_or_unknown_subcommand_is_refused() {
+        for action in ["ps; id", "exec web sh", "-f x up", "x"] {
+            let handler = SshPodmanComposeHandler::new();
+            let ctx = crate::ports::mock::create_test_context_with_host();
+            let err = handler
+                .execute(Some(json!({"host": "server1", "action": action})), &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Compose action"),
+                "{action}: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_option_and_quote_actions_are_refused() {
+        for action in [
+            "config -o /home/deploy/.ssh/authorized_keys",
+            "up --env-file /etc/x",
+            "logs -f",
+            "logs 'web'",
+        ] {
+            let handler = SshPodmanComposeHandler::new();
+            let ctx = crate::ports::mock::create_test_context_with_host();
+            let err = handler
+                .execute(Some(json!({"host": "server1", "action": action})), &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Compose action"),
+                "{action}: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_listed_flags_still_run() {
+        let handler = SshPodmanComposeHandler::new();
+        let ctx = permissive_ctx(mock_output("ok"));
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "action": "logs --tail 50 web"})),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_logs_since_and_up_wait_run_but_bad_times_are_refused() {
+        for action in [
+            "logs --since 10m web",
+            "logs --since 2026-11-05T10:00:00Z --until 2026-11-05T11:00:00Z",
+            "up -d --wait",
+        ] {
+            let handler = SshPodmanComposeHandler::new();
+            let ctx = permissive_ctx(mock_output("ok"));
+            let result = handler
+                .execute(Some(json!({"host": "server1", "action": action})), &ctx)
+                .await
+                .unwrap();
+            assert!(
+                result.is_error.is_none() || result.is_error == Some(false),
+                "{action}"
+            );
+        }
+        for action in ["logs --since -1h", "logs --since 1h;id", "logs --since"] {
+            let handler = SshPodmanComposeHandler::new();
+            let ctx = crate::ports::mock::create_test_context_with_host();
+            let err = handler
+                .execute(Some(json!({"host": "server1", "action": action})), &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Compose action"),
+                "{action}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_registered_annotation_is_destructive() {
+        let kind = inventory::iter::<crate::mcp::registry::ToolRegistryEntry>()
+            .find(|e| e.name == "ssh_podman_compose")
+            .map(|e| e.annotation_kind);
+        assert_eq!(
+            kind,
+            Some(crate::mcp::registry::ToolAnnotationKind::Destructive)
+        );
+    }
+
+    #[test]
+    fn test_validate_refuses_output_flag_and_keeps_up_d() {
+        let host = test_host_config();
+        let bad: SshPodmanComposeArgs =
+            serde_json::from_value(json!({"host": "s", "action": "config -o /x"})).unwrap();
+        assert!(PodmanComposeTool::validate(&bad, &host).is_err());
+        let ok: SshPodmanComposeArgs =
+            serde_json::from_value(json!({"host": "s", "action": "up -d web"})).unwrap();
+        assert!(PodmanComposeTool::validate(&ok, &host).is_ok());
+    }
+
+    #[test]
+    fn test_build_command_quotes_each_action_word() {
+        let args: SshPodmanComposeArgs =
+            serde_json::from_value(json!({"host": "s", "action": "up -d"})).unwrap();
+        let cmd = PodmanComposeTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(cmd, "podman compose 'up' '-d'");
     }
 }

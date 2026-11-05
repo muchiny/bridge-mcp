@@ -167,6 +167,7 @@ const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
     "ssh_db_restore",       // overwrites the target database
     "ssh_backup_restore",   // overwrites files at the restore destination
     "ssh_docker_compose",   // `down` removes containers + networks
+    "ssh_podman_compose",   // `down -v` / `rm -v` delete volumes, `kill`, `down --rmi all`
     "ssh_esxi_snapshot",    // `remove_all` permanently deletes snapshots
     "ssh_ldap_modify",      // LDIF `changetype: delete` removes entries
     "ssh_vault_write",      // overwrites a secret (KV v1 has no versioning)

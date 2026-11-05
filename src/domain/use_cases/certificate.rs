@@ -44,7 +44,7 @@ impl CertificateCommandBuilder {
     /// or remote check via `s_client`.
     #[must_use]
     pub fn build_expiry_command(target: &str, is_file: bool, days_warning: Option<u32>) -> String {
-        let check_secs = days_warning.unwrap_or(30) * 86400;
+        let check_secs = u64::from(days_warning.unwrap_or(30)) * 86_400;
 
         if is_file {
             format!(
@@ -114,6 +114,12 @@ mod tests {
             CertificateCommandBuilder::build_expiry_command("example.com:443", false, Some(7));
         assert!(cmd.contains("s_client -connect 'example.com:443'"));
         assert!(cmd.contains("-checkend 604800")); // 7 * 86400
+    }
+
+    #[test]
+    fn test_expiry_huge_days_do_not_overflow() {
+        let cmd = CertificateCommandBuilder::build_expiry_command("a.crt", true, Some(u32::MAX));
+        assert!(cmd.contains("-checkend 371085174288000"), "{cmd}");
     }
 
     // ============== Shell Injection Prevention ==============

@@ -10,6 +10,7 @@
 //! (via [`UnixSocketTransport::shutdown_token`]) to break out of the
 //! accept loop — used by `run_daemon` to react to SIGINT and SIGTERM.
 
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -27,13 +28,35 @@ pub struct UnixSocketTransport {
     listener: UnixListener,
     socket_path: PathBuf,
     shutdown: CancellationToken,
+    /// The user the socket file belongs to: the only user (besides root) whose
+    /// connections are served.
+    owner_uid: u32,
+}
+
+/// Restrict the socket file at `path` to its owner and return the owner's uid.
+fn secure_socket(path: &Path) -> std::io::Result<u32> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(std::fs::metadata(path)?.uid())
+}
+
+/// Whether the peer of `stream` runs as `owner_uid` or as root.
+///
+/// The socket serves a full MCP session with the daemon's SSH keys and sudo
+/// passwords, so a connection from any other local user is dropped, whatever
+/// the mode of the socket file or of its directory.
+fn peer_is_allowed(stream: &tokio::net::UnixStream, owner_uid: u32) -> bool {
+    stream
+        .peer_cred()
+        .is_ok_and(|cred| cred.uid() == owner_uid || cred.uid() == 0)
 }
 
 impl UnixSocketTransport {
     /// Bind a new listener at `path`.
     ///
     /// Removes any pre-existing file at that path (e.g. stale socket
-    /// from a crashed daemon) before binding.
+    /// from a crashed daemon) before binding, then restricts the socket to
+    /// mode `0600`. [`Transport::accept`] only serves peers of the same user
+    /// (or root), checked with `SO_PEERCRED`.
     ///
     /// # Errors
     ///
@@ -48,10 +71,15 @@ impl UnixSocketTransport {
         }
 
         let listener = UnixListener::bind(path).map_err(crate::error::BridgeError::Io)?;
+        let owner_uid = secure_socket(path).map_err(|e| {
+            let _ = std::fs::remove_file(path);
+            crate::error::BridgeError::Io(e)
+        })?;
         Ok(Self {
             listener,
             socket_path: path.to_path_buf(),
             shutdown: CancellationToken::new(),
+            owner_uid,
         })
     }
 
@@ -78,15 +106,20 @@ impl Transport for UnixSocketTransport {
                 accept = self.listener.accept() => {
                     match accept {
                         Ok((stream, _addr)) => {
-                            let (reader, writer) = stream.into_split();
-                            let session_reader: Box<dyn SessionReader> =
-                                Box::new(UnixSessionReader::new(reader));
-                            let session_writer: Box<dyn SessionWriter> =
-                                Box::new(UnixSessionWriter::new(writer));
-                            return Some(Session {
-                                reader: session_reader,
-                                writer: session_writer,
-                            });
+                            if peer_is_allowed(&stream, self.owner_uid) {
+                                let (reader, writer) = stream.into_split();
+                                let session_reader: Box<dyn SessionReader> =
+                                    Box::new(UnixSessionReader::new(reader));
+                                let session_writer: Box<dyn SessionWriter> =
+                                    Box::new(UnixSessionWriter::new(writer));
+                                return Some(Session {
+                                    reader: session_reader,
+                                    writer: session_writer,
+                                });
+                            }
+                            // Dropped: `stream` closes here, and the loop
+                            // waits for the next client.
+                            warn!("refused a connection from another user on the daemon socket");
                         }
                         Err(e) => {
                             error!(error = %e, "UnixListener accept failed");
@@ -217,6 +250,26 @@ mod tests {
             path.exists(),
             "UnixSocketTransport::bind must create the socket file"
         );
+    }
+
+    /// F47: the socket must not be reachable by other users, whatever the umask.
+    #[tokio::test]
+    async fn bind_restricts_the_socket_to_its_owner() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("mode.sock");
+        let _t = UnixSocketTransport::bind(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+
+    #[tokio::test]
+    async fn peers_of_another_user_are_refused() {
+        let (a, _b) = tokio::net::UnixStream::pair().unwrap();
+        let me = a.peer_cred().unwrap().uid();
+        assert!(peer_is_allowed(&a, me));
+        if me != 0 {
+            assert!(!peer_is_allowed(&a, me.wrapping_add(1)));
+        }
     }
 
     #[tokio::test]

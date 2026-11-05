@@ -101,6 +101,10 @@ impl StandardTool for K8sPatchTool {
     }"#;
 
     fn build_command(args: &SshK8sPatchArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "target",
+            Some(args.target.as_str()),
+        )])?;
         if !matches!(args.patch_type.as_str(), "strategic" | "merge" | "json") {
             return Err(BridgeError::CommandDenied {
                 reason: format!(
@@ -363,5 +367,18 @@ mod tests {
             save_output: None,
         };
         assert!(K8sPatchTool::build_command(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_option_like_target_is_refused() {
+        let args: SshK8sPatchArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "target": "-x", "patch": "x", "patch_type": "x"}),
+        )
+        .unwrap();
+        let err = K8sPatchTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'target' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -141,8 +141,7 @@ impl GitCommandBuilder {
         depth: Option<u32>,
         single_branch: bool,
     ) -> String {
-        let escaped_url = shell_escape(url);
-        let mut cmd = format!("git clone {escaped_url}");
+        let mut cmd = String::from("git clone");
 
         if let Some(b) = branch {
             let _ = write!(cmd, " --branch {}", shell_escape(b));
@@ -153,6 +152,9 @@ impl GitCommandBuilder {
         if single_branch {
             cmd.push_str(" --single-branch");
         }
+        // `--` ends the options: a destination (or url) read as an option
+        // would be `--config=core.sshCommand=...` or `--upload-pack=...`.
+        let _ = write!(cmd, " -- {}", shell_escape(url));
         if let Some(dest) = destination {
             let _ = write!(cmd, " {}", shell_escape(dest));
         }
@@ -211,6 +213,20 @@ impl GitCommandBuilder {
         } else {
             format!("git -C {escaped_path} checkout {escaped_target}")
         }
+    }
+
+    /// Refuse a ref, remote, url or branch name that starts with `-`.
+    ///
+    /// None of them can legitimately start with `-`, and git would read the
+    /// value as an option (`--output=<file>` writes a file, `--upload-pack=<cmd>`
+    /// runs a command).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] naming `arg` when `value` starts
+    /// with `-`.
+    pub fn validate_not_option(arg: &str, value: Option<&str>) -> Result<()> {
+        value.map_or(Ok(()), |v| super::shell::refuse_option_like(arg, v))
     }
 
     /// Validate a branch action.
@@ -501,7 +517,7 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(cmd, "git clone 'https://github.com/user/repo.git'");
+        assert_eq!(cmd, "git clone -- 'https://github.com/user/repo.git'");
     }
 
     #[test]
@@ -562,8 +578,8 @@ mod tests {
             Some(5),
             true,
         );
-        assert!(cmd.contains("git clone 'https://github.com/user/repo.git'"));
-        assert!(cmd.contains("--branch 'main'"));
+        assert!(cmd.contains("git clone --branch 'main'"));
+        assert!(cmd.contains("-- 'https://github.com/user/repo.git'"));
         assert!(cmd.contains("--depth 5"));
         assert!(cmd.contains("--single-branch"));
         assert!(cmd.contains("'/opt/dest'"));
@@ -684,5 +700,34 @@ mod tests {
     fn test_validate_branch_action_case_sensitive() {
         assert!(GitCommandBuilder::validate_branch_action("List").is_err());
         assert!(GitCommandBuilder::validate_branch_action("CREATE").is_err());
+    }
+
+    // ── option injection ───────────────────────────────────────────
+
+    #[test]
+    fn test_clone_puts_url_and_destination_after_double_dash() {
+        let cmd = GitCommandBuilder::build_clone_command(
+            "ssh://x/y",
+            Some("--config=core.sshCommand=touch /tmp/p"),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            cmd,
+            "git clone -- 'ssh://x/y' '--config=core.sshCommand=touch /tmp/p'"
+        );
+    }
+
+    #[test]
+    fn test_validate_not_option_refuses_a_leading_dash() {
+        let err =
+            GitCommandBuilder::validate_not_option("branch", Some("--output=/tmp/x")).unwrap_err();
+        assert!(
+            err.to_string().contains("'branch' must not start with '-'"),
+            "{err}"
+        );
+        assert!(GitCommandBuilder::validate_not_option("branch", Some("main")).is_ok());
+        assert!(GitCommandBuilder::validate_not_option("branch", None).is_ok());
     }
 }

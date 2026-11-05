@@ -7,25 +7,46 @@
 use crate::config::ShellType;
 use crate::error::{BridgeError, Result};
 
+use super::shell::refuse_option_like;
+
 fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
 }
 
-fn is_valid_binary_path(bin: &str) -> bool {
-    !bin.is_empty()
-        && bin
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+/// Validate a caller-supplied k3s binary path.
+///
+/// The binary is run as root (`sudo <bin> ...`), so it must be a `k3s`
+/// executable that only root can have written: the value is checked by
+/// [`is_named_binary`](super::shell::is_named_binary), so it is a bare `k3s`
+/// (or `k3s` with a version suffix such as `k3s-1.31`), or an absolute path in
+/// a system directory (`/usr/local/bin/k3s`), made only of `[A-Za-z0-9/._-]`.
+/// It must not start with `-` (`sudo` would read it as one of its own
+/// options). `/bin/sh`, `python3`, `/tmp/k3s` and `./k3s` are refused.
+///
+/// # Errors
+/// Returns [`BridgeError::CommandDenied`] when `bin` breaks one of the rules.
+pub fn validate_k3s_bin(bin: &str) -> Result<()> {
+    refuse_option_like("k3s_bin", bin)?;
+    if !super::shell::is_named_binary(bin, &["k3s"]) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "k3s_bin must be 'k3s' or an absolute path to it in a system directory \
+                 (e.g. /usr/local/bin/k3s), got '{bin}'"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Generate the k3s detection prefix.
 ///
-/// If `k3s_bin` is supplied and valid, uses it verbatim with a trailing space.
-/// Otherwise auto-detects `k3s` via a subshell expression.
+/// If `k3s_bin` is supplied and passes [`validate_k3s_bin`], uses it verbatim
+/// with a trailing space. Otherwise auto-detects `k3s` via a subshell
+/// expression.
 #[must_use]
 pub fn k3s_detect_prefix(k3s_bin: Option<&str>) -> String {
     if let Some(bin) = k3s_bin
-        && is_valid_binary_path(bin)
+        && validate_k3s_bin(bin).is_ok()
     {
         return format!("{bin} ");
     }
@@ -175,12 +196,18 @@ const ALLOWED_K3S_SCRIPTS: &[&str] = &[
     "k3s-agent-uninstall.sh",
 ];
 
+/// Directories the k3s installer writes its lifecycle scripts to (the default
+/// `/usr/local/bin`, or `/opt/bin` on read-only root filesystems). Only root
+/// can write there, so a script run under `sudo` cannot be planted by a caller.
+const ALLOWED_K3S_SCRIPT_DIRS: &[&str] = &["/usr/local/bin", "/usr/local/sbin", "/opt/bin"];
+
 /// Validate a k3s uninstall/killall script path.
 ///
 /// # Errors
 /// Returns [`BridgeError::CommandDenied`] if:
 /// - not an absolute path
 /// - basename is not one of the allowed scripts
+/// - the directory is not one of `/usr/local/bin`, `/usr/local/sbin`, `/opt/bin`
 /// - contains `..` segments, leading `-`, or disallowed characters
 pub fn validate_script_path(p: &str) -> Result<()> {
     if p.is_empty() || !p.starts_with('/') {
@@ -214,6 +241,15 @@ pub fn validate_script_path(p: &str) -> Result<()> {
             reason: format!(
                 "script basename '{basename}' is not allowed; must be one of: {}",
                 ALLOWED_K3S_SCRIPTS.join(", ")
+            ),
+        });
+    }
+    let dir = p.rsplit_once('/').map_or("", |(d, _)| d);
+    if !ALLOWED_K3S_SCRIPT_DIRS.contains(&dir) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "script directory '{dir}' is not allowed; must be one of: {}",
+                ALLOWED_K3S_SCRIPT_DIRS.join(", ")
             ),
         });
     }
@@ -631,6 +667,62 @@ mod tests {
         );
     }
 
+    // ── validate_k3s_bin ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_k3s_bin_accepts_k3s_paths() {
+        assert!(validate_k3s_bin("k3s").is_ok());
+        assert!(validate_k3s_bin("/usr/local/bin/k3s").is_ok());
+        assert!(validate_k3s_bin("/usr/bin/k3s").is_ok());
+        assert!(validate_k3s_bin("k3s-1.31").is_ok());
+    }
+
+    #[test]
+    fn test_validate_k3s_bin_refuses_leading_dash() {
+        let err = validate_k3s_bin("-s").unwrap_err().to_string();
+        assert!(err.contains("k3s_bin"), "err: {err}");
+    }
+
+    #[test]
+    fn test_validate_k3s_bin_refuses_other_executables() {
+        assert!(validate_k3s_bin("/bin/sh").is_err());
+        assert!(validate_k3s_bin("/usr/bin/python3").is_err());
+        assert!(validate_k3s_bin("/tmp/k3s-evil").is_err());
+        assert!(validate_k3s_bin("/usr/é/k3s").is_err());
+        assert!(validate_k3s_bin("k3s-killall.sh").is_err());
+    }
+
+    #[test]
+    fn test_validate_k3s_bin_refuses_a_planted_file() {
+        // A file named k3s outside the system directories could have been
+        // written by the caller and would run as root under sudo.
+        for bin in [
+            "/tmp/k3s",
+            "/var/tmp/k3s",
+            "/home/u/k3s",
+            "./k3s",
+            "../x/k3s",
+            "bin/k3s",
+            "/usr/local/bin/../../tmp/k3s",
+        ] {
+            assert!(validate_k3s_bin(bin).is_err(), "{bin}");
+            assert!(
+                k3s_detect_prefix(Some(bin)).contains("command -v k3s"),
+                "{bin}"
+            );
+        }
+        assert!(validate_k3s_bin("k3s;id").is_err());
+        assert!(validate_k3s_bin("").is_err());
+    }
+
+    #[test]
+    fn test_detect_prefix_dash_or_foreign_bin_falls_back_to_subshell() {
+        for bin in ["-s", "/bin/sh"] {
+            let prefix = k3s_detect_prefix(Some(bin));
+            assert!(prefix.contains("command -v k3s"), "prefix: {prefix}");
+        }
+    }
+
     // ── validate_snapshot_name ────────────────────────────────────────────────
 
     #[test]
@@ -767,6 +859,24 @@ mod tests {
     #[test]
     fn test_validate_script_path_dotdot_rejected() {
         assert!(validate_script_path("/usr/local/../bin/k3s-uninstall.sh").is_err());
+    }
+
+    #[test]
+    fn test_validate_script_path_untrusted_directory_rejected() {
+        for p in [
+            "/tmp/k3s-killall.sh",
+            "/home/user/k3s-uninstall.sh",
+            "//usr/local/bin/k3s-killall.sh",
+            "/k3s-killall.sh",
+        ] {
+            let err = validate_script_path(p).unwrap_err().to_string();
+            assert!(err.contains("directory"), "p: {p}, err: {err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_script_path_opt_bin_accepted() {
+        assert!(validate_script_path("/opt/bin/k3s-killall.sh").is_ok());
     }
 
     // ── validate_cert_service ─────────────────────────────────────────────────

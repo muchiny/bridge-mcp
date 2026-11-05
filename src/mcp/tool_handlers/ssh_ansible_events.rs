@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::mcp::tool_handlers::utils::shell_escape;
 use crate::mcp_standard_tool;
 
 #[derive(Debug, Deserialize)]
@@ -102,11 +103,20 @@ impl StandardTool for AnsibleEventsTool {
         crate::domain::output_kind::OutputKind::Json;
 
     fn build_command(args: &SshAnsibleEventsArgs, _host_config: &HostConfig) -> Result<String> {
-        let output_file = format!("/tmp/ansible-run-{}.json", args.run_id);
+        let output_file = shell_escape(&format!("/tmp/ansible-run-{}.json", args.run_id));
         let event_filter = args
             .event_filter
             .as_deref()
             .unwrap_or("runner_on_failed|runner_on_changed|playbook_on_stats");
+        // One grep pattern, escaped once. `event_filter` is limited to
+        // `[A-Za-z0-9_|]` by `validate`, so it adds no regex metacharacter
+        // besides the alternation.
+        let pattern = shell_escape(&format!(r#""event"\s*:\s*"({event_filter})""#));
+        // The error JSON names the file; `run_id` is limited to `[A-Za-z0-9_-]`.
+        let not_found = shell_escape(&format!(
+            r#"{{"error":"Output file not found","file":"/tmp/ansible-run-{}.json"}}"#,
+            args.run_id
+        ));
 
         let mut cmd = String::new();
 
@@ -124,17 +134,37 @@ impl StandardTool for AnsibleEventsTool {
         // The JSON callback writes one JSON object per line
         let _ = write!(
             cmd,
-            r#"if [ -f '{output_file}' ]; then grep -E '"event"\s*:\s*"({event_filter})"' '{output_file}' || echo '{{"no_matching_events":true}}'; else echo '{{"error":"Output file not found","file":"{output_file}"}}'; fi"#
+            r#"if [ -f {output_file} ]; then grep -E {pattern} {output_file} || echo '{{"no_matching_events":true}}'; else echo {not_found}; fi"#
         );
 
         Ok(cmd)
     }
 
     fn validate(args: &SshAnsibleEventsArgs, _host_config: &HostConfig) -> Result<()> {
-        // Validate run_id to prevent path injection
-        if args.run_id.contains("..") || args.run_id.contains('/') || args.run_id.contains('\\') {
+        // run_id is spliced into a path: only what `ssh_ansible_run_background`
+        // generates (`%Y%m%d%H%M%S_$$`), i.e. no path separator or shell syntax.
+        if args.run_id.is_empty()
+            || !args
+                .run_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
             return Err(crate::error::BridgeError::CommandDenied {
-                reason: "Invalid run_id: must not contain path separators".to_string(),
+                reason: "Invalid run_id: must contain only letters, digits, '_' and '-' \
+                         (no path separators)"
+                    .to_string(),
+            });
+        }
+        // event_filter is a pipe-separated list of event names.
+        if let Some(filter) = args.event_filter.as_deref()
+            && (filter.is_empty()
+                || !filter
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|'))
+        {
+            return Err(crate::error::BridgeError::CommandDenied {
+                reason: "Invalid event_filter: must contain only letters, digits, '_' and '|'"
+                    .to_string(),
             });
         }
         Ok(())
@@ -332,5 +362,65 @@ mod tests {
         assert!(cmd.contains("kill -0 42"));
         assert!(cmd.contains("running"));
         assert!(cmd.contains("runner_on_failed"));
+    }
+
+    #[test]
+    fn test_build_command_quotes_path_and_pattern_once() {
+        let args = SshAnsibleEventsArgs {
+            host: "server1".to_string(),
+            run_id: "abc_1-2".to_string(),
+            event_filter: Some("runner_on_failed|playbook_on_stats".to_string()),
+            check_status: None,
+            pid: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = AnsibleEventsTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.contains("[ -f '/tmp/ansible-run-abc_1-2.json' ]"),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains(r#"grep -E '"event"\s*:\s*"(runner_on_failed|playbook_on_stats)"' '/tmp/ansible-run-abc_1-2.json'"#),
+            "{cmd}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hostile_run_id_refused() {
+        let handler = SshAnsibleEventsHandler::new();
+        let ctx = create_test_context_with_host();
+        for run_id in ["x'; id; echo '", "a b", "a\nb", "$(id)", "a;b", ""] {
+            let result = handler
+                .execute(Some(json!({"host": "server1", "run_id": run_id})), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("run_id"), "{run_id}: {reason}");
+                }
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hostile_event_filter_refused() {
+        let handler = SshAnsibleEventsHandler::new();
+        let ctx = create_test_context_with_host();
+        for filter in ["x)\"'; id; echo '", "a b", "a\nb", "$(id)", "a.*", ""] {
+            let result = handler
+                .execute(
+                    Some(json!({"host": "server1", "run_id": "abc", "event_filter": filter})),
+                    &ctx,
+                )
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("event_filter"), "{filter}: {reason}");
+                }
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
     }
 }

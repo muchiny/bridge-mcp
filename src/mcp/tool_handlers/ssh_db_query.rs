@@ -55,7 +55,9 @@ impl StandardTool for DbQueryTool {
     const DESCRIPTION: &'static str = "Execute a SQL query on a remote database via SSH. Supports MySQL and PostgreSQL. The \
         query runs via the database CLI client (mysql/psql) on the remote host. Returns query \
         results as table or CSV text. Dangerous queries (DROP, TRUNCATE, DELETE FROM) are \
-        blocked. Use ssh_db_dump for backups before destructive operations.";
+        blocked on a best-effort basis (a guard against mistakes, not a security boundary), \
+        and so are database client commands (\\! and system for mysql, a leading backslash \
+        for psql). Use ssh_db_dump for backups before destructive operations.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -71,7 +73,7 @@ impl StandardTool for DbQueryTool {
             },
             "query": {
                 "type": "string",
-                "description": "SQL query to execute. Single-statement only (multi-statement batches are not supported). For PostgreSQL strings containing single quotes, use $$ dollar-quoting (e.g. SELECT $$O'Brien$$). For MySQL, backslash-escape single quotes (e.g. WHERE name=\\'O\\'Brien\\')."
+                "description": "SQL query to execute. Single-statement only (multi-statement batches are not supported). For PostgreSQL strings containing single quotes, use $$ dollar-quoting (e.g. SELECT $$O'Brien$$). For MySQL, write a single quote inside a string as two quotes (e.g. WHERE name='O''Brien'); the shell quoting is handled for you. A backslash outside a quoted string (\\G, \\!, ...) is refused."
             },
             "database": {
                 "type": "string",
@@ -141,6 +143,16 @@ impl StandardTool for DbQueryTool {
     }
 
     fn validate(args: &SshDbQueryArgs, _host_config: &HostConfig) -> Result<()> {
+        let db_type = DatabaseType::from_str_checked(&args.db_type)?;
+        DatabaseCommandBuilder::validate_connection(
+            &db_type,
+            args.db_host.as_deref(),
+            args.db_user.as_deref(),
+            &args.database,
+            args.db_password.as_deref(),
+            None,
+        )?;
+        DatabaseCommandBuilder::validate_client_query(&db_type, &args.query)?;
         DatabaseCommandBuilder::validate_query(&args.query)?;
         Ok(())
     }
@@ -597,5 +609,132 @@ mod tests {
 
         let result = DbQueryTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_refuses_option_like_database() {
+        let handler = SshDbQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "--execute=x", "query": "SELECT 1"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_mysql_client_command() {
+        let handler = SshDbQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "db", "query": "\\! id > /tmp/o"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'query'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_psql_backslash_command() {
+        let handler = SshDbQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "postgresql", "database": "db", "query": "\\! id"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'query'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_comment_split_drop() {
+        let handler = SshDbQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "db", "query": "DROP/**/TABLE t"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'DROP TABLE'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_postgres_connection_string_database() {
+        let handler = SshDbQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        for database in [
+            "dbname=postgres host=10.0.0.66 port=5432",
+            "postgresql://10.0.0.66/db",
+        ] {
+            let result = handler
+                .execute(Some(json!({"host": "server1", "db_type": "postgresql", "database": database, "query": "SELECT 1"})), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+                e => panic!("Expected CommandDenied for {database:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_mysql_client_command_bypasses() {
+        let handler = SshDbQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        for query in [
+            "SELECT `a\\`` \\! id > /tmp/p",
+            "ssl_session_data_print /home/app/.ssh/authorized_keys",
+            "connect db otherhost",
+        ] {
+            let result = handler
+                .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "db", "query": query})), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => assert!(reason.contains("'query'")),
+                e => panic!("Expected CommandDenied for {query:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_executable_and_nested_comment_drop() {
+        let handler = SshDbQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        for (db_type, query) in [
+            ("mysql", "/*!DROP*/ TABLE users"),
+            ("postgresql", "DROP /* /* */ */ TABLE users"),
+        ] {
+            let result = handler
+                .execute(Some(json!({"host": "server1", "db_type": db_type, "database": "db", "query": query})), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { .. } => {}
+                e => panic!("Expected CommandDenied for {query:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_command_mysql_disables_client_commands() {
+        let args = SshDbQueryArgs {
+            host: "server1".to_string(),
+            db_type: "mysql".to_string(),
+            query: "SELECT 1".to_string(),
+            database: "mydb".to_string(),
+            db_host: None,
+            db_port: None,
+            db_user: None,
+            db_password: None,
+            format: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = DbQueryTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains(" --binary-mode -e 'SELECT 1'"), "{cmd}");
     }
 }

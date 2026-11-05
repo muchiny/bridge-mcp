@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::network::NetworkCommandBuilder;
+use crate::domain::use_cases::network::{NetworkCommandBuilder, validate_connection_state};
 use crate::error::Result;
 use crate::mcp::apps::table;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -95,6 +95,13 @@ impl StandardTool for NetConnectionsTool {
             args.state.as_deref(),
             args.listening.unwrap_or(false),
         ))
+    }
+
+    fn validate(args: &SshNetConnectionsArgs, _host_config: &HostConfig) -> Result<()> {
+        if let Some(state) = args.state.as_deref() {
+            validate_connection_state(state)?;
+        }
+        Ok(())
     }
 
     fn post_process(
@@ -511,5 +518,14 @@ LISTEN 0      128         0.0.0.0:22          0.0.0.0:*    users:((\"sshd\",pid=
                 .unwrap_or("")
                 .contains("sshd")
         );
+    }
+
+    #[test]
+    fn test_validate_refuses_an_option_as_state() {
+        let args: SshNetConnectionsArgs =
+            serde_json::from_value(json!({"host": "s", "state": "-D/home/u/.ssh/authorized_keys"}))
+                .unwrap();
+        let err = NetConnectionsTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("'state' must be one of"), "{err}");
     }
 }

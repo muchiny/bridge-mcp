@@ -108,6 +108,10 @@ impl StandardTool for HelmSearchRepoTool {
         crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshHelmSearchRepoArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "keyword",
+            Some(args.keyword.as_str()),
+        )])?;
         if let Some(out) = args.output.as_deref() {
             HelmCommandBuilder::validate_helm_output(out)?;
         }
@@ -337,5 +341,17 @@ mod tests {
         };
         let result = HelmSearchRepoTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_option_like_keyword_is_refused() {
+        let args: SshHelmSearchRepoArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "keyword": "-x"})).unwrap();
+        let err = HelmSearchRepoTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'keyword' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -91,6 +91,9 @@ impl StandardTool for K8sAuthWhoamiTool {
         if let Some(ctx) = args.context.as_deref() {
             crate::domain::use_cases::kubernetes::validate_context(ctx)?;
         }
+        if let Some(out) = args.output.as_deref() {
+            crate::domain::use_cases::kubernetes::validate_kubectl_output(out)?;
+        }
         Ok(KubernetesCommandBuilder::build_auth_whoami_command(
             args.kubectl_bin.as_deref(),
             args.output.as_deref(),
@@ -272,5 +275,14 @@ mod tests {
         assert!(cmd.contains("auth whoami"), "cmd: {cmd}");
         assert!(cmd.contains("json"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_file_reading_output_is_refused() {
+        let args: SshK8sAuthWhoamiArgs =
+            serde_json::from_value(json!({"host": "h", "output": "go-template-file=/etc/shadow"}))
+                .unwrap();
+        let err = K8sAuthWhoamiTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("output"), "{err}");
     }
 }

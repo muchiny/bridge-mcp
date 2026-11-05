@@ -7,9 +7,14 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::docker::DockerCommandBuilder;
-use crate::error::Result;
-use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::domain::use_cases::shell::{refuse_option_like, refuse_sensitive_env_name};
+use crate::error::{BridgeError, Result};
+use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::standard_tool::{
+    StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
+};
 use crate::mcp_standard_tool;
+use crate::ports::ToolContext;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +104,28 @@ impl StandardTool for DockerExecTool {
         "required": ["host", "container", "command"]
     }"#;
 
+    fn validate(args: &SshDockerExecArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("container", &args.container)?;
+        for entry in args.env.iter().flatten() {
+            validate_env_entry(entry)?;
+        }
+        // `sh -c` reads a command string that starts with `-` as its own options.
+        refuse_option_like("command", &args.command)
+    }
+
+    /// `command` is a free-form script from the request, so it faces the same
+    /// whitelist as `ssh_exec`, not only the blacklist `validate_builtin`
+    /// applies to builder-produced commands.
+    fn pre_execute(
+        args: &SshDockerExecArgs,
+        ctx: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        let script = command_with_env(args.workdir.as_deref(), args.env.as_deref(), &args.command);
+        std::future::ready(
+            validate_free_form_command(ctx, Self::NAME, &args.host, &script).map(|()| None),
+        )
+    }
+
     fn build_command(args: &SshDockerExecArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(DockerCommandBuilder::build_exec_command(
             args.docker_bin.as_deref(),
@@ -111,16 +138,118 @@ impl StandardTool for DockerExecTool {
     }
 }
 
+/// The text the whitelist judges: `cd -- DIR &&` for a `workdir` (it changes
+/// which file a relative path names), the `env` entries as the assignments a
+/// shell line would carry (`NAME=VALUE command`), then the command. An entry
+/// changes what the command does (`RSYNC_RSH`, `KUBE_EDITOR`), so a
+/// whitelist entry for the bare command does not approve it. `docker exec -e`
+/// sets the entries for the whole command and its `sh`, not only for the
+/// first simple command the line shows them on.
+fn command_with_env(workdir: Option<&str>, env: Option<&[String]>, command: &str) -> String {
+    let mut words: Vec<String> = workdir
+        .map(|dir| {
+            format!(
+                "cd -- {} &&",
+                crate::domain::use_cases::shell::posix_word(dir)
+            )
+        })
+        .into_iter()
+        .collect();
+    words.extend(
+        env.unwrap_or_default()
+            .iter()
+            .map(|entry| match entry.split_once('=') {
+                Some((name, value)) => {
+                    format!(
+                        "{name}={}",
+                        crate::domain::use_cases::shell::posix_word(value)
+                    )
+                }
+                None => crate::domain::use_cases::shell::posix_word(entry),
+            }),
+    );
+    words.push(command.to_string());
+    words.join(" ")
+}
+
+/// Check one `env` entry (`NAME=VALUE`).
+///
+/// `docker exec -e` accepts any name, so an entry could set a variable that
+/// changes which program or library the container runs, or how its shell
+/// starts (`BASH_FUNC_echo%%`, `LD_PRELOAD`, `PATH`, `SHELLOPTS`), and run
+/// something the whitelist never saw. The name must be a plain identifier
+/// (`[A-Za-z_][A-Za-z0-9_]*`) and not one of those variables. An entry
+/// without `=` would copy the variable from the remote login environment, so
+/// it is refused too.
+fn validate_env_entry(entry: &str) -> Result<()> {
+    let Some((name, _value)) = entry.split_once('=') else {
+        return Err(BridgeError::CommandDenied {
+            reason: "'env' entries must be NAME=VALUE".to_string(),
+        });
+    };
+    let mut chars = name.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid {
+        return Err(BridgeError::CommandDenied {
+            reason: format!("'env' variable name '{name}' must match [A-Za-z_][A-Za-z0-9_]*"),
+        });
+    }
+    refuse_sensitive_env_name("env", name)
+}
+
 /// Handler for the `ssh_docker_exec` tool.
 pub type SshDockerExecHandler = StandardToolHandler<DockerExecTool>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::BridgeError;
     use crate::ports::ToolHandler;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    #[test]
+    fn the_whitelist_sees_env_entries_before_the_command() {
+        assert_eq!(
+            command_with_env(None, None, "rsync -a /d/ b:/s/"),
+            "rsync -a /d/ b:/s/"
+        );
+        assert_eq!(
+            command_with_env(Some("/tmp/x y"), None, "./healthcheck.sh"),
+            "cd -- '/tmp/x y' && ./healthcheck.sh"
+        );
+        assert_eq!(
+            command_with_env(
+                None,
+                Some(&["RSYNC_RSH=sh -c 'id' x".to_string(), "DEBUG=1".to_string()]),
+                "rsync -a /d/ b:/s/"
+            ),
+            r"RSYNC_RSH='sh -c '\''id'\'' x' DEBUG=1 rsync -a /d/ b:/s/"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_env_entry_needs_its_own_whitelist_match() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^rsync -a /d/ b:/s/$"]);
+        let args = |env: serde_json::Value| -> SshDockerExecArgs {
+            serde_json::from_value(json!({
+                "host": "server1", "container": "app", "command": "rsync -a /d/ b:/s/", "env": env
+            }))
+            .unwrap()
+        };
+        assert!(
+            DockerExecTool::pre_execute(&args(json!([])), &ctx)
+                .await
+                .is_ok()
+        );
+        assert!(
+            DockerExecTool::pre_execute(&args(json!(["RSYNC_RSH=sh -c id x"])), &ctx)
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {
@@ -362,5 +491,108 @@ mod tests {
         };
         let cmd = DockerExecTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("podman"));
+    }
+
+    #[tokio::test]
+    async fn test_container_starting_with_dash_is_refused() {
+        let handler = SshDockerExecHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(
+                Some(json!({"host": "server1", "container": "-x", "command": "ls"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'container' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_env_entries_that_change_what_runs_are_refused() {
+        for entry in [
+            "BASH_FUNC_echo%%=() { cat /run/secrets/db_password; }",
+            "BASH_FUNC_echo=x",
+            "SHELLOPTS=xtrace",
+            "PS4=$(id)",
+            "LD_PRELOAD=/x.so",
+            "path=/x",
+            "PATH=/tmp",
+            "BASH_ENV=/tmp/x",
+            "IFS=x",
+            "1BAD=x",
+            "=x",
+            "A B=x",
+            "NOEQUALS",
+            "",
+        ] {
+            let args: SshDockerExecArgs = serde_json::from_value(
+                json!({"host": "h", "container": "c", "command": "echo ok", "env": [entry]}),
+            )
+            .unwrap();
+            let result = DockerExecTool::validate(&args, &test_host_config());
+            assert!(
+                matches!(result, Err(BridgeError::CommandDenied { .. })),
+                "{entry}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ordinary_env_entries_pass() {
+        let args: SshDockerExecArgs = serde_json::from_value(json!({
+            "host": "h", "container": "c", "command": "echo ok",
+            "env": ["FOO=bar", "DEBUG=1", "_X9=a=b", "EMPTY=", "MY_PATH=/x"]
+        }))
+        .unwrap();
+        DockerExecTool::validate(&args, &test_host_config()).unwrap();
+        let none: SshDockerExecArgs =
+            serde_json::from_value(json!({"host": "h", "container": "c", "command": "ls"}))
+                .unwrap();
+        DockerExecTool::validate(&none, &test_host_config()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_command_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshDockerExecArgs =
+            serde_json::from_value(json!({"host": "server1", "container": "c", "command": "id"}))
+                .unwrap();
+        let result = DockerExecTool::pre_execute(&args, &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "command must be whitelist-checked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_whitelisted_command_is_allowed() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshDockerExecArgs = serde_json::from_value(
+            json!({"host": "server1", "container": "c", "command": "echo ok"}),
+        )
+        .unwrap();
+        let result = DockerExecTool::pre_execute(&args, &ctx).await;
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_command_starting_with_a_dash_is_refused() {
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = SshDockerExecHandler::new()
+            .execute(
+                Some(json!({"host": "server1", "container": "c", "command": "-s"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'command' must not start with '-'"),
+            "{err}"
+        );
     }
 }

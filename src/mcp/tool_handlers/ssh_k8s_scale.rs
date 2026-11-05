@@ -85,6 +85,10 @@ impl StandardTool for K8sScaleTool {
     }"#;
 
     fn build_command(args: &SshK8sScaleArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "resource",
+            Some(args.resource.as_str()),
+        )])?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -351,8 +355,22 @@ mod tests {
         };
         let host_config = test_host_config();
         let cmd = K8sScaleTool::build_command(&args, &host_config).unwrap();
-        // "k3s kubectl" has a space so is_valid_binary_path rejects it; falls back to auto-detect
+        // "k3s kubectl" has a space so is_named_binary rejects it; falls back to auto-detect
         assert!(cmd.contains("scale 'statefulset/redis'"));
         assert!(cmd.contains("--replicas=0"));
+    }
+
+    #[test]
+    fn test_option_like_resource_is_refused() {
+        let args: SshK8sScaleArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "resource": "-x", "replicas": 1}),
+        )
+        .unwrap();
+        let err = K8sScaleTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'resource' must not start with '-'"),
+            "{err}"
+        );
     }
 }

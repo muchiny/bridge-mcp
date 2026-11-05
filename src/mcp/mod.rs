@@ -2,6 +2,8 @@ pub mod apps;
 pub mod completion_provider;
 pub mod elicitation;
 pub mod history;
+#[cfg(test)]
+mod injection_sweep;
 mod instructions;
 pub mod logger;
 pub mod meta_tools;

@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::vault::VaultCommandBuilder;
+use crate::domain::use_cases::vault::{VaultCommandBuilder, validate_vault_path};
 use crate::error::Result;
 use crate::mcp::apps::table;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -14,7 +14,6 @@ use crate::ports::protocol::ToolCallResult;
 pub struct SshVaultListArgs {
     host: String,
     path: String,
-    vault_addr: Option<String>,
     mount: Option<String>,
     #[serde(rename = "format")]
     output_format: Option<String>,
@@ -49,10 +48,6 @@ impl StandardTool for VaultListTool {
                         "type": "string",
                         "description": "KV path prefix to list e.g. secret/ or secret/myapp/ (alphanumeric, slashes, hyphens, underscores, dots; no path traversal)"
                     },
-                    "vault_addr": {
-                        "type": "string",
-                        "description": "Vault server address e.g. https://vault.example.com:8200 (overrides VAULT_ADDR env on the remote host)"
-                    },
                     "mount": {
                         "type": "string",
                         "description": "Secrets engine mount path e.g. secret or kv; passed as `vault kv list -mount=<mount>`"
@@ -80,10 +75,14 @@ impl StandardTool for VaultListTool {
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Auto;
 
+    // Checked here as well as in the builder, so a refused path is audited.
+    fn validate(args: &SshVaultListArgs, _host_config: &HostConfig) -> Result<()> {
+        validate_vault_path(&args.path)
+    }
+
     fn build_command(args: &SshVaultListArgs, _host_config: &HostConfig) -> Result<String> {
         VaultCommandBuilder::build_list_command(
             &args.path,
-            args.vault_addr.as_deref(),
             args.mount.as_deref(),
             args.output_format.as_deref(),
         )
@@ -185,7 +184,6 @@ mod tests {
         let json = json!({
             "host": "myhost",
             "path": "secret/data/",
-            "vault_addr": "https://vault.example.com:8200",
             "mount": "secret",
             "format": "json",
             "timeout_seconds": 30,
@@ -195,10 +193,6 @@ mod tests {
         let args: SshVaultListArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
         assert_eq!(args.path, "secret/data/");
-        assert_eq!(
-            args.vault_addr.as_deref(),
-            Some("https://vault.example.com:8200")
-        );
         assert_eq!(args.mount.as_deref(), Some("secret"));
         assert_eq!(args.output_format.as_deref(), Some("json"));
         assert_eq!(args.timeout_seconds, Some(30));
@@ -212,7 +206,6 @@ mod tests {
         let args: SshVaultListArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
         assert_eq!(args.path, "secret/data/");
-        assert!(args.vault_addr.is_none());
         assert!(args.mount.is_none());
         assert!(args.output_format.is_none());
         assert!(args.timeout_seconds.is_none());
@@ -229,9 +222,31 @@ mod tests {
         assert!(properties.contains_key("timeout_seconds"));
         assert!(properties.contains_key("max_output"));
         assert!(properties.contains_key("save_output"));
-        assert!(properties.contains_key("vault_addr"));
+        assert!(!properties.contains_key("vault_addr"));
         assert!(properties.contains_key("mount"));
         assert!(properties.contains_key("format"));
+    }
+
+    #[test]
+    fn test_vault_addr_argument_is_refused() {
+        // A caller-chosen address would receive the host's Vault token.
+        let mut value: serde_json::Value = json!({"host": "h", "path": "secret/"});
+        value["vault_addr"] = json!("http://10.0.0.66:8200");
+        let err = serde_json::from_value::<SshVaultListArgs>(value).unwrap_err();
+        assert!(err.to_string().contains("vault_addr"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_refuses_a_bad_path() {
+        let host = server1_hosts().remove("server1").unwrap();
+        for path in ["", "secret/../sys", "a b", "x;id"] {
+            let args: SshVaultListArgs =
+                serde_json::from_value(json!({"host": "h", "path": path})).unwrap();
+            assert!(VaultListTool::validate(&args, &host).is_err(), "{path}");
+        }
+        let ok: SshVaultListArgs =
+            serde_json::from_value(json!({"host": "h", "path": "secret/app"})).unwrap();
+        assert!(VaultListTool::validate(&ok, &host).is_ok());
     }
 
     #[test]

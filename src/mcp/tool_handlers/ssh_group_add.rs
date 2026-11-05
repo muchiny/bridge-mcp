@@ -5,6 +5,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::domain::use_cases::user_management::UserCommandBuilder;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -94,6 +95,11 @@ impl StandardTool for GroupAddTool {
             args.gid,
             args.system.unwrap_or(false),
         ))
+    }
+
+    fn validate(args: &SshGroupAddArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("name", &args.name)?;
+        Ok(())
     }
 }
 
@@ -334,5 +340,16 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_like_name() {
+        let args: SshGroupAddArgs =
+            serde_json::from_value(json!({"host": "s", "name": "-x"})).unwrap();
+        let err = GroupAddTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'name' must not start with '-'"),
+            "{err}"
+        );
     }
 }

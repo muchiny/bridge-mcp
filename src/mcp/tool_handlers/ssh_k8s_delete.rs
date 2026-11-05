@@ -588,4 +588,36 @@ mod tests {
             "expected error when --all used on namespace"
         );
     }
+
+    fn delete_args(v: serde_json::Value) -> SshK8sDeleteArgs {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn test_plural_namespace_resource_is_protected() {
+        let args =
+            delete_args(json!({"host": "h", "resource": "namespaces", "name": "kube-system"}));
+        assert!(K8sDeleteTool::validate(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_namespace_selector_and_all_are_refused() {
+        let by_label = delete_args(json!({
+            "host": "h", "resource": "namespace",
+            "label_selector": "kubernetes.io/metadata.name=kube-system"
+        }));
+        assert!(K8sDeleteTool::build_command(&by_label, &test_host_config()).is_err());
+        let all = delete_args(json!({"host": "h", "resource": "namespaces", "all": true}));
+        assert!(K8sDeleteTool::build_command(&all, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_option_like_name_is_refused() {
+        let args = delete_args(json!({"host": "h", "resource": "namespace", "name": "--all"}));
+        let err = K8sDeleteTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'name' must not start with '-'"),
+            "{err}"
+        );
+    }
 }

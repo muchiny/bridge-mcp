@@ -44,11 +44,19 @@ pub fn validate_webhook_url(url: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`BridgeError::CommandDenied`] if the payload exceeds 10000 characters.
+/// Returns [`BridgeError::CommandDenied`] if the payload is empty, exceeds
+/// 10000 characters, or starts with `@` (`curl -d @file` reads and sends that
+/// file instead of the text).
 pub fn validate_payload(payload: &str) -> Result<()> {
     if payload.is_empty() {
         return Err(BridgeError::CommandDenied {
             reason: "Payload must not be empty".to_string(),
+        });
+    }
+    if payload.starts_with('@') {
+        return Err(BridgeError::CommandDenied {
+            reason: "Payload must not start with '@': curl would read it as a file name"
+                .to_string(),
         });
     }
     if payload.len() > 10000 {
@@ -65,6 +73,9 @@ pub struct ChatOpsCommandBuilder;
 impl ChatOpsCommandBuilder {
     /// Build a command to send a webhook POST request.
     ///
+    /// curl runs with `--globoff`: without it `[1-100000000]` and `{a,b}` in
+    /// the URL are expanded into one request per value.
+    ///
     /// # Errors
     ///
     /// Returns an error if the URL or payload is invalid.
@@ -76,7 +87,7 @@ impl ChatOpsCommandBuilder {
         let escaped_payload = shell_escape(payload);
 
         Ok(format!(
-            "curl -s -X POST -H 'Content-Type: application/json' \
+            "curl -s -X POST --globoff -H 'Content-Type: application/json' \
              -d {escaped_payload} {escaped_url} \
              -w '\\nHTTP_STATUS:%{{http_code}}' -o /dev/stdout"
         ))
@@ -84,7 +95,8 @@ impl ChatOpsCommandBuilder {
 
     /// Build a command to send a notification via webhook.
     ///
-    /// Formats the message as a JSON notification payload and sends it.
+    /// Formats the message as a JSON notification payload and sends it
+    /// (curl runs with `--globoff`, see [`Self::build_webhook_command`]).
     ///
     /// # Errors
     ///
@@ -107,14 +119,17 @@ impl ChatOpsCommandBuilder {
         }
 
         let escaped_url = shell_escape(webhook_url);
-        let escaped_message = shell_escape(message);
+        // The message is a JSON string value: encode it as JSON first, so a
+        // quote in it cannot add keys to the payload, then quote it once.
+        let json_message = serde_json::Value::String(message.to_string()).to_string();
+        let escaped_message = shell_escape(&json_message);
 
         Ok(format!(
             "HOSTNAME=$(hostname 2>/dev/null || echo 'unknown') && \
              TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date) && \
              PAYLOAD=$(printf '{{\"text\":%s,\"hostname\":\"%s\",\"timestamp\":\"%s\"}}' \
              {escaped_message} \"$HOSTNAME\" \"$TIMESTAMP\") && \
-             curl -s -X POST -H 'Content-Type: application/json' \
+             curl -s -X POST --globoff -H 'Content-Type: application/json' \
              -d \"$PAYLOAD\" {escaped_url} \
              -w '\\nHTTP_STATUS:%{{http_code}}' -o /dev/stdout"
         ))
@@ -232,6 +247,39 @@ mod tests {
         assert!(cmd.contains("'\\''"));
     }
 
+    #[test]
+    fn test_webhook_refuses_a_payload_that_curl_reads_as_a_file() {
+        for bad in ["@/etc/passwd", "@-", "@~/.aws/credentials"] {
+            let err = ChatOpsCommandBuilder::build_webhook_command(
+                "https://hooks.slack.com/services/T/B/X",
+                bad,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("must not start with '@'"), "{err}");
+        }
+        // A leading '@' elsewhere is plain text.
+        validate_payload("{\"text\":\"@here\"}").unwrap();
+    }
+
+    #[test]
+    fn test_notify_message_is_a_json_string() {
+        let cmd = ChatOpsCommandBuilder::build_notify_command(
+            "say \"hi\", \"evil\":\"1",
+            "https://hooks.slack.com/services/T/B/X",
+        )
+        .unwrap();
+        assert!(
+            cmd.contains("'\"say \\\"hi\\\", \\\"evil\\\":\\\"1\"'"),
+            "{cmd}"
+        );
+        let plain = ChatOpsCommandBuilder::build_notify_command(
+            "Server restarted",
+            "https://hooks.slack.com/services/T/B/X",
+        )
+        .unwrap();
+        assert!(plain.contains("'\"Server restarted\"'"), "{plain}");
+    }
+
     // ── build_notify_command ──────────────────────────────────
 
     #[test]
@@ -270,5 +318,34 @@ mod tests {
             "https://hooks.slack.com/services/T/B/X",
         );
         assert!(result.is_err());
+    }
+
+    // ── URL globbing ──────────────────────────────────────────
+
+    #[test]
+    fn test_webhook_url_is_not_globbed_by_curl() {
+        for url in [
+            "https://hooks.example.com/x/[1-100000000]",
+            "https://{10.0.0.1,10.0.0.2}/hook",
+        ] {
+            let cmd = ChatOpsCommandBuilder::build_webhook_command(url, "{}").unwrap();
+            assert!(cmd.contains(" --globoff "), "{cmd}");
+            assert!(
+                cmd.contains(&format!(" '{url}' ")),
+                "URL stays one operand: {cmd}"
+            );
+            let notify = ChatOpsCommandBuilder::build_notify_command("hi", url).unwrap();
+            assert!(notify.contains(" --globoff "), "{notify}");
+            assert!(notify.contains(&format!(" '{url}' ")), "{notify}");
+        }
+    }
+
+    #[test]
+    fn test_globoff_comes_before_the_url() {
+        let cmd =
+            ChatOpsCommandBuilder::build_webhook_command("https://example.com/h", "{}").unwrap();
+        let flag = cmd.find("--globoff").unwrap();
+        let url = cmd.find("'https://example.com/h'").unwrap();
+        assert!(flag < url, "{cmd}");
     }
 }

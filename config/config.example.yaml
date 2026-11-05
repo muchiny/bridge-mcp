@@ -72,7 +72,9 @@ hosts:
   # os_type: windows enables Windows-specific tools and shell escaping.
   # Over SSH the default shell for Windows is cmd (OpenSSH's own default);
   # set shell: powershell if the host's OpenSSH DefaultShell is PowerShell.
-  # WinRM and PSRP hosts default to powershell and need no `shell`.
+  # The Windows tools quote for PowerShell and run only where shell is
+  # powershell: on a cmd host they are refused.
+  # WinRM and PSRP hosts always run powershell: `shell` is ignored there.
   # windows-dc:
   #   hostname: 192.168.1.200
   #   port: 22

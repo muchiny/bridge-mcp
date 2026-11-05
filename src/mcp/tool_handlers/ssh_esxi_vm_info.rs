@@ -68,6 +68,10 @@ impl StandardTool for EsxiVmInfoTool {
         "required": ["host", "vm_id"]
     }"#;
 
+    fn validate(args: &SshEsxiVmInfoArgs, _host_config: &HostConfig) -> Result<()> {
+        crate::domain::use_cases::shell::refuse_option_like("vm_id", &args.vm_id)
+    }
+
     fn build_command(args: &SshEsxiVmInfoArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(EsxiCommandBuilder::build_vm_info_command(&args.vm_id))
     }
@@ -81,7 +85,7 @@ mod tests {
     use super::*;
     use crate::error::BridgeError;
     use crate::ports::ToolHandler;
-    use crate::ports::mock::create_test_context;
+    use crate::ports::mock::{create_test_context, create_test_context_with_host};
     use serde_json::json;
 
     #[tokio::test]
@@ -187,6 +191,21 @@ mod tests {
         match result.unwrap_err() {
             BridgeError::McpInvalidRequest(_) => {}
             e => panic!("Expected McpInvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_option_shaped_vm_id_is_refused() {
+        let handler = SshEsxiVmInfoHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "vm_id": "-x"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("'vm_id'"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
         }
     }
 }

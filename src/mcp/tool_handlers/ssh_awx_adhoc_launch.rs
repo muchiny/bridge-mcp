@@ -37,6 +37,13 @@ struct SshAwxAdhocLaunchArgs {
     become_enabled: Option<bool>,
 }
 
+/// Whether an Ansible module executes its arguments as a command line: the
+/// same list `ssh_ansible_adhoc` checks.
+#[cfg(test)]
+fn runs_a_command(module_name: &str) -> bool {
+    crate::domain::use_cases::ansible::AnsibleCommandBuilder::runs_a_command(module_name)
+}
+
 /// Default Ansible module for an ad-hoc command.
 fn default_module_name() -> String {
     "command".to_string()
@@ -62,11 +69,11 @@ const SCHEMA: &str = r#"{
         },
         "module_args": {
             "type": "string",
-            "description": "Arguments passed to the module (sent in the JSON body, never the shell)"
+            "description": "Arguments passed to the module (sent in the JSON body, never the shell). Refused, as in ssh_ansible_adhoc: Jinja ({{, {%, {#), the JSON form (starting with '{'), the escapes Ansible decodes (\\U and 8 hex digits, \\u and 4, \\x and 2, \\N{), the sequence \\=, a word starting with '=' that holds a backslash and, for a command module, a word starting with executable=, chdir= or stdin=."
         },
         "limit": {
             "type": "string",
-            "description": "Limit pattern restricting the host subset"
+            "description": "Ansible host pattern restricting the host subset (no Jinja, no leading '-')"
         },
         "verbosity": {
             "type": "integer",
@@ -83,7 +90,11 @@ const SCHEMA: &str = r#"{
 }"#;
 
 /// Handler for launching AWX ad-hoc commands.
-#[mcp_tool(name = "ssh_awx_adhoc_launch", group = "awx", annotation = "mutating")]
+#[mcp_tool(
+    name = "ssh_awx_adhoc_launch",
+    group = "awx",
+    annotation = "destructive"
+)]
 pub struct SshAwxAdhocLaunchHandler;
 
 impl Default for SshAwxAdhocLaunchHandler {
@@ -100,6 +111,10 @@ impl SshAwxAdhocLaunchHandler {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "execute validates, builds the AWX body and the call in one flow"
+)]
 #[async_trait]
 impl ToolHandler for SshAwxAdhocLaunchHandler {
     fn name(&self) -> &'static str {
@@ -109,7 +124,9 @@ impl ToolHandler for SshAwxAdhocLaunchHandler {
     fn description(&self) -> &'static str {
         "Launch an AWX ad-hoc command (Ansible module) against an inventory. \
          Returns the ad-hoc command ID and initial status. \
-         module_args is sent in the JSON body, never interpolated into the shell."
+         module_args is sent in the JSON body, never interpolated into the shell; the \
+         text Ansible would decode or reinterpret (Jinja, the JSON form, \\x \\u \\U \\N \
+         escapes, ...) is refused."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -138,6 +155,25 @@ impl ToolHandler for SshAwxAdhocLaunchHandler {
 
         AwxCommandBuilder::validate_id(args.inventory)?;
         AwxCommandBuilder::validate_id(args.credential)?;
+        // AWX hands `module_args` to the same Ansible parser as
+        // `ssh_ansible_adhoc` does, so the same text is refused.
+        crate::domain::use_cases::ansible::AnsibleCommandBuilder::validate_adhoc_args(
+            &args.module_name,
+            &args.module_args,
+        )?;
+        crate::domain::use_cases::ansible::AnsibleCommandBuilder::validate_adhoc_module(
+            &args.module_name,
+            Some(&args.module_args),
+        )?;
+        // `limit` is the play's host pattern, which Ansible templates; the
+        // module name is a plugin name.
+        crate::domain::use_cases::ansible::AnsibleCommandBuilder::refuse_jinja_in(&[
+            ("limit", args.limit.as_deref()),
+            ("module_name", Some(args.module_name.as_str())),
+        ])?;
+        if let Some(limit) = args.limit.as_deref() {
+            crate::domain::use_cases::shell::refuse_option_like("limit", limit)?;
+        }
 
         let awx = ctx.config.awx.as_ref().ok_or_else(|| {
             BridgeError::McpInvalidRequest(
@@ -201,6 +237,26 @@ impl ToolHandler for SshAwxAdhocLaunchHandler {
             .hosts
             .get(host)
             .ok_or_else(|| BridgeError::UnknownHost { host: host.clone() })?;
+        if let Some(reason) = crate::mcp::tool_handlers::utils::awx_host_refusal(host, host_config)
+        {
+            ctx.execute_use_case
+                .log_denied(self.name(), host, "", &reason);
+            return Ok(ToolCallResult::error(reason));
+        }
+
+        // The AWX server runs `module_args` as a command on the inventory hosts
+        // when the module executes one, and any other module can start a
+        // program too (a package, a service). Judged as `ssh_ansible_adhoc`
+        // judges them: a command module's args alone, any other module as
+        // `ansible-module MODULE ARGS`; only `ping` without args is exempt.
+        if let Some(text) =
+            crate::domain::use_cases::ansible::AnsibleCommandBuilder::adhoc_policy_text(
+                &args.module_name,
+                Some(&args.module_args),
+            )
+        {
+            crate::mcp::standard_tool::validate_free_form_command(ctx, self.name(), host, &text)?;
+        }
 
         let limits = ctx.config.limits.clone();
         let mut conn = ctx
@@ -227,7 +283,7 @@ impl ToolHandler for SshAwxAdhocLaunchHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::mock::create_test_context;
+    use crate::ports::mock::{create_test_context, create_test_context_with_host};
     use serde_json::json;
 
     #[tokio::test]
@@ -393,12 +449,91 @@ mod tests {
         }
     }
 
+    /// A standard-mode context with AWX on `server1` and a whitelist.
+    fn awx_whitelist_ctx(whitelist: &[&str]) -> crate::ports::ToolContext {
+        let mut config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        config.security.mode = crate::config::SecurityMode::Standard;
+        config.security.whitelist = whitelist.iter().map(|s| (*s).to_string()).collect();
+        config.awx = Some(crate::config::AwxConfig {
+            ssh_host: "server1".to_string(),
+            url: "https://awx.test".to_string(),
+            token: crate::config::RedactedSecret::from("awx-token"),
+            api_timeout: 30,
+            verify_ssl: true,
+        });
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        )
+    }
+
+    /// Any module can start a program (a package's scripts, a service), so a
+    /// module that is not a command module is judged as
+    /// `ansible-module MODULE ARGS`, as `ssh_ansible_adhoc` judges it.
+    #[tokio::test]
+    async fn every_module_but_a_bare_ping_faces_the_whitelist() {
+        let ctx = awx_whitelist_ctx(&[
+            "^uptime$",
+            "^ansible-module service name=nginx state=started$",
+        ]);
+        let call = |module: &str, margs: &str| json!({"inventory": 1, "credential": 1, "module_name": module, "module_args": margs});
+        for (module, margs) in [
+            ("apt", "deb=http://repo.internal/x.deb"),
+            ("service", "name=evil state=started"),
+            ("ping", "data=x"),
+            ("shell", "id"),
+        ] {
+            let r = SshAwxAdhocLaunchHandler
+                .execute(Some(call(module, margs)), &ctx)
+                .await;
+            assert!(r.is_err(), "{module} {margs}: {r:?}");
+        }
+        for (module, margs) in [
+            ("command", "uptime"),
+            ("service", "name=nginx state=started"),
+            ("ping", ""),
+        ] {
+            let r = SshAwxAdhocLaunchHandler
+                .execute(Some(call(module, margs)), &ctx)
+                .await;
+            assert!(r.is_ok(), "{module} {margs}: {r:?}");
+        }
+    }
+
+    /// `limit` is the play's host pattern, which Ansible templates.
+    #[tokio::test]
+    async fn the_limit_refuses_jinja_and_a_leading_dash() {
+        let ctx = awx_whitelist_ctx(&["^uptime$"]);
+        for limit in ["all,{{ lookup('pipe','id') }}", "-x", "web{%x%}"] {
+            let r = SshAwxAdhocLaunchHandler
+                .execute(
+                    Some(json!({
+                        "inventory": 1, "credential": 1, "module_name": "command",
+                        "module_args": "uptime", "limit": limit
+                    })),
+                    &ctx,
+                )
+                .await;
+            assert!(
+                matches!(r, Err(BridgeError::CommandDenied { .. })),
+                "{limit}: {r:?}"
+            );
+        }
+    }
+
     /// `limit` on this tool is an Ansible host pattern, not a row limit. The
     /// reduction used to strip the key before the tool read it, so the job ran
     /// on the whole inventory. Read what was RUN, from the history.
     #[tokio::test]
     async fn the_host_pattern_reaches_the_command_that_runs() {
         let mut config = (*crate::ports::mock::create_test_context_with_host().config).clone();
+        // `command` runs `module_args`, which faces the whitelist like `ssh_exec`.
+        config.security.mode = crate::config::SecurityMode::Permissive;
         config.awx = Some(crate::config::AwxConfig {
             ssh_host: "server1".to_string(),
             url: "https://awx.test".to_string(),
@@ -424,5 +559,122 @@ mod tests {
             command.contains("limit") && command.contains("web01:web02"),
             "the host pattern must reach the launched command: {command}"
         );
+    }
+
+    #[test]
+    fn runs_a_command_matches_command_modules_only() {
+        for m in [
+            "command",
+            "shell",
+            "raw",
+            "script",
+            "ansible.builtin.shell",
+            " Shell ",
+            "ansible.windows.win_powershell",
+        ] {
+            assert!(runs_a_command(m), "{m}");
+        }
+        for m in ["ping", "copy", "setup", ""] {
+            assert!(!runs_a_command(m), "{m}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blacklisted_command_in_module_args_is_refused() {
+        let mut config = (*create_test_context_with_host().config).clone();
+        config.awx = Some(crate::config::AwxConfig {
+            ssh_host: "server1".to_string(),
+            url: "https://awx.test".to_string(),
+            token: crate::config::RedactedSecret::from("awx-token"),
+            api_timeout: 30,
+            verify_ssl: true,
+        });
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        let result = SshAwxAdhocLaunchHandler
+            .execute(
+                Some(
+                    json!({"inventory": 1, "credential": 2, "module_name": "shell",
+                    "module_args": "rm -rf /"}),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_module_args_ansible_would_reinterpret_are_refused() {
+        let handler = SshAwxAdhocLaunchHandler;
+        let ctx = create_test_context();
+        for (module, text) in [
+            ("shell", "{{ lookup('pipe','id') }}"),
+            ("debug", "msg={% if 1 %}x{% endif %}"),
+            ("shell", "{\"_raw_params\": \"id\"}"),
+            ("command", "msg=\\x41"),
+            ("command", "msg=\\u0041"),
+            ("copy", "content=\\U00000041"),
+            ("command", "\\N{LEFT CURLY BRACKET}"),
+            ("command", "a\\=b"),
+            ("command", "a =b\\n"),
+            ("command", "=\\tb"),
+            ("command", "executable=/tmp/x id"),
+            ("shell", "id chdir=/tmp"),
+            ("ansible.builtin.command", "stdin=x cat"),
+        ] {
+            let result = handler
+                .execute(
+                    Some(json!({
+                        "inventory": 7, "credential": 3,
+                        "module_name": module, "module_args": text
+                    })),
+                    &ctx,
+                )
+                .await;
+            match result {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains("args"), "{module} {text}: {reason}");
+                }
+                other => panic!("{module} {text}: expected CommandDenied, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_legitimate_module_args_pass_the_parser_checks() {
+        let handler = SshAwxAdhocLaunchHandler;
+        // No AWX section in this context: a call that gets past the checks of
+        // the arguments stops at "AWX not configured".
+        let ctx = create_test_context();
+        for (module, text) in [
+            ("command", "uptime"),
+            ("shell", "creates=/tmp/x removes=/tmp/y warn=false uptime"),
+            ("shell", "dir C:\\Users\\Public"),
+            ("shell", "echo \\0 \\173"),
+            ("copy", "chdir=/tmp executable=x"),
+            ("service", "name=nginx state=restarted"),
+        ] {
+            let result = handler
+                .execute(
+                    Some(json!({
+                        "inventory": 7, "credential": 3,
+                        "module_name": module, "module_args": text
+                    })),
+                    &ctx,
+                )
+                .await;
+            let err = result.expect_err("no AWX section").to_string();
+            assert!(err.contains("AWX not configured"), "{module} {text}: {err}");
+        }
     }
 }

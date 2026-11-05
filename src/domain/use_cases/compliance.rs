@@ -60,14 +60,16 @@ pub fn validate_category(category: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`BridgeError::CommandDenied`] if the STIG ID is empty or contains
-/// invalid characters.
+/// Returns [`BridgeError::CommandDenied`] if the STIG ID is empty, starts with
+/// `-` (a STIG ID never does, and `grep` would read it as an option) or
+/// contains invalid characters.
 pub fn validate_stig_id(stig_id: &str) -> Result<()> {
     if stig_id.is_empty() {
         return Err(BridgeError::CommandDenied {
             reason: "STIG ID cannot be empty".to_string(),
         });
     }
+    super::shell::refuse_option_like("stig_id", stig_id)?;
     if !stig_id
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
@@ -205,13 +207,18 @@ impl ComplianceCommandBuilder {
 
         if let Some(id) = stig_id {
             let escaped_id = shell_escape(id);
-            let _ = write!(cmd, "echo 'Checking STIG: {escaped_id}'; ");
-            // Run targeted checks based on STIG ID pattern
+            // Each label is one quoted word, never an escaped id inside a
+            // second pair of quotes.
+            let checking = shell_escape(&format!("Checking STIG: {id}"));
+            let header = shell_escape(&format!("--- STIG {id} ---"));
+            let _ = write!(cmd, "printf '%s\\n' {checking}; ");
+            // Run targeted checks based on STIG ID pattern: the id is the
+            // pattern (`-e`), the directories come after `--`.
             let _ = write!(
                 cmd,
-                "echo '--- STIG {escaped_id} ---'; \
-                 grep -r {escaped_id} /etc/audit/rules.d/ 2>/dev/null; \
-                 grep -r {escaped_id} /etc/security/ 2>/dev/null; "
+                "printf '%s\\n' {header}; \
+                 grep -r -F -e {escaped_id} -- /etc/audit/rules.d/ 2>/dev/null; \
+                 grep -r -F -e {escaped_id} -- /etc/security/ 2>/dev/null; "
             );
         } else {
             // General STIG checks
@@ -525,6 +532,35 @@ mod tests {
         let cmd = ComplianceCommandBuilder::build_stig_check_command(Some("V-12345")).unwrap();
         assert!(cmd.contains("V-12345"));
         assert!(cmd.contains("DISA STIG"));
+    }
+
+    #[test]
+    fn test_stig_id_cannot_be_a_grep_option() {
+        for bad in ["-v", "-rv", "-e", "-L", "-"] {
+            let err = ComplianceCommandBuilder::build_stig_check_command(Some(bad)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("'stig_id' must not start with '-'"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stig_id_is_the_pattern_of_both_greps() {
+        let cmd = ComplianceCommandBuilder::build_stig_check_command(Some("V-12345")).unwrap();
+        assert!(
+            cmd.contains("grep -r -F -e 'V-12345' -- /etc/audit/rules.d/"),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("grep -r -F -e 'V-12345' -- /etc/security/"),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("printf '%s\\n' 'Checking STIG: V-12345'"),
+            "{cmd}"
+        );
     }
 
     #[test]

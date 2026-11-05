@@ -46,38 +46,38 @@ pub struct SystemdCommandBuilder;
 impl SystemdCommandBuilder {
     /// Build a `systemctl status` command.
     ///
-    /// Constructs: `systemctl status {service} --no-pager`
+    /// Constructs: `systemctl status --no-pager -- {service}`
     #[must_use]
     pub fn build_status_command(service: &str) -> String {
-        format!("systemctl status {} --no-pager", shell_escape(service))
+        format!("systemctl status --no-pager -- {}", shell_escape(service))
     }
 
     /// Build a `systemctl start` command.
     ///
-    /// Constructs: `systemctl start {service}`
+    /// Constructs: `systemctl start -- {service}`
     #[must_use]
     pub fn build_start_command(service: &str) -> String {
-        format!("systemctl start {}", shell_escape(service))
+        format!("systemctl start -- {}", shell_escape(service))
     }
 
     /// Build a `systemctl stop` command.
     ///
-    /// Constructs: `systemctl stop {service}`
+    /// Constructs: `systemctl stop -- {service}`
     #[must_use]
     pub fn build_stop_command(service: &str) -> String {
-        format!("systemctl stop {}", shell_escape(service))
+        format!("systemctl stop -- {}", shell_escape(service))
     }
 
     /// Build a `systemctl restart` or `systemctl reload` command.
     ///
-    /// Constructs: `systemctl {restart|reload|reload-or-restart} {service}`
+    /// Constructs: `systemctl {restart|reload|reload-or-restart} -- {service}`
     ///
     /// # Errors
     ///
     /// Returns [`BridgeError::CommandDenied`] if the action is not allowed.
     pub fn build_restart_command(service: &str, action: &str) -> Result<String> {
         Self::validate_restart_action(action)?;
-        Ok(format!("systemctl {} {}", action, shell_escape(service)))
+        Ok(format!("systemctl {} -- {}", action, shell_escape(service)))
     }
 
     /// Validate a restart action.
@@ -104,18 +104,18 @@ impl SystemdCommandBuilder {
 
     /// Build a `systemctl enable` command.
     ///
-    /// Constructs: `systemctl enable {service}`
+    /// Constructs: `systemctl enable -- {service}`
     #[must_use]
     pub fn build_enable_command(service: &str) -> String {
-        format!("systemctl enable {}", shell_escape(service))
+        format!("systemctl enable -- {}", shell_escape(service))
     }
 
     /// Build a `systemctl disable` command.
     ///
-    /// Constructs: `systemctl disable {service}`
+    /// Constructs: `systemctl disable -- {service}`
     #[must_use]
     pub fn build_disable_command(service: &str) -> String {
-        format!("systemctl disable {}", shell_escape(service))
+        format!("systemctl disable -- {}", shell_escape(service))
     }
 
     /// Build a `systemctl daemon-reload` command.
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn test_status_command() {
         let cmd = SystemdCommandBuilder::build_status_command("nginx");
-        assert_eq!(cmd, "systemctl status 'nginx' --no-pager");
+        assert_eq!(cmd, "systemctl status --no-pager -- 'nginx'");
     }
 
     // ── build_start_command ─────────────────────────────────────────
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn test_start_command() {
         let cmd = SystemdCommandBuilder::build_start_command("nginx");
-        assert_eq!(cmd, "systemctl start 'nginx'");
+        assert_eq!(cmd, "systemctl start -- 'nginx'");
     }
 
     // ── build_stop_command ──────────────────────────────────────────
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn test_stop_command() {
         let cmd = SystemdCommandBuilder::build_stop_command("nginx");
-        assert_eq!(cmd, "systemctl stop 'nginx'");
+        assert_eq!(cmd, "systemctl stop -- 'nginx'");
     }
 
     // ── build_restart_command ───────────────────────────────────────
@@ -287,13 +287,13 @@ mod tests {
     #[test]
     fn test_restart_command() {
         let cmd = SystemdCommandBuilder::build_restart_command("nginx", "restart").unwrap();
-        assert_eq!(cmd, "systemctl restart 'nginx'");
+        assert_eq!(cmd, "systemctl restart -- 'nginx'");
     }
 
     #[test]
     fn test_reload_command() {
         let cmd = SystemdCommandBuilder::build_restart_command("nginx", "reload").unwrap();
-        assert_eq!(cmd, "systemctl reload 'nginx'");
+        assert_eq!(cmd, "systemctl reload -- 'nginx'");
     }
 
     #[test]
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn test_status_injection_in_service() {
         let cmd = SystemdCommandBuilder::build_status_command("nginx; whoami");
-        assert!(cmd.contains("systemctl status 'nginx; whoami'"));
+        assert!(cmd.contains("systemctl status --no-pager -- 'nginx; whoami'"));
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod tests {
     fn test_reload_or_restart_action() {
         let cmd =
             SystemdCommandBuilder::build_restart_command("nginx", "reload-or-restart").unwrap();
-        assert_eq!(cmd, "systemctl reload-or-restart 'nginx'");
+        assert_eq!(cmd, "systemctl reload-or-restart -- 'nginx'");
     }
 
     // ============== validate_service_name Edge Cases ==============
@@ -601,13 +601,13 @@ mod tests {
     #[test]
     fn test_enable_command() {
         let cmd = SystemdCommandBuilder::build_enable_command("nginx");
-        assert_eq!(cmd, "systemctl enable 'nginx'");
+        assert_eq!(cmd, "systemctl enable -- 'nginx'");
     }
 
     #[test]
     fn test_enable_command_injection() {
         let cmd = SystemdCommandBuilder::build_enable_command("nginx; rm -rf /");
-        assert!(cmd.contains("systemctl enable 'nginx; rm -rf /'"));
+        assert!(cmd.contains("systemctl enable -- 'nginx; rm -rf /'"));
     }
 
     // ============== build_disable_command ==============
@@ -615,13 +615,32 @@ mod tests {
     #[test]
     fn test_disable_command() {
         let cmd = SystemdCommandBuilder::build_disable_command("nginx");
-        assert_eq!(cmd, "systemctl disable 'nginx'");
+        assert_eq!(cmd, "systemctl disable -- 'nginx'");
     }
 
     #[test]
     fn test_disable_command_injection() {
         let cmd = SystemdCommandBuilder::build_disable_command("nginx$(whoami)");
-        assert!(cmd.contains("systemctl disable 'nginx$(whoami)'"));
+        assert!(cmd.contains("systemctl disable -- 'nginx$(whoami)'"));
+    }
+
+    // ============== option-like unit names ==============
+
+    #[test]
+    fn test_unit_goes_after_double_dash() {
+        // `-.mount` and `-.slice` are real units: `--` keeps them operands.
+        for cmd in [
+            SystemdCommandBuilder::build_status_command("-.mount"),
+            SystemdCommandBuilder::build_start_command("-.mount"),
+            SystemdCommandBuilder::build_stop_command("-.mount"),
+            SystemdCommandBuilder::build_enable_command("-.mount"),
+            SystemdCommandBuilder::build_disable_command("-.mount"),
+            SystemdCommandBuilder::build_restart_command("-.mount", "restart").unwrap(),
+        ] {
+            assert!(cmd.contains(" -- '-.mount'"), "{cmd}");
+        }
+        let status = SystemdCommandBuilder::build_status_command("-.mount");
+        assert!(status.ends_with(" -- '-.mount'"), "{status}");
     }
 
     // ============== build_daemon_reload_command ==============

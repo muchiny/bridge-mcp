@@ -34,7 +34,7 @@ impl_common_args!(SshFleetDiffArgs);
 #[mcp_standard_tool(
     name = "ssh_fleet_diff",
     group = "orchestration",
-    annotation = "read_only"
+    annotation = "mutating"
 )]
 pub struct FleetDiffTool;
 
@@ -79,6 +79,7 @@ impl StandardTool for FleetDiffTool {
         },
         "required": ["host", "command"]
     }"#;
+    const RAW_COMMAND: bool = true;
 
     /// `command` is a free-form shell fragment straight from the request, so it
     /// gets the same whitelist treatment as `ssh_exec` instead of the
@@ -232,6 +233,14 @@ mod tests {
             matches!(result, Err(BridgeError::CommandDenied { .. })),
             "command must be whitelist-checked, got: {result:?}"
         );
+    }
+
+    /// F54: the tool runs any command, so a client must not auto-approve it
+    /// and the pipeline must not replay it after a timeout.
+    #[test]
+    fn fleet_diff_is_not_advertised_as_read_only() {
+        let ann = crate::mcp::registry::tool_annotations("ssh_fleet_diff");
+        assert_ne!(ann.read_only_hint, Some(true));
     }
 
     #[tokio::test]

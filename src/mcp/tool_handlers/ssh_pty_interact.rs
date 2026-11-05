@@ -97,7 +97,9 @@ impl StandardTool for PtyInteractTool {
 
     fn build_command(args: &SshPtyInteractArgs, _host_config: &HostConfig) -> Result<String> {
         let escaped_input = shell::escape(&args.input, crate::config::ShellType::Posix);
-        Ok(format!("echo {escaped_input}"))
+        // `printf '%s\n'`, not `echo`: `echo` reads a leading `-n`, `-e` or `-E`
+        // of the input as an option, and some shells expand backslashes in it.
+        Ok(format!("printf '%s\\n' {escaped_input}"))
     }
 }
 
@@ -274,8 +276,7 @@ mod tests {
             save_output: None,
         };
         let cmd = PtyInteractTool::build_command(&args, &host_config).unwrap();
-        assert!(cmd.contains("echo"));
-        assert!(cmd.contains("ls -la"));
+        assert_eq!(cmd, "printf '%s\\n' 'ls -la'");
     }
 
     #[test]
@@ -319,5 +320,48 @@ mod tests {
         };
         let cmd = PtyInteractTool::build_command(&args, &host_config).unwrap();
         assert!(cmd.contains("'test; rm -rf /'"));
+    }
+
+    #[test]
+    fn a_dash_input_is_data_not_an_echo_option() {
+        use crate::config::{AuthConfig, HostConfig, HostKeyVerification, OsType};
+        let host_config = HostConfig {
+            hostname: "test".to_string(),
+            port: 22,
+            user: "test".to_string(),
+            auth: AuthConfig::Agent,
+            description: None,
+            host_key_verification: HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: OsType::default(),
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        };
+        let args = SshPtyInteractArgs {
+            host: "s".to_string(),
+            session_id: "sess-1".to_string(),
+            input: "-n".to_string(),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = PtyInteractTool::build_command(&args, &host_config).unwrap();
+        assert_eq!(cmd, "printf '%s\\n' '-n'");
     }
 }

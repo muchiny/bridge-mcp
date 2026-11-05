@@ -27,6 +27,15 @@ pub fn validate_log_name(name: &str) -> Result<()> {
             reason: "Log name cannot be empty".to_string(),
         });
     }
+    // `wevtutil` reads a word that starts with `/` or `-` as a switch.
+    if name.starts_with(['/', '-']) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid log name '{name}'. It must not start with '/' or '-': wevtutil \
+                 would read it as a switch."
+            ),
+        });
+    }
     if name
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/' || c == ' ')
@@ -40,6 +49,53 @@ pub fn validate_log_name(name: &str) -> Result<()> {
             ),
         })
     }
+}
+
+/// Validates the destination file of an event log export.
+///
+/// Only an absolute drive-letter path is accepted (`C:\Logs\x.evtx`,
+/// `C:/Logs/x.evtx`): a UNC path (`\\host\share`, `//host/share`) would make the
+/// host write the export to a remote share and authenticate to it with its own
+/// credentials, and a leading `-` or `/` is read by `wevtutil` as a switch. After
+/// the drive, only alphanumeric characters, separators, hyphen, underscore, space,
+/// dot, parentheses, apostrophe and `~` are allowed (`C:\Program Files (x86)\…`,
+/// `C:\Users\o'brien\…`, `C:\PROGRA~2\…`): inside the single-quoted `PowerShell`
+/// literal the builder emits they are inert (the apostrophe is doubled), and
+/// `wevtutil` takes them literally. That excludes `"` (Windows `PowerShell` 5.1
+/// passes it unescaped to the native command line, where the CRT would strip it
+/// and could expose a UNC path or split the argument), `?` (`\\??\UNC\…`), `*`, `|`,
+/// `<`, `>`, `:` (alternate data streams) and control characters. A trailing
+/// separator is refused too: it names a directory, and before a closing quote a
+/// backslash escapes that quote.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the path is not a plain
+/// drive-letter file path.
+pub fn validate_export_file(file: &str) -> Result<()> {
+    let mut head = file.chars();
+    let drive_path = matches!(
+        (head.next(), head.next(), head.next()),
+        (Some(drive), Some(':'), Some('\\' | '/')) if drive.is_ascii_alphabetic()
+    );
+    let plain = file.chars().skip(2).all(|c| {
+        c.is_alphanumeric()
+            || matches!(
+                c,
+                '\\' | '/' | '-' | '_' | ' ' | '.' | '(' | ')' | '\'' | '~'
+            )
+    });
+    if !drive_path || !plain || file.ends_with(['\\', '/']) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid export file '{file}'. It must be a local drive-letter file path \
+                 (C:\\dir\\file.evtx): no UNC path, no double quote, and only alphanumeric, \
+                 separator, hyphen, underscore, space, dot, parenthesis, apostrophe and \
+                 tilde characters."
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Builds Windows Event Log `PowerShell` commands for remote execution.
@@ -139,6 +195,66 @@ mod tests {
     #[test]
     fn test_validate_log_name_valid_with_spaces() {
         assert!(validate_log_name("Windows PowerShell").is_ok());
+    }
+
+    #[test]
+    fn test_validate_log_name_refuses_a_leading_switch_character() {
+        for name in ["/r", "-x", "/lf"] {
+            let err = validate_log_name(name).expect_err(name);
+            assert!(err.to_string().contains("must not start with"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_export_file_refuses_unc_and_switches() {
+        for file in [
+            "\\\\attacker\\share\\x.evtx",
+            "//attacker/share/x.evtx",
+            "/ow:true",
+            "-ow",
+            "",
+        ] {
+            assert!(validate_export_file(file).is_err(), "{file}");
+        }
+        for file in [
+            "C:\\Logs\\x.evtx",
+            "d:/Logs/x.evtx",
+            "C:\\My Logs\\x.1.evtx",
+            "C:\\Program Files (x86)\\MyApp\\Logs\\sec.evtx",
+            "C:\\Users\\o'brien\\x.evtx",
+            "C:\\PROGRA~2\\x.evtx",
+        ] {
+            assert!(validate_export_file(file).is_ok(), "{file}");
+        }
+    }
+
+    /// A `"` reaches the native command line unescaped under Windows
+    /// `PowerShell` 5.1: the quoted UNC form must not get through.
+    #[test]
+    fn test_validate_export_file_refuses_quotes_and_non_drive_paths() {
+        for file in [
+            "\"\\\\attacker\\share\\loot.evtx\"",
+            "\"//attacker/share/loot.evtx\"",
+            " \\\\attacker\\share\\x.evtx",
+            "C:\\Logs\\x\".evtx",
+            "\\\\??\\UNC\\attacker\\share\\x.evtx",
+            "C:\\x.evtx:stream",
+            "C:\\Logs\\",
+            "C:x.evtx",
+            "x.evtx",
+            "\\Logs\\x.evtx",
+            "C:\\x\n.evtx",
+            "C:\\a?b.evtx",
+            "C:\\a*.evtx",
+            "C:\\a|b.evtx",
+            "C:\\a<b.evtx",
+            "C:\\a>b.evtx",
+            "C:\\a\"b.evtx",
+            "C:\\a\tb.evtx",
+            "C:\\a:b:c.evtx",
+        ] {
+            assert!(validate_export_file(file).is_err(), "{file:?}");
+        }
     }
 
     #[test]
@@ -314,6 +430,18 @@ mod tests {
         let cmd =
             WindowsEventCommandBuilder::build_export_command("System", "out.evtx'; whoami; '");
         assert!(cmd.contains("'out.evtx''; whoami; '''"));
+    }
+
+    #[test]
+    fn test_export_command_keeps_parentheses_and_doubles_apostrophe() {
+        let cmd = WindowsEventCommandBuilder::build_export_command(
+            "System",
+            "C:\\Users\\o'brien\\Program Files (x86)\\PROGRA~2.evtx",
+        );
+        assert_eq!(
+            cmd,
+            "wevtutil epl 'System' 'C:\\Users\\o''brien\\Program Files (x86)\\PROGRA~2.evtx'"
+        );
     }
 
     #[test]

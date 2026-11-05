@@ -45,6 +45,25 @@ pub fn escape(s: &str, shell: ShellType) -> String {
     }
 }
 
+/// `word` as one POSIX shell word: as is when it holds only characters a
+/// shell leaves alone (letters, digits and `-_./:=@%+,`), quoted otherwise.
+///
+/// For text a whitelist judges as a shell line (the words a tool passes
+/// without a shell), so the line reads the way the words will be passed.
+#[must_use]
+pub fn posix_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '@' | '%' | '+' | ',')
+        });
+    if plain {
+        word.to_string()
+    } else {
+        escape(word, ShellType::Posix)
+    }
+}
+
 /// The single-quote characters of the Windows PowerShell Language
 /// Specification 3.0, section 2.3.5.2. Any of them opens or closes a verbatim
 /// string.
@@ -135,14 +154,17 @@ pub fn try_escape(s: &str, shell: ShellType) -> Result<String> {
 /// Build a "change directory then run command" one-liner, refusing a directory
 /// the shell cannot quote.
 ///
-/// - **Posix**: `cd '/path' && command`
-/// - **Cmd**: `cd /d "C:\path" && command`
+/// - **Posix**: `cd -- '/path' && { command` and a newline, then `}`
+/// - **Cmd**: `cd /d "C:\path" || exit /b 1 & command`
 /// - **`PowerShell`**: `Set-Location -LiteralPath 'C:\path' -ErrorAction Stop; command`
 ///
-/// Every form runs `command` only once the directory change succeeded: `&&`
-/// for Posix and Cmd, `-ErrorAction Stop` for `PowerShell`, where a missing
-/// directory is otherwise a non-terminating error and `command` would run in
-/// the default directory.
+/// Every form runs the whole of `command` only once the directory change
+/// succeeded, however many commands it holds (`a; b`, `a & b`, a newline):
+/// the Posix brace group binds the `command` list to the `&&` (the newline
+/// before `}` ends a trailing comment or `&`), Cmd leaves the shell when the
+/// `cd` fails, and `-ErrorAction Stop` makes a missing directory a
+/// terminating error for `PowerShell`. `--` keeps a directory that starts
+/// with `-` from being read as a `cd` option.
 ///
 /// # Errors
 ///
@@ -157,14 +179,14 @@ pub fn try_escape(s: &str, shell: ShellType) -> Result<String> {
 ///
 /// assert_eq!(
 ///     shell::try_cd_and_run("/var/log", "ls", ShellType::Posix).unwrap(),
-///     "cd '/var/log' && ls"
+///     "cd -- '/var/log' && { ls\n}"
 /// );
 /// ```
 pub fn try_cd_and_run(dir: &str, cmd: &str, shell: ShellType) -> Result<String> {
     let q = try_escape(dir, shell)?;
     Ok(match shell {
-        ShellType::Posix => format!("cd {q} && {cmd}"),
-        ShellType::Cmd => format!("cd /d {q} && {cmd}"),
+        ShellType::Posix => format!("cd -- {q} && {{ {cmd}\n}}"),
+        ShellType::Cmd => format!("cd /d {q} || exit /b 1 & {cmd}"),
         ShellType::PowerShell => format!("Set-Location -LiteralPath {q} -ErrorAction Stop; {cmd}"),
     })
 }
@@ -248,9 +270,550 @@ pub const fn exit_code_var(shell: ShellType) -> &'static str {
     }
 }
 
+/// Refuse a `command` that a transport typing it into a remote terminal
+/// (telnet, a serial console) cannot carry intact.
+///
+/// Those transports send the command as keystrokes, through the remote
+/// terminal's line discipline and line editor, which act on control
+/// characters before any shell parses the quoting: `^C` discards the line
+/// typed so far and `^U` or `^W` erase it, a tab completes a quoted word and
+/// closes its quote, a line break submits the line (to a device CLI, as a
+/// command of its own). Each of them can turn a quoted argument into a
+/// command. A command over several lines would also answer with several
+/// prompts, which the transports' read-until-prompt cannot follow. So any
+/// control character ([`char::is_control`], line feed and tab included) is
+/// refused.
+///
+/// # Errors
+///
+/// [`BridgeError::CommandDenied`] naming `transport` and the first control
+/// character found.
+pub fn refuse_terminal_controls(transport: &str, command: &str) -> Result<()> {
+    match command.chars().find(|c| c.is_control()) {
+        None => Ok(()),
+        Some(c) => Err(BridgeError::CommandDenied {
+            reason: format!(
+                "{transport} types the command into the remote terminal, which acts on \
+                 the control character U+{:04X} in it before the shell reads the \
+                 quoting: refused",
+                u32::from(c)
+            ),
+        }),
+    }
+}
+
+/// Directories a caller-supplied binary may live in when given as a path:
+/// the system ones, where only root can plant a file.
+const BINARY_DIRS: &[&str] = &[
+    "/usr/bin",
+    "/bin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/usr/local/sbin",
+    "/opt/bin",
+    "/snap/bin",
+    "/var/lib/rancher/rke2/bin",
+];
+
+/// Whether `rest` (what follows a program name in a file name) is empty or a
+/// version: an optional `-`, an optional `v`, then digits and dots starting
+/// with a digit (`-1.31`, `-v1.31.2`, `3`, `-3.14`).
+fn is_version_suffix(rest: &str) -> bool {
+    if rest.is_empty() {
+        return true;
+    }
+    let rest = rest.strip_prefix('-').unwrap_or(rest);
+    let rest = rest.strip_prefix('v').unwrap_or(rest);
+    rest.starts_with(|c: char| c.is_ascii_digit())
+        && rest.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// Whether `bin` names one of the programs `names`: either a bare name, or an
+/// absolute path whose directory is exactly one of `/usr/bin`, `/bin`,
+/// `/usr/local/bin`, `/usr/sbin`, `/sbin`, `/usr/local/sbin`, `/opt/bin`,
+/// `/snap/bin` and `/var/lib/rancher/rke2/bin` (where RKE2 installs `kubectl`,
+/// `crictl` and `ctr`). The file name must be a name of the list, alone or followed by
+/// a version only (`kubectl-1.31`, `kubectl-v1.31.2`, `helm3`, `helm-3.14`).
+/// The characters are limited to `[A-Za-z0-9/._-]` and the value must not start
+/// with `-`.
+///
+/// A caller-supplied binary is the program the command starts with, often
+/// under `sudo`, past the whitelist. So the value must not be a program
+/// other than the one named (`/bin/sh`, `python3`, a plugin such as
+/// `kubectl-node_shell`), nor a file the caller could have written elsewhere
+/// (`/tmp/kubectl`, `./kubectl`, `bin/kubectl`, `/usr/bin/../../tmp/kubectl`).
+#[must_use]
+pub fn is_named_binary(bin: &str, names: &[&str]) -> bool {
+    is_named_binary_in(bin, names, &[])
+}
+
+/// [`is_named_binary`] that also accepts an absolute path whose directory is
+/// exactly one of `extra_dirs` (written without a trailing `/`).
+///
+/// For a program that a vendor installs in a root-owned directory of its own,
+/// such as the Docker CLI plugins. `extra_dirs` must hold only directories
+/// that only root can write to.
+#[must_use]
+pub fn is_named_binary_in(bin: &str, names: &[&str], extra_dirs: &[&str]) -> bool {
+    if bin.is_empty()
+        || bin.starts_with('-')
+        || !bin
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+    {
+        return false;
+    }
+    let file = match bin.rsplit_once('/') {
+        None => bin,
+        Some((dir, file)) => {
+            if !bin.starts_with('/') || !(BINARY_DIRS.contains(&dir) || extra_dirs.contains(&dir)) {
+                return false;
+            }
+            file
+        }
+    };
+    names
+        .iter()
+        .any(|name| file.strip_prefix(name).is_some_and(is_version_suffix))
+}
+
+/// Refuse the environment variable `name` of the argument `arg` when it
+/// changes which program or library runs, or how a shell starts.
+///
+/// Such a variable lets a caller run something other than the command a
+/// whitelist approved: `PATH` and `LD_*` pick the program or the loaded
+/// library, `BASH_ENV`, `ENV`, `SHELLOPTS`, `PS4` and `PROMPT_COMMAND` run
+/// code when a shell starts, `BASH_FUNC_*` defines a function that replaces a
+/// command, `IFS` changes how words split. The interpreters and tools that
+/// load code from a variable are refused too: `PYTHONPATH`, `PYTHONHOME`,
+/// `PYTHONSTARTUP`, `PYTHONINSPECT`, `PYTHONBREAKPOINT`, `PYTHONUSERBASE`,
+/// `PERL5*`, `PERLLIB`, `RUBYOPT`, `RUBYLIB`, `NODE_OPTIONS`, `NODE_PATH`,
+/// `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`, `CLASSPATH`,
+/// `LUA_INIT*`, `LUA_PATH`, `LUA_CPATH`, `FPATH`, `ZDOTDIR`, `GIT_CONFIG*`,
+/// `GIT_EXEC_PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`,
+/// `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_PAGER`, `GIT_EDITOR`,
+/// `GIT_SEQUENCE_EDITOR`, `GIT_EXTERNAL_DIFF`, `EDITOR`, `VISUAL`, `PAGER`,
+/// `BROWSER`, `EXECIGNORE`, `OPENSSL_CONF`, `GLIBC_TUNABLES`, `MALLOC_CONF`,
+/// `TAR_OPTIONS`, `LESSOPEN`, `LESSCLOSE`, `MANPAGER`, `SYSTEMD_PAGER`,
+/// `SUDO_ASKPASS`, `SSH_ASKPASS_REQUIRE` and `PYTHONWARNINGS`. Harmless
+/// neighbours (`NODE_ENV`, `PYTHONUNBUFFERED`, `LANG`) pass. Names are
+/// compared as given, since the environment is case-sensitive, except that
+/// `path`, `fpath`, `cdpath` and `module_path` are refused too: zsh ties them
+/// to `PATH` and its siblings. The list cannot name every variable some
+/// program reads, so where a whitelist applies the entries are judged with
+/// the command too.
+///
+/// # Errors
+///
+/// `CommandDenied` naming `arg` when `name` is one of those.
+pub fn refuse_sensitive_env_name(arg: &str, name: &str) -> Result<()> {
+    const EXACT: &[&str] = &[
+        "PATH",
+        "IFS",
+        "ENV",
+        "BASH_ENV",
+        "CDPATH",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "GLOBIGNORE",
+        "PROMPT_COMMAND",
+        "GCONV_PATH",
+        "LOCPATH",
+        "NLSPATH",
+        "HOSTALIASES",
+        "RESOLV_HOST_CONF",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONINSPECT",
+        "PYTHONBREAKPOINT",
+        "PYTHONUSERBASE",
+        "PERLLIB",
+        "RUBYOPT",
+        "RUBYLIB",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "CLASSPATH",
+        "LUA_PATH",
+        "LUA_CPATH",
+        "FPATH",
+        "ZDOTDIR",
+        "GIT_EXEC_PATH",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_PROXY_COMMAND",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_PAGER",
+        "GIT_EDITOR",
+        "GIT_SEQUENCE_EDITOR",
+        "GIT_EXTERNAL_DIFF",
+        "TAR_OPTIONS",
+        "LESSOPEN",
+        "LESSCLOSE",
+        "MANPAGER",
+        "SYSTEMD_PAGER",
+        "SUDO_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "PYTHONWARNINGS",
+        "MALLOC_CONF",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "BROWSER",
+        "EXECIGNORE",
+        "OPENSSL_CONF",
+        "GLIBC_TUNABLES",
+    ];
+    const PREFIXES: &[&str] = &[
+        "LD_",
+        "DYLD_",
+        "BASH_FUNC_",
+        "PERL5",
+        "LUA_INIT",
+        "GIT_CONFIG",
+    ];
+    // Environment names are case-sensitive, but zsh ties these lower-case
+    // parameters to `PATH`, `FPATH`, `CDPATH` and its module path, and the
+    // SSH user's login shell may be zsh.
+    const ZSH_TIED: &[&str] = &["path", "fpath", "cdpath", "module_path"];
+    let sensitive = EXACT.contains(&name)
+        || ZSH_TIED.contains(&name)
+        || PREFIXES.iter().any(|prefix| name.starts_with(prefix));
+    if sensitive {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "'{arg}' must not set the environment variable '{name}': it changes which \
+                 program or library runs, or how a shell starts"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse `value` for the argument `arg` when it starts with `-`.
+///
+/// Quoting keeps a value one word, but a word that starts with `-` in a slot
+/// where the program still reads options is an option: `find '-delete'`,
+/// `git log '--output=/etc/x'`, `systemctl status '--help'`. Use this for
+/// identifiers that can never start with `-` (Kubernetes, Helm and container
+/// names, users, groups, units, numeric ids). For a path or free text, put
+/// `--` before it when the program honours it instead.
+///
+/// # Errors
+///
+/// `CommandDenied` naming `arg` when `value` starts with `-`.
+pub fn refuse_option_like(arg: &str, value: &str) -> Result<()> {
+    if value.starts_with('-') {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "'{arg}' must not start with '-': the remote program would read it as an \
+                 option"
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== is_named_binary =====
+
+    #[test]
+    fn is_named_binary_accepts_the_program_bare_in_a_path_or_versioned() {
+        for bin in [
+            "kubectl",
+            "/usr/local/bin/kubectl",
+            "kubectl-1.31",
+            "kubectl-v1.31.2",
+            "/snap/bin/microk8s.kubectl",
+            "/usr/bin/kubectl",
+            "/opt/bin/kubectl",
+        ] {
+            assert!(
+                is_named_binary(bin, &["kubectl", "microk8s.kubectl"]),
+                "{bin}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_named_binary_refuses_other_programs_and_option_shapes() {
+        for bin in [
+            "/bin/sh",
+            "python3",
+            "kubectlx",
+            "-kubectl",
+            "kubectl; id",
+            "",
+            "kube ctl",
+            "$(id)",
+            "kubectl-node_shell",
+            "kubectl-ns",
+            "oc-mirror",
+            "kubectl-",
+            "kubectl-v",
+            "kubectl1.x",
+            "/home/u/bin/kubectl",
+            "/tmp/kubectl",
+            "/var/tmp/kubectl",
+            "./kubectl",
+            "../x/kubectl",
+            "bin/kubectl",
+            "/kubectl",
+            "//usr/bin/kubectl",
+            "/usr/bin/../../tmp/kubectl",
+            "/usr/local/bin/sub/kubectl",
+            "/usr/bin/",
+            "/usr/bin/kubectl-ns",
+        ] {
+            assert!(!is_named_binary(bin, &["kubectl"]), "{bin}");
+        }
+    }
+
+    #[test]
+    fn is_named_binary_accepts_the_rke2_bin_directory() {
+        assert!(is_named_binary(
+            "/var/lib/rancher/rke2/bin/kubectl",
+            &["kubectl"]
+        ));
+        assert!(is_named_binary(
+            "/var/lib/rancher/rke2/bin/crictl",
+            &["crictl"]
+        ));
+        for bin in [
+            "/var/lib/rancher/rke2/bin/sh",
+            "/var/lib/rancher/rke2/bin/sub/kubectl",
+            "/var/lib/rancher/rke2/kubectl",
+            "/var/lib/rancher/k3s/bin/kubectl",
+            "/var/lib/rancher/rke2/bin/../../x/kubectl",
+        ] {
+            assert!(!is_named_binary(bin, &["kubectl"]), "{bin}");
+        }
+    }
+
+    #[test]
+    fn is_named_binary_in_accepts_extra_directories_only_when_given() {
+        let plugin = "/usr/libexec/docker/cli-plugins/docker-compose";
+        let dirs = ["/usr/libexec/docker/cli-plugins"];
+        assert!(!is_named_binary(plugin, &["docker-compose"]));
+        assert!(is_named_binary_in(plugin, &["docker-compose"], &dirs));
+        assert!(is_named_binary_in(
+            "/usr/bin/docker-compose",
+            &["docker-compose"],
+            &dirs
+        ));
+        for bin in [
+            "/usr/libexec/docker/cli-plugins/sh",
+            "/usr/libexec/docker/cli-plugins/docker-buildx",
+            "/usr/libexec/docker/cli-plugins/../x/docker-compose",
+            "/usr/libexec/docker/docker-compose",
+        ] {
+            assert!(
+                !is_named_binary_in(bin, &["docker-compose"], &dirs),
+                "{bin}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_named_binary_refuses_helm_plugins_and_accepts_helm_versions() {
+        for bin in ["helm", "helm3", "helm-3.14", "/usr/local/bin/helm-v3.14.2"] {
+            assert!(is_named_binary(bin, &["helm"]), "{bin}");
+        }
+        for bin in ["helm-diff", "helm-secrets", "/tmp/helm"] {
+            assert!(!is_named_binary(bin, &["helm"]), "{bin}");
+        }
+    }
+
+    // ===== refuse_sensitive_env_name =====
+
+    /// `TAR_OPTIONS=--to-command=…` runs a program under a whitelisted `tar`;
+    /// the pager and askpass variables start one too.
+    #[test]
+    fn posix_word_quotes_only_what_a_shell_would_read() {
+        assert_eq!(posix_word("ls"), "ls");
+        assert_eq!(posix_word("/var/log/a-b_c.log"), "/var/log/a-b_c.log");
+        assert_eq!(posix_word("a b"), "'a b'");
+        assert_eq!(posix_word("x;id"), "'x;id'");
+        assert_eq!(posix_word("'a"), r"''\''a'");
+        assert_eq!(posix_word(""), "''");
+    }
+
+    #[test]
+    fn refuse_sensitive_env_name_refuses_option_and_helper_variables() {
+        for name in [
+            "TAR_OPTIONS",
+            "LESSOPEN",
+            "LESSCLOSE",
+            "MANPAGER",
+            "SYSTEMD_PAGER",
+            "SUDO_ASKPASS",
+            "SSH_ASKPASS_REQUIRE",
+            "PYTHONWARNINGS",
+        ] {
+            assert!(refuse_sensitive_env_name("env", name).is_err(), "{name}");
+        }
+        for name in [
+            "TAR_DIR",
+            "LESS",
+            "PYTHONUNBUFFERED",
+            "TZ",
+            "MALLOC_ARENA_MAX",
+            "env",
+            "tar_options",
+            "ld_preload",
+        ] {
+            assert!(refuse_sensitive_env_name("env", name).is_ok(), "{name}");
+        }
+        for name in ["path", "fpath", "cdpath", "module_path"] {
+            assert!(refuse_sensitive_env_name("env", name).is_err(), "{name}");
+        }
+        for name in ["Path", "manpath"] {
+            assert!(refuse_sensitive_env_name("env", name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn refuse_sensitive_env_name_refuses_names_that_change_what_runs() {
+        for name in [
+            "PATH",
+            "IFS",
+            "ENV",
+            "BASH_ENV",
+            "CDPATH",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "PS4",
+            "GLOBIGNORE",
+            "PROMPT_COMMAND",
+            "GCONV_PATH",
+            "LOCPATH",
+            "NLSPATH",
+            "HOSTALIASES",
+            "RESOLV_HOST_CONF",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "BASH_FUNC_echo%%",
+            "MALLOC_CONF",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "PYTHONINSPECT",
+            "PERL5LIB",
+            "PERL5OPT",
+            "PERLLIB",
+            "RUBYOPT",
+            "RUBYLIB",
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "JAVA_TOOL_OPTIONS",
+            "_JAVA_OPTIONS",
+            "JDK_JAVA_OPTIONS",
+            "CLASSPATH",
+            "LUA_INIT",
+            "LUA_INIT_5_4",
+            "LUA_PATH",
+            "LUA_CPATH",
+            "FPATH",
+            "ZDOTDIR",
+            "GIT_EXEC_PATH",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "GIT_PROXY_COMMAND",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "EDITOR",
+            "VISUAL",
+            "PAGER",
+            "BROWSER",
+            "GLIBC_TUNABLES",
+        ] {
+            let err = refuse_sensitive_env_name("env", name).expect_err(name);
+            assert!(err.to_string().contains("'env'"), "{err}");
+        }
+    }
+
+    #[test]
+    fn refuse_sensitive_env_name_lets_ordinary_names_through() {
+        for name in [
+            "FOO",
+            "DEBUG",
+            "LANG",
+            "TZ",
+            "MY_PATH",
+            "PATHS",
+            "LDX",
+            "ENVIRON",
+            "NODE_ENV",
+            "PYTHONUNBUFFERED",
+            "GIT_AUTHOR_NAME",
+            "GIT_TERMINAL_PROMPT",
+            "JAVA_OPTS",
+        ] {
+            refuse_sensitive_env_name("env", name).expect(name);
+        }
+    }
+
+    // ===== refuse_option_like =====
+
+    #[test]
+    fn refuse_option_like_refuses_a_leading_dash_only() {
+        for value in ["-delete", "--output=/etc/x", "-"] {
+            let err = refuse_option_like("path", value).expect_err(value);
+            assert!(
+                err.to_string().contains("'path' must not start with '-'"),
+                "{err}"
+            );
+        }
+        for value in ["x", "a-b", "", "./-x", "web-1"] {
+            refuse_option_like("path", value).expect(value);
+        }
+    }
+
+    // ===== refuse_terminal_controls =====
+
+    #[test]
+    fn refuse_terminal_controls_lets_printable_text_through() {
+        for command in [
+            "",
+            "git -C '/srv/app' diff -- 'x'\\''; id; #'",
+            "echo 'héllo €'",
+        ] {
+            assert!(
+                refuse_terminal_controls("telnet", command).is_ok(),
+                "{command}"
+            );
+        }
+    }
+
+    /// The characters a line discipline or line editor acts on, each of which
+    /// can end a quoted argument before the shell sees it.
+    #[test]
+    fn refuse_terminal_controls_refuses_every_control_character() {
+        for c in [
+            '\u{0}', '\u{3}', '\t', '\n', '\r', '\u{15}', '\u{17}', '\u{1b}', '\u{7f}', '\u{85}',
+        ] {
+            let command = format!("cat '/var/log/x{c}id'");
+            match refuse_terminal_controls("serial", &command) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.starts_with("serial "), "{reason}");
+                    assert!(
+                        reason.contains(&format!("U+{:04X}", u32::from(c))),
+                        "{reason}"
+                    );
+                }
+                other => panic!("{c:?} must be refused, got {other:?}"),
+            }
+        }
+    }
 
     // ===== escape =====
 
@@ -477,7 +1040,7 @@ mod tests {
     fn try_cd_and_run_cmd_quotes_without_carets() {
         assert_eq!(
             try_cd_and_run("C:\\a&b^c", "dir", ShellType::Cmd).unwrap(),
-            "cd /d \"C:\\a&b^c\" && dir"
+            "cd /d \"C:\\a&b^c\" || exit /b 1 & dir"
         );
     }
 
@@ -490,11 +1053,46 @@ mod tests {
     }
 
     #[test]
-    fn try_cd_and_run_posix_is_unchanged() {
+    fn try_cd_and_run_posix_guards_the_whole_command_list() {
         assert_eq!(
             try_cd_and_run("/var/log", "ls -la", ShellType::Posix).unwrap(),
-            "cd '/var/log' && ls -la"
+            "cd -- '/var/log' && { ls -la\n}"
         );
+    }
+
+    #[test]
+    fn try_cd_and_run_posix_puts_a_dash_directory_after_double_dash() {
+        let line = try_cd_and_run("-ZQXdash", "x", ShellType::Posix).unwrap();
+        assert!(line.starts_with("cd -- '-ZQXdash' && "), "{line}");
+    }
+
+    /// Finding F30: after a failed `cd`, `;` used to start a new list item
+    /// that ran in the login directory.
+    #[cfg(unix)]
+    #[test]
+    fn try_cd_and_run_posix_runs_nothing_after_a_failed_cd() {
+        for command in [
+            "echo ran; echo ran2",
+            "echo ran & wait",
+            "echo ran\necho ran2",
+            "echo ran # c",
+        ] {
+            let line =
+                try_cd_and_run("/nonexistent-bridge-mcp-dir", command, ShellType::Posix).unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&line)
+                .output()
+                .unwrap();
+            assert!(out.stdout.is_empty(), "{command}: {out:?}");
+            assert!(!out.status.success(), "{command}");
+        }
+    }
+
+    #[test]
+    fn try_cd_and_run_cmd_leaves_the_shell_when_cd_fails() {
+        let line = try_cd_and_run("C:\\x", "a & b", ShellType::Cmd).unwrap();
+        assert_eq!(line, "cd /d \"C:\\x\" || exit /b 1 & a & b");
     }
 
     #[test]

@@ -79,10 +79,7 @@ impl StandardTool for CronRemoveTool {
     const OS_GUARD: Option<OsType> = Some(OsType::Linux);
 
     fn build_command(args: &SshCronRemoveArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(CronCommandBuilder::build_remove_command(
-            &args.pattern,
-            args.user.as_deref(),
-        ))
+        CronCommandBuilder::build_remove_command(&args.pattern, args.user.as_deref())
     }
 }
 
@@ -376,5 +373,13 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_build_command_refuses_an_empty_pattern() {
+        let args: SshCronRemoveArgs =
+            serde_json::from_value(json!({"host": "s", "pattern": ""})).unwrap();
+        let err = CronRemoveTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("Cron pattern"), "{err}");
     }
 }

@@ -433,7 +433,7 @@ mod tests {
             .expect("result");
         assert_eq!(
             ctx.connection_pool.mock_calls()[0].0,
-            "cd /d \"C:\\a&b\" && cd"
+            "cd /d \"C:\\a&b\" || exit /b 1 & cd"
         );
     }
 

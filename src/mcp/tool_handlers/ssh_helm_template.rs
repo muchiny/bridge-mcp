@@ -128,7 +128,7 @@ impl StandardTool for HelmTemplateTool {
             },
             "kubeconfig": {
                 "type": "string",
-                "description": "Path to kubeconfig file (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
+                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or ~/.kube/ (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -149,6 +149,11 @@ impl StandardTool for HelmTemplateTool {
         crate::domain::output_kind::OutputKind::Yaml;
 
     fn build_command(args: &SshHelmTemplateArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::validate_kubeconfig_opt(args.kubeconfig.as_deref())?;
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[
+            ("release", Some(args.release.as_str())),
+            ("chart", Some(args.chart.as_str())),
+        ])?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -521,5 +526,30 @@ mod tests {
         assert!(cmd.contains("--api-versions 'apps/v1'"), "cmd={cmd}");
         assert!(cmd.contains("--api-versions 'batch/v1'"), "cmd={cmd}");
         assert!(cmd.contains("--validate"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_option_like_release_is_refused() {
+        let args: SshHelmTemplateArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "release": "-x", "chart": "x"}))
+                .unwrap();
+        let err = HelmTemplateTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'release' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_option_like_chart_is_refused() {
+        let args: SshHelmTemplateArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "release": "x", "chart": "-x"}))
+                .unwrap();
+        let err = HelmTemplateTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'chart' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -37,8 +37,8 @@ impl StandardTool for TerraformPlanTool {
 
     const DESCRIPTION: &'static str = "Generate a Terraform execution plan on a remote host — shows what resources will be \
         created, modified, or destroyed without making any changes. Always run before \
-        ssh_terraform_apply to preview the impact. Save the plan to a file with out=PATH and \
-        pass that path as plan_file to ssh_terraform_apply for a guaranteed-exact apply. Use \
+        ssh_terraform_apply to preview the impact. Save the plan to a file with out=NAME (a plain file name, written in dir) and \
+        pass that name as plan_file to ssh_terraform_apply for a guaranteed-exact apply. Use \
         destroy=true to generate a full-teardown plan. Requires ssh_terraform_init to have been \
         run first. Use ssh_terraform_output to read declared output values; use \
         ssh_terraform_state for inspecting existing state.";
@@ -70,7 +70,7 @@ impl StandardTool for TerraformPlanTool {
                     },
                     "out": {
                         "type": "string",
-                        "description": "Path on the remote host to save the plan file (e.g. /tmp/plan.tfplan). Pass this path as plan_file to ssh_terraform_apply for an exact, pre-reviewed apply."
+                        "description": "Plain file name (no '/' or '\\', not starting with '-') of the plan file, written inside dir (e.g. plan.tfplan). Pass this name as plan_file to ssh_terraform_apply for an exact, pre-reviewed apply."
                     },
                     "destroy": {
                         "type": "boolean",
@@ -94,6 +94,10 @@ impl StandardTool for TerraformPlanTool {
 
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Auto;
+
+    fn validate(args: &SshTerraformPlanArgs, _host_config: &HostConfig) -> Result<()> {
+        TerraformCommandBuilder::validate_plan_args(&args.dir, args.out.as_deref())
+    }
 
     fn build_command(args: &SshTerraformPlanArgs, _host_config: &HostConfig) -> Result<String> {
         TerraformCommandBuilder::build_plan_command(
@@ -320,5 +324,34 @@ mod tests {
         assert!(cmd.contains("plan"));
         assert!(cmd.contains("env=prod"));
         assert!(cmd.contains("-destroy"));
+    }
+
+    #[tokio::test]
+    async fn test_refused_argument_is_audited() {
+        let handler = SshTerraformPlanHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        handler
+            .execute(Some(json!({"host": "server1", "dir": "/opt/infra", "out": "/home/deploy/.ssh/authorized_keys"})), &ctx)
+            .await
+            .expect_err("the argument must be refused");
+        let events = ctx.audit_logger.drain_for_test();
+        assert!(
+            events.iter().any(|e| e.event_type == "command_denied"
+                && e.tool_name.as_deref() == Some("ssh_terraform_plan")),
+            "expected a command_denied event: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_refuses_and_accepts() {
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let host = ctx.config.hosts.get("server1").unwrap();
+        let bad: SshTerraformPlanArgs = serde_json::from_value(json!({"host": "server1", "dir": "/opt/infra", "out": "/home/deploy/.ssh/authorized_keys"})).unwrap();
+        TerraformPlanTool::validate(&bad, host).unwrap_err();
+        let good: SshTerraformPlanArgs = serde_json::from_value(
+            json!({"host": "server1", "dir": "/opt/infra", "out": "plan.tfplan"}),
+        )
+        .unwrap();
+        TerraformPlanTool::validate(&good, host).unwrap();
     }
 }

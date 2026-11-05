@@ -67,7 +67,8 @@ const LOG_FILES_ALLOWED_PUNCT: &[char] = &[
 /// # Errors
 ///
 /// Returns [`BridgeError::CommandDenied`] if the list is empty, too long, holds
-/// too many entries, or contains any character outside the allowlist.
+/// too many entries, has an entry starting with `-`, or contains any character
+/// outside the allowlist.
 pub fn validate_log_files(log_files: &str) -> Result<()> {
     if log_files.trim().is_empty() {
         return Err(BridgeError::CommandDenied {
@@ -88,6 +89,16 @@ pub fn validate_log_files(log_files: &str) -> Result<()> {
     {
         return Err(BridgeError::CommandDenied {
             reason: format!("log_files contains a disallowed character: {bad:?}"),
+        });
+    }
+    // Each entry is a shell word that `tail`, `grep`, `wc` and `for` read:
+    // one starting with '-' would be an option, not a path.
+    if let Some(word) = log_files.split_whitespace().find(|w| w.starts_with('-')) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "log_files entry '{word}' must not start with '-': the remote program would \
+                 read it as an option"
+            ),
         });
     }
     let count = log_files.split_whitespace().count();
@@ -146,7 +157,7 @@ impl LogAggregationCommandBuilder {
         }
 
         Ok(format!(
-            "{journal_cmd} 2>/dev/null || grep -r {escaped_pattern} {files} 2>/dev/null | tail -100"
+            "{journal_cmd} 2>/dev/null || grep -r -e {escaped_pattern} -- {files} 2>/dev/null | tail -100"
         ))
     }
 
@@ -184,7 +195,7 @@ impl LogAggregationCommandBuilder {
 
         let files = log_files.unwrap_or(DEFAULT_LOG_FILES);
         validate_log_files(files)?;
-        Ok(format!("tail -n {n} {files} 2>/dev/null"))
+        Ok(format!("tail -n {n} -- {files} 2>/dev/null"))
     }
 }
 
@@ -270,7 +281,7 @@ mod tests {
             LogAggregationCommandBuilder::build_log_search_command("error", None, None).unwrap();
         assert!(cmd.contains("journalctl"));
         assert!(cmd.contains("--grep 'error'"));
-        assert!(cmd.contains("grep -r 'error'"));
+        assert!(cmd.contains("grep -r -e 'error'"));
         assert!(cmd.contains(DEFAULT_LOG_FILES));
         assert!(cmd.contains("tail -100"));
     }
@@ -458,5 +469,28 @@ mod tests {
         let cmd = LogAggregationCommandBuilder::build_log_aggregate_command(Some("/var/log/a.log"))
             .unwrap();
         assert!(cmd.contains("for f in /var/log/a.log"));
+    }
+
+    #[test]
+    fn test_log_files_entry_starting_with_a_dash_is_refused() {
+        for files in ["-ZQXdash", "/var/log/a.log -f", "--help"] {
+            let err = validate_log_files(files).unwrap_err();
+            assert!(err.to_string().contains("must not start with '-'"), "{err}");
+        }
+        assert!(validate_log_files("/var/log/a-b.log ./-x").is_ok());
+    }
+
+    #[test]
+    fn test_log_search_and_tail_end_options_before_the_files() {
+        let search =
+            LogAggregationCommandBuilder::build_log_search_command("-v", Some("/var/log/a"), None)
+                .unwrap();
+        assert!(
+            search.contains("grep -r -e '-v' -- /var/log/a "),
+            "{search}"
+        );
+        let tail =
+            LogAggregationCommandBuilder::build_log_tail_command(Some("/var/log/a"), None).unwrap();
+        assert!(tail.contains("tail -n 50 -- /var/log/a "), "{tail}");
     }
 }

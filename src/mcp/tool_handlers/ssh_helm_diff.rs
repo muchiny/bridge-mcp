@@ -142,6 +142,10 @@ impl StandardTool for HelmDiffTool {
     }"#;
 
     fn build_command(args: &SshHelmDiffArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[
+            ("release", Some(args.release.as_str())),
+            ("chart", args.chart.as_deref()),
+        ])?;
         HelmCommandBuilder::validate_diff_subcommand(&args.subcommand)?;
         Ok(HelmCommandBuilder::build_diff_command(
             args.helm_bin.as_deref(),
@@ -368,5 +372,32 @@ mod tests {
         };
         let result = HelmDiffTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_option_like_release_is_refused() {
+        let args: SshHelmDiffArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "subcommand": "x", "release": "-x"}),
+        )
+        .unwrap();
+        let err = HelmDiffTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'release' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_option_like_chart_is_refused() {
+        let args: SshHelmDiffArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "subcommand": "x", "release": "x", "chart": "-x"}),
+        )
+        .unwrap();
+        let err = HelmDiffTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'chart' must not start with '-'"),
+            "{err}"
+        );
     }
 }

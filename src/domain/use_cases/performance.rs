@@ -19,6 +19,9 @@ pub fn validate_latency_target(target: &str) -> Result<()> {
             reason: "Latency target cannot be empty".to_string(),
         });
     }
+    // `ping '-f'` and `mtr '-F/etc/shadow'` are one shell word and still
+    // options. No hostname or IP starts with a hyphen.
+    super::shell::refuse_option_like("target", target)?;
     // A valid hostname/IP should only contain: alphanumeric, dots, hyphens, colons (IPv6)
     if !target
         .chars()
@@ -32,6 +35,18 @@ pub fn validate_latency_target(target: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Validate the `device` argument of `iostat`.
+///
+/// Block device names never start with `-`; `iostat -x '-f' 1 5` would read
+/// the word as an option.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if `device` starts with `-`.
+pub fn validate_io_device(device: &str) -> Result<()> {
+    super::shell::refuse_option_like("device", device)
 }
 
 /// Builds performance profiling commands for remote execution.
@@ -148,7 +163,10 @@ impl PerformanceCommandBuilder {
                  && rm -f /tmp/bench_test"
                 .to_string(),
             "memory" => "dd if=/dev/zero of=/dev/null bs=1M count=1024 2>&1".to_string(),
-            _ => format!("echo 'Unknown benchmark type: {bench_type}'"),
+            _ => format!(
+                "printf '%s\\n' {}",
+                shell_escape(&format!("Unknown benchmark type: {bench_type}"))
+            ),
         }
     }
 }
@@ -156,6 +174,37 @@ impl PerformanceCommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_latency_target_refuses_a_leading_dash() {
+        for bad in ["-F/etc/passwd", "-f", "-s65507"] {
+            for method in [None, Some("mtr")] {
+                let err = PerformanceCommandBuilder::build_latency_test_command(bad, 3, method)
+                    .unwrap_err();
+                assert!(
+                    err.to_string().contains("'target' must not start with '-'"),
+                    "{err}"
+                );
+            }
+        }
+        assert!(PerformanceCommandBuilder::build_latency_test_command("web-1", 3, None).is_ok());
+    }
+
+    #[test]
+    fn test_unknown_benchmark_type_is_one_quoted_word() {
+        let cmd = PerformanceCommandBuilder::build_benchmark_command("x'; id");
+        assert_eq!(cmd, r"printf '%s\n' 'Unknown benchmark type: x'\''; id'");
+    }
+
+    #[test]
+    fn test_validate_io_device_refuses_a_leading_dash() {
+        let err = validate_io_device("-f").unwrap_err();
+        assert!(
+            err.to_string().contains("'device' must not start with '-'"),
+            "{err}"
+        );
+        assert!(validate_io_device("nvme0n1").is_ok());
+    }
 
     // ---- Duration validation ----
 

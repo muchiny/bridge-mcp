@@ -107,7 +107,18 @@ impl StandardTool for EsxiSnapshotTool {
     }"#;
 
     fn validate(args: &SshEsxiSnapshotArgs, _host_config: &HostConfig) -> Result<()> {
-        EsxiCommandBuilder::validate_snapshot_action(&args.action)
+        EsxiCommandBuilder::validate_snapshot_action(&args.action)?;
+        crate::domain::use_cases::shell::refuse_option_like("vm_id", &args.vm_id)?;
+        if let Some(name) = args.name.as_deref() {
+            crate::domain::use_cases::shell::refuse_option_like("name", name)?;
+        }
+        if let Some(description) = args.description.as_deref() {
+            crate::domain::use_cases::shell::refuse_option_like("description", description)?;
+        }
+        if let Some(id) = args.snapshot_id.as_deref() {
+            crate::domain::use_cases::shell::refuse_option_like("snapshot_id", id)?;
+        }
+        Ok(())
     }
 
     fn build_command(args: &SshEsxiSnapshotArgs, _host_config: &HostConfig) -> Result<String> {
@@ -396,5 +407,52 @@ mod tests {
         let cmd = EsxiSnapshotTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("vim-cmd vmsvc/snapshot.removeall"));
         assert!(cmd.contains("'42'"));
+    }
+
+    #[tokio::test]
+    async fn test_option_shaped_vm_id_is_refused() {
+        let handler = SshEsxiSnapshotHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "vm_id": "-x", "action": "list"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("'vm_id'"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_option_shaped_snapshot_name_is_refused() {
+        let handler = SshEsxiSnapshotHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "vm_id": "1", "action": "create", "name": "-x"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'name'"), "{reason}"),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_option_shaped_snapshot_id_is_refused() {
+        let handler = SshEsxiSnapshotHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler.execute(Some(json!({"host": "server1", "vm_id": "1", "action": "revert", "snapshot_id": "-x"})), &ctx).await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("'snapshot_id'"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }

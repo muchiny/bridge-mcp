@@ -65,11 +65,11 @@ impl StandardTool for AnsibleFactsTool {
             },
             "filter": {
                 "type": "string",
-                "description": "Fact filter glob pattern passed to the setup module (-a filter=...). Supports wildcards (e.g., 'ansible_distribution*') and comma-separated patterns (e.g., 'ansible_eth*,ansible_memory*' on Ansible 2.9+). Strongly recommended to reduce output — without filter, ALL facts (~50K chars) are returned."
+                "description": "Fact-name glob passed to the setup module (-a filter=...): letters, digits, '_', '*', '?', ',' and [...] classes only (e.g., 'ansible_distribution*'; comma-separated patterns such as 'ansible_eth*,ansible_memory*' on Ansible 2.9+). Spaces, '=' and Jinja are refused. Strongly recommended to reduce output — without filter, ALL facts (~50K chars) are returned."
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file or comma-separated host list"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
             },
             "become": {
                 "type": "boolean",
@@ -77,7 +77,7 @@ impl StandardTool for AnsibleFactsTool {
             },
             "become_user": {
                 "type": "string",
-                "description": "User to become"
+                "description": "User to become (letters, digits, '_', '.', '@', '-'; max 64; no leading '-'; optional DOMAIN\\ prefix and trailing '$')"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -110,6 +110,25 @@ impl StandardTool for AnsibleFactsTool {
             args.become_user.as_deref(),
         ))
     }
+
+    fn validate(args: &SshAnsibleFactsArgs, _host_config: &HostConfig) -> Result<()> {
+        AnsibleCommandBuilder::validate_pattern(&args.pattern)?;
+        AnsibleCommandBuilder::refuse_jinja_in(&[
+            ("pattern", Some(args.pattern.as_str())),
+            ("inventory", args.inventory.as_deref()),
+        ])?;
+        if let Some(inventory) = args.inventory.as_deref() {
+            AnsibleCommandBuilder::validate_inventory(inventory)?;
+        }
+        if let Some(filter) = args.filter.as_deref() {
+            AnsibleCommandBuilder::validate_facts_filter(filter)?;
+        }
+        // `become_user` ends up unquoted in a shell line on the targets.
+        if let Some(user) = args.become_user.as_deref() {
+            AnsibleCommandBuilder::validate_user_name("become_user", user)?;
+        }
+        Ok(())
+    }
 }
 
 /// Handler for the `ssh_ansible_facts` tool.
@@ -120,7 +139,7 @@ mod tests {
     use super::*;
     use crate::error::BridgeError;
     use crate::ports::ToolHandler;
-    use crate::ports::mock::create_test_context;
+    use crate::ports::mock::{create_test_context, create_test_context_with_host};
     use serde_json::json;
 
     #[tokio::test]
@@ -339,5 +358,214 @@ mod tests {
         assert!(cmd.contains("-i 'hosts.ini'"));
         assert!(cmd.contains(" -b"));
         assert!(cmd.contains("--become-user 'root'"));
+    }
+
+    #[tokio::test]
+    async fn test_option_like_pattern_refused() {
+        let handler = SshAnsibleFactsHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host":"server1","pattern":"-ZQXdash"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("pattern"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_filter_with_jinja_is_refused() {
+        let handler = SshAnsibleFactsHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1",
+                    "pattern": "localhost",
+                    "filter": "{{ lookup('pipe','id') }}"
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("filter"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_filter_with_a_second_parameter_is_refused() {
+        let handler = SshAnsibleFactsHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1",
+                    "pattern": "localhost",
+                    "filter": "* fact_path=/var/tmp/d"
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("filter"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_become_user_with_jinja_is_refused() {
+        let handler = SshAnsibleFactsHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1",
+                    "pattern": "all",
+                    "become_user": "{{ lookup('pipe','id') }}"
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("become_user"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fact_glob_filters_still_pass_validation() {
+        let json = json!({
+            "host": "server1",
+            "pattern": "all",
+            "filter": "ansible_eth*,ansible_memory*",
+            "become_user": "root"
+        });
+        let args: SshAnsibleFactsArgs = serde_json::from_value(json).unwrap();
+        assert!(AnsibleFactsTool::validate(&args, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_become_user_with_shell_syntax_is_refused() {
+        for user in [
+            "root; id",
+            "root && id",
+            "root id",
+            "$(id)",
+            "`id`",
+            "-root",
+            "",
+            "root|id",
+            "root\nid",
+        ] {
+            let args: SshAnsibleFactsArgs = serde_json::from_value(
+                json!({"host":"server1","pattern":"all","become_user":user}),
+            )
+            .unwrap();
+            let err = AnsibleFactsTool::validate(&args, &test_host_config()).expect_err(user);
+            match err {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("become_user"), "{reason}");
+                }
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_become_user_names_still_pass() {
+        for user in ["root", "deploy", "_svc", "ops.team", "j.doe@corp", "a-b_c9"] {
+            let args: SshAnsibleFactsArgs = serde_json::from_value(
+                json!({"host":"server1","pattern":"all","become_user":user}),
+            )
+            .unwrap();
+            assert!(
+                AnsibleFactsTool::validate(&args, &test_host_config()).is_ok(),
+                "{user}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_jinja_in_pattern_and_inventory_is_refused() {
+        for field in ["pattern", "inventory"] {
+            let mut value = json!({"host":"server1","pattern":"all"});
+            value[field] = json!("{{ lookup('pipe','id') }}");
+            let args: SshAnsibleFactsArgs = serde_json::from_value(value).unwrap();
+            match AnsibleFactsTool::validate(&args, &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains(field), "{field}: {reason}");
+                }
+                other => panic!("{field}: expected CommandDenied, got {other:?}"),
+            }
+        }
+        let ok: SshAnsibleFactsArgs = serde_json::from_value(
+            json!({"host":"server1","pattern":"web*:!db1","inventory":"hosts.ini"}),
+        )
+        .unwrap();
+        assert!(AnsibleFactsTool::validate(&ok, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_inventory_is_read_as_data() {
+        let with: SshAnsibleFactsArgs = serde_json::from_value(
+            json!({"host":"server1","pattern":"all","inventory":"/tmp/inv"}),
+        )
+        .unwrap();
+        let cmd = AnsibleFactsTool::build_command(&with, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml ansible 'all' -m setup -i '/tmp/inv'"
+        );
+        let without: SshAnsibleFactsArgs =
+            serde_json::from_value(json!({"host":"server1","pattern":"all"})).unwrap();
+        let cmd = AnsibleFactsTool::build_command(&without, &test_host_config()).unwrap();
+        assert_eq!(cmd, "ansible 'all' -m setup");
+    }
+
+    #[test]
+    fn test_dashed_inventory_is_refused() {
+        let bad: SshAnsibleFactsArgs = serde_json::from_value(
+            json!({"host":"server1","pattern":"all","inventory":"-ZQXdash"}),
+        )
+        .unwrap();
+        match AnsibleFactsTool::validate(&bad, &test_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(reason.contains("inventory"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+        let ok: SshAnsibleFactsArgs = serde_json::from_value(
+            json!({"host":"server1","pattern":"all","inventory":"./-hosts,"}),
+        )
+        .unwrap();
+        assert!(AnsibleFactsTool::validate(&ok, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_windows_domain_and_gmsa_become_users() {
+        for user in ["CORP\\svc", "svc$"] {
+            let ok: SshAnsibleFactsArgs = serde_json::from_value(
+                json!({"host":"server1","pattern":"all","become_user":user}),
+            )
+            .unwrap();
+            assert!(
+                AnsibleFactsTool::validate(&ok, &test_host_config()).is_ok(),
+                "{user}"
+            );
+        }
+        let bad: SshAnsibleFactsArgs = serde_json::from_value(
+            json!({"host":"server1","pattern":"all","become_user":"CORP\\"}),
+        )
+        .unwrap();
+        assert!(AnsibleFactsTool::validate(&bad, &test_host_config()).is_err());
     }
 }

@@ -75,7 +75,8 @@ impl StandardTool for EsxiVmPowerTool {
     }"#;
 
     fn validate(args: &SshEsxiVmPowerArgs, _host_config: &HostConfig) -> Result<()> {
-        EsxiCommandBuilder::validate_power_action(&args.action)
+        EsxiCommandBuilder::validate_power_action(&args.action)?;
+        crate::domain::use_cases::shell::refuse_option_like("vm_id", &args.vm_id)
     }
 
     fn build_command(args: &SshEsxiVmPowerArgs, _host_config: &HostConfig) -> Result<String> {
@@ -208,6 +209,24 @@ mod tests {
         match result.unwrap_err() {
             BridgeError::McpInvalidRequest(_) => {}
             e => panic!("Expected McpInvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_option_shaped_vm_id_is_refused() {
+        let handler = SshEsxiVmPowerHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "vm_id": "-x", "action": "on"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("'vm_id'"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
         }
     }
 }

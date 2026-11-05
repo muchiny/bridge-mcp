@@ -110,6 +110,52 @@ pub fn validate_record_type(record_type: &str) -> Result<()> {
     Ok(())
 }
 
+/// The connection states `ss state <value>` takes, plus its state sets.
+const SS_STATES: &[&str] = &[
+    "established",
+    "syn-sent",
+    "syn-recv",
+    "fin-wait-1",
+    "fin-wait-2",
+    "time-wait",
+    "closed",
+    "close-wait",
+    "last-ack",
+    "listening",
+    "closing",
+    "all",
+    "connected",
+    "synchronized",
+    "bucket",
+    "big",
+];
+
+/// Validate the `state` filter of `ss`.
+///
+/// `ss -tunap state '-D/home/u/.ssh/authorized_keys'` is one shell word and
+/// still an option: `ss` opens that file for writing while it parses its
+/// arguments. Only the state names `ss` documents are accepted.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if `state` is not one of the `ss`
+/// state names.
+pub fn validate_connection_state(state: &str) -> Result<()> {
+    // `ss` compares state names without regard to case, so the upper-case
+    // spellings it prints for most states (`TIME-WAIT`) are accepted too. Its
+    // abbreviations (`ESTAB`, `LISTEN`, `UNCONN`) are not state names to it.
+    if SS_STATES.iter().any(|s| s.eq_ignore_ascii_case(state)) {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid connection state '{state}': 'state' must be one of {}",
+                SS_STATES.join(", ")
+            ),
+        })
+    }
+}
+
 /// Builds network diagnostic commands for remote execution.
 pub struct NetworkCommandBuilder;
 
@@ -283,6 +329,31 @@ impl NetworkCommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_state_must_be_an_ss_state_name() {
+        for bad in [
+            "-D/home/u/.ssh/authorized_keys",
+            "-ZQXdash",
+            "x",
+            "",
+            "established; id",
+        ] {
+            let err = validate_connection_state(bad).expect_err(bad);
+            assert!(err.to_string().contains("'state' must be one of"), "{err}");
+        }
+        for good in [
+            "established",
+            "time-wait",
+            "fin-wait-1",
+            "all",
+            "listening",
+            "TIME-WAIT",
+            "Established",
+        ] {
+            validate_connection_state(good).expect(good);
+        }
+    }
 
     /// Shell-escaping decides where a word ends, not how the program reads
     /// it. `dig '-f/etc/passwd'` is one shell word and still an option.

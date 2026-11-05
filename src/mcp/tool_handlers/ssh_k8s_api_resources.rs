@@ -107,6 +107,9 @@ impl StandardTool for K8sApiResourcesTool {
         if let Some(ctx) = args.context.as_deref() {
             validate_context(ctx)?;
         }
+        if let Some(out) = args.output.as_deref() {
+            crate::domain::use_cases::kubernetes::validate_kubectl_output(out)?;
+        }
         Ok(KubernetesCommandBuilder::build_api_resources_command(
             args.kubectl_bin.as_deref(),
             args.namespaced,
@@ -283,5 +286,14 @@ mod tests {
         assert!(cmd.contains("--namespaced=true"), "cmd: {cmd}");
         assert!(cmd.contains("--api-group="), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_file_reading_output_is_refused() {
+        let args: SshK8sApiResourcesArgs =
+            serde_json::from_value(json!({"host": "h", "output": "jsonpath-file=/etc/shadow"}))
+                .unwrap();
+        let err = K8sApiResourcesTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("output"), "{err}");
     }
 }

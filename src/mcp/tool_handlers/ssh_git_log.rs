@@ -109,6 +109,10 @@ impl StandardTool for GitLogTool {
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Auto;
 
+    fn validate(args: &SshGitLogArgs, _host_config: &HostConfig) -> Result<()> {
+        GitCommandBuilder::validate_not_option("branch", args.branch.as_deref())
+    }
+
     fn build_command(args: &SshGitLogArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(GitCommandBuilder::build_log_command(
             &args.path,
@@ -317,5 +321,15 @@ mod tests {
         assert!(cmd.contains("log"));
         assert!(cmd.contains("20"));
         assert!(cmd.contains("main"));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_shaped_branch() {
+        let args: SshGitLogArgs = serde_json::from_value(
+            json!({"host": "s", "path": "/opt/repo", "branch": "--output=/tmp/x"}),
+        )
+        .unwrap();
+        let err = GitLogTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("'branch'"), "{err}");
     }
 }

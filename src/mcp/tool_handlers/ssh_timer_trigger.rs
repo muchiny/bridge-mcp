@@ -5,7 +5,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::systemd_timers::TimerCommandBuilder;
+use crate::domain::use_cases::systemd_timers::{TimerCommandBuilder, validate_timer_name};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -74,6 +74,10 @@ impl StandardTool for TimerTriggerTool {
 
     fn build_command(args: &SshTimerTriggerArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(TimerCommandBuilder::build_trigger_command(&args.timer))
+    }
+
+    fn validate(args: &SshTimerTriggerArgs, _host_config: &HostConfig) -> Result<()> {
+        validate_timer_name(&args.timer)
     }
 }
 
@@ -216,5 +220,16 @@ mod tests {
         assert_ne!(cmd, "");
         assert!(cmd.contains("apt-daily"));
         assert!(cmd.contains("start") || cmd.contains("trigger"));
+    }
+
+    #[test]
+    fn test_validate_refuses_unit_path() {
+        let args: SshTimerTriggerArgs = serde_json::from_value(json!({
+            "host": "s",
+            "timer": "/tmp/x.service"
+        }))
+        .unwrap();
+        let err = TimerTriggerTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("Invalid timer name"), "{err}");
     }
 }

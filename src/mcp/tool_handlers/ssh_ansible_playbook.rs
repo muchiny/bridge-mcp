@@ -94,7 +94,7 @@ impl StandardTool for AnsiblePlaybookTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file or comma-separated host list"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
             },
             "limit": {
                 "type": "string",
@@ -137,7 +137,7 @@ impl StandardTool for AnsiblePlaybookTool {
             },
             "become_user": {
                 "type": "string",
-                "description": "User to become"
+                "description": "User to become (letters, digits, '_', '.', '@', '-'; max 64; no leading '-'; optional DOMAIN\\ prefix and trailing '$')"
             },
             "working_dir": {
                 "type": "string",
@@ -150,11 +150,11 @@ impl StandardTool for AnsiblePlaybookTool {
             },
             "vault_password_file": {
                 "type": "string",
-                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file)"
+                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file). Must be a plain file without execute permission (Ansible runs an executable one); the call stops with exit status 2 otherwise"
             },
             "vault_id": {
                 "type": "string",
-                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id)"
+                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id). The file after the first '@' (the whole value without one) must be a plain file without execute permission; 'prompt' and 'prompt_ask_vault_pass' are not files"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -247,6 +247,26 @@ impl StandardTool for AnsiblePlaybookTool {
 
     fn validate(args: &SshAnsiblePlaybookArgs, _host_config: &HostConfig) -> Result<()> {
         AnsibleCommandBuilder::validate_playbook_path(&args.playbook)?;
+        AnsibleCommandBuilder::refuse_jinja_in(&[
+            ("inventory", args.inventory.as_deref()),
+            ("limit", args.limit.as_deref()),
+            ("tags", args.tags.as_deref()),
+            ("skip_tags", args.skip_tags.as_deref()),
+        ])?;
+        if let Some(inventory) = args.inventory.as_deref() {
+            AnsibleCommandBuilder::validate_inventory(inventory)?;
+        }
+        AnsibleCommandBuilder::validate_vault_args(
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
+        )?;
+        // `become_user` ends up unquoted in a shell line on the targets.
+        if let Some(user) = args.become_user.as_deref() {
+            AnsibleCommandBuilder::validate_user_name("become_user", user)?;
+        }
+        if let Some(ref vars) = args.extra_vars {
+            AnsibleCommandBuilder::validate_extra_vars(vars)?;
+        }
         if let Some(ref cb) = args.callback {
             AnsibleCommandBuilder::validate_callback(cb)?;
         }
@@ -610,7 +630,7 @@ mod tests {
         };
 
         let cmd = AnsiblePlaybookTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("-e 'env'='production'"));
+        assert!(cmd.contains(r#"-e '{"env":"production"}'"#));
         assert!(cmd.contains("--check"));
     }
 
@@ -643,7 +663,7 @@ mod tests {
         };
 
         let cmd = AnsiblePlaybookTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("cd '/opt/ansible' &&"));
+        assert!(cmd.contains("cd -- '/opt/ansible' &&"));
         assert!(cmd.contains("ansible-playbook"));
         assert!(cmd.contains("-i 'hosts.ini'"));
         assert!(cmd.contains("--limit 'webservers'"));
@@ -682,5 +702,234 @@ mod tests {
             command.contains("--limit") && command.contains("web01:web02"),
             "the host pattern must reach ansible-playbook: {command}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_option_like_playbook_refused() {
+        let handler = SshAnsiblePlaybookHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host":"server1","playbook":"-ZQXdash"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("playbook"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_extra_vars_refused() {
+        let handler = SshAnsiblePlaybookHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host":"server1","playbook":"site.yml","extra_vars":{"ansible_ssh_common_args":"x"}})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("extra_vars"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_become_user_with_jinja_is_refused() {
+        let handler = SshAnsiblePlaybookHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host":"server1","playbook":"site.yml","become_user":"{{ lookup('pipe','id') }}"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("become_user"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_plain_become_user_still_validates() {
+        let args: SshAnsiblePlaybookArgs = serde_json::from_value(
+            json!({"host":"server1","playbook":"site.yml","become_user":"deploy"}),
+        )
+        .unwrap();
+        assert!(AnsiblePlaybookTool::validate(&args, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_become_user_with_shell_syntax_is_refused() {
+        for user in [
+            "root; id",
+            "root && id",
+            "root id",
+            "$(id)",
+            "`id`",
+            "-root",
+            "",
+            "root|id",
+            "root\nid",
+        ] {
+            let args: SshAnsiblePlaybookArgs = serde_json::from_value(
+                json!({"host":"server1","playbook":"site.yml","become_user":user}),
+            )
+            .unwrap();
+            let err = AnsiblePlaybookTool::validate(&args, &test_host_config()).expect_err(user);
+            match err {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("become_user"), "{reason}");
+                }
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_become_user_names_still_pass() {
+        for user in ["root", "deploy", "_svc", "ops.team", "j.doe@corp", "a-b_c9"] {
+            let args: SshAnsiblePlaybookArgs = serde_json::from_value(
+                json!({"host":"server1","playbook":"site.yml","become_user":user}),
+            )
+            .unwrap();
+            assert!(
+                AnsiblePlaybookTool::validate(&args, &test_host_config()).is_ok(),
+                "{user}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_jinja_in_play_selectors_is_refused() {
+        for field in ["inventory", "limit", "tags", "skip_tags"] {
+            for text in ["{{ x }}", "a{% if 1 %}", "{# c #}"] {
+                let mut value = json!({"host":"server1","playbook":"site.yml"});
+                value[field] = json!(text);
+                let args: SshAnsiblePlaybookArgs = serde_json::from_value(value).unwrap();
+                match AnsiblePlaybookTool::validate(&args, &test_host_config()) {
+                    Err(BridgeError::CommandDenied { reason }) => {
+                        assert!(reason.contains(field), "{field}: {reason}");
+                    }
+                    other => panic!("{field} {text}: expected CommandDenied, got {other:?}"),
+                }
+            }
+        }
+        let ok: SshAnsiblePlaybookArgs = serde_json::from_value(json!({
+            "host":"server1","playbook":"site.yml","inventory":"hosts.ini","limit":"web*:!db1","tags":"a,b","skip_tags":"slow"
+        }))
+        .unwrap();
+        assert!(AnsiblePlaybookTool::validate(&ok, &test_host_config()).is_ok());
+    }
+
+    fn playbook_args(value: serde_json::Value) -> SshAnsiblePlaybookArgs {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn test_inventory_is_read_as_data() {
+        let args = playbook_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "/tmp/inv",
+            "working_dir": "/opt/a", "callback": "json"
+        }));
+        let cmd = AnsiblePlaybookTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "cd -- '/opt/a' && ANSIBLE_STDOUT_CALLBACK='json' \
+             ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml \
+             ansible-playbook 'site.yml' -i '/tmp/inv'"
+        );
+        let none = playbook_args(json!({"host": "server1", "playbook": "site.yml"}));
+        let cmd = AnsiblePlaybookTool::build_command(&none, &test_host_config()).unwrap();
+        assert_eq!(cmd, "ansible-playbook 'site.yml'");
+    }
+
+    #[test]
+    fn test_vault_files_are_guarded_after_cd_and_before_ansible() {
+        let args = playbook_args(json!({
+            "host": "server1", "playbook": "site.yml", "working_dir": "/opt/a",
+            "vault_password_file": "pass.txt", "vault_id": "prod@keys/prod-pass"
+        }));
+        assert!(AnsiblePlaybookTool::validate(&args, &test_host_config()).is_ok());
+        let cmd = AnsiblePlaybookTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.starts_with(
+                "cd -- '/opt/a' && if [ -f 'pass.txt' ] && [ -n \"$(find -L 'pass.txt' -prune "
+            ),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains(
+                "; fi && if [ -f 'keys/prod-pass' ] && [ -n \"$(find -L 'keys/prod-pass' -prune "
+            ),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("; exit 2; fi && ansible-playbook 'site.yml'"),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("vault password file pass.txt must be a plain file"),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn test_no_guard_without_a_vault_file() {
+        for extra in [
+            json!({}),
+            json!({"vault_id": "prompt"}),
+            json!({"vault_id": "a@prompt"}),
+        ] {
+            let mut value = json!({"host": "server1", "playbook": "site.yml"});
+            if let Some(id) = extra.get("vault_id") {
+                value["vault_id"] = id.clone();
+            }
+            let cmd =
+                AnsiblePlaybookTool::build_command(&playbook_args(value), &test_host_config())
+                    .unwrap();
+            assert!(!cmd.contains("find -L"), "{cmd}");
+            assert!(!cmd.contains("exit 2"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_dashed_inventory_and_bad_vault_arguments_are_refused() {
+        for (field, value) in [
+            ("inventory", "-ZQXdash"),
+            ("vault_password_file", "-x"),
+            ("vault_password_file", "a{%b"),
+            ("vault_id", "-x"),
+            ("vault_id", "p@-x"),
+            ("vault_id", "p@/a\tb"),
+        ] {
+            let mut v = json!({"host": "server1", "playbook": "site.yml"});
+            v[field] = json!(value);
+            match AnsiblePlaybookTool::validate(&playbook_args(v), &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains(field), "{field}: {reason}");
+                }
+                other => panic!("{field} {value}: expected CommandDenied, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_windows_domain_and_gmsa_become_users() {
+        for user in ["CORP\\svc", "svc$"] {
+            let args = playbook_args(
+                json!({"host": "server1", "playbook": "site.yml", "become_user": user}),
+            );
+            assert!(
+                AnsiblePlaybookTool::validate(&args, &test_host_config()).is_ok(),
+                "{user}"
+            );
+        }
+        let bad = playbook_args(
+            json!({"host": "server1", "playbook": "site.yml", "become_user": "CORP\\"}),
+        );
+        assert!(AnsiblePlaybookTool::validate(&bad, &test_host_config()).is_err());
     }
 }

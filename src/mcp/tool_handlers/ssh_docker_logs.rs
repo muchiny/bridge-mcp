@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::docker::DockerCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -99,6 +100,10 @@ impl StandardTool for DockerLogsTool {
         },
         "required": ["host", "container"]
     }"#;
+
+    fn validate(args: &SshDockerLogsArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("container", &args.container)
+    }
 
     fn build_command(args: &SshDockerLogsArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(DockerCommandBuilder::build_logs_command(
@@ -354,5 +359,20 @@ mod tests {
         assert!(cmd.contains("2h"));
         assert!(cmd.contains("1h"));
         assert!(cmd.contains("--timestamps"));
+    }
+
+    #[tokio::test]
+    async fn test_container_starting_with_dash_is_refused() {
+        let handler = SshDockerLogsHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(Some(json!({"host": "server1", "container": "-x"})), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'container' must not start with '-'"),
+            "{err}"
+        );
     }
 }

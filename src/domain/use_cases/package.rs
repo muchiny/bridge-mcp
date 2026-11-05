@@ -28,6 +28,24 @@ pub fn validate_package_name(name: &str) -> Result<()> {
             ),
         });
     }
+    // apt reads a trailing `-` as "remove this package", a lone trailing `+`
+    // as "install this package", and `~` at the start of a name as a pattern
+    // (`~n.` matches everything). `--` does not stop any of them, and a
+    // package named by `ssh_pkg_install` would be removed without the gate
+    // `ssh_pkg_remove` has. `g++` and `libstdc++` end in `++`, a real name.
+    // A `~` is a version separator only after `=`.
+    let modifier_suffix = name.ends_with('-') || (name.ends_with('+') && !name.ends_with("++"));
+    let tilde_before_version = name
+        .find('~')
+        .is_some_and(|t| name.find('=').is_none_or(|e| e >= t));
+    if modifier_suffix || tilde_before_version {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid package name '{name}': apt reads a trailing '-' or '+', or a '~' \
+                 before '=', as a modifier or pattern rather than part of a package name."
+            ),
+        });
+    }
     if name
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | ':' | '~' | '='))
@@ -75,23 +93,32 @@ pub fn validate_search_query(query: &str) -> Result<()> {
     }
 }
 
-/// Validate a binary path contains only safe characters.
-fn is_valid_binary_path(bin: &str) -> bool {
-    !bin.is_empty()
-        && bin
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+/// Package managers `pkg_manager` may name.
+const PACKAGE_MANAGERS: &[&str] = &["apt", "apt-get", "dnf", "yum", "apk", "zypper", "pacman"];
+
+/// Directories a package manager is installed in.
+const PACKAGE_MANAGER_DIRS: &[&str] = &["/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/"];
+
+/// Whether `bin` names one of [`PACKAGE_MANAGERS`], bare or in a standard
+/// directory. The value is the program the command starts with, so any other
+/// path (`/home/u/evil`, `sh`, `.`) would run that program.
+fn is_known_package_manager(bin: &str) -> bool {
+    let name = PACKAGE_MANAGER_DIRS
+        .iter()
+        .find_map(|dir| bin.strip_prefix(dir))
+        .unwrap_or(bin);
+    PACKAGE_MANAGERS.contains(&name)
 }
 
 /// Generate a package manager detection prefix.
 ///
-/// If `pkg_manager` is provided and valid, use it directly. If invalid,
-/// falls back to auto-detection. Otherwise, auto-detect by probing for
+/// If `pkg_manager` names a known package manager, use it directly. Any other
+/// value falls back to auto-detection. Otherwise, auto-detect by probing for
 /// `apt`, `dnf`, `yum`, or `apk`.
 #[must_use]
 pub fn pkg_detect_prefix(pkg_manager: Option<&str>) -> String {
     if let Some(pm) = pkg_manager {
-        if is_valid_binary_path(pm) {
+        if is_known_package_manager(pm) {
             return pm.to_string();
         }
         // Invalid binary path, fall back to auto-detection
@@ -445,6 +472,59 @@ mod tests {
     #[test]
     fn test_pkg_detect_prefix_valid_path() {
         assert_eq!(pkg_detect_prefix(Some("/usr/bin/apt")), "/usr/bin/apt");
+    }
+
+    #[test]
+    fn test_pkg_detect_prefix_only_names_a_package_manager() {
+        for evil in [
+            "/home/u/evil",
+            "sh",
+            "bash",
+            "python3",
+            ".",
+            "/tmp/apt",
+            "../bin/apt",
+        ] {
+            let prefix = pkg_detect_prefix(Some(evil));
+            assert!(prefix.contains("command -v apt"), "{evil}: {prefix}");
+        }
+        for ok in [
+            "apt",
+            "apt-get",
+            "dnf",
+            "yum",
+            "apk",
+            "zypper",
+            "/usr/bin/dnf",
+            "/bin/yum",
+        ] {
+            assert_eq!(pkg_detect_prefix(Some(ok)), ok);
+        }
+    }
+
+    #[test]
+    fn test_validate_package_name_refuses_apt_modifiers() {
+        for bad in [
+            "openssh-server-",
+            "systemd-",
+            "foo+",
+            "~n.",
+            "~U",
+            "a~b",
+            "a~b=1",
+        ] {
+            let err = validate_package_name(bad).expect_err(bad);
+            assert!(err.to_string().contains("modifier or pattern"), "{err}");
+        }
+        for good in [
+            "g++",
+            "libstdc++",
+            "nginx=1.24.0-1~focal",
+            "libssl-dev",
+            "a=1+b",
+        ] {
+            validate_package_name(good).expect(good);
+        }
     }
 
     #[test]

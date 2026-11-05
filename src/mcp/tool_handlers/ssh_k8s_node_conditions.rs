@@ -87,6 +87,10 @@ impl StandardTool for K8sNodeConditionsTool {
         crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshK8sNodeConditionsArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "node",
+            args.node.as_deref(),
+        )])?;
         if let Some(ctx) = args.context.as_deref() {
             validate_context(ctx)?;
         }
@@ -267,5 +271,16 @@ mod tests {
         let cmd = K8sNodeConditionsTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("worker-1"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_option_like_node_is_refused() {
+        let args: SshK8sNodeConditionsArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "node": "-x"})).unwrap();
+        let err = K8sNodeConditionsTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'node' must not start with '-'"),
+            "{err}"
+        );
     }
 }

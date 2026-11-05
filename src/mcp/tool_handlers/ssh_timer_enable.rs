@@ -5,7 +5,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::systemd_timers::TimerCommandBuilder;
+use crate::domain::use_cases::systemd_timers::{TimerCommandBuilder, validate_timer_name};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -82,6 +82,10 @@ impl StandardTool for TimerEnableTool {
             &args.timer,
             args.now.unwrap_or(false),
         ))
+    }
+
+    fn validate(args: &SshTimerEnableArgs, _host_config: &HostConfig) -> Result<()> {
+        validate_timer_name(&args.timer)
     }
 }
 
@@ -240,5 +244,16 @@ mod tests {
         let host = test_host_config();
         let cmd = TimerEnableTool::build_command(&args, &host).unwrap();
         assert!(cmd.contains("--now") || cmd.contains("start"));
+    }
+
+    #[test]
+    fn test_validate_refuses_unit_path() {
+        let args: SshTimerEnableArgs = serde_json::from_value(json!({
+            "host": "s",
+            "timer": "/tmp/x.service"
+        }))
+        .unwrap();
+        let err = TimerEnableTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("Invalid timer name"), "{err}");
     }
 }

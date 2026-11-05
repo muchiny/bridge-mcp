@@ -34,26 +34,26 @@ fuzz_target!(|data: &str| {
     let _ = validate_vault_path(data);
 
     // status
-    let cmd = VaultCommandBuilder::build_status_command(Some(data), Some(data));
+    let cmd = VaultCommandBuilder::build_status_command(Some(data));
     assert_arrives_as_text(&cmd, data, "status");
 
     // read
     if let Ok(cmd) =
-        VaultCommandBuilder::build_read_command(data, Some(data), Some(data), Some(data), Some(data))
+        VaultCommandBuilder::build_read_command(data, Some(data), Some(data), Some(data))
     {
         assert_arrives_as_text(&cmd, data, "read");
     }
 
     // list
     if let Ok(cmd) =
-        VaultCommandBuilder::build_list_command(data, Some(data), Some(data), Some(data))
+        VaultCommandBuilder::build_list_command(data, Some(data), Some(data))
     {
         assert_arrives_as_text(&cmd, data, "list");
     }
 
     // write
     if let Ok(cmd) =
-        VaultCommandBuilder::build_write_command(data, &kv_data, Some(data), Some(data))
+        VaultCommandBuilder::build_write_command(data, &kv_data, Some(data))
     {
         assert_arrives_as_text(&cmd, data, "write");
     }

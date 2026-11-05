@@ -3,7 +3,9 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::k3s::{K3sCommandBuilder, validate_path, validate_snapshot_name};
+use crate::domain::use_cases::k3s::{
+    K3sCommandBuilder, validate_k3s_bin, validate_path, validate_snapshot_name,
+};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -61,6 +63,9 @@ impl StandardTool for SshK3sEtcdSnapshotSaveTool {
         args: &SshK3sEtcdSnapshotSaveArgs,
         _host_config: &HostConfig,
     ) -> Result<String> {
+        if let Some(b) = args.k3s_bin.as_deref() {
+            validate_k3s_bin(b)?;
+        }
         if let Some(n) = &args.name {
             validate_snapshot_name(n)?;
         }
@@ -273,5 +278,17 @@ mod tests {
             save_output: None,
         };
         assert!(SshK3sEtcdSnapshotSaveTool::build_command(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_build_command_refuses_dash_or_foreign_k3s_bin() {
+        for bin in ["-s", "/bin/sh"] {
+            let args: SshK3sEtcdSnapshotSaveArgs =
+                serde_json::from_value(json!({"host": "s1", "k3s_bin": bin})).unwrap();
+            let err = SshK3sEtcdSnapshotSaveTool::build_command(&args, &test_host_config())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("k3s_bin"), "err: {err}");
+        }
     }
 }

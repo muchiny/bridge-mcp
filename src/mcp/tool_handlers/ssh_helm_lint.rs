@@ -98,6 +98,10 @@ impl StandardTool for HelmLintTool {
     }"#;
 
     fn build_command(args: &SshHelmLintArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "chart_path",
+            Some(args.chart_path.as_str()),
+        )])?;
         Ok(HelmCommandBuilder::build_lint_command(
             args.helm_bin.as_deref(),
             &args.chart_path,
@@ -302,5 +306,17 @@ mod tests {
         let cmd = HelmLintTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("--strict"));
         assert!(cmd.contains("-f '/opt/values.yaml'"));
+    }
+
+    #[test]
+    fn test_option_like_chart_path_is_refused() {
+        let args: SshHelmLintArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "chart_path": "-x"})).unwrap();
+        let err = HelmLintTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'chart_path' must not start with '-'"),
+            "{err}"
+        );
     }
 }

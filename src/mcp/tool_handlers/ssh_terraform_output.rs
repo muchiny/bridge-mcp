@@ -76,6 +76,10 @@ impl StandardTool for TerraformOutputTool {
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Auto;
 
+    fn validate(args: &SshTerraformOutputArgs, _host_config: &HostConfig) -> Result<()> {
+        TerraformCommandBuilder::validate_output_args(&args.dir, args.name.as_deref())
+    }
+
     fn build_command(args: &SshTerraformOutputArgs, _host_config: &HostConfig) -> Result<String> {
         TerraformCommandBuilder::build_output_command(
             &args.dir,
@@ -321,5 +325,39 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_refused_argument_is_audited() {
+        let handler = SshTerraformOutputHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        handler
+            .execute(
+                Some(json!({"host": "server1", "dir": "/opt/infra", "name": "-raw"})),
+                &ctx,
+            )
+            .await
+            .expect_err("the argument must be refused");
+        let events = ctx.audit_logger.drain_for_test();
+        assert!(
+            events.iter().any(|e| e.event_type == "command_denied"
+                && e.tool_name.as_deref() == Some("ssh_terraform_output")),
+            "expected a command_denied event: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_refuses_and_accepts() {
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let host = ctx.config.hosts.get("server1").unwrap();
+        let bad: SshTerraformOutputArgs =
+            serde_json::from_value(json!({"host": "server1", "dir": "/opt/infra", "name": "-raw"}))
+                .unwrap();
+        TerraformOutputTool::validate(&bad, host).unwrap_err();
+        let good: SshTerraformOutputArgs = serde_json::from_value(
+            json!({"host": "server1", "dir": "/opt/infra", "name": "vpc_id"}),
+        )
+        .unwrap();
+        TerraformOutputTool::validate(&good, host).unwrap();
     }
 }

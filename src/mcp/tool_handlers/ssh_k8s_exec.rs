@@ -9,8 +9,12 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::domain::use_cases::kubernetes::KubernetesCommandBuilder;
 use crate::error::Result;
-use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::standard_tool::{
+    StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
+};
 use crate::mcp_standard_tool;
+use crate::ports::ToolContext;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,7 +109,37 @@ impl StandardTool for K8sExecTool {
         "required": ["host", "pod"]
     }"#;
 
+    /// `command` and `argv` run in the pod as a free-form script from the
+    /// request, so they face the same whitelist as `ssh_exec`, not only the
+    /// blacklist `validate_builtin` applies to builder-produced commands.
+    /// `argv` is judged as the shell line that would pass the same words: a
+    /// word with anything but plain characters is quoted, so a `'` inside an
+    /// element cannot pose as the quoting a whitelist entry expects.
+    fn pre_execute(
+        args: &SshK8sExecArgs,
+        ctx: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        let script = match (args.command.as_deref(), args.argv.as_deref()) {
+            (Some(command), _) => command.to_string(),
+            (None, Some(words)) => argv_as_shell_line(words),
+            (None, None) => String::new(),
+        };
+        std::future::ready(if script.is_empty() {
+            Ok(None)
+        } else {
+            validate_free_form_command(ctx, Self::NAME, &args.host, &script).map(|()| None)
+        })
+    }
+
     fn build_command(args: &SshK8sExecArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "pod",
+            Some(args.pod.as_str()),
+        )])?;
+        // `sh -c` reads a command starting with `-` as its own options.
+        if let Some(command) = args.command.as_deref() {
+            crate::domain::use_cases::shell::refuse_option_like("command", command)?;
+        }
         KubernetesCommandBuilder::validate_exec_invocation(
             args.command.as_deref(),
             args.argv.as_deref(),
@@ -125,6 +159,15 @@ impl StandardTool for K8sExecTool {
     }
 }
 
+/// `words` as one POSIX shell line that passes the same words.
+fn argv_as_shell_line(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| crate::domain::use_cases::shell::posix_word(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Handler for the `ssh_k8s_exec` tool.
 pub type SshK8sExecHandler = StandardToolHandler<K8sExecTool>;
 
@@ -136,6 +179,30 @@ mod tests {
     use crate::ports::ToolHandler;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    #[test]
+    fn argv_is_judged_as_the_shell_line_that_passes_it() {
+        let words = |w: &[&str]| w.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            argv_as_shell_line(&words(&["ls", "-la", "/var/log"])),
+            "ls -la /var/log"
+        );
+        // Quotes inside elements no longer imitate one quoted word.
+        assert_eq!(
+            argv_as_shell_line(&words(&[
+                "grep",
+                "'a",
+                "/etc/shadow",
+                "b'",
+                "/var/log/app.log"
+            ])),
+            r"grep ''\''a' /etc/shadow 'b'\''' /var/log/app.log"
+        );
+        assert_eq!(
+            argv_as_shell_line(&words(&["echo", "a b", ""])),
+            "echo 'a b' ''"
+        );
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {
@@ -376,6 +443,19 @@ mod tests {
     }
 
     #[test]
+    fn test_build_command_refuses_a_command_starting_with_a_dash() {
+        let args: SshK8sExecArgs =
+            serde_json::from_value(json!({"host": "h", "pod": "p", "command": "-ZQXdash"}))
+                .unwrap();
+        let err = K8sExecTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(matches!(err, BridgeError::CommandDenied { .. }), "{err}");
+        let args: SshK8sExecArgs =
+            serde_json::from_value(json!({"host": "h", "pod": "p", "command": "ls -la"})).unwrap();
+        let cmd = K8sExecTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("-- sh -c 'ls -la'"), "{cmd}");
+    }
+
+    #[test]
     fn test_build_command_custom_bin() {
         let args = SshK8sExecArgs {
             host: "server1".to_string(),
@@ -392,7 +472,7 @@ mod tests {
         };
         let host_config = test_host_config();
         let cmd = K8sExecTool::build_command(&args, &host_config).unwrap();
-        // "k3s kubectl" has a space so is_valid_binary_path rejects it; falls back to auto-detect
+        // "k3s kubectl" has a space so is_named_binary rejects it; falls back to auto-detect
         assert!(cmd.contains("exec 'my-pod'"));
     }
 
@@ -508,5 +588,53 @@ mod tests {
             result.is_err(),
             "expected error when neither command nor argv provided"
         );
+    }
+
+    #[test]
+    fn test_option_like_pod_is_refused() {
+        let args: SshK8sExecArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "pod": "-x"})).unwrap();
+        let err = K8sExecTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'pod' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_command_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshK8sExecArgs =
+            serde_json::from_value(json!({"host": "server1", "pod": "p", "command": "id"}))
+                .unwrap();
+        let result = K8sExecTool::pre_execute(&args, &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "command must be whitelist-checked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_argv_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshK8sExecArgs = serde_json::from_value(
+            json!({"host": "server1", "pod": "p", "argv": ["sh", "-c", "id"]}),
+        )
+        .unwrap();
+        let result = K8sExecTool::pre_execute(&args, &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "argv must be whitelist-checked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_whitelisted_command_is_allowed() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshK8sExecArgs =
+            serde_json::from_value(json!({"host": "server1", "pod": "p", "command": "echo ok"}))
+                .unwrap();
+        let result = K8sExecTool::pre_execute(&args, &ctx).await;
+        assert!(result.is_ok(), "got: {result:?}");
     }
 }

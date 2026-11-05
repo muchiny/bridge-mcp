@@ -88,6 +88,10 @@ impl StandardTool for K8sPvcStatusTool {
     }"#;
 
     fn build_command(args: &SshK8sPvcStatusArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "pvc",
+            Some(args.pvc.as_str()),
+        )])?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -279,5 +283,16 @@ mod tests {
             save_output: None,
         };
         assert!(K8sPvcStatusTool::build_command(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_option_like_pvc_is_refused() {
+        let args: SshK8sPvcStatusArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "pvc": "-x"})).unwrap();
+        let err = K8sPvcStatusTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'pvc' must not start with '-'"),
+            "{err}"
+        );
     }
 }

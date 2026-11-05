@@ -19,9 +19,9 @@ use crate::error::{BridgeError, Result};
 use crate::ssh::CommandOutput;
 
 /// Default SSM document for Linux command execution.
-const DEFAULT_LINUX_DOCUMENT: &str = "AWS-RunShellScript";
+const DEFAULT_LINUX_DOCUMENT: &str = crate::config::SSM_SHELL_DOCUMENT;
 /// Default SSM document for Windows command execution.
-const DEFAULT_WINDOWS_DOCUMENT: &str = "AWS-RunPowerShellScript";
+const DEFAULT_WINDOWS_DOCUMENT: &str = crate::config::SSM_POWERSHELL_DOCUMENT;
 /// Poll interval for command status.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Maximum time to wait for command completion.
@@ -39,6 +39,42 @@ pub struct SsmConnection {
     document: String,
     host_name: String,
     failed: bool,
+}
+
+/// Refuse a command that holds an SSM parameter reference such as
+/// `{{ssm:/some/parameter}}` or `{{ ssm-secure:name }}`.
+///
+/// The SSM service substitutes these in the `commands` parameter on its side,
+/// before any shell runs, so quoting does not protect them: a caller-supplied
+/// argument could make the instance echo a Parameter Store value the caller
+/// may not read. A `{{` that is not a `name:` reference (a Go template such
+/// as `{{.Names}}` or `{{ range .x }}`) is left alone.
+///
+/// # Errors
+///
+/// [`BridgeError::CommandDenied`] when `command` holds a reference.
+fn refuse_parameter_references(command: &str) -> Result<()> {
+    for (i, _) in command.char_indices().filter(|&(_, c)| c == '{') {
+        let Some(after) = command.get(i..).and_then(|t| t.strip_prefix("{{")) else {
+            continue;
+        };
+        let body = after.trim_start();
+        let name_len = body
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(body.len());
+        let is_reference = name_len > 0
+            && body
+                .get(name_len..)
+                .is_some_and(|tail| tail.trim_start().starts_with(':'));
+        if is_reference {
+            return Err(BridgeError::CommandDenied {
+                reason: "the command holds an SSM parameter reference ('{{name:...}}'), which \
+                         the SSM service would substitute before any shell runs: refused"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 impl SsmConnection {
@@ -112,6 +148,8 @@ impl SsmConnection {
             command = %command,
             "Executing SSM command"
         );
+
+        refuse_parameter_references(command)?;
 
         // Send command
         let send_result = self
@@ -227,6 +265,33 @@ fn elapsed_ms(start: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refuse_parameter_references_refuses_ssm_references() {
+        for command in [
+            "echo {{ssm:/some/parameter}}",
+            "echo '{{ ssm:/p }}'",
+            "echo {{ssm-secure:p}}",
+            "echo {{{ssm:p}}}",
+            "ls '{{global:DATE}}'",
+        ] {
+            let err = refuse_parameter_references(command).expect_err(command);
+            assert!(err.to_string().contains("SSM parameter reference"), "{err}");
+        }
+    }
+
+    #[test]
+    fn refuse_parameter_references_keeps_go_templates_and_plain_braces() {
+        for command in [
+            "docker ps --format '{{.Names}}'",
+            "docker inspect --format '{{ range .Mounts }}{{ .Source }}{{ end }}' x",
+            "echo ${HOME} {a} { b }",
+            "echo {{",
+            "",
+        ] {
+            refuse_parameter_references(command).expect(command);
+        }
+    }
 
     #[test]
     fn test_default_documents() {

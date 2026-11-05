@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::docker::DockerCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -85,6 +86,10 @@ impl StandardTool for DockerNetworkInspectTool {
     }"#;
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Json;
+
+    fn validate(args: &SshDockerNetworkInspectArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("network", &args.network)
+    }
 
     fn build_command(
         args: &SshDockerNetworkInspectArgs,
@@ -247,5 +252,20 @@ mod tests {
             }
             _ => panic!("Expected Text content"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_network_starting_with_dash_is_refused() {
+        let handler = SshDockerNetworkInspectHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(Some(json!({"host": "server1", "network": "-x"})), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'network' must not start with '-'"),
+            "{err}"
+        );
     }
 }

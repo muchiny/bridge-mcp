@@ -8,6 +8,7 @@ use serde_json::json;
 
 use super::utils::shell_escape;
 use crate::config::HostConfig;
+use crate::domain::use_cases::backup_advanced::refuse_remote_archive;
 use crate::error::Result;
 use crate::mcp::apps::table;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -79,6 +80,7 @@ impl StandardTool for BackupListTool {
         crate::domain::output_kind::OutputKind::Tabular;
 
     fn build_command(args: &SshBackupListArgs, _host_config: &HostConfig) -> Result<String> {
+        refuse_remote_archive("archive_file", &args.archive_file)?;
         let verbose = args.verbose.unwrap_or(true);
         let tar_flag = if verbose { "-tvf" } else { "-tf" };
         Ok(format!(
@@ -373,5 +375,19 @@ mod tests {
         let dr = crate::domain::data_reduction::DataReductionArgs::default();
         let result = BackupListTool::post_process(result, &args, "", &dr);
         assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_build_command_refuses_remote_archive_name() {
+        let args: SshBackupListArgs = serde_json::from_value(json!({
+            "host": "s", "archive_file": "exfil.example:etc.tar"
+        }))
+        .unwrap();
+        assert!(BackupListTool::build_command(&args, &test_host_config()).is_err());
+        let ok: SshBackupListArgs = serde_json::from_value(json!({
+            "host": "s", "archive_file": "./exfil.example:etc.tar"
+        }))
+        .unwrap();
+        assert!(BackupListTool::build_command(&ok, &test_host_config()).is_ok());
     }
 }

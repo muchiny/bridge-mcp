@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracing::{info, warn};
 
-use crate::config::{HostConfig, OsType};
+use crate::config::{HostConfig, OsType, ShellType};
 use crate::domain::output_truncator::truncate_output_with_cache;
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
@@ -64,9 +64,21 @@ macro_rules! impl_common_args {
 }
 pub(crate) use impl_common_args;
 
+/// The shell a [`StandardTool`]'s builder quotes its arguments for, from its
+/// `OS_GUARD`: `PowerShell` for the Windows tools, a POSIX shell for the Linux
+/// tools and for the unrestricted ones, whose builders (`git`, `docker`,
+/// `kubectl`, …) all quote for POSIX.
+#[must_use]
+pub const fn builder_shell(os_guard: Option<OsType>) -> ShellType {
+    match os_guard {
+        Some(OsType::Windows) => ShellType::PowerShell,
+        Some(OsType::Linux) | None => ShellType::Posix,
+    }
+}
+
 /// Trait for tools that follow the standard execution pipeline.
 ///
-/// The pipeline is: parse args → host lookup → OS guard → validate →
+/// The pipeline is: parse args → host lookup → OS guard → shell guard → validate →
 /// build command → `validate_builtin` → rate limit → execute with retry →
 /// process success → truncate → save output → return.
 pub trait StandardTool: Send + Sync + 'static {
@@ -80,10 +92,20 @@ pub trait StandardTool: Send + Sync + 'static {
     /// JSON schema string for the tool's input.
     const SCHEMA: &'static str;
 
-    /// Optional OS restriction. `None` = no restriction.
+    /// Optional OS restriction. `None` = no OS restriction.
     /// `Some(OsType::Linux)` = reject Windows hosts.
     /// `Some(OsType::Windows)` = reject non-Windows hosts.
+    ///
+    /// It also names the shell the builder quotes for ([`builder_shell`]):
+    /// whatever the OS, a host whose effective shell differs is refused.
     const OS_GUARD: Option<OsType> = None;
+
+    /// The builder sends the caller's command as it is, with no quoting and
+    /// no shell syntax of its own (`ssh_fleet_diff`, `ssh_canary_exec`
+    /// without a health check), so step 3b has nothing to protect and lets it
+    /// run in any shell. A builder that wraps the command in POSIX text must
+    /// refuse other shells itself.
+    const RAW_COMMAND: bool = false;
 
     /// Expected output format. Controls which data-reduction params are
     /// advertised in the schema and which reduction pipeline runs at runtime.
@@ -487,6 +509,27 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             }
         }
 
+        // Step 3b: shell guard. The builder quotes every argument for the
+        // shell of its OS family (`builder_shell`); on a host whose commands
+        // run in another shell that quoting does not hold, and a tool
+        // argument becomes a command (`shell_mismatch` has the cases).
+        // Audited like step 4, with no command yet to name: it is the only
+        // trace a call that would once have injected leaves now.
+        if let Some(refusal) = (!T::RAW_COMMAND)
+            .then(|| {
+                crate::mcp::tool_handlers::utils::shell_mismatch(
+                    T::NAME,
+                    builder_shell(T::OS_GUARD),
+                    host_config,
+                )
+            })
+            .flatten()
+        {
+            ctx.execute_use_case
+                .log_denied(T::NAME, &host, "", &refusal);
+            return Ok(ToolCallResult::error(refusal));
+        }
+
         // Step 4: Domain validation (optional), and its denial is audited.
         //
         // This hook is where the specialised tools enforce what the whitelist
@@ -553,8 +596,20 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
             return Ok(early);
         }
 
-        // Step 5: Build command
-        let command = T::build_command(&args, host_config)?;
+        // Step 5: Build command. Several builders refuse an argument
+        // themselves (a path, a `kubeconfig`, a dashed command); that refusal
+        // is audited like one from `validate`, whatever its error variant.
+        let command = match T::build_command(&args, host_config) {
+            Ok(command) => command,
+            Err(e) => {
+                let reason = match &e {
+                    BridgeError::CommandDenied { reason } => reason.clone(),
+                    _ => e.to_string(),
+                };
+                ctx.execute_use_case.log_denied(T::NAME, &host, "", &reason);
+                return Err(e);
+            }
+        };
 
         // Step 5b: Elevate, if asked. Before step 6 on purpose: the blacklist
         // must see the command that will actually run, not the unelevated one
@@ -596,6 +651,23 @@ impl<T: StandardTool> ToolHandler for StandardToolHandler<T> {
                 return Ok(ToolCallResult::error(format!(
                     "'sudo' is not supported on Windows host '{host}'."
                 )));
+            }
+            (command, None)
+        } else if host_config.effective_shell() != ShellType::Posix {
+            // `sudo` wraps the command in POSIX text (`sudo -n bash -c '…'`).
+            // A Linux host can still read commands with another shell (a
+            // `shell:` override, WinRM or PSRP left at `os_type: linux`), and
+            // a `RAW_COMMAND` tool reaches this point there: that shell would
+            // read the POSIX quoting differently, past the whitelist that
+            // judged the unwrapped command. Refused like `ssh_exec` does.
+            if privilege.is_elevated() {
+                let reason = format!(
+                    "'sudo' requires a POSIX shell; host '{host}' uses '{}'.",
+                    format!("{:?}", host_config.effective_shell()).to_lowercase()
+                );
+                ctx.execute_use_case
+                    .log_denied(T::NAME, &host, &command, &reason);
+                return Ok(ToolCallResult::error(reason));
             }
             (command, None)
         } else {
@@ -1658,6 +1730,224 @@ mod tests {
             panic!("Expected text content")
         };
         assert!(text.contains("not available on Windows"));
+    }
+
+    // ============== Shell guard tests ==============
+
+    use crate::mcp::tool_handlers::utils::guard_test_support::{context_with_target, refusal};
+
+    /// The refusal the pipeline returned for `T` on `target`.
+    async fn refusal_from<T: StandardTool>(ctx: &ToolContext) -> String {
+        refusal(
+            &StandardToolHandler::<T>::new(),
+            json!({"host": "target"}),
+            ctx,
+        )
+        .await
+    }
+
+    #[test]
+    fn builder_shell_follows_the_os_guard() {
+        assert_eq!(builder_shell(Some(OsType::Windows)), ShellType::PowerShell);
+        assert_eq!(builder_shell(Some(OsType::Linux)), ShellType::Posix);
+        assert_eq!(builder_shell(None), ShellType::Posix);
+    }
+
+    /// The reported injection: an unrestricted tool (`OS_GUARD = None`, like
+    /// `ssh_git_diff`) on a `WinRM` host. Its POSIX-quoted arguments would be
+    /// read by `PowerShell`.
+    #[cfg(feature = "winrm")]
+    #[tokio::test]
+    async fn shell_guard_refuses_an_unrestricted_tool_on_a_winrm_host() {
+        let ctx = context_with_target("windows", r#","protocol":"winrm""#);
+        let text = refusal_from::<MockTool>(&ctx).await;
+        assert!(text.contains("mock_tool"), "{text}");
+        assert!(text.contains("PowerShell"), "{text}");
+    }
+
+    /// `os_type` is the default `linux` here, so the OS guard lets a Linux
+    /// tool through; only the shell guard stands in the way.
+    #[cfg(feature = "winrm")]
+    #[tokio::test]
+    async fn shell_guard_refuses_a_linux_tool_on_a_winrm_host_left_at_os_type_linux() {
+        let ctx = context_with_target("linux", r#","protocol":"winrm""#);
+        let text = refusal_from::<MockLinuxTool>(&ctx).await;
+        assert!(text.contains("PowerShell"), "{text}");
+    }
+
+    #[cfg(feature = "psrp")]
+    #[tokio::test]
+    async fn shell_guard_refuses_an_unrestricted_tool_on_a_psrp_host_with_shell_posix() {
+        let ctx = context_with_target("linux", r#","protocol":"psrp","shell":"posix""#);
+        let text = refusal_from::<MockTool>(&ctx).await;
+        assert!(text.contains("PowerShell"), "{text}");
+    }
+
+    struct MockRawTool;
+
+    impl StandardTool for MockRawTool {
+        type Args = MockArgs;
+        const NAME: &'static str = "mock_raw_tool";
+        const DESCRIPTION: &'static str = "A raw-command tool";
+        const SCHEMA: &'static str = r#"{
+            "type": "object",
+            "properties": { "host": { "type": "string" } },
+            "required": ["host"]
+        }"#;
+        const RAW_COMMAND: bool = true;
+
+        fn build_command(_args: &MockArgs, _host_config: &HostConfig) -> Result<String> {
+            Ok("Get-Date".to_string())
+        }
+    }
+
+    /// A tool that sends the caller's command as is passes step 3b on a
+    /// `PowerShell` host: no quoting of its own can break there.
+    #[tokio::test]
+    async fn a_raw_command_tool_runs_on_a_powershell_host() {
+        let mut config = (*context_with_target("linux", r#","shell":"powershell""#).config).clone();
+        config.security.mode = crate::config::SecurityMode::Permissive;
+        let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        );
+        let result = StandardToolHandler::<MockRawTool>::new()
+            .execute(Some(json!({"host": "target"})), &ctx)
+            .await
+            .expect("runs");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(ctx.connection_pool.mock_calls()[0].0, "Get-Date");
+    }
+
+    /// `sudo` wraps the command in POSIX text, so a raw-command tool that
+    /// passes step 3b on a non-POSIX host is refused elevation there, audited,
+    /// and sends nothing.
+    #[tokio::test]
+    async fn a_raw_command_tool_is_refused_sudo_off_posix() {
+        for extra in [r#","shell":"powershell""#, r#","shell":"cmd""#] {
+            let mut config = (*context_with_target("linux", extra).config).clone();
+            config.security.mode = crate::config::SecurityMode::Permissive;
+            let ctx = crate::ports::mock::create_test_context_with_config_and_mock_executor(
+                config,
+                crate::ssh::CommandOutput {
+                    exit_code: 0,
+                    stdout: "ok".to_string(),
+                    stderr: String::new(),
+                    duration_ms: 1,
+                },
+            );
+            let result = StandardToolHandler::<MockRawTool>::new()
+                .execute(Some(json!({"host": "target", "sudo": true})), &ctx)
+                .await
+                .expect("a refusal is a tool result");
+            assert_eq!(result.is_error, Some(true), "{extra}");
+            assert!(ctx.connection_pool.mock_calls().is_empty(), "{extra}");
+            let events = ctx.audit_logger.drain_for_test();
+            assert_eq!(events.len(), 1, "{extra}: {events:?}");
+            assert_eq!(events[0].event_type, "command_denied");
+            match &events[0].result {
+                crate::security::CommandResult::Denied { reason } => {
+                    assert!(reason.contains("requires a POSIX shell"), "{reason}");
+                }
+                r => panic!("expected Denied, got {r:?}"),
+            }
+        }
+    }
+
+    /// The shell guard's refusal is a policy denial: it leaves one
+    /// `command_denied` event naming the tool and the host, with no command
+    /// (none is built at step 3b).
+    #[tokio::test]
+    async fn a_shell_mismatch_is_audited() {
+        let ctx = context_with_target("linux", r#","shell":"powershell""#);
+        let result = StandardToolHandler::<MockTool>::new()
+            .execute(Some(json!({"host": "target"})), &ctx)
+            .await
+            .expect("a refusal is a tool result");
+        assert_eq!(result.is_error, Some(true));
+
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "expected one denial event: {events:?}");
+        let e = &events[0];
+        assert_eq!(e.event_type, "command_denied");
+        assert_eq!(e.host, "target");
+        assert_eq!(e.tool_name.as_deref(), Some(MockTool::NAME));
+        assert_eq!(e.command, "", "no command is built at step 3b");
+        match &e.result {
+            crate::security::CommandResult::Denied { reason } => {
+                assert!(reason.contains("PowerShell"), "{reason}");
+            }
+            r => panic!("expected Denied, got {r:?}"),
+        }
+    }
+
+    /// A builder that refuses an argument itself leaves the same trace as a
+    /// refusal from `validate`.
+    #[tokio::test]
+    async fn a_refusal_from_the_builder_is_audited() {
+        struct MockRefusingBuilder;
+        impl StandardTool for MockRefusingBuilder {
+            type Args = MockArgs;
+            const NAME: &'static str = "mock_refusing_builder";
+            const DESCRIPTION: &'static str = "Mock tool whose builder refuses";
+            const SCHEMA: &'static str =
+                r#"{"type":"object","properties":{"host":{"type":"string"}},"required":["host"]}"#;
+            fn build_command(_a: &MockArgs, _h: &HostConfig) -> Result<String> {
+                Err(BridgeError::CommandDenied {
+                    reason: "refused by the builder".to_string(),
+                })
+            }
+        }
+
+        let ctx = context_with_target("linux", "");
+        let err = StandardToolHandler::<MockRefusingBuilder>::new()
+            .execute(Some(json!({"host": "target"})), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::CommandDenied { .. }), "{err:?}");
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event_type, "command_denied");
+        assert_eq!(
+            events[0].tool_name.as_deref(),
+            Some("mock_refusing_builder")
+        );
+        match &events[0].result {
+            crate::security::CommandResult::Denied { reason } => {
+                assert_eq!(reason, "refused by the builder");
+            }
+            r => panic!("expected Denied, got {r:?}"),
+        }
+    }
+
+    /// `cmd.exe` does not treat `'` as a quote, so a POSIX-quoted `&` runs a
+    /// second command on a Windows SSH host.
+    #[tokio::test]
+    async fn shell_guard_refuses_an_unrestricted_tool_on_a_windows_ssh_host() {
+        let ctx = context_with_target("windows", "");
+        let text = refusal_from::<MockTool>(&ctx).await;
+        assert!(text.contains("cmd.exe"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn shell_guard_refuses_a_windows_tool_on_a_cmd_host() {
+        let ctx = context_with_target("windows", "");
+        let text = refusal_from::<MockWindowsTool>(&ctx).await;
+        assert!(text.contains("cmd.exe"), "{text}");
+        assert!(text.contains("`shell: powershell`"), "{text}");
+    }
+
+    /// A Linux SSH host declared with a `PowerShell` default shell.
+    #[tokio::test]
+    async fn shell_guard_refuses_an_unrestricted_tool_on_a_powershell_ssh_host() {
+        let ctx = context_with_target("linux", r#","shell":"powershell""#);
+        let text = refusal_from::<MockTool>(&ctx).await;
+        assert!(text.contains("PowerShell"), "{text}");
     }
 
     #[tokio::test]

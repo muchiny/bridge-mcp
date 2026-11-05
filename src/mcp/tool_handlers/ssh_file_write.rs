@@ -129,10 +129,12 @@ impl ToolHandler for SshFileWriteHandler {
                     host: args.host.clone(),
                 })?;
 
-        if let Some(refusal) =
-            crate::mcp::tool_handlers::utils::reject_posix_only_on_windows(host_config, self.name())
+        if let Some(reason) =
+            crate::mcp::tool_handlers::utils::posix_only_refusal(host_config, self.name())
         {
-            return Ok(refusal);
+            ctx.execute_use_case
+                .log_denied(self.name(), &args.host, "", &reason);
+            return Ok(ToolCallResult::error(reason));
         }
 
         // Step 3: Rate limit
@@ -796,5 +798,23 @@ mod tests {
             result.remote_exit_code, None,
             "sortie simulée 0 : aucun code posé : {result:?}"
         );
+    }
+
+    /// `printf` into a POSIX-quoted path: refused on a Windows host and on any host whose
+    /// commands do not run in a POSIX shell, before anything is sent.
+    #[tokio::test]
+    async fn test_refuses_hosts_without_a_posix_shell() {
+        use crate::mcp::tool_handlers::utils::guard_test_support::{context_with_target, refusal};
+        let args = serde_json::json!({"host": "target", "path": "/tmp/x", "content": "y"});
+        let text = refusal(
+            &SshFileWriteHandler,
+            args.clone(),
+            &context_with_target("windows", ""),
+        )
+        .await;
+        assert!(text.contains("Windows"), "{text}");
+        let pwsh = context_with_target("linux", r#","shell":"powershell""#);
+        let text = refusal(&SshFileWriteHandler, args, &pwsh).await;
+        assert!(text.contains("PowerShell"), "{text}");
     }
 }

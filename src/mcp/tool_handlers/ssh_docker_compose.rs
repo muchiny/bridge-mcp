@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::docker::DockerCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -119,7 +120,11 @@ impl StandardTool for DockerComposeTool {
     }"#;
 
     fn validate(args: &SshDockerComposeArgs, _host_config: &HostConfig) -> Result<()> {
-        DockerCommandBuilder::validate_compose_action(&args.action)
+        DockerCommandBuilder::validate_compose_action(&args.action)?;
+        for service in args.services.iter().flatten() {
+            refuse_option_like("services", service)?;
+        }
+        Ok(())
     }
 
     fn build_command(args: &SshDockerComposeArgs, _host_config: &HostConfig) -> Result<String> {
@@ -442,5 +447,20 @@ mod tests {
         assert!(cmd.contains("web"));
         assert!(cmd.contains("db"));
         assert!(cmd.contains("--build"));
+    }
+
+    #[tokio::test]
+    async fn test_services_starting_with_dash_is_refused() {
+        let handler = SshDockerComposeHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(Some(json!({"host": "server1", "action": "up", "project_dir": "/opt/app", "services": ["web", "-x"]})), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'services' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -92,6 +92,11 @@ impl StandardTool for GitPullTool {
         "required": ["host", "path"]
     }"#;
 
+    fn validate(args: &SshGitPullArgs, _host_config: &HostConfig) -> Result<()> {
+        GitCommandBuilder::validate_not_option("remote", args.remote.as_deref())?;
+        GitCommandBuilder::validate_not_option("branch", args.branch.as_deref())
+    }
+
     fn build_command(args: &SshGitPullArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(GitCommandBuilder::build_pull_command(
             &args.path,
@@ -369,5 +374,16 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_shaped_remote_and_branch() {
+        for key in ["remote", "branch"] {
+            let mut v = json!({"host": "s", "path": "/opt/repo"});
+            v[key] = json!("--upload-pack=touch /tmp/p");
+            let args: SshGitPullArgs = serde_json::from_value(v).unwrap();
+            let err = GitPullTool::validate(&args, &test_host_config()).unwrap_err();
+            assert!(err.to_string().contains(&format!("'{key}'")), "{err}");
+        }
     }
 }

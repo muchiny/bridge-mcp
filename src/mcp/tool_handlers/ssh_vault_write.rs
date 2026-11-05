@@ -17,7 +17,6 @@ pub struct SshVaultWriteArgs {
     /// incapable of leaking through `format!("{args:?}")`. The pair only
     /// needs to live long enough to build the remote `vault kv put` command.
     data: Vec<RedactedSecret>,
-    vault_addr: Option<String>,
     mount: Option<String>,
     timeout_seconds: Option<u64>,
     max_output: Option<u64>,
@@ -34,9 +33,16 @@ impl StandardTool for VaultWriteTool {
 
     const NAME: &'static str = "ssh_vault_write";
 
+    /// The secrets travel in the command string; elevation would copy them
+    /// into the argv of `sudo` and of the root `bash -c`.
+    const ALLOWS_ELEVATION: bool = false;
+
     const DESCRIPTION: &'static str = "Write (create or overwrite) a secret in HashiCorp Vault on a remote host via `vault kv put`. \
-        Provide key=value pairs in `data`; values are transmitted via a stdin heredoc so they \
-        never appear in the remote process argv or `ps` output. Use ssh_vault_list to browse \
+        Provide key=value pairs in `data` (each split at its first `=`; no empty key, no repeated \
+        key); they are sent to `vault` as one JSON object on its stdin through a heredoc, so \
+        they are not in the `vault` process argv; the heredoc is part of the command string, so the \
+        remote login shell's own command line still carries them while it runs, and `sudo` is \
+        therefore refused. Use ssh_vault_list to browse \
         existing paths, ssh_vault_status to confirm Vault is unsealed, and ssh_vault_read to \
         verify the written values.";
 
@@ -54,11 +60,7 @@ impl StandardTool for VaultWriteTool {
                     "data": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "One or more key=value pairs to write e.g. [\"username=admin\", \"password=s3cr3t\"]; values are piped via stdin heredoc and never exposed in remote process argv"
-                    },
-                    "vault_addr": {
-                        "type": "string",
-                        "description": "Vault server address e.g. https://vault.example.com:8200 (overrides VAULT_ADDR env on the remote host)"
+                        "description": "One or more key=value pairs to write e.g. [\"username=admin\", \"password=s3cr3t\"]; the pairs reach `vault` as a JSON object via a stdin heredoc, but the heredoc is part of the command string the remote login shell runs"
                     },
                     "mount": {
                         "type": "string",
@@ -80,13 +82,12 @@ impl StandardTool for VaultWriteTool {
                 "required": ["host", "path", "data"]
             }"#;
 
+    fn validate(args: &SshVaultWriteArgs, _host_config: &HostConfig) -> Result<()> {
+        VaultCommandBuilder::validate_write_args(&args.path, &args.data)
+    }
+
     fn build_command(args: &SshVaultWriteArgs, _host_config: &HostConfig) -> Result<String> {
-        VaultCommandBuilder::build_write_command(
-            &args.path,
-            &args.data,
-            args.vault_addr.as_deref(),
-            args.mount.as_deref(),
-        )
+        VaultCommandBuilder::build_write_command(&args.path, &args.data, args.mount.as_deref())
     }
 }
 
@@ -150,7 +151,6 @@ mod tests {
             "host": "myhost",
             "path": "secret/data/myapp",
             "data": ["username=admin", "password=secret123"],
-            "vault_addr": "https://vault.example.com:8200",
             "mount": "secret",
             "timeout_seconds": 30,
             "max_output": 5000,
@@ -163,10 +163,6 @@ mod tests {
         // `as_str()` boundary to compare as &str.
         let data_strs: Vec<&str> = args.data.iter().map(RedactedSecret::as_str).collect();
         assert_eq!(data_strs, vec!["username=admin", "password=secret123"]);
-        assert_eq!(
-            args.vault_addr.as_deref(),
-            Some("https://vault.example.com:8200")
-        );
         assert_eq!(args.mount.as_deref(), Some("secret"));
         assert_eq!(args.timeout_seconds, Some(30));
         assert_eq!(args.max_output, Some(5000));
@@ -181,7 +177,6 @@ mod tests {
         assert_eq!(args.path, "secret/data/myapp");
         let data_strs: Vec<&str> = args.data.iter().map(RedactedSecret::as_str).collect();
         assert_eq!(data_strs, vec!["key=value"]);
-        assert!(args.vault_addr.is_none());
         assert!(args.mount.is_none());
         assert!(args.timeout_seconds.is_none());
         assert!(args.max_output.is_none());
@@ -197,8 +192,18 @@ mod tests {
         assert!(properties.contains_key("timeout_seconds"));
         assert!(properties.contains_key("max_output"));
         assert!(properties.contains_key("save_output"));
-        assert!(properties.contains_key("vault_addr"));
+        assert!(!properties.contains_key("vault_addr"));
         assert!(properties.contains_key("mount"));
+    }
+
+    #[test]
+    fn test_vault_addr_argument_is_refused() {
+        // A caller-chosen address would receive the host's Vault token.
+        let mut value: serde_json::Value =
+            json!({"host": "h", "path": "secret/a", "data": ["k=v"]});
+        value["vault_addr"] = json!("http://10.0.0.66:8200");
+        let err = serde_json::from_value::<SshVaultWriteArgs>(value).unwrap_err();
+        assert!(err.to_string().contains("vault_addr"), "{err}");
     }
 
     #[test]
@@ -218,7 +223,6 @@ mod tests {
             host: "myhost".to_string(),
             path: "secret/data/myapp".to_string(),
             data: vec![RedactedSecret::from("api_key=s3cr3t")],
-            vault_addr: None,
             mount: None,
             timeout_seconds: None,
             max_output: None,
@@ -408,5 +412,31 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_validate_refuses_before_build() {
+        let host = test_host_config();
+        let bad_path: SshVaultWriteArgs =
+            serde_json::from_value(json!({"host": "s", "path": "secret/$(id)", "data": ["k=v"]}))
+                .unwrap();
+        assert!(VaultWriteTool::validate(&bad_path, &host).is_err());
+        let bad_data: SshVaultWriteArgs =
+            serde_json::from_value(json!({"host": "s", "path": "secret/app", "data": ["novalue"]}))
+                .unwrap();
+        assert!(VaultWriteTool::validate(&bad_data, &host).is_err());
+        let ok: SshVaultWriteArgs = serde_json::from_value(
+            json!({"host": "s", "path": "secret/app", "data": ["username=admin", "password=s3cr3t"]}),
+        )
+        .unwrap();
+        assert!(VaultWriteTool::validate(&ok, &host).is_ok());
+        let cmd = VaultWriteTool::build_command(&ok, &host).unwrap();
+        let body: serde_json::Value = serde_json::from_str(cmd.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(body, json!({"username": "admin", "password": "s3cr3t"}));
+    }
+
+    #[test]
+    fn test_elevation_is_refused_for_the_secret_bearing_command() {
+        const { assert!(!VaultWriteTool::ALLOWS_ELEVATION) };
     }
 }

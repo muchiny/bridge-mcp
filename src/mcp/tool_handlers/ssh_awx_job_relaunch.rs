@@ -155,6 +155,12 @@ impl ToolHandler for SshAwxJobRelaunchHandler {
             .hosts
             .get(host)
             .ok_or_else(|| BridgeError::UnknownHost { host: host.clone() })?;
+        if let Some(reason) = crate::mcp::tool_handlers::utils::awx_host_refusal(host, host_config)
+        {
+            ctx.execute_use_case
+                .log_denied(self.name(), host, "", &reason);
+            return Ok(ToolCallResult::error(reason));
+        }
 
         let limits = ctx.config.limits.clone();
         let mut conn = ctx

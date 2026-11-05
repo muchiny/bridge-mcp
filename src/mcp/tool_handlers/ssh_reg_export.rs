@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::config::OsType;
 use crate::domain::use_cases::windows_registry::{
-    WindowsRegistryCommandBuilder, validate_file_path,
+    WindowsRegistryCommandBuilder, validate_file_path, validate_registry_key,
 };
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -79,6 +79,7 @@ impl StandardTool for RegExportTool {
     }
 
     fn validate(args: &SshRegExportArgs, _host_config: &HostConfig) -> Result<()> {
+        validate_registry_key(&args.key)?;
         validate_file_path(&args.file)?;
         Ok(())
     }
@@ -205,7 +206,7 @@ mod tests {
             sudo_password: None,
             tags: Vec::new(),
             os_type: crate::config::OsType::Windows,
-            shell: None,
+            shell: Some(crate::config::ShellType::PowerShell),
             retry: None,
             protocol: crate::config::Protocol::default(),
 
@@ -234,6 +235,34 @@ mod tests {
         assert_ne!(cmd, "");
     }
 
+    #[test]
+    fn export_refuses_a_unc_file_and_a_key_without_a_hive() {
+        let host = test_host_config();
+        for (key, file) in [
+            (
+                "HKLM\\SOFTWARE\\Vendor",
+                "\\\\attacker.example\\share\\loot.reg",
+            ),
+            ("\\\\attacker.example\\share", "C:\\out.reg"),
+            ("/y", "C:\\out.reg"),
+            ("HKLM\\SOFTWARE\" \\\\attacker\\share\\loot\" x\"z", "a"),
+            ("HKLM\\SOFTWARE\\Vendor", "\"\\\\attacker\\share\\x.reg\""),
+            ("HKLM\\SOFTWARE\\My App\\", "C:\\out.reg"),
+        ] {
+            let args: SshRegExportArgs =
+                serde_json::from_value(json!({"host": "s", "key": key, "file": file})).unwrap();
+            assert!(
+                RegExportTool::validate(&args, &host).is_err(),
+                "{key} {file}"
+            );
+        }
+        let ok: SshRegExportArgs = serde_json::from_value(
+            json!({"host": "s", "key": "HKLM\\SOFTWARE\\Vendor", "file": "C:\\out.reg"}),
+        )
+        .unwrap();
+        assert!(RegExportTool::validate(&ok, &host).is_ok());
+    }
+
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {
         crate::ssh::CommandOutput {
             stdout: stdout.to_string(),
@@ -260,7 +289,7 @@ mod tests {
                 sudo_password: None,
                 tags: Vec::new(),
                 os_type: OsType::Windows,
-                shell: None,
+                shell: Some(crate::config::ShellType::PowerShell),
                 retry: None,
                 protocol: crate::config::Protocol::default(),
                 #[cfg(feature = "winrm")]

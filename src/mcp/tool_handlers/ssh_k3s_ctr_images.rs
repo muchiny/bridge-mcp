@@ -4,7 +4,9 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::output_kind::OutputKind;
-use crate::domain::use_cases::k3s::{K3sCommandBuilder, validate_ctr_action, validate_path};
+use crate::domain::use_cases::k3s::{
+    K3sCommandBuilder, validate_ctr_action, validate_k3s_bin, validate_path,
+};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -58,6 +60,9 @@ impl StandardTool for SshK3sCtrImagesTool {
 
     fn build_command(args: &SshK3sCtrImagesArgs, _host_config: &HostConfig) -> Result<String> {
         validate_ctr_action(&args.action)?;
+        if let Some(b) = args.k3s_bin.as_deref() {
+            validate_k3s_bin(b)?;
+        }
         if let Some(t) = &args.tarball {
             validate_path(t)?;
         }
@@ -259,5 +264,18 @@ mod tests {
             save_output: None,
         };
         assert!(SshK3sCtrImagesTool::build_command(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_build_command_refuses_dash_or_foreign_k3s_bin() {
+        for bin in ["-s", "/bin/sh"] {
+            let args: SshK3sCtrImagesArgs =
+                serde_json::from_value(json!({"host": "s1", "k3s_bin": bin, "action": "ls"}))
+                    .unwrap();
+            let err = SshK3sCtrImagesTool::build_command(&args, &test_host_config())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("k3s_bin"), "err: {err}");
+        }
     }
 }

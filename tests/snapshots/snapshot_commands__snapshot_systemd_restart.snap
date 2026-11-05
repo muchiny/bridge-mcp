@@ -2,4 +2,4 @@
 source: tests/snapshot_commands.rs
 expression: "SystemdCommandBuilder::build_restart_command(\"nginx\", \"restart\").unwrap()"
 ---
-systemctl restart 'nginx'
+systemctl restart -- 'nginx'

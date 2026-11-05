@@ -9,8 +9,12 @@ use crate::config::HostConfig;
 use crate::config::OsType;
 use crate::domain::use_cases::pty::{PtyCommandBuilder, validate_dimensions, validate_pty_command};
 use crate::error::Result;
-use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::standard_tool::{
+    StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
+};
 use crate::mcp_standard_tool;
+use crate::ports::ToolContext;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +106,19 @@ impl StandardTool for PtyExecTool {
         Ok(())
     }
 
+    /// `command` is a free-form shell fragment (`script -c` hands it to
+    /// `/bin/sh`), so it gets the same whitelist treatment as `ssh_exec`
+    /// instead of the blacklist-only `validate_builtin`.
+    fn pre_execute(
+        args: &SshPtyExecArgs,
+        ctx: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        std::future::ready(
+            validate_free_form_command(ctx, PtyExecTool::NAME, &args.host, &args.command)
+                .map(|()| None),
+        )
+    }
+
     fn build_command(args: &SshPtyExecArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(PtyCommandBuilder::build_pty_exec_command(
             &args.command,
@@ -146,6 +163,25 @@ mod tests {
             BridgeError::UnknownHost { host } => assert_eq!(host, "nonexistent"),
             e => panic!("Expected UnknownHost, got: {e:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn pty_exec_command_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^cat"]);
+        let args = SshPtyExecArgs {
+            host: "server1".to_string(),
+            command: "id".to_string(),
+            rows: None,
+            cols: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let result = PtyExecTool::pre_execute(&args, &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "command must be whitelist-checked, got: {result:?}"
+        );
     }
 
     #[test]

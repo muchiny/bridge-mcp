@@ -52,7 +52,8 @@ impl StandardTool for StorageMountTool {
         specify fs_type (e.g. ext4, xfs, nfs, cifs) and options (e.g. ro,noexec,nosuid). Discover \
         available block devices and partition names with ssh_storage_lsblk first. To unmount use \
         ssh_storage_umount; to make the mount persistent add it to /etc/fstab (visible via \
-        ssh_storage_fstab).";
+        ssh_storage_fstab). fs_type takes kernel filesystems and fixed-helper types only (no \
+        fuse types).";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -98,12 +99,12 @@ impl StandardTool for StorageMountTool {
     const OS_GUARD: Option<OsType> = Some(OsType::Linux);
 
     fn build_command(args: &SshStorageMountArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(StorageCommandBuilder::build_mount_command(
+        StorageCommandBuilder::build_mount_command(
             &args.device,
             &args.mount_point,
             args.fs_type.as_deref(),
             args.options.as_deref(),
-        ))
+        )
     }
 }
 
@@ -448,5 +449,30 @@ mod tests {
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_build_command_refuses_fuse_helper_selection() {
+        let host = test_host_config();
+        for v in [
+            json!({"host": "s", "device": "/tmp/p.sh", "mount_point": "/mnt", "fs_type": "fuse.sh"}),
+            json!({"host": "s", "device": "sh#/tmp/p.sh", "mount_point": "/mnt", "fs_type": "fuse"}),
+            json!({"host": "s", "device": "sh#/tmp/p.sh", "mount_point": "/mnt"}),
+        ] {
+            let args: SshStorageMountArgs = serde_json::from_value(v).unwrap();
+            assert!(StorageMountTool::build_command(&args, &host).is_err());
+        }
+    }
+
+    #[test]
+    fn test_build_command_accepts_zfs_and_ordinary_options() {
+        let host = test_host_config();
+        let args: SshStorageMountArgs = serde_json::from_value(json!({
+            "host": "s", "device": "tank/data", "mount_point": "/data", "fs_type": "zfs",
+            "options": "ro,noatime"
+        }))
+        .unwrap();
+        let cmd = StorageMountTool::build_command(&args, &host).unwrap();
+        assert_eq!(cmd, "mount -t 'zfs' -o 'ro,noatime' -- 'tank/data' '/data'");
     }
 }

@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use super::utils::shell_escape;
 use crate::config::HostConfig;
+use crate::domain::use_cases::backup_advanced::refuse_remote_archive;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -90,6 +91,7 @@ impl StandardTool for BackupCreateTool {
     }"#;
 
     fn build_command(args: &SshBackupCreateArgs, _host_config: &HostConfig) -> Result<String> {
+        refuse_remote_archive("output_file", &args.output_file)?;
         let tar_flag = match args.compress.as_deref() {
             Some("gzip") => "-czf",
             Some("bzip2") => "-cjf",
@@ -105,12 +107,14 @@ impl StandardTool for BackupCreateTool {
                 parts.push(format!("--exclude={}", shell_escape(pattern)));
             }
         }
+        // `--` so a source path starting with '-' is a file, not a tar option.
+        parts.push("--".to_string());
         for path in &args.source_paths {
             parts.push(shell_escape(path));
         }
         let tar_cmd = parts.join(" ");
         Ok(format!(
-            "{tar_cmd} && ls -lh {}",
+            "{tar_cmd} && ls -lh -- {}",
             shell_escape(&args.output_file)
         ))
     }
@@ -435,5 +439,36 @@ mod tests {
         let debug_str = format!("{args:?}");
         assert!(debug_str.contains("SshBackupCreateArgs"));
         assert!(debug_str.contains("test-host"));
+    }
+
+    #[test]
+    fn sources_and_listing_come_after_end_of_options() {
+        let args = SshBackupCreateArgs {
+            host: "server1".to_string(),
+            source_paths: vec!["-x".to_string()],
+            output_file: "-o.tar".to_string(),
+            compress: None,
+            exclude: Some(vec!["*.log".to_string()]),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = BackupCreateTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("--exclude='*.log' -- '-x'"), "{cmd}");
+        assert!(cmd.contains("&& ls -lh -- '-o.tar'"), "{cmd}");
+    }
+
+    #[test]
+    fn test_build_command_refuses_remote_archive_name() {
+        let args: SshBackupCreateArgs = serde_json::from_value(json!({
+            "host": "s", "source_paths": ["/etc"], "output_file": "exfil.example:etc.tar"
+        }))
+        .unwrap();
+        assert!(BackupCreateTool::build_command(&args, &test_host_config()).is_err());
+        let ok: SshBackupCreateArgs = serde_json::from_value(json!({
+            "host": "s", "source_paths": ["/etc"], "output_file": "./exfil.example:etc.tar"
+        }))
+        .unwrap();
+        assert!(BackupCreateTool::build_command(&ok, &test_host_config()).is_ok());
     }
 }

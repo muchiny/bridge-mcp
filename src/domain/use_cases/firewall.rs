@@ -32,6 +32,9 @@ pub fn validate_port(port: &str) -> Result<()> {
             reason: "Port cannot be empty".to_string(),
         });
     }
+    // A service name may not start with `-`: `ufw allow '-x'/tcp` reads it as
+    // an option, and quoting does not change that.
+    super::shell::refuse_option_like("port", port)?;
 
     // Port range: "start:end"
     if let Some((start, end)) = port.split_once(':') {
@@ -195,20 +198,22 @@ impl FirewallCommandBuilder {
                 }
             }
             Some("firewall-cmd") => {
-                let mut cmd = format!(
-                    "firewall-cmd --permanent --add-port={}/{}",
-                    shell_escape(port),
-                    proto
-                );
-                if let Some(src) = source {
-                    let _ = write!(
-                        cmd,
-                        " && firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address={} port port={} protocol={} accept'",
+                // With a source only the rich rule: a plain `--add-port` as
+                // well would open the port to everyone.
+                let mut cmd = if let Some(src) = source {
+                    format!(
+                        "firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address={} port port={} protocol={} accept'",
                         shell_escape(src),
                         shell_escape(port),
                         proto
-                    );
-                }
+                    )
+                } else {
+                    format!(
+                        "firewall-cmd --permanent --add-port={}/{}",
+                        shell_escape(port),
+                        proto
+                    )
+                };
                 cmd.push_str(" && firewall-cmd --reload");
                 cmd
             }
@@ -225,12 +230,16 @@ impl FirewallCommandBuilder {
                 cmd
             }
             _ => {
-                let escaped_port = shell_escape(port);
+                // The same rule per tool as the explicit arms, `source` included.
+                let ufw = Self::build_allow_command(Some("ufw"), port, protocol, source)?;
+                let firewalld =
+                    Self::build_allow_command(Some("firewall-cmd"), port, protocol, source)?;
+                let iptables = Self::build_allow_command(Some("iptables"), port, protocol, source)?;
                 format!(
-                    "if command -v ufw >/dev/null 2>&1; then ufw allow {escaped_port}/{proto}; \
-                     elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={escaped_port}/{proto} && firewall-cmd --reload; \
-                     elif command -v iptables >/dev/null 2>&1; then iptables -A INPUT -p {proto} --dport {escaped_port} -j ACCEPT; \
-                     elif [ -x /usr/sbin/iptables ]; then /usr/sbin/iptables -A INPUT -p {proto} --dport {escaped_port} -j ACCEPT; \
+                    "if command -v ufw >/dev/null 2>&1; then {ufw}; \
+                     elif command -v firewall-cmd >/dev/null 2>&1; then {firewalld}; \
+                     elif command -v iptables >/dev/null 2>&1; then {iptables}; \
+                     elif [ -x /usr/sbin/iptables ]; then /usr/sbin/{iptables}; \
                      else echo 'No firewall tool found'; exit 127; fi"
                 )
             }
@@ -299,12 +308,16 @@ impl FirewallCommandBuilder {
                 cmd
             }
             _ => {
-                let escaped_port = shell_escape(port);
+                // The same rule per tool as the explicit arms, `source` included.
+                let ufw = Self::build_deny_command(Some("ufw"), port, protocol, source)?;
+                let firewalld =
+                    Self::build_deny_command(Some("firewall-cmd"), port, protocol, source)?;
+                let iptables = Self::build_deny_command(Some("iptables"), port, protocol, source)?;
                 format!(
-                    "if command -v ufw >/dev/null 2>&1; then ufw deny {escaped_port}/{proto}; \
-                     elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-rich-rule='rule family=ipv4 port port={escaped_port} protocol={proto} reject' && firewall-cmd --reload; \
-                     elif command -v iptables >/dev/null 2>&1; then iptables -A INPUT -p {proto} --dport {escaped_port} -j DROP; \
-                     elif [ -x /usr/sbin/iptables ]; then /usr/sbin/iptables -A INPUT -p {proto} --dport {escaped_port} -j DROP; \
+                    "if command -v ufw >/dev/null 2>&1; then {ufw}; \
+                     elif command -v firewall-cmd >/dev/null 2>&1; then {firewalld}; \
+                     elif command -v iptables >/dev/null 2>&1; then {iptables}; \
+                     elif [ -x /usr/sbin/iptables ]; then /usr/sbin/{iptables}; \
                      else echo 'No firewall tool found'; exit 127; fi"
                 )
             }
@@ -385,6 +398,54 @@ mod tests {
         assert!(cmd.contains("ufw allow"));
         assert!(cmd.contains("firewall-cmd"));
         assert!(cmd.contains("iptables"));
+    }
+
+    #[test]
+    fn test_allow_auto_uses_the_source() {
+        let cmd =
+            FirewallCommandBuilder::build_allow_command(None, "5432", None, Some("10.0.0.5/32"))
+                .unwrap();
+        assert!(cmd.contains("then ufw allow from '10.0.0.5/32' to any port '5432' proto tcp;"));
+        assert!(cmd.contains("source address='10.0.0.5/32'"));
+        assert!(
+            !cmd.contains("--add-port"),
+            "firewalld must not open the port to all: {cmd}"
+        );
+        assert!(
+            cmd.contains("iptables -A INPUT -p tcp --dport '5432' -s '10.0.0.5/32' -j ACCEPT;")
+        );
+        assert!(cmd.contains("/usr/sbin/iptables -A INPUT -p tcp --dport '5432' -s '10.0.0.5/32'"));
+    }
+
+    #[test]
+    fn test_deny_auto_uses_the_source() {
+        let cmd = FirewallCommandBuilder::build_deny_command(None, "22", None, Some("203.0.113.9"))
+            .unwrap();
+        assert!(cmd.contains("then ufw deny from '203.0.113.9' to any port '22' proto tcp;"));
+        assert!(cmd.contains("source address='203.0.113.9'"));
+        assert!(cmd.contains("--dport '22' -s '203.0.113.9' -j DROP;"));
+    }
+
+    #[test]
+    fn test_allow_firewalld_with_source_adds_no_global_port() {
+        let cmd = FirewallCommandBuilder::build_allow_command(
+            Some("firewall-cmd"),
+            "5432",
+            None,
+            Some("10.0.0.5"),
+        )
+        .unwrap();
+        assert!(!cmd.contains("--add-port"), "{cmd}");
+        assert!(cmd.contains("--add-rich-rule="), "{cmd}");
+    }
+
+    #[test]
+    fn test_validate_port_refuses_a_leading_dash() {
+        let err = validate_port("-ZQXdash").unwrap_err();
+        assert!(
+            err.to_string().contains("'port' must not start with '-'"),
+            "{err}"
+        );
     }
 
     // ── validate_port ─────────────────────────────────────────────

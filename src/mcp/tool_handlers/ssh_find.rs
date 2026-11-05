@@ -12,7 +12,6 @@ use tracing::{info, warn};
 use crate::domain::output_truncator::truncate_output_with_cache;
 use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
-use crate::mcp::tool_handlers::utils::reject_posix_only_on_windows;
 use crate::mcp_tool;
 use crate::ports::{ToolContext, ToolHandler, ToolSchema};
 use crate::ssh::{is_retryable_error, with_retry_if};
@@ -46,9 +45,23 @@ struct SshFindArgs {
 #[mcp_tool(name = "ssh_find", group = "directory", annotation = "read_only")]
 pub struct SshFindHandler;
 
+/// Quote the search root of `find`.
+///
+/// `find` has no `--` that ends its expression: it reads leading operands as
+/// starting points up to the first one that begins with `-`, `(`, `)`, `,` or
+/// `!`, and takes that one for an expression (`find -delete` deletes). Such a
+/// root is made relative (`./-delete` names the same directory).
+fn find_root(path: &str) -> String {
+    if path.starts_with(['-', '(', ')', ',', '!']) {
+        shell_escape(&format!("./{path}"))
+    } else {
+        shell_escape(path)
+    }
+}
+
 /// Build the `find` command string from parsed arguments.
 fn build_find_command(args: &SshFindArgs) -> String {
-    let mut cmd = format!("find {}", shell_escape(&args.path));
+    let mut cmd = format!("find {}", find_root(&args.path));
 
     if let Some(depth) = args.max_depth {
         let _ = write!(cmd, " -maxdepth {depth}");
@@ -161,8 +174,12 @@ impl ToolHandler for SshFindHandler {
                     host: args.host.clone(),
                 })?;
 
-        if let Some(refusal) = reject_posix_only_on_windows(host_config, "ssh_find") {
-            return Ok(refusal);
+        if let Some(reason) =
+            crate::mcp::tool_handlers::utils::posix_only_refusal(host_config, self.name())
+        {
+            ctx.execute_use_case
+                .log_denied(self.name(), &args.host, "", &reason);
+            return Ok(ToolCallResult::error(reason));
         }
 
         let command = build_find_command(&args);
@@ -312,6 +329,38 @@ mod tests {
     use super::*;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
+
+    fn find_args(path: &str) -> SshFindArgs {
+        SshFindArgs {
+            host: "h".to_string(),
+            path: path.to_string(),
+            name: None,
+            file_type: None,
+            max_depth: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        }
+    }
+
+    #[test]
+    fn a_search_root_that_looks_like_an_expression_is_made_relative() {
+        for path in ["-delete", "-fprint", "(", "!", ","] {
+            let cmd = build_find_command(&find_args(path));
+            assert!(
+                cmd.starts_with(&format!("find './{path}' -maxdepth 5")),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_search_root_is_left_alone() {
+        let cmd = build_find_command(&find_args("/var/log"));
+        assert_eq!(cmd, "find '/var/log' -maxdepth 5 2>/dev/null");
+        let rel = build_find_command(&find_args("a-b"));
+        assert!(rel.starts_with("find 'a-b' "), "{rel}");
+    }
 
     #[tokio::test]
     async fn test_missing_arguments() {
@@ -545,5 +594,23 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    /// `find` with POSIX-quoted arguments: refused on a Windows host and on any host whose
+    /// commands do not run in a POSIX shell, before anything is sent.
+    #[tokio::test]
+    async fn test_refuses_hosts_without_a_posix_shell() {
+        use crate::mcp::tool_handlers::utils::guard_test_support::{context_with_target, refusal};
+        let args = serde_json::json!({"host": "target", "path": "/tmp"});
+        let text = refusal(
+            &SshFindHandler,
+            args.clone(),
+            &context_with_target("windows", ""),
+        )
+        .await;
+        assert!(text.contains("Windows"), "{text}");
+        let pwsh = context_with_target("linux", r#","shell":"powershell""#);
+        let text = refusal(&SshFindHandler, args, &pwsh).await;
+        assert!(text.contains("PowerShell"), "{text}");
     }
 }

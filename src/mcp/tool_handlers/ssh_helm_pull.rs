@@ -110,6 +110,10 @@ impl StandardTool for HelmPullTool {
     }"#;
 
     fn build_command(args: &SshHelmPullArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "chart",
+            Some(args.chart.as_str()),
+        )])?;
         if let Some(r) = args.repo.as_deref() {
             HelmCommandBuilder::validate_repo_url(r)?;
         }
@@ -352,6 +356,17 @@ mod tests {
         assert!(
             result.is_err(),
             "expected error for repo URL with shell metachar"
+        );
+    }
+
+    #[test]
+    fn test_option_like_chart_is_refused() {
+        let args: SshHelmPullArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "chart": "-x"})).unwrap();
+        let err = HelmPullTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'chart' must not start with '-'"),
+            "{err}"
         );
     }
 }

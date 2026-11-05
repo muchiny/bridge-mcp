@@ -156,6 +156,8 @@ impl TelnetConnection {
 
         debug!(host = %self.host_name, command = %command, "Executing Telnet command");
 
+        crate::domain::use_cases::shell::refuse_terminal_controls("telnet", command)?;
+
         self.write_line(command)
             .await
             .map_err(|e| BridgeError::SshExec {
@@ -354,6 +356,35 @@ fn strip_echo_and_prompt(raw: &str, command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `exec` refuses a command with a control character before writing a
+    /// byte: the device on the other end receives nothing.
+    #[tokio::test]
+    async fn exec_refuses_a_control_character_before_writing_anything() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let client = TcpStream::connect(addr).await.expect("connect");
+        let (mut device, _) = listener.accept().await.expect("accept");
+        let mut conn = TelnetConnection {
+            stream: client,
+            prompt_re: Regex::new(DEFAULT_PROMPT).expect("prompt regex"),
+            host_name: "switch".to_string(),
+            failed: false,
+        };
+
+        let err = conn
+            .exec("show run\u{1b}[2K", &LimitsConfig::default())
+            .await
+            .expect_err("a control character is refused");
+        assert!(matches!(err, BridgeError::CommandDenied { .. }), "{err}");
+
+        drop(conn);
+        let mut received = Vec::new();
+        device.read_to_end(&mut received).await.expect("read");
+        assert!(received.is_empty(), "the device received {received:?}");
+    }
 
     #[test]
     fn test_default_telnet_port() {

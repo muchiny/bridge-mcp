@@ -328,4 +328,17 @@ mod tests {
         assert!(cmd.contains("--format 'json'"));
         assert!(cmd.contains("-p"));
     }
+
+    #[tokio::test]
+    async fn test_option_like_target_refused() {
+        let handler = SshAnsibleLintHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host":"server1","target":"-ZQXdash"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("target"), "{reason}"),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
 }

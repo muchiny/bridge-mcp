@@ -83,6 +83,10 @@ impl StandardTool for K8sUncordonTool {
     }"#;
 
     fn build_command(args: &SshK8sUncordonArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "node",
+            Some(args.node.as_str()),
+        )])?;
         if let Some(ctx) = args.context.as_deref() {
             crate::domain::use_cases::kubernetes::validate_context(ctx)?;
         }
@@ -293,5 +297,16 @@ mod tests {
         let cmd = K8sUncordonTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("uncordon 'node-1'"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_option_like_node_is_refused() {
+        let args: SshK8sUncordonArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "node": "-x"})).unwrap();
+        let err = K8sUncordonTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'node' must not start with '-'"),
+            "{err}"
+        );
     }
 }

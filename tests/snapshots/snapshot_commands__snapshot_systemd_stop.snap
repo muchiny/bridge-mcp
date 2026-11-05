@@ -2,4 +2,4 @@
 source: tests/snapshot_commands.rs
 expression: "SystemdCommandBuilder::build_stop_command(\"docker.service\")"
 ---
-systemctl stop 'docker.service'
+systemctl stop -- 'docker.service'

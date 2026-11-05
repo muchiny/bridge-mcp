@@ -215,13 +215,13 @@ mod tests {
     fn test_build_command_custom_valid_path() {
         let args = SshK3sKillallArgs {
             host: "s1".into(),
-            script_path: Some("/opt/k3s/k3s-killall.sh".into()),
+            script_path: Some("/opt/bin/k3s-killall.sh".into()),
             timeout_seconds: None,
             max_output: None,
             save_output: None,
         };
         let cmd = K3sKillallTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("/opt/k3s/k3s-killall.sh"), "cmd: {cmd}");
+        assert!(cmd.contains("/opt/bin/k3s-killall.sh"), "cmd: {cmd}");
     }
 
     #[test]
@@ -248,5 +248,16 @@ mod tests {
         };
         let result = K3sKillallTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_command_untrusted_directory_rejected() {
+        let args: SshK3sKillallArgs =
+            serde_json::from_value(json!({"host": "s1", "script_path": "/tmp/k3s-killall.sh"}))
+                .unwrap();
+        let err = K3sKillallTool::build_command(&args, &test_host_config())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("directory"), "err: {err}");
     }
 }

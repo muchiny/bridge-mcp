@@ -54,9 +54,12 @@ impl StandardTool for DbRestoreTool {
 
     const DESCRIPTION: &'static str = "Restore a database from a dump file on a remote host via SSH. Supports MySQL and \
         PostgreSQL. The input_file must exist on the remote host (use ssh_upload to send it \
-        first). Auto-detects compressed files (.gz, .bz2, .xz). Verbose restore progress and \
-        error messages are returned to the caller — use timeout_seconds for large restores to \
-        avoid the default timeout. Use ssh_db_dump to create backups before restoring.";
+        first). Auto-detects compressed files (.gz, .bz2, .xz). The file is run as a script by \
+        the database client: mysql runs it in binary mode (client commands off), psql has no \
+        such mode and runs a line starting with a backslash as a psql command. Verbose \
+        restore progress and error messages are returned to the caller — use timeout_seconds \
+        for large restores to avoid the default timeout. Use ssh_db_dump to create backups \
+        before restoring.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -121,6 +124,18 @@ impl StandardTool for DbRestoreTool {
             &args.database,
             &args.input_file,
         ))
+    }
+
+    fn validate(args: &SshDbRestoreArgs, _host_config: &HostConfig) -> Result<()> {
+        let db_type = DatabaseType::from_str_checked(&args.db_type)?;
+        DatabaseCommandBuilder::validate_connection(
+            &db_type,
+            args.db_host.as_deref(),
+            args.db_user.as_deref(),
+            &args.database,
+            args.db_password.as_deref(),
+            None,
+        )
     }
 }
 
@@ -380,5 +395,44 @@ mod tests {
         // Final type-pinning assertion: only compiles when the field is
         // exactly `Option<RedactedSecret>`.
         let _typed: &Option<RedactedSecret> = &args.db_password;
+    }
+
+    #[tokio::test]
+    async fn test_refuses_option_like_database() {
+        let handler = SshDbRestoreHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "--execute=x", "input_file": "/dev/null"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_newline_in_password() {
+        let handler = SshDbRestoreHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "postgresql", "database": "db", "db_password": "x\ny", "input_file": "/dev/null"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'db_password'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_postgres_connection_string_database() {
+        let handler = SshDbRestoreHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "postgresql", "database": "postgres://10.0.0.66/db", "input_file": "/dev/null"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }

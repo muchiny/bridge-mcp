@@ -703,11 +703,19 @@ impl McpServer {
     /// side effect is not a gate.
     ///
     /// `root_scoped_tools_matches_the_handlers_that_check` keeps it honest by
-    /// reading the handler sources, so adding a `validate_root_scope` call
-    /// without adding the tool here fails the build rather than silently
-    /// leaving that tool unscoped.
+    /// reading the handler sources, so adding a `validate_root_scope` call, or
+    /// a `StandardTool::scoped_paths` override (the seven `ssh_file_*` tools
+    /// below declare their paths that way), without adding the tool here fails
+    /// the build rather than silently leaving that tool unscoped.
     const ROOT_SCOPED_TOOLS: &'static [&'static str] = &[
         "ssh_download",
+        "ssh_file_chmod",
+        "ssh_file_chown",
+        "ssh_file_diff",
+        "ssh_file_patch",
+        "ssh_file_read",
+        "ssh_file_stat",
+        "ssh_file_template",
         "ssh_file_write",
         "ssh_files_write",
         "ssh_find",
@@ -5839,8 +5847,7 @@ rbac:
             .filter_map(|entry| {
                 let path = entry.ok()?.path();
                 let source = std::fs::read_to_string(&path).ok()?;
-                source
-                    .contains("validate_root_scope")
+                (source.contains("validate_root_scope") || source.contains("fn scoped_paths("))
                     .then(|| path.file_stem()?.to_str().map(str::to_string))
                     .flatten()
             })
@@ -5856,7 +5863,33 @@ rbac:
         assert_eq!(
             found, declared,
             "ROOT_SCOPED_TOOLS must name exactly the handlers that call \
-             validate_root_scope"
+             validate_root_scope or override StandardTool::scoped_paths"
+        );
+    }
+
+    /// The `StandardTool` file tools declare their paths through
+    /// `scoped_paths`, not a direct `validate_root_scope` call. They were left
+    /// out of the list, so no `roots/list` was ever requested for them and the
+    /// scoping check ran against an empty list.
+    #[tokio::test]
+    async fn a_standard_tool_file_tool_asks_for_the_client_roots() {
+        let server = server_with_all_groups();
+        let (session, _rx) = session_declaring(&json!({ "roots": {} }));
+        let call = json!({
+            "name": "ssh_file_read",
+            "arguments": { "host": "no-such-host-xyz", "path": "/etc/shadow" }
+        });
+
+        let result = server
+            .handle_tools_call(Some(json!(1)), Some(call), None, Some(&session))
+            .await
+            .result
+            .expect("a result");
+
+        assert_eq!(result["resultType"], "input_required", "{result}");
+        assert_eq!(
+            result["inputRequests"]["client_roots"]["method"], "roots/list",
+            "{result}"
         );
     }
 

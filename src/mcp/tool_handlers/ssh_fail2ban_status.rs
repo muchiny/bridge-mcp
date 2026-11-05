@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::config::OsType;
 use crate::domain::use_cases::network_security::NetworkSecurityCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -85,6 +86,13 @@ impl StandardTool for Fail2banStatusTool {
 
     fn build_command(args: &SshFail2banStatusArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(NetworkSecurityCommandBuilder::build_fail2ban_status_command(args.jail.as_deref()))
+    }
+
+    fn validate(args: &SshFail2banStatusArgs, _host_config: &HostConfig) -> Result<()> {
+        if let Some(v) = args.jail.as_deref() {
+            refuse_option_like("jail", v)?;
+        }
+        Ok(())
     }
 }
 
@@ -357,5 +365,16 @@ mod tests {
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         assert!(!result.content.is_empty());
+    }
+
+    #[test]
+    fn test_validate_refuses_option_like_jail() {
+        let args: SshFail2banStatusArgs =
+            serde_json::from_value(json!({"host": "s", "jail": "-x"})).unwrap();
+        let err = Fail2banStatusTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'jail' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -8,6 +8,7 @@ use serde_json::json;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::docker::DockerCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::apps::table;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -88,6 +89,13 @@ impl StandardTool for DockerStatsTool {
     }"#;
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Tabular;
+
+    fn validate(args: &SshDockerStatsArgs, _host_config: &HostConfig) -> Result<()> {
+        for container in args.containers.iter().flatten() {
+            refuse_option_like("containers", container)?;
+        }
+        Ok(())
+    }
 
     fn build_command(args: &SshDockerStatsArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(DockerCommandBuilder::build_stats_command(
@@ -468,5 +476,23 @@ mod tests {
         assert!(result.is_error.is_none() || result.is_error == Some(false));
         assert!(result.content.len() >= 2);
         assert!(result.structured_content.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_containers_starting_with_dash_is_refused() {
+        let handler = SshDockerStatsHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(
+                Some(json!({"host": "server1", "containers": ["web", "-x"]})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'containers' must not start with '-'"),
+            "{err}"
+        );
     }
 }

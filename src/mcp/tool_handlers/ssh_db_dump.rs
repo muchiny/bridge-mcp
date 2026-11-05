@@ -134,6 +134,18 @@ impl StandardTool for DbDumpTool {
             &args.output_file,
         ))
     }
+
+    fn validate(args: &SshDbDumpArgs, _host_config: &HostConfig) -> Result<()> {
+        let db_type = DatabaseType::from_str_checked(&args.db_type)?;
+        DatabaseCommandBuilder::validate_connection(
+            &db_type,
+            args.db_host.as_deref(),
+            args.db_user.as_deref(),
+            &args.database,
+            args.db_password.as_deref(),
+            args.tables.as_deref(),
+        )
+    }
 }
 
 /// Handler for the `ssh_db_dump` tool.
@@ -546,5 +558,57 @@ mod tests {
         // Final type-pinning assertion: only compiles when the field is
         // exactly `Option<RedactedSecret>`.
         let _typed: &Option<RedactedSecret> = &args.db_password;
+    }
+
+    #[tokio::test]
+    async fn test_refuses_option_like_database() {
+        let handler = SshDbDumpHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "--result-file=/x", "output_file": "/tmp/o.sql"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_option_like_table() {
+        let handler = SshDbDumpHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "db", "tables": ["--result-file=/x"], "output_file": "/tmp/o.sql"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'tables'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_newline_in_password() {
+        let handler = SshDbDumpHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "mysql", "database": "db", "db_password": "x\n[client]\ntee=/x", "output_file": "/tmp/o.sql"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'db_password'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_postgres_connection_string_database() {
+        let handler = SshDbDumpHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host": "server1", "db_type": "postgresql", "database": "dbname=postgres host=10.0.0.66", "output_file": "/tmp/o.sql"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
     }
 }

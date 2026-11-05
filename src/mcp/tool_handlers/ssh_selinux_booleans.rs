@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::security_modules::SecurityModulesCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -85,6 +86,13 @@ impl StandardTool for SelinuxBooleansTool {
                 args.value,
             ),
         )
+    }
+
+    fn validate(args: &SshSelinuxBooleansArgs, _host_config: &HostConfig) -> Result<()> {
+        if let Some(v) = args.name.as_deref() {
+            refuse_option_like("name", v)?;
+        }
+        Ok(())
     }
 }
 
@@ -233,5 +241,16 @@ mod tests {
         let cmd = SelinuxBooleansTool::build_command(&args, &host).unwrap();
         assert_ne!(cmd, "");
         assert!(cmd.contains("httpd_can_network_connect"));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_like_name() {
+        let args: SshSelinuxBooleansArgs =
+            serde_json::from_value(json!({"host": "s", "name": "-x"})).unwrap();
+        let err = SelinuxBooleansTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'name' must not start with '-'"),
+            "{err}"
+        );
     }
 }

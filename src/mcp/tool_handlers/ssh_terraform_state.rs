@@ -78,6 +78,14 @@ impl StandardTool for TerraformStateTool {
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Auto;
 
+    fn validate(args: &SshTerraformStateArgs, _host_config: &HostConfig) -> Result<()> {
+        TerraformCommandBuilder::validate_state_args(
+            &args.dir,
+            &args.subcommand,
+            args.resource.as_deref(),
+        )
+    }
+
     fn build_command(args: &SshTerraformStateArgs, _host_config: &HostConfig) -> Result<String> {
         TerraformCommandBuilder::build_state_command(
             &args.dir,
@@ -326,5 +334,31 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_refused_argument_is_audited() {
+        let handler = SshTerraformStateHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        handler
+            .execute(Some(json!({"host": "server1", "dir": "/opt/infra", "subcommand": "show", "resource": "-state=/x"})), &ctx)
+            .await
+            .expect_err("the argument must be refused");
+        let events = ctx.audit_logger.drain_for_test();
+        assert!(
+            events.iter().any(|e| e.event_type == "command_denied"
+                && e.tool_name.as_deref() == Some("ssh_terraform_state")),
+            "expected a command_denied event: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_refuses_and_accepts() {
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let host = ctx.config.hosts.get("server1").unwrap();
+        let bad: SshTerraformStateArgs = serde_json::from_value(json!({"host": "server1", "dir": "/opt/infra", "subcommand": "show", "resource": "-state=/x"})).unwrap();
+        TerraformStateTool::validate(&bad, host).unwrap_err();
+        let good: SshTerraformStateArgs = serde_json::from_value(json!({"host": "server1", "dir": "/opt/infra", "subcommand": "show", "resource": "aws_instance.web"})).unwrap();
+        TerraformStateTool::validate(&good, host).unwrap();
     }
 }

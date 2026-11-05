@@ -91,6 +91,11 @@ impl StandardTool for GitCloneTool {
         "required": ["host", "url"]
     }"#;
 
+    fn validate(args: &SshGitCloneArgs, _host_config: &HostConfig) -> Result<()> {
+        GitCommandBuilder::validate_not_option("url", Some(args.url.as_str()))?;
+        GitCommandBuilder::validate_not_option("branch", args.branch.as_deref())
+    }
+
     fn build_command(args: &SshGitCloneArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(GitCommandBuilder::build_clone_command(
             &args.url,
@@ -289,5 +294,26 @@ mod tests {
         assert!(cmd.contains("git clone"));
         assert!(cmd.contains("develop"));
         assert!(cmd.contains("--depth"));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_shaped_url_and_branch() {
+        for key in ["url", "branch"] {
+            let mut v = json!({"host": "s", "url": "ssh://x/y"});
+            v[key] = json!("--upload-pack=touch /tmp/p");
+            let args: SshGitCloneArgs = serde_json::from_value(v).unwrap();
+            let err = GitCloneTool::validate(&args, &test_host_config()).unwrap_err();
+            assert!(err.to_string().contains(&format!("'{key}'")), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_build_command_destination_after_double_dash() {
+        let args: SshGitCloneArgs = serde_json::from_value(
+            json!({"host": "s", "url": "ssh://x/y", "destination": "--config=a=b"}),
+        )
+        .unwrap();
+        let cmd = GitCloneTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("-- 'ssh://x/y' '--config=a=b'"), "{cmd}");
     }
 }

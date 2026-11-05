@@ -79,10 +79,10 @@ impl SshTailHandler {
     /// Build the tail command from arguments
     fn build_command(file: &str, lines: u64, grep: Option<&str>) -> String {
         grep.map_or_else(
-            || format!("tail -n {lines} {}", shell_escape(file)),
+            || format!("tail -n {lines} -- {}", shell_escape(file)),
             |pattern| {
                 format!(
-                    "tail -n {lines} {} | grep -E {}",
+                    "tail -n {lines} -- {} | grep -E -e {}",
                     shell_escape(file),
                     shell_escape(pattern)
                 )
@@ -133,6 +133,14 @@ impl ToolHandler for SshTailHandler {
                 .ok_or_else(|| BridgeError::UnknownHost {
                     host: args.host.clone(),
                 })?;
+
+        if let Some(reason) =
+            crate::mcp::tool_handlers::utils::posix_only_refusal(host_config, self.name())
+        {
+            ctx.execute_use_case
+                .log_denied(self.name(), &args.host, "", &reason);
+            return Ok(ToolCallResult::error(reason));
+        }
 
         let lines = args.lines.unwrap_or(100);
         let command = Self::build_command(&args.file, lines, args.grep.as_deref());
@@ -449,25 +457,34 @@ mod tests {
     #[test]
     fn test_build_command_basic() {
         let cmd = SshTailHandler::build_command("/var/log/syslog", 100, None);
-        assert_eq!(cmd, "tail -n 100 '/var/log/syslog'");
+        assert_eq!(cmd, "tail -n 100 -- '/var/log/syslog'");
     }
 
     #[test]
     fn test_build_command_with_grep() {
         let cmd = SshTailHandler::build_command("/var/log/syslog", 50, Some("ERROR|FATAL"));
-        assert_eq!(cmd, "tail -n 50 '/var/log/syslog' | grep -E 'ERROR|FATAL'");
+        assert_eq!(
+            cmd,
+            "tail -n 50 -- '/var/log/syslog' | grep -E -e 'ERROR|FATAL'"
+        );
     }
 
     #[test]
     fn test_build_command_with_special_chars_in_path() {
         let cmd = SshTailHandler::build_command("/var/log/my app/test.log", 100, None);
-        assert_eq!(cmd, "tail -n 100 '/var/log/my app/test.log'");
+        assert_eq!(cmd, "tail -n 100 -- '/var/log/my app/test.log'");
     }
 
     #[test]
     fn test_build_command_shell_injection_prevented() {
         let cmd = SshTailHandler::build_command("/tmp/test; rm -rf /", 100, None);
-        assert_eq!(cmd, "tail -n 100 '/tmp/test; rm -rf /'");
+        assert_eq!(cmd, "tail -n 100 -- '/tmp/test; rm -rf /'");
+    }
+
+    #[test]
+    fn test_build_command_dashed_file_and_pattern_are_operands() {
+        let cmd = SshTailHandler::build_command("-f", 10, Some("-v"));
+        assert_eq!(cmd, "tail -n 10 -- '-f' | grep -E -e '-v'");
     }
 
     #[test]
@@ -475,5 +492,23 @@ mod tests {
         let cmd =
             SshTailHandler::build_command("/var/log/syslog", 100, Some("'; rm -rf / ; echo '"));
         assert!(cmd.contains("'\\''"));
+    }
+
+    /// `tail` with a POSIX-quoted file and pattern: refused on a Windows host and on any host whose
+    /// commands do not run in a POSIX shell, before anything is sent.
+    #[tokio::test]
+    async fn test_refuses_hosts_without_a_posix_shell() {
+        use crate::mcp::tool_handlers::utils::guard_test_support::{context_with_target, refusal};
+        let args = serde_json::json!({"host": "target", "file": "/var/log/syslog"});
+        let text = refusal(
+            &SshTailHandler,
+            args.clone(),
+            &context_with_target("windows", ""),
+        )
+        .await;
+        assert!(text.contains("Windows"), "{text}");
+        let pwsh = context_with_target("linux", r#","shell":"powershell""#);
+        let text = refusal(&SshTailHandler, args, &pwsh).await;
+        assert!(text.contains("PowerShell"), "{text}");
     }
 }

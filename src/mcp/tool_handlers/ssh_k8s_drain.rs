@@ -128,6 +128,10 @@ impl StandardTool for K8sDrainTool {
     }"#;
 
     fn build_command(args: &SshK8sDrainArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "node",
+            Some(args.node.as_str()),
+        )])?;
         if let Some(ctx) = args.context.as_deref() {
             crate::domain::use_cases::kubernetes::validate_context(ctx)?;
         }
@@ -365,5 +369,16 @@ mod tests {
         );
         assert!(!args.delete_emptydir);
         assert!(!args.force);
+    }
+
+    #[test]
+    fn test_option_like_node_is_refused() {
+        let args: SshK8sDrainArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "node": "-x"})).unwrap();
+        let err = K8sDrainTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'node' must not start with '-'"),
+            "{err}"
+        );
     }
 }

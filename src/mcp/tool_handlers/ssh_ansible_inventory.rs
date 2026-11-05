@@ -66,7 +66,7 @@ impl StandardTool for AnsibleInventoryTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file path"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
             },
             "list": {
                 "type": "boolean",
@@ -124,6 +124,16 @@ impl StandardTool for AnsibleInventoryTool {
             args.vars.unwrap_or(false),
         ))
     }
+
+    fn validate(args: &SshAnsibleInventoryArgs, _host_config: &HostConfig) -> Result<()> {
+        if let Some(inventory) = args.inventory.as_deref() {
+            AnsibleCommandBuilder::validate_inventory(inventory)?;
+        }
+        if let Some(group) = args.group.as_deref() {
+            crate::domain::use_cases::shell::refuse_option_like("group", group)?;
+        }
+        Ok(())
+    }
 }
 
 /// Handler for the `ssh_ansible_inventory` tool.
@@ -134,7 +144,7 @@ mod tests {
     use super::*;
     use crate::error::BridgeError;
     use crate::ports::ToolHandler;
-    use crate::ports::mock::create_test_context;
+    use crate::ports::mock::{create_test_context, create_test_context_with_host};
     use serde_json::json;
 
     #[tokio::test]
@@ -393,5 +403,69 @@ mod tests {
         assert!(cmd.contains("--graph 'webservers'"));
         assert!(cmd.contains("--yaml"));
         assert!(cmd.contains("--vars"));
+    }
+
+    #[tokio::test]
+    async fn test_option_like_group_refused() {
+        let handler = SshAnsibleInventoryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host":"server1","graph":true,"group":"-ZQXdash"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("group"), "{reason}"),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inventory_is_read_as_data() {
+        let mut args = SshAnsibleInventoryArgs {
+            host: "server1".to_string(),
+            inventory: Some("/tmp/inv".to_string()),
+            list: Some(true),
+            graph: None,
+            host_pattern: None,
+            group: None,
+            yaml: None,
+            vars: None,
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = AnsibleInventoryTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml ansible-inventory -i '/tmp/inv' --list"
+        );
+        args.inventory = None;
+        let cmd = AnsibleInventoryTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(cmd, "ansible-inventory --list");
+    }
+
+    #[tokio::test]
+    async fn test_dashed_inventory_refused_and_plain_one_accepted() {
+        let handler = SshAnsibleInventoryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host":"server1","list":true,"inventory":"-ZQXdash"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("inventory"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+        let ok: SshAnsibleInventoryArgs = serde_json::from_value(
+            json!({"host":"server1","list":true,"inventory":"/etc/ansible/hosts"}),
+        )
+        .unwrap();
+        assert!(AnsibleInventoryTool::validate(&ok, &test_host_config()).is_ok());
     }
 }

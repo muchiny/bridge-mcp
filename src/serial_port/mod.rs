@@ -94,6 +94,8 @@ impl SerialConnection {
             "Sending serial command"
         );
 
+        crate::domain::use_cases::shell::refuse_terminal_controls("serial", command)?;
+
         // Write command + newline
         self.port
             .write_all(format!("{command}\r\n").as_bytes())

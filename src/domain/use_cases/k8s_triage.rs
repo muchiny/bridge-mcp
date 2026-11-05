@@ -13,21 +13,13 @@ fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
 }
 
-/// Validate that a binary path contains only safe characters.
-fn is_valid_binary_path(bin: &str) -> bool {
-    !bin.is_empty()
-        && bin
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
-}
-
 /// Build the `K=...` shell variable head for kubectl binary detection.
 ///
 /// Uses `>/dev/null 2>&1` (POSIX-safe) instead of `>/dev/null 2>&1` to avoid
 /// the command blacklist.
 fn kubectl_k_head(kubectl_bin: Option<&str>) -> String {
     if let Some(bin) = kubectl_bin
-        && is_valid_binary_path(bin)
+        && super::shell::is_named_binary(bin, super::kubernetes::KUBECTL_NAMES)
     {
         return format!("K=\"{bin}\"; ");
     }
@@ -713,23 +705,27 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ============ is_valid_binary_path ============
+    // ============ kubectl_bin ============
 
     #[test]
-    fn test_is_valid_binary_path_empty() {
-        assert!(!is_valid_binary_path(""));
-    }
-
-    #[test]
-    fn test_is_valid_binary_path_valid() {
-        assert!(is_valid_binary_path("kubectl"));
-        assert!(is_valid_binary_path("/usr/local/bin/kubectl"));
-        assert!(is_valid_binary_path("k3s"));
-    }
-
-    #[test]
-    fn test_is_valid_binary_path_injection() {
-        assert!(!is_valid_binary_path("kubectl; rm -rf /"));
-        assert!(!is_valid_binary_path("kubectl && evil"));
+    fn a_kubectl_bin_that_is_not_kubectl_falls_back_to_detection() {
+        assert!(
+            kubectl_k_head(Some("/usr/local/bin/kubectl"))
+                .starts_with("K=\"/usr/local/bin/kubectl\"")
+        );
+        for bin in [
+            "/bin/sh",
+            "k3s",
+            "kubectl; rm -rf /",
+            "",
+            "kubectl-node_shell",
+            "/tmp/kubectl",
+            "./kubectl",
+        ] {
+            assert!(
+                kubectl_k_head(Some(bin)).contains("command -v kubectl"),
+                "{bin}"
+            );
+        }
     }
 }

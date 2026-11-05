@@ -6,7 +6,9 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::config::OsType;
-use crate::domain::use_cases::windows_event::{WindowsEventCommandBuilder, validate_log_name};
+use crate::domain::use_cases::windows_event::{
+    WindowsEventCommandBuilder, validate_export_file, validate_log_name,
+};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -55,7 +57,7 @@ impl StandardTool for WinEventExportTool {
             },
             "file": {
                 "type": "string",
-                "description": "Destination file path on the remote host (e.g., C:\\Logs\\export.evtx)"
+                "description": "Destination file path on the remote host: a local drive-letter path (e.g., C:\\Logs\\export.evtx), not a UNC path"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -82,6 +84,7 @@ impl StandardTool for WinEventExportTool {
 
     fn validate(args: &SshWinEventExportArgs, _host_config: &HostConfig) -> Result<()> {
         validate_log_name(&args.log)?;
+        validate_export_file(&args.file)?;
         Ok(())
     }
 }
@@ -196,7 +199,7 @@ mod tests {
             sudo_password: None,
             tags: Vec::new(),
             os_type: crate::config::OsType::Windows,
-            shell: None,
+            shell: Some(crate::config::ShellType::PowerShell),
             retry: None,
             protocol: crate::config::Protocol::default(),
 
@@ -211,6 +214,44 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+        }
+    }
+
+    #[test]
+    fn export_refuses_a_unc_destination() {
+        let args: SshWinEventExportArgs = serde_json::from_value(
+            json!({"host": "s", "log": "System", "file": "\\\\attacker\\share\\x.evtx"}),
+        )
+        .unwrap();
+        assert!(WinEventExportTool::validate(&args, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn export_refuses_a_quoted_unc_destination_and_keeps_a_drive_path() {
+        let host = test_host_config();
+        for file in ["\"\\\\attacker\\share\\loot.evtx\"", "-ow", "out.evtx"] {
+            let args: SshWinEventExportArgs =
+                serde_json::from_value(json!({"host": "s", "log": "System", "file": file}))
+                    .unwrap();
+            assert!(
+                WinEventExportTool::validate(&args, &host).is_err(),
+                "{file}"
+            );
+        }
+        let ok: SshWinEventExportArgs = serde_json::from_value(
+            json!({"host": "s", "log": "System", "file": "C:\\Logs\\x.evtx"}),
+        )
+        .unwrap();
+        assert!(WinEventExportTool::validate(&ok, &host).is_ok());
+        for file in [
+            "C:\\Program Files (x86)\\MyApp\\Logs\\sec.evtx",
+            "C:\\Users\\o'brien\\x.evtx",
+            "C:\\PROGRA~2\\x.evtx",
+        ] {
+            let args: SshWinEventExportArgs =
+                serde_json::from_value(json!({"host": "s", "log": "System", "file": file}))
+                    .unwrap();
+            assert!(WinEventExportTool::validate(&args, &host).is_ok(), "{file}");
         }
     }
 
@@ -250,7 +291,7 @@ mod tests {
                 sudo_password: None,
                 tags: Vec::new(),
                 os_type: OsType::Windows,
-                shell: None,
+                shell: Some(crate::config::ShellType::PowerShell),
                 retry: None,
                 protocol: crate::config::Protocol::default(),
                 #[cfg(feature = "winrm")]

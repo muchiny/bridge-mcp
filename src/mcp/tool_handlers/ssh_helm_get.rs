@@ -85,7 +85,7 @@ impl StandardTool for HelmGetTool {
             },
             "kubeconfig": {
                 "type": "string",
-                "description": "Path to kubeconfig file (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
+                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or ~/.kube/ (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -106,6 +106,11 @@ impl StandardTool for HelmGetTool {
         crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshHelmGetArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::validate_kubeconfig_opt(args.kubeconfig.as_deref())?;
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "release",
+            Some(args.release.as_str()),
+        )])?;
         KubernetesCommandBuilder::validate_helm_get_subcommand(&args.subcommand)?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
@@ -441,5 +446,19 @@ mod tests {
 
         let cmd = HelmGetTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("get 'metadata' 'rel'"), "cmd={cmd}");
+    }
+
+    #[test]
+    fn test_option_like_release_is_refused() {
+        let args: SshHelmGetArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "subcommand": "x", "release": "-x"}),
+        )
+        .unwrap();
+        let err = HelmGetTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'release' must not start with '-'"),
+            "{err}"
+        );
     }
 }

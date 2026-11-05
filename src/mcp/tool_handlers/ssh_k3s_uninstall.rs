@@ -231,4 +231,15 @@ mod tests {
         let result = K3sUninstallTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_build_command_untrusted_directory_rejected() {
+        let args: SshK3sUninstallArgs =
+            serde_json::from_value(json!({"host": "s1", "script_path": "/tmp/k3s-uninstall.sh"}))
+                .unwrap();
+        let err = K3sUninstallTool::build_command(&args, &test_host_config())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("directory"), "err: {err}");
+    }
 }

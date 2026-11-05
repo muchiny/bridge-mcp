@@ -54,7 +54,7 @@ impl StandardTool for GitCheckoutTool {
             },
             "target": {
                 "type": "string",
-                "description": "Branch name, tag, or commit to checkout"
+                "description": "Branch name, tag, or commit to checkout; a lone '-' returns to the previous branch (not with create=true)"
             },
             "create": {
                 "type": "boolean",
@@ -78,6 +78,15 @@ impl StandardTool for GitCheckoutTool {
         },
         "required": ["host", "path", "target"]
     }"#;
+
+    fn validate(args: &SshGitCheckoutArgs, _host_config: &HostConfig) -> Result<()> {
+        // A lone '-' is not an option to git: `git checkout -` returns to the
+        // previous branch. It names no branch to create, so `create` refuses it.
+        if args.target == "-" && !args.create.unwrap_or(false) {
+            return Ok(());
+        }
+        GitCommandBuilder::validate_not_option("target", Some(args.target.as_str()))
+    }
 
     fn build_command(args: &SshGitCheckoutArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(GitCommandBuilder::build_checkout_command(
@@ -372,5 +381,43 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_validate_accepts_lone_dash_as_previous_branch() {
+        let args: SshGitCheckoutArgs =
+            serde_json::from_value(json!({"host": "s", "path": "/opt/repo", "target": "-"}))
+                .unwrap();
+        GitCheckoutTool::validate(&args, &test_host_config()).unwrap();
+        let cmd = GitCheckoutTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(cmd, "git -C '/opt/repo' checkout '-'");
+    }
+
+    #[test]
+    fn test_validate_refuses_lone_dash_when_creating() {
+        for create in [json!(true), json!(false)] {
+            for target in ["-b", "--", "-x", "--orphan"] {
+                let args: SshGitCheckoutArgs = serde_json::from_value(
+                    json!({"host": "s", "path": "/opt/repo", "target": target, "create": create}),
+                )
+                .unwrap();
+                GitCheckoutTool::validate(&args, &test_host_config()).unwrap_err();
+            }
+        }
+        let args: SshGitCheckoutArgs = serde_json::from_value(
+            json!({"host": "s", "path": "/opt/repo", "target": "-", "create": true}),
+        )
+        .unwrap();
+        let err = GitCheckoutTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("'target'"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_refuses_option_shaped_target() {
+        let args: SshGitCheckoutArgs =
+            serde_json::from_value(json!({"host": "s", "path": "/opt/repo", "target": "--orphan"}))
+                .unwrap();
+        let err = GitCheckoutTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("'target'"), "{err}");
     }
 }

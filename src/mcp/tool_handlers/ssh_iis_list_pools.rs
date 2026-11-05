@@ -208,7 +208,7 @@ mod tests {
             sudo_password: None,
             tags: Vec::new(),
             os_type: crate::config::OsType::Windows,
-            shell: None,
+            shell: Some(crate::config::ShellType::PowerShell),
             retry: None,
             protocol: crate::config::Protocol::default(),
 
@@ -270,7 +270,7 @@ mod tests {
                 sudo_password: None,
                 tags: Vec::new(),
                 os_type: OsType::Windows,
-                shell: None,
+                shell: Some(crate::config::ShellType::PowerShell),
                 retry: None,
                 protocol: crate::config::Protocol::default(),
                 #[cfg(feature = "winrm")]

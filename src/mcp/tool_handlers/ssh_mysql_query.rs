@@ -5,6 +5,8 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
+use crate::domain::use_cases::shell::refuse_option_like;
+use crate::domain::{DatabaseCommandBuilder, DatabaseType};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -111,14 +113,24 @@ impl StandardTool for MysqlQueryTool {
             None => String::new(),
         };
 
+        // `--binary-mode` switches the client's command parser off (`\!`,
+        // `system`, `source`, `tee`, `pager`, `connect`, ...), whatever
+        // `validate` let through.
         Ok(format!(
-            "mysql -h localhost -P {port} -u {user}{db_part}{format_flag} -e {query}",
+            "mysql -h localhost -P {port} -u {user}{db_part}{format_flag} --binary-mode -e {query}",
             port = port,
             user = shell_escape(user),
             db_part = db_part,
             format_flag = format_flag,
             query = shell_escape(&args.query),
         ))
+    }
+
+    fn validate(args: &SshMysqlQueryArgs, _host_config: &HostConfig) -> Result<()> {
+        if let Some(db) = args.database.as_deref() {
+            refuse_option_like("database", db)?;
+        }
+        DatabaseCommandBuilder::validate_client_query(&DatabaseType::MySQL, &args.query)
     }
 }
 
@@ -359,6 +371,110 @@ mod tests {
         let result = handler
             .execute(
                 Some(json!({"host": "server1", "query": "SELECT 1", "database": "testdb"})),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_refuses_option_like_database() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshMysqlQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "query": "SELECT 1", "database": "--execute=x"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_mysql_client_command() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshMysqlQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        for query in [r"\! id", "system id"] {
+            let result = handler
+                .execute(Some(json!({"host": "server1", "query": query})), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => assert!(reason.contains("'query'")),
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_command_disables_client_commands() {
+        let host = server1_hosts().remove("server1").unwrap();
+        for database in [None, Some("testdb")] {
+            let mut payload = json!({"host": "server1", "query": "SELECT 1"});
+            if let Some(db) = database {
+                payload["database"] = json!(db);
+            }
+            let args: SshMysqlQueryArgs = serde_json::from_value(payload).unwrap();
+            let cmd = MysqlQueryTool::build_command(&args, &host).unwrap();
+            assert!(cmd.contains(" --binary-mode -e 'SELECT 1'"), "{cmd}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_client_command_bypasses() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshMysqlQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        for query in [
+            "SELECT `a\\`` \\! id > /tmp/p",
+            "SELECT 1 --\u{a0}\\! id > /tmp/p",
+            "SET sql_mode='NO_BACKSLASH_ESCAPES', @x=\"\\\"\"; SELECT '\\'; \\! id > /tmp/p",
+            "ssl_session_data_print /home/app/.ssh/authorized_keys",
+            "connect db otherhost",
+            "SELECT 1;\n  system id",
+        ] {
+            let result = handler
+                .execute(Some(json!({"host": "server1", "query": query})), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => assert!(reason.contains("'query'")),
+                e => panic!("Expected CommandDenied for {query:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_accepts_multiline_and_hinted_queries() {
+        let handler = SshMysqlQueryHandler::new();
+        for query in [
+            "SELECT id,\n       source,\n       COUNT(*)\nFROM events\nGROUP BY source",
+            "SELECT /*+ MAX_EXECUTION_TIME(1000) */ source FROM logs",
+            "SELECT * FROM notes WHERE body = 'done; edit later'",
+        ] {
+            let ctx = permissive_ctx(mock_output("mock output"));
+            let result = handler
+                .execute(Some(json!({"host": "server1", "query": query})), &ctx)
+                .await
+                .unwrap();
+            assert!(
+                result.is_error.is_none() || result.is_error == Some(false),
+                "{query}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_accepts_backslash_inside_string() {
+        let handler = SshMysqlQueryHandler::new();
+        let ctx = permissive_ctx(mock_output("mock output"));
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "query": r"SELECT * FROM t WHERE a LIKE '50\%'"})),
                 &ctx,
             )
             .await

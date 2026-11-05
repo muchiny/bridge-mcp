@@ -88,6 +88,9 @@ impl StandardTool for IoTraceTool {
 
     fn validate(args: &SshIoTraceArgs, _host_config: &HostConfig) -> Result<()> {
         PerformanceCommandBuilder::validate_duration(args.duration.unwrap_or(5))?;
+        if let Some(device) = args.device.as_deref() {
+            crate::domain::use_cases::performance::validate_io_device(device)?;
+        }
         Ok(())
     }
 }
@@ -98,6 +101,19 @@ pub type SshIoTraceHandler = StandardToolHandler<IoTraceTool>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `iostat -x DEVICE`: a device that starts with `-` would be an option.
+    #[test]
+    fn an_option_shaped_device_is_refused() {
+        let args: SshIoTraceArgs =
+            serde_json::from_value(json!({"host": "h", "device": "-V"})).expect("valid args");
+        let host: HostConfig = serde_json::from_value(
+            json!({"hostname": "h", "user": "u", "auth": {"type": "agent"}}),
+        )
+        .expect("host");
+        let err = IoTraceTool::validate(&args, &host).expect_err("refused");
+        assert!(err.to_string().contains("'device'"), "{err}");
+    }
     use crate::ports::ToolHandler;
     use crate::ports::mock::create_test_context;
     use serde_json::json;

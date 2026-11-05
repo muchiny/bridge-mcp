@@ -41,6 +41,17 @@ struct SshDiskUsageArgs {
 )]
 pub struct SshDiskUsageHandler;
 
+/// Build the `du`/`df` command; `--` keeps a path starting with '-' an operand.
+fn build_disk_usage_command(path: Option<&str>) -> String {
+    path.map_or_else(
+        || "df -h".to_string(),
+        |p| {
+            let escaped_path = shell_escape(p);
+            format!("du -sh -- {escaped_path} && df -h -- {escaped_path}")
+        },
+    )
+}
+
 #[async_trait]
 impl ToolHandler for SshDiskUsageHandler {
     fn name(&self) -> &'static str {
@@ -115,12 +126,15 @@ impl ToolHandler for SshDiskUsageHandler {
                     host: args.host.clone(),
                 })?;
 
-        let command = if let Some(ref path) = args.path {
-            let escaped_path = shell_escape(path);
-            format!("du -sh {escaped_path} && df -h {escaped_path}")
-        } else {
-            "df -h".to_string()
-        };
+        if let Some(reason) =
+            crate::mcp::tool_handlers::utils::posix_only_refusal(host_config, self.name())
+        {
+            ctx.execute_use_case
+                .log_denied(self.name(), &args.host, "", &reason);
+            return Ok(ToolCallResult::error(reason));
+        }
+
+        let command = build_disk_usage_command(args.path.as_deref());
 
         if let Err(e) = ctx.execute_use_case.validate_builtin(&command) {
             let reason = match &e {
@@ -300,6 +314,15 @@ fn post_process_disk_usage(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disk_usage_path_comes_after_end_of_options() {
+        assert_eq!(build_disk_usage_command(None), "df -h");
+        assert_eq!(
+            build_disk_usage_command(Some("-x")),
+            "du -sh -- '-x' && df -h -- '-x'"
+        );
+    }
+
     use super::*;
     use crate::ports::mock::create_test_context;
     use serde_json::json;
@@ -560,5 +583,23 @@ mod tests {
         let args: SshDiskUsageArgs = serde_json::from_value(json!({"host": "server1"})).unwrap();
         let result = post_process_disk_usage(result, &args, "");
         assert!(!result.content.is_empty());
+    }
+
+    /// `du`/`df` with a POSIX-quoted path: refused on a Windows host and on any host whose
+    /// commands do not run in a POSIX shell, before anything is sent.
+    #[tokio::test]
+    async fn test_refuses_hosts_without_a_posix_shell() {
+        use crate::mcp::tool_handlers::utils::guard_test_support::{context_with_target, refusal};
+        let args = serde_json::json!({"host": "target", "path": "/var"});
+        let text = refusal(
+            &SshDiskUsageHandler,
+            args.clone(),
+            &context_with_target("windows", ""),
+        )
+        .await;
+        assert!(text.contains("Windows"), "{text}");
+        let pwsh = context_with_target("linux", r#","shell":"powershell""#);
+        let text = refusal(&SshDiskUsageHandler, args, &pwsh).await;
+        assert!(text.contains("PowerShell"), "{text}");
     }
 }

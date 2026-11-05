@@ -122,15 +122,21 @@ impl TemplateCommandBuilder {
     #[must_use]
     pub fn build_template_show_command(template_name: &str) -> String {
         let escaped = shell_escape(template_name);
+        // The escaped name is its own argument: inside `'Template: ...'` the
+        // quotes `shell_escape` adds would close the literal. `echo` joins
+        // its arguments with one space, so the printed line is unchanged.
         format!(
-            "echo 'Template: {escaped}' && echo '---' && \
+            "echo 'Template:' {escaped} && echo '---' && \
              echo 'Use ssh_template_apply to deploy this template.'"
         )
     }
 
     /// Build a command to apply template content to a destination file.
     ///
-    /// If `backup` is true, creates a `.bak` copy before overwriting.
+    /// If `backup` is true and `dest` exists, copies it to `dest.bak` before
+    /// overwriting; a failed copy stops the command before `dest` is touched
+    /// (exit 1, `backup failed` on stderr). A `dest` that does not exist yet has
+    /// nothing to back up.
     ///
     /// The heredoc terminator is randomized per call (`MCP_EOF_{uuid}`)
     /// and re-rolled on the astronomically rare collision with any body line,
@@ -140,7 +146,11 @@ impl TemplateCommandBuilder {
         let escaped_dest = shell_escape(dest);
         let mut cmd = String::new();
         if backup {
-            let _ = write!(cmd, "cp {escaped_dest} {escaped_dest}.bak 2>/dev/null; ");
+            let _ = write!(
+                cmd,
+                "if [ -e {escaped_dest} ]; then cp -p -- {escaped_dest} {escaped_dest}.bak \
+                 || {{ echo 'backup failed' >&2; exit 1; }}; fi; "
+            );
         }
 
         let terminator = loop {
@@ -196,22 +206,24 @@ impl TemplateCommandBuilder {
             }
             "redis" => {
                 if let Some(path) = config_path {
-                    format!("redis-cli ping && echo 'Config: {}'", shell_escape(path))
+                    format!("redis-cli ping && echo 'Config:' {}", shell_escape(path))
                 } else {
                     "redis-cli ping".to_string()
                 }
             }
-            _ => format!("echo 'Unknown service: {}'", shell_escape(service)),
+            _ => format!("echo 'Unknown service:' {}", shell_escape(service)),
         }
     }
 
     /// Build a command to diff template content against an existing file.
     ///
-    /// Uses process substitution to compare.
+    /// Uses process substitution to compare. The content is `printf`'s
+    /// argument, never an `echo` operand, so a leading `-` or a backslash in it
+    /// is data.
     #[must_use]
     pub fn build_template_diff_command(content: &str, current_path: &str) -> String {
         format!(
-            "diff <(cat {}) <(echo {})",
+            "diff <(cat -- {}) <(printf '%s\\n' {})",
             shell_escape(current_path),
             shell_escape(content)
         )
@@ -439,9 +451,35 @@ mod tests {
     fn test_template_apply_backup_branch_still_works() {
         let cmd =
             TemplateCommandBuilder::build_template_apply_command("body", "/etc/foo.conf", true);
-        assert!(cmd.starts_with("cp "));
-        assert!(cmd.contains(".bak 2>/dev/null;"));
-        assert!(cmd.contains("cat > '/etc/foo.conf'"));
+        assert!(
+            cmd.starts_with(
+                "if [ -e '/etc/foo.conf' ]; then cp -p -- '/etc/foo.conf' '/etc/foo.conf'.bak || "
+            ),
+            "{cmd}"
+        );
+        assert!(
+            !cmd.contains("2>/dev/null"),
+            "a failed copy must not be silent: {cmd}"
+        );
+        assert!(
+            cmd.contains("exit 1; }; fi; cat > '/etc/foo.conf'"),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn test_template_apply_backup_failure_stops_before_the_write() {
+        let cmd = TemplateCommandBuilder::build_template_apply_command("x", "/d", true);
+        let copy = cmd.find("cp -p").expect("backup copy present");
+        let fail = cmd.find("exit 1").expect("fail-closed exit present");
+        let write = cmd.find("cat > '/d'").expect("write present");
+        assert!(copy < fail && fail < write, "{cmd}");
+    }
+
+    #[test]
+    fn test_template_apply_without_backup_has_no_copy() {
+        let cmd = TemplateCommandBuilder::build_template_apply_command("x", "/d", false);
+        assert!(cmd.starts_with("cat > '/d'"), "{cmd}");
     }
 
     // ============== Validate Command ==============
@@ -550,5 +588,26 @@ mod tests {
             Some("/etc/mysql/my.cnf"),
         );
         assert!(cmd.contains("--defaults-file="));
+    }
+
+    #[test]
+    fn test_validate_redis_path_is_its_own_echo_argument() {
+        let cmd =
+            TemplateCommandBuilder::build_template_validate_command("redis", Some("/x;id;/$(id)"));
+        assert_eq!(cmd, "redis-cli ping && echo 'Config:' '/x;id;/$(id)'");
+    }
+
+    #[test]
+    fn test_show_and_unknown_service_do_not_wrap_the_escaped_value_in_quotes() {
+        let show = TemplateCommandBuilder::build_template_show_command("a$(id)");
+        assert!(show.starts_with("echo 'Template:' 'a$(id)' && "), "{show}");
+        let unknown = TemplateCommandBuilder::build_template_validate_command("a;b", None);
+        assert_eq!(unknown, "echo 'Unknown service:' 'a;b'");
+    }
+
+    #[test]
+    fn test_diff_content_is_printf_data_not_echo_operand() {
+        let cmd = TemplateCommandBuilder::build_template_diff_command("-n\\t", "/etc/x");
+        assert_eq!(cmd, "diff <(cat -- '/etc/x') <(printf '%s\\n' '-n\\t')");
     }
 }

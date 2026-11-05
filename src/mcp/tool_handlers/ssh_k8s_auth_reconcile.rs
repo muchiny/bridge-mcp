@@ -299,7 +299,7 @@ mod tests {
         assert!(cmd.contains("/etc/k8s/rbac.yaml"), "cmd: {cmd}");
         assert!(cmd.contains("--context=east"), "cmd: {cmd}");
         assert!(
-            !cmd.contains("echo"),
+            !cmd.contains("printf"),
             "should be file path, not inline: {cmd}"
         );
     }
@@ -319,7 +319,10 @@ mod tests {
             save_output: None,
         };
         let cmd = K8sAuthReconcileTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("echo"), "should be inline: {cmd}");
+        assert!(
+            cmd.starts_with("printf '%s\\n' "),
+            "should be inline: {cmd}"
+        );
         assert!(cmd.contains("auth reconcile -f -"), "cmd: {cmd}");
         assert!(cmd.contains("--dry-run=client"), "cmd: {cmd}");
         assert!(cmd.contains("--remove-extra-permissions"), "cmd: {cmd}");

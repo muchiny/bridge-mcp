@@ -6,9 +6,34 @@
 use std::fmt::Write;
 
 use crate::config::ShellType;
+use crate::error::{BridgeError, Result};
 
 fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
+}
+
+/// Web servers whose binary `ssh_nginx_test` and `ssh_nginx_reload` may run.
+const KNOWN_SERVERS: &[&str] = &["nginx", "apache2", "httpd", "openresty"];
+
+/// Refuse a `server` that is not a known web server.
+///
+/// The test and reload commands run `<server> -t`, so the name is a program:
+/// any other value (`bash`, `/tmp/payload.sh`) would run that program.
+///
+/// # Errors
+///
+/// Returns `BridgeError::CommandDenied` if `server` is not `nginx`, `apache2`,
+/// `httpd` or `openresty`.
+pub fn validate_server(server: Option<&str>) -> Result<()> {
+    match server {
+        Some(s) if !KNOWN_SERVERS.contains(&s) => Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Unknown web server '{s}': 'server' must be one of {}",
+                KNOWN_SERVERS.join(", ")
+            ),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Builds Nginx/web server management commands for remote execution.
@@ -21,7 +46,7 @@ impl NginxCommandBuilder {
     #[must_use]
     pub fn build_status_command(server: Option<&str>) -> String {
         match server {
-            Some(s) => format!("systemctl status {} --no-pager", shell_escape(s)),
+            Some(s) => format!("systemctl status --no-pager -- {}", shell_escape(s)),
             None => String::from(
                 "if systemctl is-active nginx >/dev/null 2>&1; then systemctl status nginx --no-pager; \
                  elif systemctl is-active apache2 >/dev/null 2>&1; then systemctl status apache2 --no-pager; \
@@ -53,7 +78,7 @@ impl NginxCommandBuilder {
             "nginx" => String::from("nginx -t 2>&1 && systemctl reload nginx"),
             "apache2" | "httpd" => format!("apachectl configtest 2>&1 && systemctl reload {srv}"),
             _ => format!(
-                "{} -t 2>&1 && systemctl reload {}",
+                "{} -t 2>&1 && systemctl reload -- {}",
                 shell_escape(srv),
                 shell_escape(srv)
             ),
@@ -70,7 +95,7 @@ impl NginxCommandBuilder {
             Some("httpd") => "/etc/httpd/conf.d/",
             _ => "/etc/nginx/sites-enabled/",
         });
-        let mut cmd = format!("ls -la {} 2>/dev/null", shell_escape(dir));
+        let mut cmd = format!("ls -la -- {} 2>/dev/null", shell_escape(dir));
         let _ = write!(
             cmd,
             " || ls -la /etc/nginx/conf.d/ 2>/dev/null || echo 'No sites directory found'"
@@ -86,7 +111,7 @@ mod tests {
     #[test]
     fn test_status_nginx() {
         let cmd = NginxCommandBuilder::build_status_command(Some("nginx"));
-        assert!(cmd.contains("systemctl status 'nginx'"));
+        assert!(cmd.contains("systemctl status --no-pager -- 'nginx'"));
     }
 
     #[test]
@@ -152,7 +177,7 @@ mod tests {
     #[test]
     fn test_status_injection_in_server() {
         let cmd = NginxCommandBuilder::build_status_command(Some("nginx; rm -rf /"));
-        assert!(cmd.contains("systemctl status 'nginx; rm -rf /'"));
+        assert!(cmd.contains("systemctl status --no-pager -- 'nginx; rm -rf /'"));
     }
 
     #[test]
@@ -202,19 +227,19 @@ mod tests {
     fn test_reload_custom_server_escaping() {
         let cmd = NginxCommandBuilder::build_reload_command(Some("openresty"));
         assert!(cmd.contains("'openresty' -t 2>&1"));
-        assert!(cmd.contains("systemctl reload 'openresty'"));
+        assert!(cmd.contains("systemctl reload -- 'openresty'"));
     }
 
     #[test]
     fn test_status_apache2() {
         let cmd = NginxCommandBuilder::build_status_command(Some("apache2"));
-        assert!(cmd.contains("systemctl status 'apache2' --no-pager"));
+        assert!(cmd.contains("systemctl status --no-pager -- 'apache2'"));
     }
 
     #[test]
     fn test_status_httpd() {
         let cmd = NginxCommandBuilder::build_status_command(Some("httpd"));
-        assert!(cmd.contains("systemctl status 'httpd' --no-pager"));
+        assert!(cmd.contains("systemctl status --no-pager -- 'httpd'"));
     }
 
     #[test]
@@ -273,5 +298,39 @@ mod tests {
         let cmd =
             NginxCommandBuilder::build_list_sites_command(None, Some("/opt/it's-nginx/sites/"));
         assert!(cmd.contains("/opt/it'\\''s-nginx/sites/"));
+    }
+
+    #[test]
+    fn test_status_and_reload_put_the_unit_after_double_dash() {
+        let status = NginxCommandBuilder::build_status_command(Some("-.mount"));
+        assert!(status.ends_with(" -- '-.mount'"), "{status}");
+        let reload = NginxCommandBuilder::build_reload_command(Some("openresty"));
+        assert!(
+            reload.ends_with("systemctl reload -- 'openresty'"),
+            "{reload}"
+        );
+    }
+
+    #[test]
+    fn test_list_sites_dir_goes_after_double_dash() {
+        let cmd = NginxCommandBuilder::build_list_sites_command(None, Some("-R"));
+        assert!(cmd.starts_with("ls -la -- '-R' 2>/dev/null"), "{cmd}");
+    }
+
+    #[test]
+    fn test_validate_server_refuses_programs_and_options() {
+        for bad in ["bash", "/tmp/payload.sh", "python3", "-v", ""] {
+            let err = validate_server(Some(bad)).unwrap_err();
+            assert!(err.to_string().contains("'server'"), "{err}");
+        }
+        for good in [
+            None,
+            Some("nginx"),
+            Some("apache2"),
+            Some("httpd"),
+            Some("openresty"),
+        ] {
+            assert!(validate_server(good).is_ok(), "{good:?}");
+        }
     }
 }

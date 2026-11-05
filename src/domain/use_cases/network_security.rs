@@ -48,7 +48,8 @@ pub fn validate_capture_count(count: u32) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`BridgeError::CommandDenied`] if the target is empty or contains
+/// Returns [`BridgeError::CommandDenied`] if the target is empty, starts with
+/// `-` (a scanner would read it as an option such as `-oN<file>`) or contains
 /// shell-dangerous characters.
 pub fn validate_target(target: &str) -> Result<()> {
     if target.is_empty() {
@@ -56,6 +57,7 @@ pub fn validate_target(target: &str) -> Result<()> {
             reason: "Target cannot be empty".to_string(),
         });
     }
+    super::shell::refuse_option_like("target", target)?;
     if !target
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | ':' | '/' | '_'))
@@ -105,7 +107,7 @@ impl NetworkSecurityCommandBuilder {
         let _ = write!(
             cmd,
             "nmap -sT {escaped_target} -p {escaped_ports} 2>/dev/null || \
-             for p in $(echo {escaped_ports} | tr ',' ' '); do \
+             for p in $(printf '%s' {escaped_ports} | tr ',' ' '); do \
              (echo >/dev/tcp/{target_str}/$p) 2>/dev/null && \
              echo \"port $p open\"; done"
         );
@@ -128,7 +130,7 @@ impl NetworkSecurityCommandBuilder {
 
     /// Build a command to capture network traffic.
     ///
-    /// Constructs: `tcpdump -i IFACE -c COUNT FILTER -nn 2>&1`
+    /// Constructs: `tcpdump -i IFACE -c COUNT -nn [-- FILTER] 2>&1`
     ///
     /// # Errors
     ///
@@ -143,13 +145,14 @@ impl NetworkSecurityCommandBuilder {
         let iface = interface.unwrap_or("any");
         let escaped_iface = shell_escape(iface);
 
-        let mut cmd = format!("tcpdump -i {escaped_iface} -c {count}");
+        let mut cmd = format!("tcpdump -i {escaped_iface} -c {count} -nn");
 
+        // `--` first: `-w<file>` in the filter would make tcpdump write a file.
         if let Some(f) = filter {
-            let _ = write!(cmd, " {}", shell_escape(f));
+            let _ = write!(cmd, " -- {}", shell_escape(f));
         }
 
-        cmd.push_str(" -nn 2>&1");
+        cmd.push_str(" 2>&1");
         Ok(cmd)
     }
 
@@ -241,6 +244,25 @@ mod tests {
         assert!(validate_target("host`id`").is_err());
     }
 
+    #[test]
+    fn test_validate_target_refuses_leading_dash() {
+        for bad in ["-oN/home/u/.bashrc", "-iL/etc/passwd", "-"] {
+            let err = validate_target(bad).unwrap_err();
+            assert!(
+                err.to_string().contains("'target' must not start with '-'"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_port_scan_ports_are_printed_with_a_format() {
+        let cmd =
+            NetworkSecurityCommandBuilder::build_port_scan_command(Some("10.0.0.1"), Some("-1000"));
+        assert!(cmd.contains("printf '%s' '-1000' | tr"), "{cmd}");
+        assert!(!cmd.contains("echo '-1000'"), "{cmd}");
+    }
+
     // ── build_port_scan_command ───────────────────────────
 
     #[test]
@@ -323,6 +345,17 @@ mod tests {
             NetworkSecurityCommandBuilder::build_network_capture_command(None, Some("port 80"), 10)
                 .unwrap();
         assert!(cmd.contains("'port 80'"));
+    }
+
+    #[test]
+    fn test_capture_filter_goes_after_double_dash() {
+        let cmd = NetworkSecurityCommandBuilder::build_network_capture_command(
+            None,
+            Some("-w/etc/cron.d/x"),
+            10,
+        )
+        .unwrap();
+        assert_eq!(cmd, "tcpdump -i 'any' -c 10 -nn -- '-w/etc/cron.d/x' 2>&1");
     }
 
     #[test]

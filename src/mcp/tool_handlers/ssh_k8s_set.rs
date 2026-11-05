@@ -121,6 +121,14 @@ impl StandardTool for K8sSetTool {
     }"#;
 
     fn build_command(args: &SshK8sSetArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "target",
+            Some(args.target.as_str()),
+        )])?;
+        crate::domain::use_cases::kubernetes::refuse_option_like_assignments(
+            &args.subcommand,
+            &args.assignments,
+        )?;
         if !matches!(args.subcommand.as_str(), "image" | "env" | "resources") {
             return Err(BridgeError::CommandDenied {
                 reason: format!(
@@ -407,6 +415,41 @@ mod tests {
     }
 
     #[test]
+    fn test_build_command_set_env_may_pick_a_container() {
+        let args = |assignments: Vec<&str>| SshK8sSetArgs {
+            host: "s1".into(),
+            subcommand: "env".into(),
+            target: "deployment/api".into(),
+            assignments: assignments.into_iter().map(String::from).collect(),
+            namespace: None,
+            context: None,
+            list: None,
+            from: None,
+            env_file: None,
+            kubectl_bin: Some("kubectl".into()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd =
+            K8sSetTool::build_command(&args(vec!["-c", "app", "FOO=bar"]), &test_host_config())
+                .unwrap();
+        assert!(cmd.contains("'-c' 'app' 'FOO=bar'"), "cmd: {cmd}");
+        K8sSetTool::build_command(
+            &args(vec!["--containers=app", "FOO=bar"]),
+            &test_host_config(),
+        )
+        .unwrap();
+        for bad in ["--kubeconfig=/x", "--server=https://x", "--limits=cpu=1"] {
+            assert!(
+                K8sSetTool::build_command(&args(vec![bad, "FOO=bar"]), &test_host_config())
+                    .is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn test_build_command_set_env_list() {
         let args = SshK8sSetArgs {
             host: "s1".into(),
@@ -494,5 +537,44 @@ mod tests {
             result.is_err(),
             "expected error when no assignments/list/from/env_file"
         );
+    }
+
+    #[test]
+    fn test_option_like_target_is_refused() {
+        let args: SshK8sSetArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "subcommand": "x", "target": "-x"}),
+        )
+        .unwrap();
+        let err = K8sSetTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'target' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_option_like_assignment_is_refused() {
+        let args: SshK8sSetArgs = serde_json::from_value(json!({
+            "host": "h", "subcommand": "image", "target": "deployment/api",
+            "assignments": ["--server=https://attacker.example"]
+        }))
+        .unwrap();
+        let err = K8sSetTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'assignments' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_resources_flags_are_still_allowed() {
+        let args: SshK8sSetArgs = serde_json::from_value(json!({
+            "host": "h", "subcommand": "resources", "target": "deployment/api",
+            "assignments": ["--limits=cpu=200m", "-c", "app"]
+        }))
+        .unwrap();
+        let cmd = K8sSetTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.contains("'--limits=cpu=200m' '-c' 'app'"), "{cmd}");
     }
 }

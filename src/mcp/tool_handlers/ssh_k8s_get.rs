@@ -136,6 +136,13 @@ impl StandardTool for K8sGetTool {
         crate::domain::output_kind::OutputKind::Auto;
 
     fn build_command(args: &SshK8sGetArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[
+            ("resource", Some(args.resource.as_str())),
+            ("name", args.name.as_deref()),
+        ])?;
+        if let Some(out) = args.output.as_deref() {
+            crate::domain::use_cases::kubernetes::validate_kubectl_output(out)?;
+        }
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -717,5 +724,36 @@ mod tests {
             "{}",
             text_of(&out)
         );
+    }
+
+    #[test]
+    fn test_option_like_resource_is_refused() {
+        let args: SshK8sGetArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "resource": "-x"})).unwrap();
+        let err = K8sGetTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'resource' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_option_like_name_is_refused() {
+        let args: SshK8sGetArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "resource": "x", "name": "-x"}))
+                .unwrap();
+        let err = K8sGetTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'name' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_file_reading_output_is_refused() {
+        let args: SshK8sGetArgs = serde_json::from_value(serde_json::json!({"host": "x", "resource": "x", "output": "go-template-file=/etc/shadow"})).unwrap();
+        let err = K8sGetTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("output"), "{err}");
     }
 }

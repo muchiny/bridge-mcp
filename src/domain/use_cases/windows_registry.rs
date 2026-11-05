@@ -14,10 +14,43 @@ fn ps_escape(s: &str) -> String {
     shell::escape(s, ShellType::PowerShell)
 }
 
+/// The registry hives `reg.exe` and the `PowerShell` registry provider name.
+const REGISTRY_ROOTS: [&str; 10] = [
+    "HKLM",
+    "HKCU",
+    "HKCR",
+    "HKU",
+    "HKCC",
+    "HKEY_LOCAL_MACHINE",
+    "HKEY_CURRENT_USER",
+    "HKEY_CLASSES_ROOT",
+    "HKEY_USERS",
+    "HKEY_CURRENT_CONFIG",
+];
+
+/// Whether `path` starts with `prefix`, ignoring ASCII case.
+fn starts_with_ignore_case(path: &str, prefix: &str) -> bool {
+    path.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+/// Whether `path` is addressed to the registry provider: a drive form
+/// (`HKLM:`, `HKCU:`, `HKCR:`, `HKU:`, `HKCC:`) or `Registry::HK…`. Any other
+/// path (a UNC path, a drive letter, a relative name) would reach the file
+/// system provider.
+fn has_registry_provider_prefix(path: &str) -> bool {
+    ["HKLM:", "HKCU:", "HKCR:", "HKU:", "HKCC:", "Registry::HK"]
+        .iter()
+        .any(|prefix| starts_with_ignore_case(path, prefix))
+}
+
 /// Validates a Windows Registry path to prevent command injection.
 ///
 /// Registry paths must contain only alphanumeric characters, backslashes,
-/// colons, hyphens, underscores, spaces, and dots.
+/// colons, hyphens, underscores, spaces, and dots, and must start with a
+/// registry drive (`HKLM:`, `HKCU:`, `HKCR:`, `HKU:`, `HKCC:`) or
+/// `Registry::HK…`: any other path reaches the file system provider, and a
+/// UNC path (`\\host\share`) makes the Windows host authenticate to `host`.
 ///
 /// # Errors
 ///
@@ -26,6 +59,14 @@ pub fn validate_registry_path(path: &str) -> Result<()> {
     if path.is_empty() {
         return Err(BridgeError::CommandDenied {
             reason: "Registry path cannot be empty".to_string(),
+        });
+    }
+    if !has_registry_provider_prefix(path) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid registry path '{path}'. It must start with a registry drive \
+                 (HKLM:, HKCU:, HKCR:, HKU:, HKCC:) or Registry::HK."
+            ),
         });
     }
     if path.chars().all(|c| {
@@ -71,10 +112,63 @@ pub fn validate_registry_name(name: &str) -> Result<()> {
     }
 }
 
+/// Validates the key a `reg export` is given.
+///
+/// The key must start with a hive (`HKLM`, `HKEY_LOCAL_MACHINE`, …, with or
+/// without a trailing `:`), so that `reg.exe` never reads it as a switch or a
+/// remote `\\machine\` form. The rest of the key is only quoted: a key name
+/// may hold braces or parentheses. A double quote (or a typographic one) and a
+/// control character are refused, as is a trailing backslash: Windows
+/// `PowerShell` 5.1 does not escape them in the command line of a native
+/// program, so they would split `reg.exe`'s arguments (the rest of the key
+/// would become the export file, possibly a UNC path) or, before the closing
+/// quote, swallow the next argument.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] if the key is invalid.
+pub fn validate_registry_key(key: &str) -> Result<()> {
+    let body = key.get(..10).map_or(key, |head| {
+        if head.eq_ignore_ascii_case("Registry::") {
+            key.get(10..).unwrap_or("")
+        } else {
+            key
+        }
+    });
+    let (root, _) = body.split_once('\\').unwrap_or((body, ""));
+    let root = root.strip_suffix(':').unwrap_or(root);
+    if !REGISTRY_ROOTS.iter().any(|r| r.eq_ignore_ascii_case(root)) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid registry key '{key}'. It must start with a hive \
+                 (HKLM, HKCU, HKCR, HKU, HKCC or the HKEY_ name)."
+            ),
+        });
+    }
+    if key
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '"' | '\u{201C}'..='\u{201E}'))
+        || key.ends_with('\\')
+    {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid registry key '{key}'. It must not contain a double quote or a \
+                 control character, and must not end with a backslash."
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Validates a file path to prevent command injection.
 ///
 /// Paths must contain only alphanumeric characters, backslashes, forward slashes,
-/// colons, hyphens, underscores, spaces, and dots.
+/// colons, hyphens, underscores, spaces, and dots, and must not start with two
+/// path separators (`\\host\share`, `//host/share`, `\/host`) once leading
+/// whitespace is trimmed: a UNC path makes the Windows host open a connection
+/// to `host`, with its own credentials. It must not start with `-` or end with
+/// a separator: before the closing quote of an argument, a backslash escapes
+/// that quote and swallows the next argument (`/y`) of `reg.exe`'s command line.
 ///
 /// # Errors
 ///
@@ -83,6 +177,18 @@ pub fn validate_file_path(path: &str) -> Result<()> {
     if path.is_empty() {
         return Err(BridgeError::CommandDenied {
             reason: "File path cannot be empty".to_string(),
+        });
+    }
+    let mut leading = path.trim_start().chars();
+    if matches!(
+        (leading.next(), leading.next()),
+        (Some('\\' | '/'), Some('\\' | '/'))
+    ) {
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "Invalid file path '{path}'. A UNC path (two leading separators) is refused: \
+                 the host would connect to a remote share."
+            ),
         });
     }
     if path.chars().all(|c| {
@@ -95,6 +201,14 @@ pub fn validate_file_path(path: &str) -> Result<()> {
             || c == ' '
             || c == '.'
     }) {
+        if path.starts_with('-') || path.ends_with(['\\', '/']) {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "Invalid file path '{path}'. It must name a file: no leading '-' and no \
+                     trailing separator."
+                ),
+            });
+        }
         Ok(())
     } else {
         Err(BridgeError::CommandDenied {
@@ -210,6 +324,82 @@ mod tests {
         assert!(validate_registry_path(r"HKLM:\|Out-File").is_err());
     }
 
+    /// F56: a UNC or file system path must not reach `Get-ItemProperty`.
+    #[test]
+    fn test_validate_registry_path_requires_a_registry_provider() {
+        for path in [
+            r"\\attacker.example\share\x",
+            r"C:\Windows",
+            "relative",
+            r"\Registry\x",
+            r"HKLMx:\x",
+        ] {
+            let err = validate_registry_path(path).expect_err(path);
+            assert!(err.to_string().contains("registry drive"), "{path}: {err}");
+        }
+        for path in [
+            r"HKLM:\SOFTWARE",
+            r"hkcu:\Software\x",
+            r"HKU:\S-1-5-18",
+            r"HKCC:",
+            r"Registry::HKEY_LOCAL_MACHINE\SOFTWARE",
+            r"Registry::HKLM\SOFTWARE",
+        ] {
+            validate_registry_path(path).expect(path);
+        }
+    }
+
+    #[test]
+    fn test_validate_registry_key_requires_a_hive() {
+        for key in [
+            r"\\attacker\share",
+            "/y",
+            "-x",
+            r"C:\x",
+            "x",
+            r"HKLMX\a",
+            "",
+        ] {
+            assert!(validate_registry_key(key).is_err(), "{key}");
+        }
+        for key in [
+            r"HKLM\SOFTWARE\MyApp",
+            r"HKEY_CURRENT_USER\Software",
+            r"HKLM:\SOFTWARE",
+            "HKCR",
+            r"Registry::HKCU\x",
+        ] {
+            validate_registry_key(key).expect(key);
+        }
+        validate_registry_key(r"HKLM\SOFTWARE\Classes\CLSID\{0000-1} (x86)").unwrap();
+    }
+
+    /// A `"` in the key splits `reg.exe`'s arguments under Windows `PowerShell`
+    /// 5.1, which does not escape it: the rest of the key becomes the file.
+    #[test]
+    fn test_validate_registry_key_refuses_quotes_controls_and_trailing_backslash() {
+        for key in [
+            "HKLM\\SOFTWARE\" \\\\attacker\\share\\loot\" x\"z",
+            "HKLM\\SOFTWARE\"",
+            "\"HKLM\\SOFTWARE\"",
+            "HKLM\\SOFTWARE\u{201C}x",
+            "HKLM\\SOFTWARE\u{201E}x",
+            "HKLM\\SOFTWARE\nx",
+            "HKLM\\SOFTWARE\u{0}x",
+            "HKLM\\SOFTWARE\\My App\\",
+            "HKLM\\",
+        ] {
+            assert!(validate_registry_key(key).is_err(), "{key:?}");
+        }
+        for key in [
+            r"HKLM\SOFTWARE\My App",
+            r"HKCU\Software\{0000-1} (x86)",
+            r"HKLM:\SOFTWARE\Vendor's",
+        ] {
+            validate_registry_key(key).expect(key);
+        }
+    }
+
     // ── validate_registry_name ──────────────────────────────────────
 
     #[test]
@@ -239,6 +429,43 @@ mod tests {
         assert!(validate_file_path(r"C:\backup.reg").is_ok());
         assert!(validate_file_path(r"C:\Users\admin\export.reg").is_ok());
         assert!(validate_file_path("/tmp/export.reg").is_ok());
+    }
+
+    /// F56: `reg export` must not write the export to a remote share.
+    #[test]
+    fn test_validate_file_path_refuses_unc() {
+        for path in [
+            r"\\attacker.example\share\loot.reg",
+            "//attacker.example/share/loot.reg",
+            r"\/attacker\share",
+            r"/\attacker\share",
+        ] {
+            let err = validate_file_path(path).expect_err(path);
+            assert!(err.to_string().contains("UNC"), "{path}: {err}");
+        }
+        assert!(validate_file_path(r"\Windows\Temp\x.reg").is_ok());
+        assert!(validate_file_path("x.reg").is_ok());
+    }
+
+    /// A UNC path hidden behind leading whitespace, a `"`, a leading switch
+    /// character or a trailing separator (which escapes the closing quote under
+    /// Windows `PowerShell` 5.1) is refused; plain paths still pass.
+    #[test]
+    fn test_validate_file_path_refuses_hidden_unc_and_argument_splitting() {
+        for path in [
+            " \\\\attacker\\share\\x.reg",
+            "\t//attacker/share/x.reg",
+            "\"\\\\attacker\\share\\x.reg\"",
+            "C:\\x\".reg",
+            "-x.reg",
+            "C:\\My Dir\\",
+            "C:/dir/",
+        ] {
+            assert!(validate_file_path(path).is_err(), "{path:?}");
+        }
+        for path in [r"C:\My Dir\x.reg", "C:/dir/x.reg", "x-y.reg"] {
+            validate_file_path(path).expect(path);
+        }
     }
 
     #[test]

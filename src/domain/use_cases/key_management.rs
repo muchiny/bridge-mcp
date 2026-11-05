@@ -127,8 +127,8 @@ impl KeyManagementCommandBuilder {
         let escaped_key = shell_escape(public_key);
         Ok(format!(
             "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
-             grep -qF {escaped_key} ~/.ssh/authorized_keys 2>/dev/null || \
-             echo {escaped_key} >> ~/.ssh/authorized_keys && \
+             grep -qF -e {escaped_key} ~/.ssh/authorized_keys 2>/dev/null || \
+             printf '%s\\n' {escaped_key} >> ~/.ssh/authorized_keys && \
              chmod 600 ~/.ssh/authorized_keys && \
              echo 'Key distributed successfully'"
         ))
@@ -174,6 +174,20 @@ impl KeyManagementCommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_distribute_prints_the_key_with_a_format() {
+        let cmd = KeyManagementCommandBuilder::build_key_distribute_command(
+            "ssh-ed25519 AAAAC3 user\\nhost",
+        )
+        .unwrap();
+        assert!(
+            cmd.contains(r"printf '%s\n' 'ssh-ed25519 AAAAC3 user\nhost' >>"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("grep -qF -e 'ssh-ed25519"), "{cmd}");
+        assert!(!cmd.contains("echo 'ssh"), "{cmd}");
+    }
 
     // ── validate_key_type ─────────────────────────────────────
 

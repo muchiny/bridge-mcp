@@ -87,7 +87,7 @@ impl StandardTool for AnsibleRunBackgroundTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file or comma-separated host list"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
             },
             "limit": {
                 "type": "string",
@@ -130,7 +130,7 @@ impl StandardTool for AnsibleRunBackgroundTool {
             },
             "become_user": {
                 "type": "string",
-                "description": "User to become"
+                "description": "User to become (letters, digits, '_', '.', '@', '-'; max 64; no leading '-'; optional DOMAIN\\ prefix and trailing '$')"
             },
             "working_dir": {
                 "type": "string",
@@ -138,11 +138,11 @@ impl StandardTool for AnsibleRunBackgroundTool {
             },
             "vault_password_file": {
                 "type": "string",
-                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file)"
+                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file). Must be a plain file without execute permission (Ansible runs an executable one); the call stops with exit status 2 otherwise"
             },
             "vault_id": {
                 "type": "string",
-                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id)"
+                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id). The file after the first '@' (the whole value without one) must be a plain file without execute permission; 'prompt' and 'prompt_ask_vault_pass' are not files"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -186,21 +186,49 @@ impl StandardTool for AnsibleRunBackgroundTool {
             args.vault_id.as_deref(),
         );
 
-        // Generate a unique run ID using date + random
-        // Launch in background, capture PID, return JSON with run_id and pid
+        // The vault password file guards run first, in the foreground and in
+        // `working_dir`, so the call itself reports a refused file (status 2,
+        // message on stderr) instead of a `started` reply for a run that never
+        // begins. The playbook command carries the same guards: they run again
+        // right before `ansible-playbook` starts.
+        let precheck = AnsibleCommandBuilder::vault_precheck(
+            args.working_dir.as_deref(),
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
+        );
+
+        // A run ID from the date and the shell's PID. Only `nohup` goes to the
+        // background: with `a && b && nohup … &` the whole list did, so the
+        // `echo` saw no RUN_ID. OUTPUT_FILE is exported because the inner
+        // `bash -c` expands it.
         Ok(format!(
-            r#"RUN_ID=$(date +%Y%m%d%H%M%S)_$$ && \
-OUTPUT_FILE="/tmp/ansible-run-$RUN_ID.json" && \
-nohup bash -c '{playbook_cmd} > "$OUTPUT_FILE" 2>&1' > /dev/null 2>&1 & \
-PID=$! && \
-echo '{{"run_id":"'$RUN_ID'","pid":'$PID',"output_file":"'$OUTPUT_FILE'","status":"started"}}'
-"#,
+            r#"{precheck}RUN_ID=$(date +%Y%m%d%H%M%S)_$$; export OUTPUT_FILE="/tmp/ansible-run-$RUN_ID.json"; nohup bash -c '{playbook_cmd} > "$OUTPUT_FILE" 2>&1' > /dev/null 2>&1 & PID=$!; echo '{{"run_id":"'$RUN_ID'","pid":'$PID',"output_file":"'$OUTPUT_FILE'","status":"started"}}'"#,
             playbook_cmd = playbook_cmd.replace('\'', "'\\''"),
         ))
     }
 
     fn validate(args: &SshAnsibleRunBackgroundArgs, _host_config: &HostConfig) -> Result<()> {
         AnsibleCommandBuilder::validate_playbook_path(&args.playbook)?;
+        AnsibleCommandBuilder::refuse_jinja_in(&[
+            ("inventory", args.inventory.as_deref()),
+            ("limit", args.limit.as_deref()),
+            ("tags", args.tags.as_deref()),
+            ("skip_tags", args.skip_tags.as_deref()),
+        ])?;
+        if let Some(inventory) = args.inventory.as_deref() {
+            AnsibleCommandBuilder::validate_inventory(inventory)?;
+        }
+        AnsibleCommandBuilder::validate_vault_args(
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
+        )?;
+        // `become_user` ends up unquoted in a shell line on the targets.
+        if let Some(user) = args.become_user.as_deref() {
+            AnsibleCommandBuilder::validate_user_name("become_user", user)?;
+        }
+        if let Some(ref vars) = args.extra_vars {
+            AnsibleCommandBuilder::validate_extra_vars(vars)?;
+        }
         Ok(())
     }
 }
@@ -383,6 +411,10 @@ mod tests {
         };
         let cmd = AnsibleRunBackgroundTool::build_command(&args, &test_host_config()).unwrap();
         assert!(cmd.contains("nohup"));
+        // Only `nohup` runs in the background, and the inner shell sees the
+        // output file.
+        assert!(cmd.contains("_$$; export OUTPUT_FILE="), "{cmd}");
+        assert!(cmd.contains("2>&1 & PID=$!; echo"), "{cmd}");
         assert!(cmd.contains("ANSIBLE_STDOUT_CALLBACK"));
         assert!(cmd.contains("json"));
         assert!(cmd.contains("ansible-run-"));
@@ -417,5 +449,244 @@ mod tests {
             command.contains("--limit") && command.contains("web01:web02"),
             "the host pattern must reach ansible: {command}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_option_like_playbook_refused() {
+        let handler = SshAnsibleRunBackgroundHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host":"server1","playbook":"-ZQXdash"})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("playbook"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_extra_vars_refused() {
+        let handler = SshAnsibleRunBackgroundHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(Some(json!({"host":"server1","playbook":"site.yml","extra_vars":{"ansible_ssh_common_args":"x"}})), &ctx)
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("extra_vars"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_become_user_with_jinja_is_refused() {
+        let handler = SshAnsibleRunBackgroundHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host":"server1","playbook":"site.yml","become_user":"{{ lookup('pipe','id') }}"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("become_user"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_plain_become_user_still_validates() {
+        let args: SshAnsibleRunBackgroundArgs = serde_json::from_value(
+            json!({"host":"server1","playbook":"site.yml","become_user":"deploy"}),
+        )
+        .unwrap();
+        assert!(AnsibleRunBackgroundTool::validate(&args, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_become_user_with_shell_syntax_is_refused() {
+        for user in [
+            "root; id",
+            "root && id",
+            "root id",
+            "$(id)",
+            "`id`",
+            "-root",
+            "",
+            "root|id",
+            "root\nid",
+        ] {
+            let args: SshAnsibleRunBackgroundArgs = serde_json::from_value(
+                json!({"host":"server1","playbook":"site.yml","become_user":user}),
+            )
+            .unwrap();
+            let err =
+                AnsibleRunBackgroundTool::validate(&args, &test_host_config()).expect_err(user);
+            match err {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("become_user"), "{reason}");
+                }
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_become_user_names_still_pass() {
+        for user in ["root", "deploy", "_svc", "ops.team", "j.doe@corp", "a-b_c9"] {
+            let args: SshAnsibleRunBackgroundArgs = serde_json::from_value(
+                json!({"host":"server1","playbook":"site.yml","become_user":user}),
+            )
+            .unwrap();
+            assert!(
+                AnsibleRunBackgroundTool::validate(&args, &test_host_config()).is_ok(),
+                "{user}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_jinja_in_play_selectors_is_refused() {
+        for field in ["inventory", "limit", "tags", "skip_tags"] {
+            for text in ["{{ x }}", "a{% if 1 %}", "{# c #}"] {
+                let mut value = json!({"host":"server1","playbook":"site.yml"});
+                value[field] = json!(text);
+                let args: SshAnsibleRunBackgroundArgs = serde_json::from_value(value).unwrap();
+                match AnsibleRunBackgroundTool::validate(&args, &test_host_config()) {
+                    Err(BridgeError::CommandDenied { reason }) => {
+                        assert!(reason.contains(field), "{field}: {reason}");
+                    }
+                    other => panic!("{field} {text}: expected CommandDenied, got {other:?}"),
+                }
+            }
+        }
+        let ok: SshAnsibleRunBackgroundArgs = serde_json::from_value(json!({
+            "host":"server1","playbook":"site.yml","inventory":"hosts.ini","limit":"web*:!db1","tags":"a,b","skip_tags":"slow"
+        }))
+        .unwrap();
+        assert!(AnsibleRunBackgroundTool::validate(&ok, &test_host_config()).is_ok());
+    }
+
+    fn run_background_args(value: serde_json::Value) -> SshAnsibleRunBackgroundArgs {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn test_inventory_is_read_as_data_inside_the_background_shell() {
+        let args = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "/tmp/inv",
+            "working_dir": "/opt/a"
+        }));
+        let cmd = AnsibleRunBackgroundTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.contains(
+                "nohup bash -c 'cd -- '\\''/opt/a'\\'' && ANSIBLE_STDOUT_CALLBACK='\\''json'\\'' \
+                 ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml \
+                 ansible-playbook '\\''site.yml'\\'' -i '\\''/tmp/inv'\\'' > \"$OUTPUT_FILE\" 2>&1'"
+            ),
+            "{cmd}"
+        );
+        let none = run_background_args(json!({"host": "server1", "playbook": "site.yml"}));
+        let cmd = AnsibleRunBackgroundTool::build_command(&none, &test_host_config()).unwrap();
+        assert!(!cmd.contains("INVENTORY_ENABLED"), "{cmd}");
+        assert!(cmd.starts_with("RUN_ID=$(date "), "{cmd}");
+    }
+
+    #[test]
+    fn test_vault_guards_run_in_the_foreground_before_the_launch() {
+        let args = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "working_dir": "/opt/a",
+            "vault_password_file": "/etc/ansible/pass",
+            "vault_id": "prod@/etc/ansible/prod-pass"
+        }));
+        let cmd = AnsibleRunBackgroundTool::build_command(&args, &test_host_config()).unwrap();
+        // Foreground subshell in the working directory, ahead of everything.
+        assert!(
+            cmd.starts_with(
+                "( cd -- '/opt/a' && if [ -f '/etc/ansible/pass' ] && [ -n \"$(find -L "
+            ),
+            "{cmd}"
+        );
+        let end = cmd
+            .find("; fi ) || exit $?; RUN_ID=")
+            .expect("precheck end");
+        let launch = cmd.find("nohup bash -c '").expect("launch");
+        assert!(end < launch, "{cmd}");
+        assert!(
+            cmd.get(..end)
+                .is_some_and(|head| head.contains("; fi && if [ -f '/etc/ansible/prod-pass' ]")),
+            "{cmd}"
+        );
+        // The same guards run again inside the background shell, quoted for it.
+        assert!(
+            cmd.contains(
+                "nohup bash -c 'cd -- '\\''/opt/a'\\'' && if [ -f '\\''/etc/ansible/pass'\\'' ]"
+            ),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("--vault-password-file '\\''/etc/ansible/pass'\\''"),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn test_vault_precheck_without_working_dir_and_without_vault_files() {
+        let args = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "vault_id": "p@/v"
+        }));
+        let cmd = AnsibleRunBackgroundTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.starts_with("( if [ -f '/v' ] && [ -n \"$(find -L '/v' -prune "),
+            "{cmd}"
+        );
+        assert!(cmd.contains("; fi ) || exit $?; RUN_ID=$(date "), "{cmd}");
+
+        for vault in [
+            json!({}),
+            json!({"vault_id": "prompt"}),
+            json!({"vault_id": "x@prompt_ask_vault_pass"}),
+        ] {
+            let mut value = json!({"host": "server1", "playbook": "site.yml"});
+            if let Some(id) = vault.get("vault_id") {
+                value["vault_id"] = id.clone();
+            }
+            let args = run_background_args(value);
+            let cmd = AnsibleRunBackgroundTool::build_command(&args, &test_host_config()).unwrap();
+            assert!(cmd.starts_with("RUN_ID=$(date "), "{cmd}");
+            assert!(!cmd.contains("find -L"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_dashed_inventory_and_bad_vault_arguments_are_refused() {
+        for (field, value) in [
+            ("inventory", "-ZQXdash"),
+            ("vault_password_file", "-x"),
+            ("vault_password_file", "{{ x }}"),
+            ("vault_id", "p@-x"),
+            ("vault_id", "p@/a\nb"),
+        ] {
+            let mut v = json!({"host": "server1", "playbook": "site.yml"});
+            v[field] = json!(value);
+            let args = run_background_args(v);
+            match AnsibleRunBackgroundTool::validate(&args, &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains(field), "{field}: {reason}");
+                }
+                other => panic!("{field} {value}: expected CommandDenied, got {other:?}"),
+            }
+        }
+        let ok = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "hosts.ini",
+            "vault_password_file": "/etc/ansible/pass", "vault_id": "prod@/etc/ansible/prod-pass",
+            "become_user": "CORP\\svc"
+        }));
+        assert!(AnsibleRunBackgroundTool::validate(&ok, &test_host_config()).is_ok());
     }
 }

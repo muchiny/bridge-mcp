@@ -86,6 +86,10 @@ impl StandardTool for GitDiffTool {
         "required": ["host", "path"]
     }"#;
 
+    fn validate(args: &SshGitDiffArgs, _host_config: &HostConfig) -> Result<()> {
+        GitCommandBuilder::validate_not_option("commit", args.commit.as_deref())
+    }
+
     fn build_command(args: &SshGitDiffArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(GitCommandBuilder::build_diff_command(
             &args.path,
@@ -361,5 +365,15 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_shaped_commit() {
+        let args: SshGitDiffArgs = serde_json::from_value(
+            json!({"host": "s", "path": "/opt/repo", "commit": "--output=/tmp/x"}),
+        )
+        .unwrap();
+        let err = GitDiffTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("'commit'"), "{err}");
     }
 }

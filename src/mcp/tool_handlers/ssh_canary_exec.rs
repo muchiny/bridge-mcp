@@ -6,9 +6,9 @@
 
 use serde::Deserialize;
 
-use crate::config::HostConfig;
+use crate::config::{HostConfig, ShellType};
 use crate::domain::use_cases::orchestration::OrchestrationCommandBuilder;
-use crate::error::Result;
+use crate::error::{BridgeError, Result};
 use crate::mcp::protocol::ToolCallResult;
 use crate::mcp::standard_tool::{
     StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
@@ -101,6 +101,7 @@ impl StandardTool for CanaryExecTool {
         },
         "required": ["host", "command"]
     }"#;
+    const RAW_COMMAND: bool = true;
 
     /// `command` and `health_check` are free-form shell fragments straight from
     /// the request, so they get the same whitelist treatment as `ssh_exec`
@@ -113,7 +114,22 @@ impl StandardTool for CanaryExecTool {
         std::future::ready(validate_canary_commands(args, ctx))
     }
 
-    fn build_command(args: &SshCanaryExecArgs, _host_config: &HostConfig) -> Result<String> {
+    fn build_command(args: &SshCanaryExecArgs, host_config: &HostConfig) -> Result<String> {
+        // `command` alone runs unchanged in any shell. The health check is
+        // chained with `&& (… || true)`, which only a POSIX shell reads.
+        if args
+            .health_check
+            .as_deref()
+            .is_some_and(|hc| !hc.is_empty())
+            && host_config.effective_shell() != ShellType::Posix
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: "'health_check' is chained with POSIX `&& (… || true)`, which this \
+                         host's shell does not read: run the health check as a separate \
+                         call, or use a host with a POSIX shell"
+                    .to_string(),
+            });
+        }
         Ok(OrchestrationCommandBuilder::build_canary_command(
             &args.command,
             args.health_check.as_deref(),
@@ -295,6 +311,48 @@ mod tests {
             matches!(result, Err(BridgeError::CommandDenied { .. })),
             "health_check must be whitelist-checked, got: {result:?}"
         );
+    }
+
+    fn host_with_shell(shell: Option<ShellType>) -> HostConfig {
+        use crate::config::{HostKeyVerification, OsType};
+        HostConfig {
+            hostname: "test".to_string(),
+            port: 22,
+            user: "test".to_string(),
+            auth: crate::config::AuthConfig::Agent,
+            description: None,
+            host_key_verification: HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: OsType::default(),
+            shell,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
+
+    #[test]
+    fn health_check_is_refused_on_a_non_posix_host_but_the_bare_command_is_kept() {
+        let host = host_with_shell(Some(ShellType::PowerShell));
+        let err = CanaryExecTool::build_command(&args_with("Get-Date", Some("x")), &host)
+            .expect_err("health_check chains POSIX syntax");
+        assert!(err.to_string().contains("health_check"), "{err}");
+        let cmd = CanaryExecTool::build_command(&args_with("Get-Date", None), &host).unwrap();
+        assert_eq!(cmd, "Get-Date");
     }
 
     #[tokio::test]

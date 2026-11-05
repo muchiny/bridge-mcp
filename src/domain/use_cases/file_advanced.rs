@@ -33,7 +33,7 @@ impl FileAdvancedCommandBuilder {
     pub fn build_diff_command(file1: &str, file2: &str, context_lines: u32) -> String {
         let f1 = shell_escape(file1);
         let f2 = shell_escape(file2);
-        format!("diff -u --color=never -U {context_lines} {f1} {f2} || true")
+        format!("diff -u --color=never -U {context_lines} -- {f1} {f2} || true")
     }
 
     /// Build a patch apply command (with dry-run support).
@@ -50,14 +50,17 @@ impl FileAdvancedCommandBuilder {
         let escaped_target = shell_escape(target_file);
         let escaped_patch = shell_escape(patch_content);
         let dry_flag = if dry_run { " --dry-run" } else { "" };
-        format!("printf '%s' {escaped_patch} | patch{dry_flag} -p0 {escaped_target}")
+        format!("printf '%s' {escaped_patch} | patch{dry_flag} -p0 -- {escaped_target}")
     }
 
     /// Build a template rendering command using envsubst.
     ///
     /// # Errors
     ///
-    /// Returns [`BridgeError::CommandDenied`] if a variable key is not a valid POSIX env-var name.
+    /// Returns [`BridgeError::CommandDenied`] if a variable key is not a valid POSIX env-var name,
+    /// or names a variable that changes how the shell or the dynamic loader finds the program
+    /// to run (`PATH`, `LD_PRELOAD`, `IFS`, ...): the exports run before `envsubst` is started,
+    /// so such a key would let the caller choose the program that runs in its place.
     pub fn build_template_command(
         template_path: &str,
         output_path: &str,
@@ -69,6 +72,7 @@ impl FileAdvancedCommandBuilder {
         let mut exports: Vec<String> = Vec::with_capacity(variables.len());
         for (k, v) in variables {
             validate_env_var_name(k)?;
+            super::shell::refuse_sensitive_env_name("variables", k)?;
             let escaped_v = shell_escape(v);
             exports.push(format!("export {k}={escaped_v}"));
         }
@@ -239,5 +243,46 @@ mod tests {
                 .unwrap();
         assert!(cmd.contains("Template rendered to"));
         assert!(cmd.contains("'/tmp/out.conf'"));
+    }
+
+    #[test]
+    fn diff_and_patch_put_their_files_after_end_of_options() {
+        let diff = FileAdvancedCommandBuilder::build_diff_command("-a", "-b", 3);
+        assert_eq!(diff, "diff -u --color=never -U 3 -- '-a' '-b' || true");
+        let patch = FileAdvancedCommandBuilder::build_patch_command("-x", "p", true);
+        assert_eq!(patch, "printf '%s' 'p' | patch --dry-run -p0 -- '-x'");
+    }
+
+    #[test]
+    fn test_template_command_refuses_loader_and_shell_control_names() {
+        for bad in [
+            "PATH",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "IFS",
+            "BASH_ENV",
+            "GCONV_PATH",
+            "FPATH",
+            "fpath",
+        ] {
+            let vars = vec![(bad.to_string(), "/tmp/b".to_string())];
+            let r = FileAdvancedCommandBuilder::build_template_command(
+                "/etc/hostname",
+                "/tmp/o",
+                &vars,
+            );
+            assert!(
+                matches!(r, Err(BridgeError::CommandDenied { .. })),
+                "variable {bad} must be refused: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_template_command_still_exports_ordinary_names() {
+        let vars = vec![("SERVER_NAME".to_string(), "example.com".to_string())];
+        let cmd =
+            FileAdvancedCommandBuilder::build_template_command("/etc/t", "/tmp/o", &vars).unwrap();
+        assert!(cmd.starts_with("export SERVER_NAME='example.com' && envsubst < "));
     }
 }

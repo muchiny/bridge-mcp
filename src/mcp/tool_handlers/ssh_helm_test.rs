@@ -79,7 +79,7 @@ impl StandardTool for HelmTestTool {
             },
             "kubeconfig": {
                 "type": "string",
-                "description": "Path to kubeconfig file (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
+                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or ~/.kube/ (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
             },
             "helm_bin": {
                 "type": "string",
@@ -101,6 +101,11 @@ impl StandardTool for HelmTestTool {
     }"#;
 
     fn build_command(args: &SshHelmTestArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::validate_kubeconfig_opt(args.kubeconfig.as_deref())?;
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "release",
+            Some(args.release.as_str()),
+        )])?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -336,6 +341,18 @@ mod tests {
         assert!(
             result.is_err(),
             "expected error for flag-like namespace value"
+        );
+    }
+
+    #[test]
+    fn test_option_like_release_is_refused() {
+        let args: SshHelmTestArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "release": "-x"})).unwrap();
+        let err = HelmTestTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'release' must not start with '-'"),
+            "{err}"
         );
     }
 }

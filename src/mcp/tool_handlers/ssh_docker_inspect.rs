@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::docker::DockerCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -88,6 +89,10 @@ impl StandardTool for DockerInspectTool {
     }"#;
     const OUTPUT_KIND: crate::domain::output_kind::OutputKind =
         crate::domain::output_kind::OutputKind::Json;
+
+    fn validate(args: &SshDockerInspectArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("target", &args.target)
+    }
 
     fn build_command(args: &SshDockerInspectArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(DockerCommandBuilder::build_inspect_command(
@@ -220,5 +225,19 @@ mod tests {
             BridgeError::McpInvalidRequest(_) => {}
             e => panic!("Expected McpInvalidRequest, got: {e:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_target_starting_with_dash_is_refused() {
+        let handler = SshDockerInspectHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(Some(json!({"host": "server1", "target": "-x"})), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("'target' must not start with '-'"),
+            "{err}"
+        );
     }
 }

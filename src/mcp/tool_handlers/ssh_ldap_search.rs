@@ -113,6 +113,12 @@ impl StandardTool for LdapSearchTool {
         ))
     }
 
+    fn validate(args: &SshLdapSearchArgs, _host_config: &HostConfig) -> Result<()> {
+        args.attributes
+            .as_deref()
+            .map_or(Ok(()), LdapCommandBuilder::validate_attributes)
+    }
+
     fn post_process(
         result: ToolCallResult,
         args: &SshLdapSearchArgs,
@@ -340,5 +346,26 @@ mod tests {
         let dr = crate::domain::data_reduction::DataReductionArgs::default();
         let result = LdapSearchTool::post_process(result, &args, "", &dr);
         assert!(!result.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_refuses_shell_text_in_attributes() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshLdapSearchHandler::new();
+        let ctx = create_test_context_with_host();
+        for attributes in ["cn; id #", "$(id)", "-W"] {
+            let result = handler
+                .execute(
+                    Some(json!({"host": "server1", "base_dn": "dc=x", "attributes": attributes})),
+                    &ctx,
+                )
+                .await;
+            match result.unwrap_err() {
+                crate::error::BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'attributes'"));
+                }
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
     }
 }

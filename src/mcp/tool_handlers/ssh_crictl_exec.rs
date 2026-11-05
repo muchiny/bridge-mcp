@@ -5,8 +5,12 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::domain::use_cases::crictl::{CrictlCommandBuilder, validate_container_id};
 use crate::error::{BridgeError, Result};
-use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::standard_tool::{
+    StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
+};
 use crate::mcp_standard_tool;
+use crate::ports::ToolContext;
 
 /// Arguments for the `ssh_crictl_exec` tool.
 #[derive(Debug, Deserialize)]
@@ -59,6 +63,23 @@ impl StandardTool for CrictlExecTool {
     }"#;
 
     // RawText is the default output kind — no OUTPUT_KIND const needed.
+
+    fn validate(args: &SshCrictlExecArgs, _host_config: &HostConfig) -> Result<()> {
+        // `sh -c` reads a command string that starts with `-` as its own options.
+        crate::domain::use_cases::shell::refuse_option_like("command", &args.command)
+    }
+
+    /// `command` is a free-form script from the request, so it faces the same
+    /// whitelist as `ssh_exec`, not only the blacklist `validate_builtin`
+    /// applies to builder-produced commands.
+    fn pre_execute(
+        args: &SshCrictlExecArgs,
+        ctx: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        std::future::ready(
+            validate_free_form_command(ctx, Self::NAME, &args.host, &args.command).map(|()| None),
+        )
+    }
 
     fn build_command(args: &SshCrictlExecArgs, _host_config: &HostConfig) -> Result<String> {
         if args.container_id.is_empty() {
@@ -282,5 +303,47 @@ mod tests {
         assert!(cmd.contains("crictl exec"), "cmd: {cmd}");
         assert!(!cmd.contains("-s"), "no -s flag: {cmd}");
         assert!(cmd.contains("sh -c 'date'"), "cmd: {cmd}");
+    }
+
+    #[tokio::test]
+    async fn test_command_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshCrictlExecArgs = serde_json::from_value(
+            json!({"host": "server1", "container_id": "abc", "command": "id"}),
+        )
+        .unwrap();
+        let result = CrictlExecTool::pre_execute(&args, &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "command must be whitelist-checked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_whitelisted_command_is_allowed() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshCrictlExecArgs = serde_json::from_value(
+            json!({"host": "server1", "container_id": "abc", "command": "echo ok"}),
+        )
+        .unwrap();
+        let result = CrictlExecTool::pre_execute(&args, &ctx).await;
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_command_starting_with_a_dash_is_refused() {
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = SshCrictlExecHandler::new()
+            .execute(
+                Some(json!({"host": "server1", "container_id": "c", "command": "-s"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'command' must not start with '-'"),
+            "{err}"
+        );
     }
 }

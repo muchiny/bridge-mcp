@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-11-05
+
+**6.0.0 is a major release because of its breaking changes, and it fixes the
+critical security advisory GHSA-vcgr-hw4v-9r68 (command and option injection
+through tool arguments): upgrading is recommended.** Most of the breaking
+changes are the refusals that close that advisory, and each says what to
+use instead.
+
+The count is 66 by this bar: something that worked against 5.0.1 (a host
+entry or config file, a tool call with its arguments, a whitelist entry, the
+commands a tool sends, or a crate calling the library) now needs a change.
+63 are behaviour or configuration changes and 3 are in the library API.
+
+To recount: this release marks breaking changes with `Breaking` in bold,
+inside `### Changed`, `### Fixed` and `### Security` (5.0.0 used a
+`### BREAKING` section). Each item of a list under a bullet marked
+`Breaking` is one breaking change, and that bullet is then not counted
+itself; a `Breaking` bullet without such a list is one. So the count is the
+number of those list items as written: one rule that covers several tools
+is one item, and a rule on two different arguments is one item for each. Not
+counted, by the same bar: the dependency bumps (the dependency requirements
+in `Cargo.toml` are unchanged and no public type comes from them); the 51 new
+public library functions, which are additive; refusals of attacks with no
+legitimate use (a line break in a crontab entry, a quote that turns a file
+argument into a UNC path, a `;` in `become_user`, other spellings of a
+protected namespace); the fail-closed deletion fixes
+(`ssh_k8s_localpath_gc`, `ssh_cron_remove`); the `working_dir` fix, which
+changes only a command whose `cd` fails; and fixes to tools that did not
+work (`ssh_vault_write`, the Kubernetes tools with an auto-detected
+kubectl). `cargo semver-checks` against v5.0.1 reports two of the three
+library items: the removed function, and the four `VaultCommandBuilder`
+methods that lost a parameter. It cannot see the third, four builders that
+now return `Result<String>` instead of `String`.
+
 ### Changed
 
 - **Dependencies: the five open Dependabot updates in one change.** Crates:
@@ -26,12 +60,230 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aws-smithy-*` patch releases. The aws-sdk-rust releases of 2026-10-29 and
   2026-10-30 list no change for SSM and nothing breaking. The `cargo vet`
   exemptions follow.
-- **WinRM commands carry about 360 more characters.** The UTF-8 switch and the
+- **Breaking for long commands: WinRM commands carry about 360 more
+  characters.** The UTF-8 switch and the
   exit-code line go with every command that is neither a preamble nor named
   blocks. winrm-rs passes the script to `powershell.exe -EncodedCommand`,
   UTF-16 then base64, on a command line WinRS caps at 8191 characters: the
   longest command that fits is about 360 characters shorter than in 5.0.1
-  (some 2 600 instead of 3 000 ASCII characters).
+  (some 2 600 instead of 3 000 ASCII characters). A command in between now
+  fails: split it, or put the script in a file on the host and run that.
+- **Breaking for some configurations: a tool is refused on a host whose
+  commands run in another shell than the one it quotes for.** See Security.
+  Each item below is one breaking change:
+  - The Windows tools need `shell: powershell` on a Windows host over SSH
+    (set it on the host entry).
+  - The tools without an OS restriction, `ssh_tail` and `ssh_disk_usage` are
+    refused on Windows hosts and on any host whose shell is not POSIX
+    (WinRM, PSRP, `shell: powershell` or `cmd`), except `ssh_fleet_diff` and
+    `ssh_canary_exec` without `health_check`, which send the command as
+    written. On those hosts use the Windows tools, or `ssh_exec` with a
+    PowerShell command.
+  - An explicit `shell` on a WinRM or PSRP host, or on an SSM host with a
+    standard document, is ignored: the protocol decides, and the loader
+    warns (remove `shell` from such a host entry).
+  - The AWX tools refuse an `awx.ssh_host` that is not a POSIX Linux host:
+    point `awx.ssh_host` at a Linux host reached over SSH.
+  - Telnet and serial refuse commands holding a control character: send
+    telnet and serial commands one line at a time, with no control
+    character.
+- **Breaking: the injection fixes refuse values that used to pass.** See
+  Security for why. Each item below is one breaking change:
+  - A value starting with `-` in a name argument (Kubernetes, Helm,
+    container, user, group, Git ref or remote, VM id, database, jail, chain,
+    playbook, pattern) is refused (name the object without the dash, and
+    write a path as `./name`).
+  - `kubectl_bin`, `helm_bin`, `docker_bin`, `compose_bin` and `crictl_bin`
+    must name their program (a version suffix such as `kubectl-1.31` or
+    `helm3` is fine, a plugin such as `kubectl-ns` is not), bare or in
+    `/usr/bin`, `/bin`, `/usr/local/bin`, `/usr/sbin`, `/sbin`,
+    `/usr/local/sbin`, `/opt/bin`, `/snap/bin` or `/var/lib/rancher/rke2/bin`
+    (and the Docker CLI plugin directories `/usr/libexec/docker/cli-plugins`,
+    `/usr/lib/docker/cli-plugins` and `/usr/local/lib/docker/cli-plugins` for
+    `compose_bin`, which still takes `docker compose` and `podman compose`);
+    a `k3s_bin` that does not name `k3s` the same way is refused (point each
+    argument at the real program, or leave it out).
+  - `pkg_manager` must be `apt`, `apt-get`, `dnf`, `yum`, `apk`, `zypper` or
+    `pacman`, bare or in `/usr/bin`, `/bin`, `/usr/sbin` or `/sbin` (no
+    version suffix); any other value is ignored and auto-detection runs
+    instead (set it to one of these, or leave it empty).
+  - A Helm `kubeconfig` must be under `/etc/rancher/k3s/`,
+    `/etc/rancher/rke2/`, `/etc/kubernetes/`,
+    `/var/snap/microk8s/current/credentials/`, `/var/lib/k0s/pki/`,
+    `/root/.kube/`, `~/.kube/` or `$HOME/.kube/`, then a file path of
+    letters, digits, `/`, `.`, `_` and `-` without `..` (name your own home
+    `~/`, not `/home/…`).
+  - `ssh_nginx_test` and `ssh_nginx_reload` accept only `nginx`, `apache2`,
+    `httpd` or `openresty` as `server` (use one of these four names; for
+    another server, use `ssh_exec`).
+  - The k3s scripts (`script_path` of `ssh_k3s_killall` and
+    `ssh_k3s_uninstall`) must be in `/usr/local/bin`, `/usr/local/sbin` or
+    `/opt/bin` (move the script there).
+  - `ssh_session_exec` with `sudo: true` uses `sudo -n`, so it needs
+    `NOPASSWD` (use `ssh_exec` with `sudo` on a host that needs the
+    password).
+  - `ssh_vault_write` no longer takes `sudo` (elevation would put the
+    secrets in the argv of `sudo`: let the SSH user run `vault`).
+  - The Vault tools no longer take `vault_addr`: the host's own
+    `VAULT_ADDR` applies (set it on the host).
+  - The container and pod `exec` tools, `ssh_pty_exec` and `ssh_cron_add`
+    need a whitelist match in strict and standard modes (add the patterns to
+    `security.whitelist`); so do `ssh_ansible_adhoc` and
+    `ssh_awx_adhoc_launch`, with every module but an argument-less `ping`: a
+    command module's `args`, any other module as `ansible-module MODULE ARGS`.
+  - `ssh_awx_adhoc_launch` is annotated destructive (approve it as a
+    destructive tool; pass `--yes` in scripts).
+  - The AWX `limit` refuses Jinja and a leading `-` (move the templating
+    into the inventory, drop the dash).
+  - `ssh_docker_exec` is judged with its `workdir` as `cd -- DIR && …` (add
+    a whitelist pattern that matches that line).
+  - `ssh_k8s_exec` `argv` is judged as the shell line that passes the same
+    words (an element holding a quote or a space is quoted; add a whitelist
+    pattern that matches that line).
+  - `ssh_cron_add` writes `%` escaped, so cron runs the command as written
+    (a `%` that cron read as a line break or as standard input is now
+    literal: move that into a script).
+  - `ssh_cron_add` refuses a schedule field starting with `-` (write the
+    schedule field without a leading dash).
+  - `ssh_canary_exec` and `ssh_fleet_diff` refuse `sudo` on a host whose
+    shell is not POSIX (drop `sudo`, or elevate inside a command written for
+    that shell).
+  - `ssh_podman_exec` runs its command through `sh -c` in the container, as
+    `ssh_docker_exec` does (write the command as a shell line, as for
+    `ssh_docker_exec`).
+  - `ssh_docker_exec`, `ssh_podman_exec`, `ssh_crictl_exec` and
+    `ssh_k8s_exec` refuse a command starting with `-`, which `sh -c` read as
+    its own options (start with a program name or an absolute path).
+  - Each `env` entry of `ssh_docker_exec` must be `NAME=VALUE` with a name
+    that does not change what runs (`PATH`, `IFS`, `ENV`, `BASH_ENV`,
+    `LD_*`, `PYTHONPATH`, `NODE_OPTIONS`, `PERL5OPT`, `TAR_OPTIONS`,
+    `LESSOPEN`, … and zsh's `path`, `fpath`, `cdpath` are refused: set those
+    on the host or inside the command).
+  - Each `variables` key of `ssh_file_template` must be an identifier
+    (`[A-Za-z_][A-Za-z0-9_]*`) and not one of those names (rename the
+    variable in the template).
+  - Where a whitelist applies, `ssh_docker_exec` is judged as the line
+    `NAME=VALUE … COMMAND`, so an entry needs its own whitelist match (add a
+    whitelist pattern that matches that line).
+  - `ssh_ansible_events` takes `event_filter` as event names joined by `|`,
+    not a regex (write `runner_on_failed|playbook_on_stats`, with no regex
+    syntax).
+  - `ssh_cron_remove` matches its pattern literally, not as a regex (pass
+    the exact text of the entry instead of a regex).
+  - `ssh_podman_compose` takes a known subcommand (not `exec`, `run` or
+    `cp`) followed by its listed flags and service names only, refuses
+    quotes and backslashes and is annotated destructive (use a listed
+    subcommand; use `ssh_exec` for `exec`, `run` and `cp`).
+  - `ssh_net_connections` takes one of the full `ss` state names only
+    (`established`, `time-wait`, `listening`, …, in any case; the
+    abbreviations `ESTAB`, `LISTEN` and `UNCONN` are refused: pass the full
+    name, e.g. `established`).
+  - The timer tools take letters, digits and `-_.@:\` only (the `\` and `:`
+    of `systemd-escape` included; name the timer with those characters).
+  - `kubectl -o` takes `json`, `yaml`, `wide`, `name` or a `custom-columns=`,
+    `jsonpath=`, `jsonpath-as-json=`, `go-template=` or `template=` form only
+    (the `*-file` forms are refused: give the template inline).
+  - `ssh_ansible_facts` takes `filter` as a fact-name glob only (no Jinja;
+    pass a name such as `ansible_*`).
+  - `ssh_storage_mount` takes `fs_type` from a fixed list of file system
+    types (ext2-4, xfs, btrfs, zfs, vfat, exfat, ntfs, nfs, nfs4, cifs,
+    tmpfs, overlay, iso9660, squashfs, …; any other type, every `fuse*` type
+    and `glusterfs` are refused: mount a FUSE file system on the host).
+  - `ssh_storage_mount` refuses a `#` in the device when `fs_type` is
+    absent, `auto` or `none` (give a type from the list, or a device
+    without `#`).
+  - `ssh_terraform_plan` writes `out` only as a plain file name in the
+    Terraform directory (give a bare name such as `plan.out`).
+  - The backup tools refuse an archive name with a `:` before its first `/`
+    (tar reads it as `host:path`: write `./name:x`).
+  - `ssh_win_event_export` writes only to an absolute drive-letter path
+    (give one such as `C:\exports\x.evtx`).
+  - MySQL queries run with `mysql --binary-mode`, which turns the client's
+    own commands off (and its `\r\n` translation); a MySQL query with a
+    backslash outside a string or comment (`\G` included), or with any
+    backslash when it also holds a backtick or several statements, with a
+    statement starting with a client command word (`system`, `source`, `tee`,
+    `pager`, `edit`, `delimiter`, `connect`, …), and any query with a `/*!`
+    or `/*M!` comment, are refused (write plain SQL, ending the statement
+    with `;`).
+  - A psql query starting with a backslash is refused (write the SQL the
+    meta-command stands for).
+  - `ssh_db_restore` runs `mysql --binary-mode` too (restore a dump that
+    needs `DELIMITER` or `source` with the `mysql` client on the host).
+  - A PostgreSQL database name with `=` or a `postgres://` or
+    `postgresql://` prefix is refused (give the plain name; the host and the
+    user have their own arguments).
+  - `db_host`, `db_user`, `database` and `db_password` holding a line feed,
+    a carriage return or a NUL are refused (pass the value on one line, with
+    no control character).
+  - LDIF with an `include:` or `control:` line, or a carriage return outside
+    a CRLF line end, is refused (inline the values, end lines with a line
+    feed).
+  - `extra_vars` keys must be identifiers (`app-name` is refused: write
+    `app_name`).
+  - `extra_vars` keys starting with `ansible_` (`ansible_user`,
+    `ansible_port`, `ansible_python_interpreter`, which can run local
+    commands) are refused and belong in the inventory or `host_vars`.
+  - `extra_vars` values and ad-hoc `args` (and AWX `module_args`) holding
+    `{{`, `{%` or `{#` are refused, as they are in host patterns, `limit`,
+    `tags`, `skip_tags`, `inventory` and module names (put a templated value
+    in the playbook, the inventory or `host_vars`).
+  - `become_user` and the ad-hoc `user` must be plain user names
+    (`[A-Za-z_][A-Za-z0-9_.@-]*`, with an optional `DOMAIN\` prefix and a
+    trailing `$`; pass the plain name).
+  - Ad-hoc `args` (and AWX `module_args`) in Ansible's JSON form (`{…}`:
+    use `key=value` words), holding a hex or named escape Ansible decodes
+    (`\u0041`, `\x41`, `\N{…}`), an escaped `=`, or a backslash when a word
+    may start with `=` are refused (write the characters themselves).
+  - For the command modules, ad-hoc `args` holding a word starting with
+    `executable=`, `chdir=` or `stdin=` are refused (run such a call from a
+    playbook, or with `ssh_exec`).
+  - A caller `inventory` is read with the inventory plugins `host_list`,
+    `yaml`, `ini` and `toml` only (`ANSIBLE_INVENTORY_ENABLED`): a script or
+    plugin-configuration inventory belongs in `ansible.cfg`.
+  - A caller `vault_password_file` or `vault_id` file must be a regular file
+    without execute permission, or the tool stops before Ansible starts,
+    with the command's exit status 2 and a message on stderr
+    (`bridge-mcp tool` itself exits 6): a vault script belongs in
+    `ansible.cfg`.
+  - The path of a caller `vault_password_file` or `vault_id` file may not
+    hold `$`, `..` or a `~user` prefix (Ansible expands those, the check
+    would not: give a literal absolute path).
+  - The registry tools take paths under a hive only (`HKLM:`, `HKCU:`, …:
+    write `HKLM:\SOFTWARE\…`).
+  - `ssh_webhook_send` refuses a payload starting with `@`, which curl read
+    as a file name (put a word before it: `hello @here`).
+  - `working_dir` adds a line break to the command, so telnet and serial
+    hosts refuse it (write the `cd` in the command instead).
+  - `ssh_fleet_diff` is annotated mutating, not read-only: it runs any
+    command, and is no longer replayed after a timeout (approve it as a
+    mutating tool, and retry after a timeout yourself).
+- **A refusal raised while a tool builds its command is audited**
+  (`command_denied`), like one from argument validation: a builder that
+  refuses a path, a `kubeconfig` or a dashed command left no trace.
+- **Breaking for clients that declare roots: seven more file tools are scoped
+  to them.** `ssh_file_chmod`, `ssh_file_chown`, `ssh_file_diff`,
+  `ssh_file_patch`, `ssh_file_read`, `ssh_file_stat` and `ssh_file_template`
+  now ask the client for its roots (`roots/list`) and refuse a path outside
+  them, as `ssh_file_write` and `ssh_find` do. They were missing from the
+  list, so the check ran against no roots and let every path through. Add
+  the directories you use to the client's roots (a root of `/` allows every
+  path). A client that declares no roots is unaffected.
+- **Breaking (lib API):** three changes for a crate that calls the library.
+  Each item below is one breaking change:
+  - `domain::privilege::elevate_with_password_via_pipe` is removed, because
+    sessions no longer type the password into the shell: use `elevate`
+    (`sudo -n`, needs `NOPASSWD`), or `elevate_with_password`, which returns
+    the password in `Elevated::stdin` for `exec_with_stdin`.
+  - The four `VaultCommandBuilder` methods `build_status_command`,
+    `build_read_command`, `build_list_command` and `build_write_command`
+    lose their `vault_addr` parameter: drop the argument and set
+    `VAULT_ADDR` on the host.
+  - Four builders that could not fail now return `Result<String>`:
+    `CronCommandBuilder::build_remove_command`,
+    `FileOpsCommandBuilder::build_chmod_command` and `build_chown_command`,
+    and `StorageCommandBuilder::build_mount_command`: handle the `Result` at
+    each call site (`?` or `match`).
 
 ### Fixed
 
@@ -39,13 +291,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the command text in PowerShell, but a host without `shell` got the default of
   its `os_type`, `cmd` on Windows, and `-w`/`working_dir` built
   `cd /d "…" && …`, which Windows PowerShell rejects ("The token '&&' is not a
-  valid statement separator"). An explicit `shell` is still honoured, and the
-  loader now warns when it is not `powershell` on a WinRM or PSRP host. SSH
-  hosts keep `cmd` on Windows, OpenSSH's own default shell. `shell` decides
+  valid statement separator"). An explicit `shell` other than `powershell` is
+  ignored there (see Security), and the loader warns about it. SSH hosts keep
+  `cmd` on Windows, OpenSSH's own default shell. The host's shell decides
   `working_dir`, persistent sessions, the `export LC_ALL=C;` prefix of standard
-  tools and whether `sudo` is accepted; the tools' own argument quoting does
-  not follow it.
-- **WinRM and PSRP report a native program's exit code.** `cmd /c exit 3`
+  tools, whether `sudo` is accepted and which tools run (see Security).
+- **Breaking for scripts that read exit codes: WinRM and PSRP report a
+  native program's exit code.** `cmd /c exit 3`
   reported 1 over WinRM (`powershell.exe` exits from `$?`) and 0 over PSRP (a
   completed pipeline has no exit code). Both now apply one rule after the
   caller's last statement: 0 if it succeeded, else `$LASTEXITCODE` when a
@@ -56,7 +308,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `begin`/`process`/`end`/`dynamicparam` named blocks keep the old codes (1 or
   0 over WinRM, 0 over PSRP): nothing may follow those blocks. An explicit
   `exit N` keeps N over WinRM but still gives 0 over PSRP: psrp-rs declares no
-  host, so the server never passes `SetShouldExit` on.
+  host, so the server never passes `SetShouldExit` on. A caller that
+  tolerated a failing last statement now sees the failure: end the script
+  with a statement that succeeds (`$true`, or `$null = $true` to print
+  nothing), also after a `try`/`catch`, since a caught error can leave `$?`
+  false.
 - **WinRM output is UTF-8.** `powershell.exe` wrote on the console's OEM code
   page (437 on an en-US Windows) and the adapter decoded UTF-8: `"héllo-€"`
   came back as `h�llo-?`. The script now switches `[Console]::OutputEncoding`
@@ -72,11 +328,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already intact, a native program's non-ASCII output still is not. A
   top-level `Write-Error`, which PowerShell labels with the whole script text,
   now shows the added text too.
+- **The Kubernetes tools that run several kubectl calls work with an
+  auto-detected kubectl.** They stored the detection in a variable as quoted
+  text, `K='$(if …)'`, so the command was the literal text and failed:
+  `ssh_k8s_pvc_status`, the `localpath`, `endpoints`, `ingress_describe`,
+  `networkpolicy`, `service_describe`, `dns_check` and `connectivity_test`
+  tools, and the Traefik tools.
+- **`ssh_firewall_allow` and `ssh_firewall_deny` apply `source`** when no
+  `firewall_tool` is given; the rule used to open or close the port for
+  everyone.
+- **`ssh_cloud_cost` filters by `service`.** The filter was not valid JSON
+  and AWS refused it. **`ssh_notify` sends valid JSON** whatever the message.
+  **`ssh_alert_set` thresholds compare**: awk got the operator quoted.
+  **`extra_vars` values with spaces** reach Ansible whole. **`ssh_ldap_add`
+  and `ssh_ldap_modify`** no longer read `%` and `\` in the LDIF as `printf`
+  directives. **`ssh_cert_expiry`** accepts `days` above 49710.
+- **`ssh_vault_write` writes.** It sent `key=value` lines to
+  `vault kv put PATH -`, which reads JSON there, so every call failed. It now
+  sends one JSON object, and refuses an entry without `=`, an empty key and a
+  duplicate key.
+- **`ssh_ansible_run_background` runs the playbook.** The whole
+  `RUN_ID=… && OUTPUT_FILE=… && nohup …` list went to the background, so the
+  reply carried an empty `run_id`, and the inner shell never saw
+  `OUTPUT_FILE`, so its redirection failed before the playbook started.
+- **With `working_dir`, the Ansible tools get their output format.**
+  `ANSIBLE_STDOUT_CALLBACK` was set on `cd` instead of `ansible-playbook`, so
+  `ssh_ansible_recap`, the `jq_filter` of `ssh_ansible_playbook` and the JSON
+  of `ssh_ansible_run_background` got the default human output.
+- **`ssh_template_apply` with `backup`** no longer writes when the backup copy
+  fails. **`ssh_webhook_send` and `ssh_notify`** send `[` and `{` in a URL
+  literally (`curl --globoff`).
 - **PSRP runs scripts that end on `if`, `foreach`, `try` or `while`.** The
   adapter appended `| Out-String` to the text, which does not parse after such
   a statement ("An empty pipe element is not allowed") and formatted only the
   last statement. `Out-String` is now a second command of the pipeline and
   formats all of the script's output.
+
+### Security
+
+- **A tool runs only on a host whose shell its quoting was written for.** Every
+  built-in tool quotes the caller's arguments for one shell: a POSIX shell for
+  the Linux tools and for the some 250 tools without an OS restriction (`git`,
+  `docker`, `kubectl`, …), PowerShell for the Windows tools. That quoting was
+  applied whatever shell the host runs, and in another shell it does not hold:
+  on a WinRM or PSRP host, on a Windows host over SSH, or on a host declared
+  `shell: powershell`, a crafted argument to a read-only tool could run a
+  command of the caller's choosing. Built-in tool commands are not checked
+  against the whitelist, so `security.mode: strict` did not stop it. A tool is
+  now refused, before anything is sent, on a host whose commands run in
+  another shell, and the refusal is audited. `ssh_find`, `ssh_file_write`,
+  `ssh_tail`, `ssh_disk_usage`, the `file://` and `log://` resources and the
+  AWX tools (on `awx.ssh_host`) get the same check. **What may stop working:**
+  a Windows host over SSH without `shell` counts as `cmd.exe`, and the Windows
+  tools are now refused there; if its OpenSSH DefaultShell is PowerShell, set
+  `shell: powershell`, as the refusal says. The tools without an OS
+  restriction are refused on a host whose shell is not POSIX, where their
+  POSIX commands could not run anyway, and so are `ssh_tail` and
+  `ssh_disk_usage` (also on any `os_type: windows` host), except
+  `ssh_fleet_diff` and `ssh_canary_exec` without a health check, which send
+  the caller's command as it is.
+- **`shell` no longer overrides the protocol.** WinRM and PSRP run every
+  command in PowerShell, and SSM in the shell of its document
+  (`AWS-RunPowerShellScript` on Windows and `AWS-RunShellScript` on Linux,
+  unless `description` names another). An explicit `shell` there was honoured
+  for `working_dir`, the `LC_ALL=C` prefix of standard tools and `sudo`: with
+  `shell: posix` on a WinRM host, a `working_dir` value with a `'` in it ended
+  the POSIX quoting PowerShell read, past the whitelist. The protocol now
+  decides, and the loader warns that the value is ignored. A custom SSM
+  document is still left to `shell`.
+- **Telnet and serial refuse a command with a control character in it.**
+  They type the command into the remote terminal, whose line discipline and
+  line editor act on `^C`, `^U`, a tab or a line break before the shell reads
+  the quoting, so a quoted argument holding one could become a command. Any
+  control character, line feed and tab included, is refused.
+- **Tool arguments could inject commands or options on POSIX hosts too.** A
+  new test calls each tool it can drive through a mock executor (449 of
+  476; the rest build no command or are listed in the test) with hostile
+  values in every string argument that has no fixed list of values, and
+  lexes, as a shell would, each command that would reach the host
+  (`src/mcp/injection_sweep.rs`). It fails when a value is not one quoted
+  word, can be read as an option, or a tool stops sending commands. It and
+  two security reviews found, and this release fixes:
+  - **Values spliced raw or quoted twice**, so a `'` ended the quoting:
+    `ssh_ansible_events` (`run_id`, `event_filter`, a read-only tool),
+    `ssh_ansible_facts` (`filter`), `ssh_ldap_search` (`attributes`),
+    `ssh_podman_exec` (`command` ran on the host, not in the container),
+    `ssh_podman_compose` (`action`), `ssh_cloud_cost` (`service`),
+    `ssh_backup_snapshot` (`label`), the probe and API paths of
+    `ssh_k8s_port_forward` and `ssh_traefik_introspect`, and the `context`
+    of the Kubernetes RBAC tools.
+  - **Values read as options**: some 150 arguments sat where the program
+    still reads options, so `find '-delete'`, `git log '--output=FILE'`,
+    `git clone '--upload-pack=CMD'` or `sudo '-s'` were possible. Names that
+    cannot start with `-` (Kubernetes objects, Helm releases, containers,
+    users, groups, Git refs, VM ids, database names) are refused when they
+    do; paths and patterns, and the unit names of the systemd, timer and
+    nginx tools (`systemctl start -- UNIT`), now follow `--`, or `./` for
+    `find`, `chmod` and `chown`; data is written with `printf '%s'`, never as
+    a format or as `echo`'s argument.
+  - **Second interpreters**: a MySQL client command (`\!`, `system`) or a
+    psql meta-command in a query ran a shell; a PostgreSQL database name was
+    read as a connection string (`host=…`), sending the password to another
+    server; Jinja in `ssh_ansible_facts`'s `filter` or `ssh_ansible_adhoc`'s
+    `args` ran on the controller, and a `become_user` holding a `;` ended the
+    sudo command Ansible runs on the target; a line break in a path or
+    command added a crontab line (`ssh_backup_schedule`, `ssh_cron_add`); an
+    LDIF `attr:< file:///…` line read a file of the remote host into the
+    directory; a webhook payload starting with `@` made curl send a file;
+    `extra_vars` reached Ansible as `key=value` words and Jinja templates;
+    `kubectl -o jsonpath-file=…` read a file. Each is refused.
+  - **Programs chosen by the caller**: `k3s_bin` (under `sudo`),
+    `kubectl_bin`, `helm_bin`, `docker_bin`, `compose_bin`, `crictl_bin`,
+    `pkg_manager` and the `server` of the nginx tools only had to be made of
+    safe characters, so `/bin/sh` ran with the tool's arguments; the
+    `script_path` of `ssh_k3s_killall` and `ssh_k3s_uninstall` ran from any
+    directory under `sudo`. The program must now be the one the argument
+    names, and the k3s scripts must sit in `/usr/local/bin`,
+    `/usr/local/sbin` or `/opt/bin`.
+  - **The whitelist was skipped**: `ssh_pty_exec`, `ssh_docker_exec`,
+    `ssh_podman_exec`, `ssh_crictl_exec`, `ssh_k8s_exec`, `ssh_cron_add`
+    (whose command cron runs later), `ssh_ansible_adhoc` and
+    `ssh_awx_adhoc_launch` ran a free-form command, or any other module (a
+    package, a service), against the blacklist only. They now face the
+    whitelist like `ssh_exec`, and `ssh_awx_adhoc_launch` is annotated
+    destructive.
+  - **`sudo` was wrapped in POSIX text for any non-Windows host**: on a Linux
+    host whose commands run in PowerShell or `cmd.exe` (`shell:`, or WinRM
+    and PSRP left at `os_type: linux`), `ssh_canary_exec` and
+    `ssh_fleet_diff` with `sudo` sent `sudo -n bash -c '…'`, which that
+    shell split past the whitelist. `sudo` is refused there, as `ssh_exec`
+    already did.
+  - **Deletions that failed open**: `ssh_k8s_localpath_gc` treated every
+    directory under the storage root as an orphan when `kubectl get pv`
+    failed, which it always did with an auto-detected kubectl, and a
+    directory holding nested live volumes as one orphan; it now stops unless
+    the PV list is complete, compares first-level directories, removes only
+    `pvc-*` directories, and removes nothing when a volume covers the root or
+    a volume path holds a `.` or `..` segment. `ssh_k8s_delete` missed a protected
+    namespace written `namespaces`, `ns`, `Namespace.v1` or `ns/NAME`, and
+    `ssh_cron_remove` installed an empty crontab when `crontab -l` failed.
+  - **`working_dir` guarded only the first command**: `cd 'dir' && a; b` ran
+    `b` in the wrong directory when `cd` failed. The whole command now runs
+    only after a successful `cd` (POSIX, `cmd.exe` and PowerShell).
+- **`ssh_session_exec` no longer types the sudo password into the session.**
+  The session shell belongs to the caller, and a `sudo` or `printf` function
+  or a `DEBUG` trap defined by an earlier call read the password out of the
+  line. Sessions elevate with `sudo -n` only (see Changed).
+- **The `file://` and `log://` resources go through the sanitizer and the
+  audit log**, like `ssh_file_read`: they returned a file's content
+  unredacted, and neither a read nor its refusal left an audit event.
+- **Breaking for a shared daemon: the daemon's unix socket is private.** It
+  is created with mode 0600, and a connection from another user than its
+  owner (or root) is dropped, so a daemon shared by several users stops
+  working for the others: run one daemon per user.
+- **Breaking: SSM refuses `{{name:…}}` parameter references in commands**
+  (`{{ssm:…}}`, `{{ssm-secure:…}}`, with or without blanks inside the
+  braces), which SSM resolves on the bridge's credentials before running
+  them, so a caller could read any parameter those credentials reach. Go
+  templates such as `{{.Names}}` are unaffected. Read the parameter on the
+  instance instead (`aws ssm get-parameter`).
+- **The registry tools refuse UNC and file system paths**, which made the
+  Windows host authenticate to a server of the caller's choosing;
+  `ssh_reg_export` and `ssh_win_event_export` also refuse the quotes that let
+  their file argument become a UNC path.
+- **The Vault tools no longer send the host's token to an address of the
+  caller's choosing** (`vault_addr`, from read-only tools).
+- **Callers can no longer choose the program a tool runs** through the
+  environment (`PATH` or `LD_PRELOAD` in `ssh_file_template` variables or
+  `ssh_docker_exec` `env`, whose entries the whitelist now judges with the
+  command), a FUSE file system type (`ssh_storage_mount`
+  `fuse.<program>`), a GNU tar remote archive (`host:path`), or a binary in
+  a directory they can write (`*_bin`, or a Helm `kubeconfig`
+  whose exec credential plugin runs, as root under `sudo`), or an executable
+  Ansible runs: an `inventory` (the script inventory plugin, from the
+  read-only `ssh_ansible_inventory` and `ssh_ansible_facts` too) or a
+  `vault_password_file` / `vault_id` source.
+- **`ssh_terraform_plan`'s `out` could overwrite any file** the SSH user can
+  write, from a read-only tool.
 
 ## [5.0.1] - 2026-11-02
 
@@ -5728,7 +6156,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v5.0.1...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v6.0.0...HEAD
+[6.0.0]: https://github.com/muchiny/bridge-mcp/compare/v5.0.1...v6.0.0
 [5.0.1]: https://github.com/muchiny/bridge-mcp/compare/v5.0.0...v5.0.1
 [5.0.0]: https://github.com/muchiny/bridge-mcp/compare/v4.1.0...v5.0.0
 [4.1.0]: https://github.com/muchiny/bridge-mcp/compare/v4.0.2...v4.1.0

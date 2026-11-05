@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::podman::PodmanCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -72,6 +73,10 @@ impl StandardTool for PodmanInspectTool {
         },
         "required": ["host", "target"]
     }"#;
+
+    fn validate(args: &SshPodmanInspectArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("target", &args.target)
+    }
 
     fn build_command(args: &SshPodmanInspectArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(PodmanCommandBuilder::build_inspect_command(&args.target))
@@ -284,5 +289,19 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_target_starting_with_dash_is_refused() {
+        let handler = SshPodmanInspectHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(Some(json!({"host": "server1", "target": "-x"})), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("'target' must not start with '-'"),
+            "{err}"
+        );
     }
 }

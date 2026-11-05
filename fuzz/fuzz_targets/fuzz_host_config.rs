@@ -66,14 +66,10 @@ fuzz_target!(|data: &str| {
         // without its `winrm` / `psrp` features: `protocol: winrm` does not
         // parse here, so the PowerShell branch is never taken and that rule
         // is covered by the unit tests of `config/types.rs` instead.
-        let inferred = if host.protocol_runs_powershell() {
-            ShellType::PowerShell
-        } else {
-            match host.os_type {
-                OsType::Linux => ShellType::Posix,
-                OsType::Windows => ShellType::Cmd,
-            }
-        };
+        let inferred = host.protocol_shell().unwrap_or(match host.os_type {
+            OsType::Linux => ShellType::Posix,
+            OsType::Windows => ShellType::Cmd,
+        });
         assert_eq!(
             host.effective_shell(),
             inferred,

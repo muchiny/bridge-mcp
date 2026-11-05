@@ -13,25 +13,47 @@ fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
 }
 
-/// Validate a binary path contains only safe characters.
-fn is_valid_binary_path(bin: &str) -> bool {
+/// Whether a path (the `KUBECONFIG` value) is non-empty and made only of
+/// `[A-Za-z0-9/._-]`, so it can be spliced into a command unquoted.
+fn is_safe_path_chars(bin: &str) -> bool {
     !bin.is_empty()
         && bin
             .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
 }
+
+/// The programs a caller-supplied `kubectl_bin` may name.
+pub(crate) const KUBECTL_NAMES: &[&str] = &["kubectl", "microk8s.kubectl", "oc"];
+
+/// The programs a caller-supplied `helm_bin` may name (`microk8s.helm3` is the
+/// `MicroK8s` snap alias, a version suffix of `microk8s.helm`).
+pub(crate) const HELM_NAMES: &[&str] = &["helm", "microk8s.helm"];
+
+/// The `awk` program (no single quote, run as `ROOT=<root> awk '<program>'`)
+/// that reduces the PV host paths on its input to the live directories
+/// `find <root> -mindepth 1 -maxdepth 1` lists: each path under the root
+/// becomes `<root>/<first component>`. Input lines that are not absolute paths
+/// (empty fields, the `PVLIST_OK` marker) are skipped. A path that is the root
+/// or one of its parents prints the single line `!COVERS` instead, which the
+/// caller treats as "everything is live". Repeated slashes are squeezed first.
+/// A path with a `.` or `..` segment names a directory this program cannot
+/// place under the root by looking at the text, so it prints `!UNSURE`, on
+/// which the caller aborts.
+const LOCALPATH_GC_LIVE_AWK: &str = r#"BEGIN { r = ENVIRON["ROOT"] } { p = $0; gsub(/\/+/, "/", p); if (p !~ /^\//) next; sub(/\/+$/, "", p); if (("/" p "/") ~ /\/\.\.?\//) { print "!UNSURE"; next } if (p == r || index(r "/", p "/") == 1) { print "!COVERS"; next } if (index(p, r "/") == 1) { s = substr(p, length(r) + 2); sub(/\/.*/, "", s); if (s != "") print r "/" s } }"#;
 
 /// Generate the kubectl binary detection prefix.
 ///
-/// If `kubectl_bin` is provided, use it directly. Otherwise, auto-detect
-/// by probing for `kubectl`, `k3s kubectl`, or `microk8s kubectl`.
+/// If `kubectl_bin` names a kubectl (`kubectl`, `microk8s.kubectl` or `oc`,
+/// see [`is_named_binary`](super::shell::is_named_binary)), use it directly.
+/// Otherwise, auto-detect by probing for `kubectl`, `k3s kubectl`, or
+/// `microk8s kubectl`.
 #[must_use]
 pub fn kubectl_detect_prefix(kubectl_bin: Option<&str>) -> String {
     if let Some(bin) = kubectl_bin {
-        if is_valid_binary_path(bin) {
+        if super::shell::is_named_binary(bin, KUBECTL_NAMES) {
             format!("{bin} ")
         } else {
-            // Invalid binary path, fall back to auto-detection
+            // The value does not name a kubectl: fall back to auto-detection
             kubectl_detect_prefix(None)
         }
     } else {
@@ -45,14 +67,16 @@ pub fn kubectl_detect_prefix(kubectl_bin: Option<&str>) -> String {
 
 /// Generate the helm binary detection prefix.
 ///
-/// If `helm_bin` is provided, use it directly. Otherwise, auto-detect.
+/// If `helm_bin` names helm (`helm` or `microk8s.helm`, see
+/// [`is_named_binary`](super::shell::is_named_binary)), use it directly;
+/// otherwise auto-detect.
 #[must_use]
 pub fn helm_detect_prefix(helm_bin: Option<&str>) -> String {
     if let Some(bin) = helm_bin {
-        if is_valid_binary_path(bin) {
+        if super::shell::is_named_binary(bin, HELM_NAMES) {
             format!("{bin} ")
         } else {
-            // Invalid binary path, fall back to auto-detection
+            // The value does not name helm: fall back to auto-detection
             helm_detect_prefix(None)
         }
     } else {
@@ -62,26 +86,190 @@ pub fn helm_detect_prefix(helm_bin: Option<&str>) -> String {
     }
 }
 
+/// The root-owned directories (and the home form) a `kubeconfig` may be in.
+///
+/// A kubeconfig can name an exec credential plugin that the client runs, as
+/// root when the tool elevates, so a file the caller could have written (in
+/// `/tmp`, in another user's home) must not be accepted. `~/.kube/` and
+/// `$HOME/.kube/` are kept literal: the remote shell expands them, so the SSH
+/// user's own home is named that way rather than by its absolute path.
+const KUBECONFIG_DIRS: &[&str] = &[
+    "/etc/rancher/k3s/",
+    "/etc/rancher/rke2/",
+    "/etc/kubernetes/",
+    "/var/snap/microk8s/current/credentials/",
+    "/var/lib/k0s/pki/",
+    "/root/.kube/",
+    "~/.kube/",
+    "$HOME/.kube/",
+];
+
+/// Whether `path` is a kubeconfig location [`validate_kubeconfig`] accepts.
+fn is_allowed_kubeconfig(path: &str) -> bool {
+    let Some(tail) = KUBECONFIG_DIRS
+        .iter()
+        .find_map(|dir| path.strip_prefix(dir))
+    else {
+        return false;
+    };
+    is_safe_path_chars(tail) && !tail.split('/').any(|s| matches!(s, "" | "." | ".."))
+}
+
+/// Validate a `kubeconfig` argument of a helm tool.
+///
+/// The value must start with `/etc/rancher/k3s/`, `/etc/rancher/rke2/`,
+/// `/etc/kubernetes/`, `/var/snap/microk8s/current/credentials/`,
+/// `/var/lib/k0s/pki/`, `/root/.kube/`, `~/.kube/` or `$HOME/.kube/`, followed by a file path made of `[A-Za-z0-9/._-]` with
+/// no empty, `.` or `..` segment. Any other file could have been written by
+/// the caller, and a kubeconfig can make the client run a command (`exec`
+/// credential plugin), as root when the tool elevates.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] for any other value.
+pub fn validate_kubeconfig(kubeconfig: &str) -> Result<()> {
+    if is_allowed_kubeconfig(kubeconfig) {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!(
+                "kubeconfig '{kubeconfig}' is not allowed: use a file under /etc/rancher/k3s/, \
+                 /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/, \
+                 /var/lib/k0s/pki/, /root/.kube/, ~/.kube/ or $HOME/.kube/ (letters, digits, \
+                 '/', '.', '_' and '-' only, no '..'; name your own home ~/, not /home/...); \
+                 a kubeconfig can make the client run a command"
+            ),
+        })
+    }
+}
+
+/// [`validate_kubeconfig`] for an optional argument; `None` is accepted.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] when a value is given and refused.
+pub fn validate_kubeconfig_opt(kubeconfig: Option<&str>) -> Result<()> {
+    kubeconfig.map_or(Ok(()), validate_kubeconfig)
+}
+
 /// Generate an optional `KUBECONFIG=<path>` environment prefix.
 ///
-/// Returns an empty string if no kubeconfig is provided or the path is invalid.
-/// This is useful for K3s environments where helm needs explicit kubeconfig.
+/// Returns an empty string if no kubeconfig is provided or the path is not
+/// one [`validate_kubeconfig`] accepts (the tool handlers refuse such a value
+/// before they get here). This is useful for K3s environments where helm
+/// needs explicit kubeconfig.
 #[must_use]
 pub fn kubeconfig_env_prefix(kubeconfig: Option<&str>) -> String {
     match kubeconfig {
-        Some(path) if is_valid_binary_path(path) => format!("KUBECONFIG={path} "),
+        Some(path) if is_allowed_kubeconfig(path) => format!("KUBECONFIG={path} "),
         _ => String::new(),
     }
 }
 
-/// Validate a kubectl context name: non-empty, not flag-like, shell-safe charset.
+/// Value to put after `K=` / `PFX=` for a kubectl prefix from
+/// [`kubectl_detect_prefix`].
+///
+/// The auto-detect prefix is a `$(...)` command substitution: it must stay
+/// bare so the shell runs it. Quoting it would assign the literal text to the
+/// variable and `$K get ...` would then try to run a command named `$(if`. An
+/// explicit binary path is quoted once.
+fn kubectl_assign_value(prefix: &str) -> String {
+    let p = prefix.trim_end();
+    if p.starts_with("$(") {
+        p.to_string()
+    } else {
+        shell_escape(p)
+    }
+}
+
+/// Refuse every named value that starts with `-`.
+///
+/// `kubectl` and `helm` read a positional that starts with `-` as an option
+/// (`--kubeconfig=...`, `--server=...`), and the names they take (pods, nodes,
+/// releases, charts, ...) never start with one. Absent values are skipped.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] naming the first offending argument.
+pub fn refuse_option_like_all(values: &[(&str, Option<&str>)]) -> Result<()> {
+    for (arg, value) in values {
+        if let Some(v) = value {
+            super::shell::refuse_option_like(arg, v)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse `kubectl set` assignments that start with `-`.
+///
+/// `set image` and `set env` take `NAME=value` words, which never start with
+/// `-`; one that does is an option (`--kubeconfig=...`). `-c` and
+/// `--containers` pick the container, for `set env` and `set resources`, and
+/// `set resources` is driven by `--limits` and `--requests`: those are the only
+/// ones let through, and none of them reads a file or changes the connection.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] naming `assignments`.
+pub fn refuse_option_like_assignments(subcommand: &str, assignments: &[String]) -> Result<()> {
+    for a in assignments {
+        let long_flag = a.strip_prefix("--").and_then(|f| f.split('=').next());
+        let container_flag = matches!(subcommand, "env" | "resources")
+            && (a == "-c" || long_flag == Some("containers"));
+        let resource_flag = subcommand == "resources"
+            && long_flag.is_some_and(|f| matches!(f, "limits" | "requests"));
+        if !container_flag && !resource_flag {
+            super::shell::refuse_option_like("assignments", a)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `kubectl -o` output format.
+///
+/// Accepts `json`, `yaml`, `wide`, `name` and the template families
+/// `custom-columns=`, `jsonpath=`, `jsonpath-as-json=`, `go-template=` and
+/// `template=`. The `*-file` forms (`go-template-file=/etc/shadow`,
+/// `jsonpath-file=`, `custom-columns-file=`) read a file on the host and are
+/// refused, as is anything that starts with `-`.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] for any other value.
+pub fn validate_kubectl_output(output: &str) -> Result<()> {
+    let ok = matches!(output, "json" | "yaml" | "wide" | "name")
+        || [
+            "custom-columns=",
+            "jsonpath=",
+            "jsonpath-as-json=",
+            "go-template=",
+            "template=",
+        ]
+        .iter()
+        .any(|p| output.starts_with(p));
+    if ok {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!(
+                "output '{output}' is not allowed; use json, yaml, wide, name, \
+                 custom-columns=..., jsonpath=... or go-template=... (the *-file forms \
+                 read files on the host)"
+            ),
+        })
+    }
+}
+
+/// Validate a kubectl context name: non-empty, not flag-like, shell-safe charset
+/// (plus the space a kubeconfig context name may contain).
 ///
 /// # Errors
 ///
 /// Returns [`BridgeError::CommandDenied`] if the context is empty, starts
 /// with `-` (flag-like values such as `--kubeconfig=/etc/x`), or contains
-/// characters outside `[A-Za-z0-9._@:/-]` plus space (rejecting injection
-/// payloads such as `prod$(kubectl delete pods --all)`).
+/// characters outside `[A-Za-z0-9._@:/ -]` (rejecting injection payloads such
+/// as `prod$(kubectl delete pods --all)`). Every expansion of the name is
+/// quoted ([`kubectl_context_flag`], `CTX_VAL`), so a space stays one word.
 pub fn validate_context(context: &str) -> Result<()> {
     if context.is_empty() {
         return Err(BridgeError::CommandDenied {
@@ -414,6 +602,15 @@ pub fn kubectl_context_flag(context: Option<&str>) -> String {
     }
 }
 
+/// Whether a `kubectl` resource kind (one item of a comma list) means
+/// namespaces: `namespace`, `namespaces`, `ns`, in any case, with an optional
+/// `.group` suffix (`namespaces.v1`).
+fn is_namespace_kind(kind: &str) -> bool {
+    let lower = kind.to_ascii_lowercase();
+    let base = lower.split('.').next().unwrap_or("");
+    matches!(base, "namespace" | "namespaces" | "ns")
+}
+
 /// Builds kubectl CLI commands for remote execution.
 pub struct KubernetesCommandBuilder;
 
@@ -642,7 +839,8 @@ impl KubernetesCommandBuilder {
     ///
     /// If `manifest` starts with `/`, `./`, or `~`, it is treated as a file
     /// path: `{kubectl} apply -f {path}`. Otherwise, it is treated as
-    /// inline YAML: `echo '{yaml}' | {kubectl} apply -f -`
+    /// inline YAML: `printf '%s\n' '{yaml}' | {kubectl} apply -f -` (never
+    /// `echo`, which would read YAML starting with `-` as an option)
     #[must_use]
     pub fn build_apply_command(
         kubectl_bin: Option<&str>,
@@ -659,7 +857,10 @@ impl KubernetesCommandBuilder {
         let mut cmd = if is_file {
             format!("{prefix}apply -f {}", shell_escape(manifest))
         } else {
-            format!("echo {} | {prefix}apply -f -", shell_escape(manifest))
+            format!(
+                "printf '%s\\n' {} | {prefix}apply -f -",
+                shell_escape(manifest)
+            )
         };
 
         if let Some(ns) = namespace {
@@ -685,7 +886,7 @@ impl KubernetesCommandBuilder {
     ///
     /// If `manifest` starts with `/`, `./`, or `~` it is a file path
     /// (`{kubectl} diff -f {path}`); otherwise it is inline YAML piped in
-    /// (`echo '{yaml}' | {kubectl} diff -f -`).
+    /// (`printf '%s\n' '{yaml}' | {kubectl} diff -f -`).
     #[must_use]
     pub fn build_diff_command(
         kubectl_bin: Option<&str>,
@@ -698,7 +899,10 @@ impl KubernetesCommandBuilder {
         let mut cmd = if is_file {
             format!("{prefix}diff -f {}", shell_escape(manifest))
         } else {
-            format!("echo {} | {prefix}diff -f -", shell_escape(manifest))
+            format!(
+                "printf '%s\\n' {} | {prefix}diff -f -",
+                shell_escape(manifest)
+            )
         };
         if let Some(ns) = namespace {
             let _ = write!(cmd, " -n {}", shell_escape(ns));
@@ -920,12 +1124,20 @@ impl KubernetesCommandBuilder {
     pub fn validate_delete(resource: &str, name: &str) -> Result<()> {
         let protected = ["kube-system", "kube-public", "default", "kube-node-lease"];
 
-        if resource.eq_ignore_ascii_case("namespace") || resource.eq_ignore_ascii_case("ns") {
-            let lower_name = name.to_lowercase();
+        // `kubectl delete ns/kube-system` names the namespace in the resource.
+        let embedded = resource
+            .split(',')
+            .filter_map(|item| item.split_once('/'))
+            .filter(|(kind, _)| is_namespace_kind(kind))
+            .map(|(_, n)| n);
+        let targets_namespace = resource.split(',').any(is_namespace_kind);
+        let named = targets_namespace.then_some(name);
+        for candidate in embedded.chain(named) {
+            let lower_name = candidate.to_lowercase();
             if protected.contains(&lower_name.as_str()) {
                 return Err(BridgeError::CommandDenied {
                     reason: format!(
-                        "Deletion of namespace '{name}' is blocked. \
+                        "Deletion of namespace '{candidate}' is blocked. \
                          Protected namespaces: {protected:?}"
                     ),
                 });
@@ -1507,6 +1719,13 @@ impl KubernetesCommandBuilder {
         field_selector: Option<&str>,
         all: bool,
     ) -> Result<()> {
+        // A leading '-' would be read as an option: `delete namespace --all`.
+        refuse_option_like_all(&[
+            ("resource", Some(resource)),
+            ("name", name),
+            ("label_selector", label_selector),
+            ("field_selector", field_selector),
+        ])?;
         let has_name = name.is_some();
         let has_selector = label_selector.is_some() || field_selector.is_some();
         if has_name && all {
@@ -1519,11 +1738,19 @@ impl KubernetesCommandBuilder {
                 reason: "Must specify at least one of: name, label_selector, field_selector, or all=true".to_string(),
             });
         }
-        if all {
-            let lower = resource.to_lowercase();
-            if lower == "namespace" || lower == "ns" {
+        if resource.split(',').any(is_namespace_kind) {
+            if all {
                 return Err(BridgeError::CommandDenied {
                     reason: "Cannot use --all with namespace resource (blast-radius guard)"
+                        .to_string(),
+                });
+            }
+            // Every namespace carries `kubernetes.io/metadata.name`, so a
+            // selector reaches the protected ones without naming them.
+            if has_selector {
+                return Err(BridgeError::CommandDenied {
+                    reason: "Cannot delete namespaces by label_selector or field_selector \
+                             (blast-radius guard); name the namespace"
                         .to_string(),
                 });
             }
@@ -1649,6 +1876,7 @@ impl KubernetesCommandBuilder {
         context: Option<&str>,
     ) -> Result<String> {
         validate_secret_type(secret_type)?;
+        super::shell::refuse_option_like("name", name)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -1777,6 +2005,7 @@ impl KubernetesCommandBuilder {
         dry_run: Option<&str>,
         context: Option<&str>,
     ) -> Result<String> {
+        super::shell::refuse_option_like("name", name)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -1834,6 +2063,7 @@ impl KubernetesCommandBuilder {
         namespace: Option<&str>,
         context: Option<&str>,
     ) -> Result<String> {
+        super::shell::refuse_option_like("name", name)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -1879,6 +2109,7 @@ impl KubernetesCommandBuilder {
             });
         }
         validate_jsonpath_key(key)?;
+        super::shell::refuse_option_like("name", name)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -1923,6 +2154,7 @@ impl KubernetesCommandBuilder {
                 reason: "secret export requires reveal=true".into(),
             });
         }
+        super::shell::refuse_option_like("name", name)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -2093,7 +2325,7 @@ impl KubernetesCommandBuilder {
     /// Build a `kubectl auth reconcile -f <manifest>` command.
     ///
     /// Same branch logic as `build_apply_command`: file path if starts with `/`, `./`, `~`;
-    /// else inline via `echo ... | kubectl auth reconcile -f -`.
+    /// else inline via `printf '%s\n' ... | kubectl auth reconcile -f -`.
     #[must_use]
     pub fn build_auth_reconcile_command(
         kubectl_bin: Option<&str>,
@@ -2110,7 +2342,7 @@ impl KubernetesCommandBuilder {
             format!("{prefix}auth reconcile -f {}", shell_escape(manifest))
         } else {
             format!(
-                "echo {} | {prefix}auth reconcile -f -",
+                "printf '%s\\n' {} | {prefix}auth reconcile -f -",
                 shell_escape(manifest)
             )
         };
@@ -2147,7 +2379,7 @@ impl KubernetesCommandBuilder {
         context: Option<&str>,
     ) -> String {
         let k_val = if let Some(bin) = kubectl_bin {
-            if is_valid_binary_path(bin) {
+            if super::shell::is_named_binary(bin, KUBECTL_NAMES) {
                 format!("K={bin}")
             } else {
                 r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
@@ -2156,21 +2388,22 @@ impl KubernetesCommandBuilder {
             r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
         };
 
-        let ctx_flag = kubectl_context_flag(context);
-        let ctx_flag_trimmed = ctx_flag.trim();
+        // The context and the namespace live in variables holding one value
+        // each and are expanded as `${VAR:+--flag "$VAR"}`, so a value is never
+        // re-split into extra kubectl flags.
+        let ctx_val_esc = shell_escape(context.unwrap_or(""));
         let v_esc = shell_escape(verb);
         let r_esc = shell_escape(resource);
 
-        let scope = if all_namespaces {
-            " -A".to_string()
-        } else if let Some(ns) = namespace {
-            format!(" -n {}", shell_escape(ns))
+        let scope = if all_namespaces { "-A" } else { "" };
+        let scope_ns_esc = shell_escape(if all_namespaces {
+            ""
         } else {
-            String::new()
-        };
+            namespace.unwrap_or("")
+        });
 
         format!(
-            r#"{k_val}; command -v jq >/dev/null 2>&1 || {{ echo 'jq not installed on host (required for who_can JSON output)' >&2; exit 3; }}; CTX="{ctx_flag_trimmed}"; V={v_esc}; R={r_esc}; SCOPE='{scope}'; MATCHES=''; for B in $($K get rolebindings,clusterrolebindings$SCOPE $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"\n"}}{{end}}' 2>/dev/null); do RNS=$(printf %s "$B"|cut -d'|' -f1); RKIND=$(printf %s "$B"|cut -d'|' -f4); RNAME=$(printf %s "$B"|cut -d'|' -f5); if [ "$RKIND" = ClusterRole ]; then RULES=$($K get clusterrole "$RNAME" $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); else RULES=$($K get role "$RNAME" ${{RNS:+-n "$RNS"}} $CTX -o jsonpath='{{.rules[*]}}' 2>/dev/null); fi; if printf %s "$RULES" | grep -q -e "$V" -e '\*' && printf %s "$RULES" | grep -q -e "$R" -e '\*'; then MATCHES="${{MATCHES}}$B"$'\n'; fi; done; printf '%s' "$MATCHES" | awk -F'|' 'NF==5 {{printf "{{\"namespace\":%s,\"kind\":%s,\"name\":%s,\"roleRefKind\":%s,\"roleRefName\":%s}}\n", (length($1)?"\""$1"\"":"null"), "\""$2"\"", "\""$3"\"", "\""$4"\"", "\""$5"\""}}' | jq -s '.'"#
+            r#"{k_val}; command -v jq >/dev/null 2>&1 || {{ echo 'jq not installed on host (required for who_can JSON output)' >&2; exit 3; }}; CTX_VAL={ctx_val_esc}; V={v_esc}; R={r_esc}; SCOPE='{scope}'; SNS={scope_ns_esc}; MATCHES=''; for B in $($K get rolebindings,clusterrolebindings $SCOPE ${{SNS:+-n "$SNS"}} ${{CTX_VAL:+--context="$CTX_VAL"}} -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"\n"}}{{end}}' 2>/dev/null); do RNS=$(printf %s "$B"|cut -d'|' -f1); RKIND=$(printf %s "$B"|cut -d'|' -f4); RNAME=$(printf %s "$B"|cut -d'|' -f5); if [ "$RKIND" = ClusterRole ]; then RULES=$($K get clusterrole "$RNAME" ${{CTX_VAL:+--context="$CTX_VAL"}} -o jsonpath='{{.rules[*]}}' 2>/dev/null); else RULES=$($K get role "$RNAME" ${{RNS:+-n "$RNS"}} ${{CTX_VAL:+--context="$CTX_VAL"}} -o jsonpath='{{.rules[*]}}' 2>/dev/null); fi; if printf %s "$RULES" | grep -q -e "$V" -e '\*' && printf %s "$RULES" | grep -q -e "$R" -e '\*'; then MATCHES="${{MATCHES}}$B"$'\n'; fi; done; printf '%s' "$MATCHES" | awk -F'|' 'NF==5 {{printf "{{\"namespace\":%s,\"kind\":%s,\"name\":%s,\"roleRefKind\":%s,\"roleRefName\":%s}}\n", (length($1)?"\""$1"\"":"null"), "\""$2"\"", "\""$3"\"", "\""$4"\"", "\""$5"\""}}' | jq -s '.'"#
         )
     }
 
@@ -2190,7 +2423,7 @@ impl KubernetesCommandBuilder {
         context: Option<&str>,
     ) -> String {
         let k_val = if let Some(bin) = kubectl_bin {
-            if is_valid_binary_path(bin) {
+            if super::shell::is_named_binary(bin, KUBECTL_NAMES) {
                 format!("K={bin}")
             } else {
                 r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
@@ -2199,14 +2432,13 @@ impl KubernetesCommandBuilder {
             r#"K="$(if command -v kubectl >/dev/null 2>&1; then echo kubectl; elif command -v k3s >/dev/null 2>&1; then echo 'k3s kubectl'; elif command -v microk8s >/dev/null 2>&1; then echo 'microk8s kubectl'; else echo kubectl; fi)""#.to_string()
         };
 
-        let ctx_flag = kubectl_context_flag(context);
-        let ctx_flag_trimmed = ctx_flag.trim();
+        let ctx_val_esc = shell_escape(context.unwrap_or(""));
         let sa_esc = shell_escape(service_account);
         let ns_val = namespace.unwrap_or("default");
         let ns_esc = shell_escape(ns_val);
 
         format!(
-            r#"{k_val}; command -v jq >/dev/null 2>&1 || {{ echo 'jq not installed on host (required for rbac_diagnose JSON output)' >&2; exit 3; }}; CTX="{ctx_flag_trimmed}"; SA={sa_esc}; NS={ns_esc}; AS="system:serviceaccount:$NS:$SA"; CANI=$($K auth can-i --list --as "$AS" -n "$NS" $CTX 2>/dev/null | tail -n +2); BINDINGS=$($K get rolebindings,clusterrolebindings --all-namespaces $CTX -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"|"}}{{range .subjects[*]}}{{.kind}}{{"/"}}{{.namespace}}{{"/"}}{{.name}}{{","}}{{end}}{{"\n"}}{{end}}' 2>/dev/null | grep -i "$SA" | grep -i "$NS"); CANI_JSON=$(printf '%s\n' "$CANI" | jq -Rs '[split("\n")[] | select(length > 0)]'); BIND_JSON=$(printf '%s\n' "$BINDINGS" | awk -F'|' 'NF>=5 {{printf "{{\"namespace\":%s,\"kind\":%s,\"name\":%s,\"roleRefKind\":%s,\"roleRefName\":%s}}\n", (length($1)?"\""$1"\"":"null"), "\""$2"\"", "\""$3"\"", "\""$4"\"", "\""$5"\""}}' | jq -s '.'); jq -n --arg sa "$AS" --argjson cani "${{CANI_JSON:-[]}}" --argjson bindings "${{BIND_JSON:-[]}}" '{{"serviceaccount":$sa,"can_i_list":$cani,"granting_bindings":$bindings}}'"#
+            r#"{k_val}; command -v jq >/dev/null 2>&1 || {{ echo 'jq not installed on host (required for rbac_diagnose JSON output)' >&2; exit 3; }}; CTX_VAL={ctx_val_esc}; SA={sa_esc}; NS={ns_esc}; AS="system:serviceaccount:$NS:$SA"; CANI=$($K auth can-i --list --as "$AS" -n "$NS" ${{CTX_VAL:+--context="$CTX_VAL"}} 2>/dev/null | tail -n +2); BINDINGS=$($K get rolebindings,clusterrolebindings --all-namespaces ${{CTX_VAL:+--context="$CTX_VAL"}} -o jsonpath='{{range .items[*]}}{{.metadata.namespace}}{{"|"}}{{.kind}}{{"|"}}{{.metadata.name}}{{"|"}}{{.roleRef.kind}}{{"|"}}{{.roleRef.name}}{{"|"}}{{range .subjects[*]}}{{.kind}}{{"/"}}{{.namespace}}{{"/"}}{{.name}}{{","}}{{end}}{{"\n"}}{{end}}' 2>/dev/null | grep -i "$SA" | grep -i "$NS"); CANI_JSON=$(printf '%s\n' "$CANI" | jq -Rs '[split("\n")[] | select(length > 0)]'); BIND_JSON=$(printf '%s\n' "$BINDINGS" | awk -F'|' 'NF>=5 {{printf "{{\"namespace\":%s,\"kind\":%s,\"name\":%s,\"roleRefKind\":%s,\"roleRefName\":%s}}\n", (length($1)?"\""$1"\"":"null"), "\""$2"\"", "\""$3"\"", "\""$4"\"", "\""$5"\""}}' | jq -s '.'); jq -n --arg sa "$AS" --argjson cani "${{CANI_JSON:-[]}}" --argjson bindings "${{BIND_JSON:-[]}}" '{{"serviceaccount":$sa,"can_i_list":$cani,"granting_bindings":$bindings}}'"#
         )
     }
 
@@ -3479,6 +3711,7 @@ impl KubernetesCommandBuilder {
         address: Option<&str>,
         context: Option<&str>,
     ) -> Result<String> {
+        super::shell::refuse_option_like("target", target)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -3536,13 +3769,15 @@ impl KubernetesCommandBuilder {
                echo '=== port-forward UP ==='; cat /tmp/pf.$$;"
         );
         if let Some(pp) = probe_path {
-            let local_port_esc = shell_escape(local_port);
-            let pp_esc = shell_escape(pp);
+            // The whole URL is built first and quoted once: wrapping the
+            // already quoted parts in another pair of quotes flips the quote
+            // parity and leaves the rest of `probe_path` outside any quotes.
+            let url_esc = shell_escape(&format!("http://127.0.0.1:{local_port_num}{pp}"));
             let _ = write!(
                 cmd,
                 " echo '=== probe ==='; \
                  curl -sS -m 5 -o /dev/null -w 'HTTP %{{http_code}} in %{{time_total}}s\\n' \
-                 'http://127.0.0.1:{local_port_esc}{pp_esc}' || echo 'probe FAILED';"
+                 {url_esc} || echo 'probe FAILED';"
             );
         }
         let _ = write!(
@@ -3601,7 +3836,7 @@ IP:.status.podIP,PHASE:.status.phase'{ctx_flag}; \
                -o custom-columns='READY:.subsets[*].addresses[*].ip,\
 NOTREADY:.subsets[*].notReadyAddresses[*].ip,\
 PORTS:.subsets[*].ports[*].port'{ctx_flag}",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ns_esc = ns_esc,
             svc_esc = svc_esc,
             ctx_flag = ctx_flag,
@@ -3659,7 +3894,7 @@ HOSTS:.spec.rules[*].host,ADDRESS:.status.loadBalancer.ingress[*].ip'{ctx_flag};
                  -o custom-columns='ADDRS:.subsets[*].addresses[*].ip,\
 PORTS:.subsets[*].ports[*].port'{ctx_flag} 2>/dev/null || echo 'no endpoints'; \
              done",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ns_esc = ns_esc,
             ing_esc = ing_esc,
             ctx_flag = ctx_flag,
@@ -3720,7 +3955,7 @@ Install Calico/Cilium or k3s --flannel-backend=none for enforcement.'; \
              else \
                echo 'flannel not detected -- verify your CNI supports NetworkPolicy enforcement.'; \
              fi",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ns_esc = ns_esc,
             pol_esc = pol_esc,
             ctx_flag = ctx_flag,
@@ -3816,7 +4051,7 @@ Install Calico/Cilium or k3s --flannel-backend=none for enforcement.'; \
              $K get configmap coredns -n kube-system \
                -o jsonpath='{{.data.Corefile}}'{ctx_flag}; \
              echo",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ctx_flag = ctx_flag,
         );
         if let Some(rn) = resolve_name {
@@ -3921,7 +4156,8 @@ pub fn validate_storage_size(size: &str) -> Result<()> {
 /// Validate a filesystem path suitable for use as the local-path-provisioner
 /// storage root.
 ///
-/// In addition to the checks in [`validate_abs_path`], the path must contain
+/// In addition to the checks in [`validate_abs_path`], the path must not
+/// contain `.` or empty segments (`/a/./b`, `/a//b`), and must contain
 /// at least 3 non-empty segments after splitting on `/` so that dangerously
 /// shallow roots like `/var` or `/var/lib` are rejected (minimum accepted
 /// depth: `/var/lib/something`).
@@ -3931,6 +4167,15 @@ pub fn validate_storage_size(size: &str) -> Result<()> {
 /// Returns [`BridgeError::CommandDenied`] if the path is invalid or too shallow.
 pub fn validate_storage_root(path: &str) -> Result<()> {
     validate_abs_path(path)?;
+    // A '.' or empty segment ('/a/./b', '/a//b') makes `find` print a path
+    // that no PV path matches, so every directory would look orphaned.
+    for seg in path.trim_end_matches('/').split('/').skip(1) {
+        if seg.is_empty() || seg == "." {
+            return Err(BridgeError::CommandDenied {
+                reason: format!("storage root contains an empty or '.' segment: {path}"),
+            });
+        }
+    }
     let depth = path.split('/').filter(|s| !s.is_empty()).count();
     if depth < 3 {
         return Err(BridgeError::CommandDenied {
@@ -3998,7 +4243,7 @@ PORTS:.subsets[*].ports[*].port'{ctx_flag}; \
                -l 'svccontroller.k3s.cattle.io/svcname={svc_esc}' \
                -o wide{ctx_flag} 2>/dev/null \
                || echo 'no svclb pods (not type=LoadBalancer or non-k3s)'",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ns_esc = ns_esc,
             svc_esc = svc_esc,
             ctx_flag = ctx_flag,
@@ -4073,7 +4318,7 @@ PORTS:.subsets[*].ports[*].port'{ctx_flag}; \
              $K delete pod $POD -n {ns_esc}{ctx_flag} --ignore-not-found --grace-period=1 \
                >/dev/null 2>&1; \
              exit $RC",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ns_esc = ns_esc,
             ctx_flag = ctx_flag,
             image_esc = image_esc,
@@ -4123,7 +4368,10 @@ PORTS:.subsets[*].ports[*].port'{ctx_flag}; \
         let ns_esc = shell_escape(ns_val);
         let port_str = api_port.to_string();
         let port_esc = shell_escape(&port_str);
-        let path_esc = shell_escape(api_path);
+        // URL and banner are each built first and quoted once (see
+        // `build_port_forward_command`).
+        let url_esc = shell_escape(&format!("http://127.0.0.1:{api_port}/api{api_path}"));
+        let banner_esc = shell_escape(&format!("=== GET /api{api_path} ==="));
         let wait_esc = shell_escape(&wait_secs.to_string());
 
         let mut cmd = String::new();
@@ -4138,19 +4386,20 @@ PORTS:.subsets[*].ports[*].port'{ctx_flag}; \
                >/tmp/tpf.$$ 2>&1 & PF=$!; \
              sleep {wait_esc}; \
              if kill -0 $PF 2>/dev/null; then \
-               echo '=== GET /api{path_esc} ==='; \
-               curl -sS -m 8 'http://127.0.0.1:{port_esc}/api{path_esc}' \
+               echo {banner_esc}; \
+               curl -sS -m 8 {url_esc} \
                  || echo 'curl FAILED'; \
              else \
                echo '=== port-forward DIED ==='; cat /tmp/tpf.$$; \
              fi; \
              kill $PF 2>/dev/null; wait $PF 2>/dev/null; rm -f /tmp/tpf.$$",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ns_esc = ns_esc,
             port_esc = port_esc,
             ctx_flag = ctx_flag,
             wait_esc = wait_esc,
-            path_esc = path_esc,
+            banner_esc = banner_esc,
+            url_esc = url_esc,
         );
         Ok(cmd)
     }
@@ -4198,22 +4447,26 @@ middlewares={{range .middlewares[*]}}{{.name}}{{end}}{{\"\\n\"}}{{end}}'{ctx_fla
                2>/dev/null || echo '(v1alpha1 group)'; \
              echo; \
              echo '=== referenced Middlewares ==='; \
-             for m in $($K get ingressroute.traefik.io {route_esc} -n $NS \
-               -o jsonpath='{{.spec.routes[*].middlewares[*].name}}'{ctx_flag} 2>/dev/null); do \
+             $K get ingressroute.traefik.io {route_esc} -n $NS \
+               -o jsonpath='{{range .spec.routes[*]}}{{range .middlewares[*]}}{{.name}}{{\"\\n\"}}{{end}}{{end}}'{ctx_flag} \
+               2>/dev/null | while IFS= read -r m; do \
+               case \"$m\" in ''|-*|*[!a-z0-9.-]*) echo '-- skipped (not a DNS name) --'; continue;; esac; \
                echo \"-- $m --\"; \
-               $K get middleware.traefik.io $m -n $NS -o yaml{ctx_flag} 2>/dev/null \
-                 || $K get middleware.traefik.containo.us $m -n $NS -o yaml{ctx_flag} 2>/dev/null \
+               $K get middleware.traefik.io -n $NS -o yaml{ctx_flag} -- \"$m\" 2>/dev/null \
+                 || $K get middleware.traefik.containo.us -n $NS -o yaml{ctx_flag} -- \"$m\" 2>/dev/null \
                  || echo 'not found'; \
              done; \
              echo '=== backend service endpoints ==='; \
-             for s in $($K get ingressroute.traefik.io {route_esc} -n $NS \
-               -o jsonpath='{{.spec.routes[*].services[*].name}}'{ctx_flag} 2>/dev/null); do \
+             $K get ingressroute.traefik.io {route_esc} -n $NS \
+               -o jsonpath='{{range .spec.routes[*]}}{{range .services[*]}}{{.name}}{{\"\\n\"}}{{end}}{{end}}'{ctx_flag} \
+               2>/dev/null | while IFS= read -r s; do \
+               case \"$s\" in ''|-*|*[!a-z0-9.-]*) echo '-- skipped (not a DNS name) --'; continue;; esac; \
                echo \"-- $s --\"; \
-               $K get endpoints $s -n $NS \
+               $K get endpoints -n $NS \
                  -o custom-columns='ADDRS:.subsets[*].addresses[*].ip,\
-PORTS:.subsets[*].ports[*].port'{ctx_flag} 2>/dev/null || echo 'no endpoints'; \
+PORTS:.subsets[*].ports[*].port'{ctx_flag} -- \"$s\" 2>/dev/null || echo 'no endpoints'; \
              done",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ns_esc = ns_esc,
             route_esc = route_esc,
             ctx_flag = ctx_flag,
@@ -4272,7 +4525,7 @@ NODE:.spec.nodeName,\
 HOSTPORTS:.spec.containers[*].ports[*].hostPort,\
 STATUS:.status.phase'{ctx_flag} 2>/dev/null \
                || echo 'no svclb pods'",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ctx_flag = ctx_flag,
         );
         Ok(cmd)
@@ -4330,7 +4583,7 @@ jobName={{.status.jobName}}{{\"\\n\"}}{{end}}'{ctx_flag} 2>/dev/null; \
 COMPLETIONS:.status.succeeded,\
 FAILED:.status.failed'{ctx_flag} 2>/dev/null \
                || echo 'no helm-install jobs'",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             dir_esc = dir_esc,
             ctx_flag = ctx_flag,
         );
@@ -4389,7 +4642,7 @@ LOCALPATH:.spec.local.path' 2>&1; \
 TYPE:.type,\
 REASON:.reason,\
 MSG:.message' 2>&1 | tail -n 25",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             pvc_esc = pvc_esc,
             ns_flag = ns_flag,
             ctx_flag = ctx_flag,
@@ -4436,7 +4689,7 @@ STATUS:.status.phase' 2>&1; \
                | grep -F \"$DIR\" \
                || $PFX -n kube-system logs deploy/local-path-provisioner{ctx_flag} --tail={lines} 2>&1 \
                | tail -n 25",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             pv_esc = pv_esc,
             ctx_flag = ctx_flag,
             lines = lines,
@@ -4490,7 +4743,7 @@ PHASE:.status.phase' 2>&1; \
                  [ -d \"$D\" ] && du -sh \"$D\" 2>/dev/null; \
                done; \
              fi",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             ctx_flag = ctx_flag,
             ns_flag = ns_flag,
         );
@@ -4513,6 +4766,7 @@ PHASE:.status.phase' 2>&1; \
         namespace: Option<&str>,
         context: Option<&str>,
     ) -> Result<String> {
+        super::shell::refuse_option_like("pvc", pvc)?;
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -4546,7 +4800,7 @@ K3s local-path does NOT support online expansion - aborting.\" >&2; \
              $PFX patch pvc {pvc_esc}{ns_flag}{ctx_flag} \
                --type=merge \
                -p '{{\"spec\":{{\"resources\":{{\"requests\":{{\"storage\":\"{size}\"}}}}}}}}' ",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             pvc_esc = pvc_esc,
             ns_flag = ns_flag,
             ctx_flag = ctx_flag,
@@ -4555,6 +4809,17 @@ K3s local-path does NOT support online expansion - aborting.\" >&2; \
         Ok(cmd)
     }
 
+    /// Build the `local-path` orphan scan (and, with `apply`, removal) command.
+    ///
+    /// The live set is reduced to the first directory under the root of each
+    /// PV path, the depth `find -maxdepth 1` lists, so a volume nested below
+    /// a directory (`<root>/ssd/pvc-1`) keeps `<root>/ssd` out of the orphans.
+    /// Nothing is removed when a PV path is the root or one of its parents, when
+    /// a PV path has a `.` or `..` segment, or when no PV lies under the root
+    /// at all while orphans exist. Only first-level directories named `pvc-*`
+    /// under the root are ever listed as orphans or removed, so a root above
+    /// the storage directory (`/var/lib/rancher/k3s`) leaves `server` and
+    /// `agent` alone.
     pub fn build_localpath_gc_command(
         kubectl_bin: Option<&str>,
         storage_root: &str,
@@ -4563,7 +4828,9 @@ K3s local-path does NOT support online expansion - aborting.\" >&2; \
     ) -> String {
         let prefix = kubectl_detect_prefix(kubectl_bin);
         let ctx_flag = kubectl_context_flag(context);
-        let root_esc = shell_escape(storage_root);
+        // `validate_storage_root` refuses '.' and empty segments; a trailing
+        // slash is dropped so `find` prints the same prefix the PV paths use.
+        let root_esc = shell_escape(storage_root.trim_end_matches('/'));
         let apply_str = if apply { "true" } else { "false" };
 
         let mut cmd = String::new();
@@ -4572,35 +4839,55 @@ K3s local-path does NOT support online expansion - aborting.\" >&2; \
             "PFX={prefix_esc}; \
              ROOT={root_esc}; \
              APPLY={apply_str}; \
-             LIVE=$($PFX get pv{ctx_flag} \
-               -o jsonpath='{{range .items[*]}}{{.spec.local.path}}{{\"\\n\"}}{{.spec.hostPath.path}}{{\"\\n\"}}{{end}}' \
-               2>/dev/null \
-               | grep -F \"$ROOT/\" \
-               | sed 's#/*$##' \
+             PVL=$($PFX get pv{ctx_flag} \
+               -o jsonpath='{{range .items[*]}}{{.spec.local.path}}{{\"\\n\"}}{{.spec.hostPath.path}}{{\"\\n\"}}{{end}}PVLIST_OK' \
+               2>/dev/null) \
+               || {{ echo 'ERROR: kubectl get pv failed - cannot tell live dirs from orphans, nothing removed' >&2; exit 1; }}; \
+             case \"$PVL\" in \
+               *PVLIST_OK) ;; \
+               *) echo 'ERROR: PV list incomplete - cannot tell live dirs from orphans, nothing removed' >&2; exit 1;; \
+             esac; \
+             LIVE=$(printf '%s\\n' \"$PVL\" \
+               | ROOT=\"$ROOT\" awk '{live_awk}' \
                | sort -u); \
+             if printf '%s\\n' \"$LIVE\" | grep -qxF '!UNSURE'; then \
+               echo 'ERROR: a PV path has a . or .. segment - cannot tell which directories are live, nothing removed' >&2; exit 1; \
+             fi; \
+             if printf '%s\\n' \"$LIVE\" | grep -qxF '!COVERS'; then \
+               echo 'ERROR: a PV path is the storage root or one of its parents - every directory under it is live, nothing removed' >&2; exit 1; \
+             fi; \
              echo '=== Live PV host dirs ==='; \
              echo \"${{LIVE:-<none>}}\"; \
              echo '=== On-disk dirs under root ==='; \
-             ON=$(find \"$ROOT\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -u); \
+             ON=$(find \"$ROOT\" -mindepth 1 -maxdepth 1 -type d -name 'pvc-*' 2>/dev/null | sort -u); \
              echo \"${{ON:-<none>}}\"; \
              echo '=== Orphans (on-disk minus live) ==='; \
              ORPH=$(comm -23 <(echo \"$ON\") <(echo \"$LIVE\")); \
              echo \"${{ORPH:-<none>}}\"; \
              if [ \"$APPLY\" = true ] && [ -n \"$ORPH\" ]; then \
+               if [ -z \"$LIVE\" ]; then \
+                 echo 'ERROR: orphans found but no PV lies under the storage root - wrong cluster or context? nothing removed' >&2; exit 1; \
+               fi; \
                echo '=== Removing orphans ==='; \
                echo \"$ORPH\" | while IFS= read -r d; do \
+                 REL=${{d#\"$ROOT\"/}}; \
                  case \"$d\" in \
-                   \"$ROOT\"/*) rm -rf -- \"$d\" && echo \"removed $d\";; \
-                   *) echo \"refusing (outside root): $d\" >&2;; \
+                   \"$ROOT\"/pvc-*) \
+                     case \"$REL\" in \
+                       */*) echo \"refusing (not a first-level directory): $d\" >&2;; \
+                       *) rm -rf -- \"$d\" && echo \"removed $d\";; \
+                     esac;; \
+                   *) echo \"refusing (not a pvc-* directory under root): $d\" >&2;; \
                  esac; \
                done; \
              else \
                echo '(dry-run - pass apply=true to delete; nothing removed)'; \
              fi",
-            prefix_esc = shell_escape(prefix.trim_end()),
+            prefix_esc = kubectl_assign_value(&prefix),
             root_esc = root_esc,
             ctx_flag = ctx_flag,
             apply_str = apply_str,
+            live_awk = LOCALPATH_GC_LIVE_AWK,
         );
         cmd
     }
@@ -5012,7 +5299,7 @@ mod tests {
             false,
             false,
         );
-        assert!(cmd.starts_with("echo "));
+        assert!(cmd.starts_with("printf '%s\\n' "), "cmd: {cmd}");
         assert!(cmd.contains("| kubectl apply -f -"));
     }
 
@@ -5077,7 +5364,7 @@ mod tests {
     fn test_build_diff_command_inline_yaml() {
         let yaml = "apiVersion: v1\nkind: Pod";
         let cmd = KubernetesCommandBuilder::build_diff_command(Some("kubectl"), yaml, None);
-        assert!(cmd.contains("echo "), "cmd: {cmd}");
+        assert!(cmd.starts_with("printf '%s\\n' "), "cmd: {cmd}");
         assert!(cmd.contains("| "), "cmd: {cmd}");
         assert!(cmd.contains("diff -f -"), "cmd: {cmd}");
     }
@@ -5981,7 +6268,7 @@ mod tests {
             false,
         );
         // Should not break the shell command - quotes should be escaped
-        assert!(cmd.contains("echo"));
+        assert!(cmd.contains("printf '%s\\n'"), "{cmd}");
         assert!(cmd.contains("kubectl apply"));
     }
 
@@ -6064,6 +6351,61 @@ mod tests {
     }
 
     #[test]
+    fn test_helm_detect_prefix_names_the_program_only() {
+        for bin in [
+            "helm",
+            "helm3",
+            "helm-3.14",
+            "/usr/local/bin/helm",
+            "microk8s.helm3",
+            "/snap/bin/microk8s.helm",
+        ] {
+            assert_eq!(helm_detect_prefix(Some(bin)), format!("{bin} "), "{bin}");
+        }
+        for bin in [
+            "microk8s.helmx",
+            "/bin/sh",
+            "helm-diff",
+            "helm-secrets",
+            "/tmp/helm",
+            "./helm",
+            "-helm",
+        ] {
+            assert!(
+                helm_detect_prefix(Some(bin)).contains("command -v helm"),
+                "{bin}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kubectl_detect_prefix_refuses_plugins_and_foreign_dirs() {
+        for bin in [
+            "kubectl",
+            "kubectl-1.31",
+            "/usr/bin/kubectl-v1.31.2",
+            "microk8s.kubectl",
+            "oc",
+        ] {
+            assert_eq!(kubectl_detect_prefix(Some(bin)), format!("{bin} "), "{bin}");
+        }
+        for bin in [
+            "kubectl-node_shell",
+            "/home/u/.krew/bin/kubectl-node_shell",
+            "kubectl-ns",
+            "oc-mirror",
+            "/tmp/kubectl",
+            "/var/tmp/kubectl",
+            "./kubectl",
+        ] {
+            assert!(
+                kubectl_detect_prefix(Some(bin)).contains("command -v kubectl"),
+                "{bin}"
+            );
+        }
+    }
+
+    #[test]
     fn test_helm_bin_injection_falls_back_to_autodetect() {
         let prefix = helm_detect_prefix(Some("echo pwned; rm -rf /"));
         assert!(prefix.contains("command -v helm"));
@@ -6071,19 +6413,19 @@ mod tests {
 
     #[test]
     fn test_valid_binary_paths_accepted() {
-        assert!(is_valid_binary_path("kubectl"));
-        assert!(is_valid_binary_path("/usr/local/bin/kubectl"));
-        assert!(is_valid_binary_path("k3s"));
-        assert!(is_valid_binary_path("/snap/bin/microk8s.kubectl"));
+        assert!(is_safe_path_chars("kubectl"));
+        assert!(is_safe_path_chars("/usr/local/bin/kubectl"));
+        assert!(is_safe_path_chars("k3s"));
+        assert!(is_safe_path_chars("/snap/bin/microk8s.kubectl"));
     }
 
     #[test]
     fn test_invalid_binary_paths_rejected() {
-        assert!(!is_valid_binary_path("echo pwned #"));
-        assert!(!is_valid_binary_path("kubectl; rm -rf /"));
-        assert!(!is_valid_binary_path("$(whoami)"));
-        assert!(!is_valid_binary_path(""));
-        assert!(!is_valid_binary_path("kubectl && cat /etc/passwd"));
+        assert!(!is_safe_path_chars("echo pwned #"));
+        assert!(!is_safe_path_chars("kubectl; rm -rf /"));
+        assert!(!is_safe_path_chars("$(whoami)"));
+        assert!(!is_safe_path_chars(""));
+        assert!(!is_safe_path_chars("kubectl && cat /etc/passwd"));
     }
 
     #[test]
@@ -6122,6 +6464,54 @@ mod tests {
         // Paths with shell metacharacters should be silently ignored
         let prefix = kubeconfig_env_prefix(Some("/tmp/config; rm -rf /"));
         assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_validate_kubeconfig_accepts_known_locations() {
+        for ok in [
+            "/etc/rancher/k3s/k3s.yaml",
+            "/etc/rancher/rke2/rke2.yaml",
+            "/etc/kubernetes/admin.conf",
+            "/var/snap/microk8s/current/credentials/client.config",
+            "/var/lib/k0s/pki/admin.conf",
+            "/root/.kube/config",
+            "~/.kube/config",
+            "$HOME/.kube/config",
+            "$HOME/.kube/cache/c.yaml",
+        ] {
+            assert!(validate_kubeconfig(ok).is_ok(), "{ok}");
+            assert_eq!(kubeconfig_env_prefix(Some(ok)), format!("KUBECONFIG={ok} "));
+        }
+        assert!(validate_kubeconfig_opt(None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_kubeconfig_refuses_caller_writable_or_odd_paths() {
+        for bad in [
+            "/tmp/kc",
+            "/home/u/kc",
+            "/home/u/.kube/config",
+            "/etc/rancher/k3s/../../../tmp/kc",
+            "/etc/rancher/k3s/./k3s.yaml",
+            "/etc/rancher/k3s//k3s.yaml",
+            "/etc/rancher/k3s/",
+            "/etc/rancher/k3s",
+            "/etc/rancher/other/x.yaml",
+            "/etc/kubernetes-evil/x",
+            "~/.kube/../x",
+            "~/.kube/",
+            "$HOME/.kube/$(id)",
+            "$HOME/.kube/a b",
+            "~root/.kube/config",
+            "$HOME/.kubex/config",
+            "relative/kc",
+            "",
+            "-x",
+        ] {
+            assert!(validate_kubeconfig(bad).is_err(), "{bad}");
+            assert!(validate_kubeconfig_opt(Some(bad)).is_err(), "{bad}");
+            assert_eq!(kubeconfig_env_prefix(Some(bad)), "", "{bad}");
+        }
     }
 
     #[test]
@@ -6317,9 +6707,17 @@ mod tests {
         // Injection payloads must be rejected by the charset guard.
         assert!(validate_context("prod$(evil)").is_err());
         assert!(validate_context("prod;rm -rf /").is_err());
-        // In-charset / space values stay valid.
+        // A space is legal in a kubeconfig context name; every expansion quotes it.
         assert!(validate_context("prod").is_ok());
         assert!(validate_context("my ctx").is_ok());
+        assert!(validate_context("x --server https://attacker.example").is_ok());
+        assert!(validate_context("a\nb").is_err());
+        assert!(validate_context("a'b").is_err());
+        assert!(validate_context("a\"b").is_err());
+        assert_eq!(
+            kubectl_context_flag(Some("x --server https://attacker.example")),
+            " --context='x --server https://attacker.example'"
+        );
     }
 
     #[test]
@@ -8118,5 +8516,523 @@ mod tests {
             false,
         );
         assert!(cmd.contains("'/var/lib/my storage'"), "cmd: {cmd}");
+    }
+
+    // ============== injection hardening ==============
+
+    #[test]
+    fn test_inline_manifest_starting_with_dash_is_piped_through_printf() {
+        let cmd = KubernetesCommandBuilder::build_apply_command(
+            Some("kubectl"),
+            "---\nkind: Pod",
+            None,
+            None,
+            false,
+            false,
+        );
+        assert!(
+            cmd.starts_with("printf '%s\\n' '---\nkind: Pod' | kubectl apply -f -"),
+            "cmd: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_auto_detected_prefix_is_not_quoted_into_a_variable() {
+        // `K='$(if ...)'` would assign the literal text and `$K get` would run `$(if`.
+        let cmd =
+            KubernetesCommandBuilder::build_endpoints_command(None, "web", None, None).unwrap();
+        assert!(cmd.starts_with("K=$(if command -v kubectl"), "cmd: {cmd}");
+        let pf = KubernetesCommandBuilder::build_pvc_status_command(None, "data", None, None);
+        assert!(pf.starts_with("PFX=$(if command -v kubectl"), "cmd: {pf}");
+    }
+
+    #[test]
+    fn test_option_like_names_are_refused_by_the_builders() {
+        let err = |r: Result<String>| r.unwrap_err().to_string();
+        assert!(
+            err(KubernetesCommandBuilder::build_secret_keys_command(
+                Some("kubectl"),
+                "-x",
+                None,
+                None
+            ))
+            .contains("'name' must not start with '-'")
+        );
+        assert!(
+            err(KubernetesCommandBuilder::build_secret_decode_command(
+                Some("kubectl"),
+                "-x",
+                "k",
+                None,
+                None,
+                true
+            ))
+            .contains("'name'")
+        );
+        assert!(
+            err(KubernetesCommandBuilder::build_secret_export_command(
+                Some("kubectl"),
+                "-x",
+                None,
+                None,
+                true
+            ))
+            .contains("'name'")
+        );
+        assert!(
+            err(KubernetesCommandBuilder::build_create_configmap_command(
+                Some("kubectl"),
+                "-x",
+                &[("k".to_string(), "v".to_string())],
+                &[],
+                None,
+                None,
+                None,
+                None
+            ))
+            .contains("'name'")
+        );
+        assert!(
+            err(KubernetesCommandBuilder::build_create_secret_command(
+                Some("kubectl"),
+                "-x",
+                "generic",
+                &[("k".to_string(), "v".to_string())],
+                &[],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            ))
+            .contains("'name'")
+        );
+        assert!(
+            err(KubernetesCommandBuilder::build_volume_expand_command(
+                Some("kubectl"),
+                "-x",
+                "1Gi",
+                None,
+                None
+            ))
+            .contains("'pvc' must not start with '-'")
+        );
+        assert!(
+            err(KubernetesCommandBuilder::build_port_forward_command(
+                Some("kubectl"),
+                "-x",
+                "8080:80",
+                None,
+                5,
+                None,
+                None,
+                None
+            ))
+            .contains("'target' must not start with '-'")
+        );
+    }
+
+    #[test]
+    fn test_refuse_option_like_all_skips_absent_values() {
+        assert!(refuse_option_like_all(&[("a", None), ("b", Some("x"))]).is_ok());
+        let e = refuse_option_like_all(&[("a", Some("ok")), ("b", Some("--all"))]).unwrap_err();
+        assert!(e.to_string().contains("'b' must not start with '-'"), "{e}");
+    }
+
+    #[test]
+    fn test_refuse_option_like_assignments() {
+        let one = |s: &str| vec![s.to_string()];
+        assert!(refuse_option_like_assignments("image", &one("app=nginx:1")).is_ok());
+        assert!(refuse_option_like_assignments("image", &one("--server=x")).is_err());
+        assert!(refuse_option_like_assignments("env", &one("-c")).is_ok());
+        assert!(refuse_option_like_assignments("env", &one("--containers=app")).is_ok());
+        assert!(refuse_option_like_assignments("env", &one("--containers")).is_ok());
+        assert!(refuse_option_like_assignments("env", &one("--limits=cpu=1")).is_err());
+        assert!(refuse_option_like_assignments("env", &one("--kubeconfig=/x")).is_err());
+        assert!(refuse_option_like_assignments("env", &one("--env=FOO=bar")).is_err());
+        assert!(refuse_option_like_assignments("image", &one("-c")).is_err());
+        assert!(refuse_option_like_assignments("image", &one("--containers=app")).is_err());
+        assert!(refuse_option_like_assignments("env", &one("FOO=bar")).is_ok());
+        assert!(refuse_option_like_assignments("resources", &one("--limits=cpu=1")).is_ok());
+        assert!(refuse_option_like_assignments("resources", &one("-c")).is_ok());
+        assert!(refuse_option_like_assignments("resources", &one("--kubeconfig=/x")).is_err());
+    }
+
+    #[test]
+    fn test_validate_kubectl_output_refuses_file_forms() {
+        for ok in [
+            "json",
+            "yaml",
+            "wide",
+            "name",
+            "jsonpath={.a}",
+            "custom-columns=A:.a",
+        ] {
+            assert!(validate_kubectl_output(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "go-template-file=/etc/shadow",
+            "jsonpath-file=/etc/shadow",
+            "custom-columns-file=/etc/shadow",
+            "-x",
+            "",
+        ] {
+            assert!(validate_kubectl_output(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_validate_delete_catches_plural_and_embedded_namespace() {
+        assert!(KubernetesCommandBuilder::validate_delete("namespaces", "kube-system").is_err());
+        assert!(KubernetesCommandBuilder::validate_delete("Namespaces.v1", "default").is_err());
+        assert!(KubernetesCommandBuilder::validate_delete("ns/kube-public", "").is_err());
+        assert!(KubernetesCommandBuilder::validate_delete("pods,namespaces", "default").is_err());
+        assert!(KubernetesCommandBuilder::validate_delete("namespaces", "team-a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_delete_target_refuses_namespace_all_and_selectors() {
+        let t = KubernetesCommandBuilder::validate_delete_target;
+        assert!(t("namespaces", None, None, None, true).is_err());
+        assert!(
+            t(
+                "namespace",
+                None,
+                Some("kubernetes.io/metadata.name=kube-system"),
+                None,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            t(
+                "namespaces",
+                None,
+                None,
+                Some("metadata.name=default"),
+                false
+            )
+            .is_err()
+        );
+        assert!(t("pods", None, Some("app=web"), None, false).is_ok());
+    }
+
+    #[test]
+    fn test_validate_delete_target_refuses_option_like_values() {
+        let t = KubernetesCommandBuilder::validate_delete_target;
+        let e = t("namespace", Some("--all"), None, None, false).unwrap_err();
+        assert!(
+            e.to_string().contains("'name' must not start with '-'"),
+            "{e}"
+        );
+        assert!(t("--all", Some("x"), None, None, false).is_err());
+        assert!(t("pods", None, Some("-l"), None, false).is_err());
+    }
+
+    #[test]
+    fn test_port_forward_probe_url_is_quoted_once() {
+        let cmd = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            Some("/;cat$IFS/etc/shadow;"),
+            5,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains(" 'http://127.0.0.1:8080/;cat$IFS/etc/shadow;' || echo 'probe FAILED'"),
+            "cmd: {cmd}"
+        );
+        let quoted = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            Some("/a'b"),
+            5,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            quoted.contains("'http://127.0.0.1:8080/a'\\''b'"),
+            "cmd: {quoted}"
+        );
+    }
+
+    #[test]
+    fn test_traefik_introspect_url_and_banner_are_quoted_once() {
+        let cmd = KubernetesCommandBuilder::build_traefik_introspect_command(
+            Some("kubectl"),
+            "/;id;",
+            None,
+            8080,
+            5,
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains("curl -sS -m 8 'http://127.0.0.1:8080/api/;id;'"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("echo '=== GET /api/;id; ==='"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_traefik_ingressroute_reads_names_line_by_line_and_checks_them() {
+        let cmd = KubernetesCommandBuilder::build_traefik_ingressroute_command(
+            Some("kubectl"),
+            "web",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!cmd.contains("for m in"), "cmd: {cmd}");
+        assert!(!cmd.contains("for s in"), "cmd: {cmd}");
+        assert!(cmd.contains("| while IFS= read -r m;"), "cmd: {cmd}");
+        assert!(cmd.contains("| while IFS= read -r s;"), "cmd: {cmd}");
+        assert!(cmd.contains("*[!a-z0-9.-]*)"), "cmd: {cmd}");
+        assert!(cmd.contains("-- \"$m\""), "cmd: {cmd}");
+        assert!(cmd.contains("-- \"$s\""), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_who_can_keeps_the_context_as_one_word() {
+        let cmd = KubernetesCommandBuilder::build_who_can_command(
+            Some("kubectl"),
+            "get",
+            "pods",
+            Some("dev"),
+            false,
+            Some("x --server https://attacker.example"),
+        );
+        assert!(
+            cmd.contains("CTX_VAL='x --server https://attacker.example';"),
+            "cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains("${CTX_VAL:+--context=\"$CTX_VAL\"}"),
+            "cmd: {cmd}"
+        );
+        assert!(!cmd.contains("$CTX "), "cmd: {cmd}");
+        assert!(cmd.contains("SNS='dev';"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_rbac_diagnose_keeps_the_context_as_one_word() {
+        let cmd = KubernetesCommandBuilder::build_rbac_diagnose_command(
+            Some("kubectl"),
+            "sa",
+            None,
+            Some("x --server https://attacker.example"),
+        );
+        assert!(
+            cmd.contains("CTX_VAL='x --server https://attacker.example';"),
+            "cmd: {cmd}"
+        );
+        assert!(!cmd.contains("$CTX "), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_validate_storage_root_refuses_dot_and_empty_segments() {
+        assert!(validate_storage_root("/var/lib/rancher/k3s/storage/.").is_err());
+        assert!(validate_storage_root("/var/lib/rancher/k3s/./storage").is_err());
+        assert!(validate_storage_root("/var/lib/rancher/k3s//storage").is_err());
+        assert!(validate_storage_root("/var/lib/rancher/k3s/storage/").is_ok());
+    }
+
+    #[test]
+    fn test_localpath_gc_fails_closed_when_the_pv_query_fails() {
+        let cmd = KubernetesCommandBuilder::build_localpath_gc_command(
+            None,
+            "/var/lib/rancher/k3s/storage/",
+            None,
+            true,
+        );
+        // The auto-detect prefix runs, and a failing query aborts before the removal loop.
+        assert!(cmd.starts_with("PFX=$(if command -v kubectl"), "cmd: {cmd}");
+        assert!(
+            cmd.contains("ROOT='/var/lib/rancher/k3s/storage';"),
+            "cmd: {cmd}"
+        );
+        let query = cmd.find("PVL=$($PFX get pv").expect("PV query");
+        let abort = cmd.find("exit 1").expect("abort");
+        let removal = cmd.find("rm -rf").expect("removal");
+        assert!(query < abort && abort < removal, "cmd: {cmd}");
+        assert!(cmd.contains("*PVLIST_OK) ;;"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_localpath_gc_compares_live_paths_at_the_depth_find_lists() {
+        let cmd = KubernetesCommandBuilder::build_localpath_gc_command(
+            Some("kubectl"),
+            "/var/lib/rancher/k3s/storage",
+            None,
+            true,
+        );
+        // The live set is the first component under ROOT (`find -maxdepth 1`
+        // depth), taken by an anchored awk, not a substring grep on full paths.
+        assert!(
+            cmd.contains("| ROOT=\"$ROOT\" awk 'BEGIN { r = ENVIRON[\"ROOT\"] }"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("s = substr(p, length(r) + 2); sub(/\\/.*/, \"\", s)"));
+        assert!(!cmd.contains("grep -F \"$ROOT/\""), "cmd: {cmd}");
+        assert!(cmd.contains("find \"$ROOT\" -mindepth 1 -maxdepth 1"));
+        // Nothing is removed when a PV is the root or one of its parents.
+        assert!(cmd.contains("index(r \"/\", p \"/\") == 1"), "cmd: {cmd}");
+        let covers = cmd.find("grep -qxF '!COVERS'").expect("COVERS check");
+        assert!(cmd[covers..].contains("nothing removed' >&2; exit 1; fi;"));
+        // A bulk delete with no PV under ROOT is refused, before any removal.
+        let no_live = cmd
+            .find("if [ -z \"$LIVE\" ]; then echo 'ERROR: orphans found but no PV lies")
+            .expect("no-live refusal");
+        let removal = cmd.find("rm -rf").expect("removal");
+        assert!(covers < no_live && no_live < removal, "cmd: {cmd}");
+        // The refusal sits inside the apply branch, so a dry run still lists.
+        let apply = cmd.find("if [ \"$APPLY\" = true ]").expect("apply branch");
+        assert!(apply < no_live, "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_localpath_gc_removes_only_first_level_pvc_directories() {
+        let cmd = KubernetesCommandBuilder::build_localpath_gc_command(
+            Some("kubectl"),
+            "/var/lib/rancher/k3s",
+            None,
+            true,
+        );
+        assert!(
+            cmd.contains("-maxdepth 1 -type d -name 'pvc-*'"),
+            "cmd: {cmd}"
+        );
+        assert!(cmd.contains("\"$ROOT\"/pvc-*)"), "cmd: {cmd}");
+        assert!(cmd.contains("REL=${d#\"$ROOT\"/};"), "cmd: {cmd}");
+        let guard = cmd.find("not a first-level directory").expect("guard");
+        let removal = cmd.find("rm -rf").expect("removal");
+        assert!(guard < removal, "cmd: {cmd}");
+        let unsure = cmd.find("grep -qxF '!UNSURE'").expect("unsure check");
+        let covers = cmd.find("grep -qxF '!COVERS'").expect("covers check");
+        assert!(unsure < covers && covers < removal, "cmd: {cmd}");
+    }
+
+    /// Run `awk` over `input` the way the generated command does.
+    #[cfg(unix)]
+    fn run_live_awk(root: &str, input: &str) -> Vec<String> {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!("awk '{LOCALPATH_GC_LIVE_AWK}' | sort -u"))
+            .env("ROOT", root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_localpath_gc_live_awk_reduces_paths_to_first_level() {
+        let root = "/var/lib/rancher/k3s/storage";
+        let live = run_live_awk(
+            root,
+            &format!(
+                "{root}/pvc-1\n{root}/pvc-2/sub\n{root}/ssd/pvc-3\n\nPVLIST_OK\n/elsewhere/x\n{root}//pvc-4/\n"
+            ),
+        );
+        assert_eq!(
+            live,
+            [
+                format!("{root}/pvc-1"),
+                format!("{root}/pvc-2"),
+                format!("{root}/pvc-4"),
+                format!("{root}/ssd"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_localpath_gc_live_awk_flags_covering_paths() {
+        let root = "/var/lib/rancher/k3s/storage";
+        for covering in [
+            root,
+            "/var/lib/rancher/k3s/storage/",
+            "/",
+            "/var/lib/rancher",
+        ] {
+            assert_eq!(run_live_awk(root, &format!("{covering}\n")), ["!COVERS"]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_localpath_gc_live_awk_flags_dot_segments() {
+        let root = "/var/lib/rancher/k3s/storage";
+        for odd in [
+            format!("{root}/."),
+            format!("{root}/./ssd/pvc-1"),
+            "/var/lib/rancher/k3s/./storage/pvc-1".to_string(),
+            format!("{root}/../storage/pvc-1"),
+            format!("{root}/pvc-1/.."),
+        ] {
+            let live = run_live_awk(root, &format!("{odd}\n"));
+            assert_eq!(live, ["!UNSURE"], "{odd}");
+        }
+        // A dot inside a name is not a segment.
+        let live = run_live_awk(root, &format!("{root}/.hidden/x\n{root}/pvc-1.bak\n"));
+        assert_eq!(
+            live,
+            [format!("{root}/.hidden"), format!("{root}/pvc-1.bak")]
+        );
+    }
+
+    #[test]
+    fn test_localpath_gc_live_awk_has_no_single_quote() {
+        // It is spliced between single quotes.
+        assert!(!LOCALPATH_GC_LIVE_AWK.contains('\''));
+        assert!(LOCALPATH_GC_LIVE_AWK.contains("print \"!COVERS\""));
+    }
+
+    #[test]
+    fn test_reconcile_and_diff_inline_manifest_use_printf() {
+        let rec = KubernetesCommandBuilder::build_auth_reconcile_command(
+            Some("kubectl"),
+            "- item",
+            false,
+            false,
+            false,
+            None,
+        );
+        assert!(
+            rec.starts_with("printf '%s\\n' '- item' | kubectl auth reconcile -f -"),
+            "cmd: {rec}"
+        );
+        let diff = KubernetesCommandBuilder::build_diff_command(Some("kubectl"), "---", None);
+        assert!(
+            diff.starts_with("printf '%s\\n' '---' | kubectl diff -f -"),
+            "cmd: {diff}"
+        );
     }
 }

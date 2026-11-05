@@ -3,12 +3,7 @@
 //! Builds metric alert check commands for remote execution via SSH.
 //! Supports CPU, memory, disk, load, and swap metrics with configurable thresholds.
 
-use crate::config::ShellType;
 use crate::error::{BridgeError, Result};
-
-fn shell_escape(s: &str) -> String {
-    super::shell::escape(s, ShellType::Posix)
-}
 
 /// Allowed metric names for alerting.
 const ALLOWED_METRICS: &[&str] = &["cpu", "memory", "disk", "load", "swap"];
@@ -71,12 +66,15 @@ impl AlertingCommandBuilder {
         validate_operator(operator)?;
 
         let collect_cmd = Self::metric_command(metric);
-        let escaped_op = shell_escape(operator);
+        // `operator` is one of `ALLOWED_OPERATORS`, so it goes into the awk
+        // program as is. Quoted, it was a literal `'>'` inside the awk program
+        // (a syntax error): the double quotes around the program already
+        // quote it for the shell.
 
         Ok(format!(
             "VALUE=$({collect_cmd}); echo \"metric={metric} value=$VALUE threshold={threshold} \
              operator={operator}\"; \
-             awk \"BEGIN {{ if ($VALUE {escaped_op} {threshold}) print \\\"ALERT: {metric} is $VALUE \
+             awk \"BEGIN {{ if ($VALUE {operator} {threshold}) print \\\"ALERT: {metric} is $VALUE \
              (threshold {threshold})\\\"; else print \\\"OK: {metric} is $VALUE \
              (threshold {threshold})\\\" }}\""
         ))
@@ -210,6 +208,15 @@ mod tests {
     }
 
     // ── build_alert_check_command ────────────────────────────────
+
+    #[test]
+    fn test_alert_check_puts_the_operator_in_the_awk_program_unquoted() {
+        for op in [">", "<", ">=", "<=", "=="] {
+            let cmd = AlertingCommandBuilder::build_alert_check_command("cpu", 80.0, op).unwrap();
+            assert!(cmd.contains(&format!("if ($VALUE {op} 80)")), "{cmd}");
+            assert!(!cmd.contains(&format!("'{op}'")), "{cmd}");
+        }
+    }
 
     #[test]
     fn test_alert_check_cpu() {

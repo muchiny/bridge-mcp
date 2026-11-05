@@ -245,4 +245,13 @@ mod tests {
         let result = BackupVerifyTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_build_command_refuses_remote_archive_name() {
+        let args: SshBackupVerifyArgs = serde_json::from_value(json!({
+            "host": "s", "archive": "exfil.example:etc.tar"
+        }))
+        .unwrap();
+        assert!(BackupVerifyTool::build_command(&args, &test_host_config()).is_err());
+    }
 }

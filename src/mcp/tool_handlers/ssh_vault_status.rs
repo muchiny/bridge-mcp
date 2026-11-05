@@ -10,7 +10,6 @@ use crate::mcp_standard_tool;
 #[serde(deny_unknown_fields)]
 pub struct SshVaultStatusArgs {
     host: String,
-    vault_addr: Option<String>,
     #[serde(rename = "format")]
     output_format: Option<String>,
     timeout_seconds: Option<u64>,
@@ -39,10 +38,6 @@ impl StandardTool for VaultStatusTool {
                         "type": "string",
                         "description": "Host alias from config.yaml (use ssh_status to list available hosts)"
                     },
-                    "vault_addr": {
-                        "type": "string",
-                        "description": "Vault server address e.g. https://vault.example.com:8200 (overrides VAULT_ADDR env on the remote host)"
-                    },
                     "format": {
                         "type": "string",
                         "description": "Output format passed to `vault status -format`: table (default), json, yaml, or pretty"
@@ -68,7 +63,6 @@ impl StandardTool for VaultStatusTool {
 
     fn build_command(args: &SshVaultStatusArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(VaultCommandBuilder::build_status_command(
-            args.vault_addr.as_deref(),
             args.output_format.as_deref(),
         ))
     }
@@ -127,7 +121,6 @@ mod tests {
     fn test_args_deserialization() {
         let json = json!({
             "host": "myhost",
-            "vault_addr": "https://vault.example.com:8200",
             "format": "json",
             "timeout_seconds": 30,
             "max_output": 5000,
@@ -135,10 +128,6 @@ mod tests {
         });
         let args: SshVaultStatusArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
-        assert_eq!(
-            args.vault_addr.as_deref(),
-            Some("https://vault.example.com:8200")
-        );
         assert_eq!(args.output_format.as_deref(), Some("json"));
         assert_eq!(args.timeout_seconds, Some(30));
         assert_eq!(args.max_output, Some(5000));
@@ -150,7 +139,6 @@ mod tests {
         let json = json!({"host": "myhost"});
         let args: SshVaultStatusArgs = serde_json::from_value(json).unwrap();
         assert_eq!(args.host, "myhost");
-        assert!(args.vault_addr.is_none());
         assert!(args.output_format.is_none());
         assert!(args.timeout_seconds.is_none());
         assert!(args.max_output.is_none());
@@ -166,8 +154,17 @@ mod tests {
         assert!(properties.contains_key("timeout_seconds"));
         assert!(properties.contains_key("max_output"));
         assert!(properties.contains_key("save_output"));
-        assert!(properties.contains_key("vault_addr"));
+        assert!(!properties.contains_key("vault_addr"));
         assert!(properties.contains_key("format"));
+    }
+
+    #[test]
+    fn test_vault_addr_argument_is_refused() {
+        // A caller-chosen address would receive the host's Vault token.
+        let mut value: serde_json::Value = json!({"host": "h"});
+        value["vault_addr"] = json!("http://10.0.0.66:8200");
+        let err = serde_json::from_value::<SshVaultStatusArgs>(value).unwrap_err();
+        assert!(err.to_string().contains("vault_addr"), "{err}");
     }
 
     #[test]

@@ -394,6 +394,14 @@ pub struct HostRetryConfig {
     pub max_delay_ms: Option<u64>,
 }
 
+/// The SSM document a Windows host runs when `description` names none.
+#[cfg(feature = "ssm")]
+pub const SSM_POWERSHELL_DOCUMENT: &str = "AWS-RunPowerShellScript";
+
+/// The SSM document a Linux host runs when `description` names none.
+#[cfg(feature = "ssm")]
+pub const SSM_SHELL_DOCUMENT: &str = "AWS-RunShellScript";
+
 impl HostConfig {
     /// The `sudo_password` to hand to `domain::privilege::elevate_with_password`,
     /// or `None` when it must not be used.
@@ -419,28 +427,62 @@ impl HostConfig {
         }
     }
 
-    /// Resolve the effective shell type for this host.
+    /// The shell that reads the commands the bridge sends this host.
     ///
-    /// An explicit `shell` wins. Otherwise a protocol that runs the command
-    /// text in `PowerShell` ([`Self::protocol_runs_powershell`]) gives
-    /// `PowerShell`, and any other protocol falls back to `os_type`:
-    /// Linux -> `Posix`, Windows -> `Cmd` (the `OpenSSH` for Windows default).
+    /// A protocol that fixes the interpreter decides, whatever `shell` says
+    /// ([`Self::protocol_shell`]). Otherwise an explicit `shell` wins, and
+    /// without one `os_type` does: Linux -> `Posix`, Windows -> `Cmd` (the
+    /// `OpenSSH` for Windows default).
+    ///
+    /// Everything the bridge quotes is quoted for this shell (`working_dir`,
+    /// the locale prefix of standard tools, `sudo`), and a tool whose builder
+    /// quotes for another shell is refused, so it must name the interpreter
+    /// that really runs: an explicit `shell: posix` on a `WinRM` host used to
+    /// send POSIX-quoted `working_dir` values to `PowerShell`, where a `'` in
+    /// them ended the quoting.
     #[must_use]
     pub fn effective_shell(&self) -> ShellType {
-        self.shell.unwrap_or_else(|| {
-            if self.protocol_runs_powershell() {
-                ShellType::PowerShell
-            } else {
-                match self.os_type {
+        self.protocol_shell()
+            .or(self.shell)
+            .unwrap_or(match self.os_type {
+                OsType::Linux => ShellType::Posix,
+                OsType::Windows => ShellType::Cmd,
+            })
+    }
+
+    /// The shell this host's protocol runs every command in, whatever `shell`
+    /// says; `None` when the remote side chooses it (`OpenSSH`'s default
+    /// shell, the telnet login shell, a cloud run-command).
+    ///
+    /// - `winrm` hands the text to `powershell.exe -EncodedCommand` and `psrp`
+    ///   runs it as a `PowerShell` pipeline
+    ///   ([`Self::protocol_runs_powershell`]).
+    /// - `ssm` runs the document named by `description`, by default
+    ///   `SSM_POWERSHELL_DOCUMENT` on Windows and `SSM_SHELL_DOCUMENT` on
+    ///   Linux (both exist only with the `ssm` feature); a custom document is
+    ///   left to `shell`.
+    #[must_use]
+    pub fn protocol_shell(&self) -> Option<ShellType> {
+        if self.protocol_runs_powershell() {
+            return Some(ShellType::PowerShell);
+        }
+        #[cfg(feature = "ssm")]
+        if self.protocol == Protocol::Ssm {
+            return match self.description.as_deref() {
+                None => Some(match self.os_type {
+                    OsType::Windows => ShellType::PowerShell,
                     OsType::Linux => ShellType::Posix,
-                    OsType::Windows => ShellType::Cmd,
-                }
-            }
-        })
+                }),
+                Some(SSM_POWERSHELL_DOCUMENT) => Some(ShellType::PowerShell),
+                Some(SSM_SHELL_DOCUMENT) => Some(ShellType::Posix),
+                Some(_) => None,
+            };
+        }
+        None
     }
 
     /// Whether this host's protocol runs the command text in `PowerShell`
-    /// whatever the remote default shell is.
+    /// whatever the remote default shell is (`WinRM`, PSRP).
     ///
     /// `winrm` hands the text to `powershell.exe -EncodedCommand` and `psrp`
     /// runs it as a `PowerShell` pipeline, so `cmd.exe` or POSIX syntax built
@@ -2571,12 +2613,79 @@ hosts:
         assert_eq!(host.effective_shell(), ShellType::PowerShell);
     }
 
-    /// An explicit `shell` still wins on `WinRM` (the loader warns about it).
+    /// `WinRM` and PSRP run every command in `PowerShell`: an explicit
+    /// `shell` there is ignored (the loader warns about it). Honouring
+    /// `shell: posix` sent POSIX-quoted `working_dir` values to `PowerShell`.
     #[cfg(feature = "winrm")]
     #[test]
-    fn test_effective_shell_winrm_explicit_shell_wins() {
+    fn test_effective_shell_winrm_ignores_an_explicit_shell() {
+        for shell in ["cmd", "posix"] {
+            let host = host_with("winrm", "windows", Some(shell));
+            assert_eq!(host.protocol_shell(), Some(ShellType::PowerShell));
+            assert_eq!(host.effective_shell(), ShellType::PowerShell, "{shell}");
+        }
+    }
+
+    #[cfg(feature = "psrp")]
+    #[test]
+    fn test_effective_shell_psrp_ignores_an_explicit_shell() {
+        let host = host_with("psrp", "linux", Some("posix"));
+        assert_eq!(host.effective_shell(), ShellType::PowerShell);
+    }
+
+    /// An SSM host as YAML would give it: `description` names the document.
+    #[cfg(feature = "ssm")]
+    fn ssm_host(os_type: &str, description: Option<&str>, shell: Option<&str>) -> HostConfig {
+        let description =
+            description.map_or(String::new(), |d| format!(r#", "description": "{d}""#));
+        let shell = shell.map_or(String::new(), |s| format!(r#", "shell": "{s}""#));
+        let json = format!(
+            r#"{{"hostname": "i-0123456789abcdef0", "user": "us-east-1", "auth": {{"type": "agent"}},
+                "protocol": "ssm", "os_type": "{os_type}"{description}{shell}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// The default SSM documents follow `os_type`, not `shell`.
+    #[cfg(feature = "ssm")]
+    #[test]
+    fn test_effective_shell_ssm_follows_the_default_document() {
         assert_eq!(
-            host_with("winrm", "windows", Some("cmd")).effective_shell(),
+            ssm_host("windows", None, None).effective_shell(),
+            ShellType::PowerShell
+        );
+        assert_eq!(
+            ssm_host("windows", None, Some("posix")).effective_shell(),
+            ShellType::PowerShell
+        );
+        assert_eq!(
+            ssm_host("linux", None, None).effective_shell(),
+            ShellType::Posix
+        );
+        assert_eq!(
+            ssm_host("linux", None, Some("powershell")).effective_shell(),
+            ShellType::Posix
+        );
+    }
+
+    /// A document named in `description`: the two defaults are known, any
+    /// other is left to `shell`.
+    #[cfg(feature = "ssm")]
+    #[test]
+    fn test_effective_shell_ssm_reads_a_named_document() {
+        assert_eq!(
+            ssm_host("linux", Some(SSM_POWERSHELL_DOCUMENT), None).effective_shell(),
+            ShellType::PowerShell
+        );
+        assert_eq!(
+            ssm_host("windows", Some(SSM_SHELL_DOCUMENT), Some("powershell")).effective_shell(),
+            ShellType::Posix
+        );
+        let custom = ssm_host("windows", Some("Custom-RunCmd"), Some("cmd"));
+        assert_eq!(custom.protocol_shell(), None);
+        assert_eq!(custom.effective_shell(), ShellType::Cmd);
+        assert_eq!(
+            ssm_host("windows", Some("Custom-RunCmd"), None).effective_shell(),
             ShellType::Cmd
         );
     }

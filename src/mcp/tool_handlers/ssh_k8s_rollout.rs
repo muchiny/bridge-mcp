@@ -107,6 +107,10 @@ impl StandardTool for K8sRolloutTool {
     }"#;
 
     fn build_command(args: &SshK8sRolloutArgs, _host_config: &HostConfig) -> Result<String> {
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[(
+            "resource",
+            Some(args.resource.as_str()),
+        )])?;
         if let Some(ns) = args.namespace.as_deref() {
             KubernetesCommandBuilder::validate_namespace(ns)?;
         }
@@ -537,5 +541,19 @@ mod tests {
         let host_config = test_host_config();
         let cmd = K8sRolloutTool::build_command(&args, &host_config).unwrap();
         assert!(cmd.contains("-l 'app=nginx'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_option_like_resource_is_refused() {
+        let args: SshK8sRolloutArgs = serde_json::from_value(
+            serde_json::json!({"host": "h", "action": "x", "resource": "-x"}),
+        )
+        .unwrap();
+        let err = K8sRolloutTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'resource' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -6,9 +6,14 @@ use serde::Deserialize;
 
 use crate::config::HostConfig;
 use crate::domain::use_cases::podman::PodmanCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
-use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::standard_tool::{
+    StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
+};
 use crate::mcp_standard_tool;
+use crate::ports::ToolContext;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +85,24 @@ impl StandardTool for PodmanExecTool {
         },
         "required": ["host", "container", "command"]
     }"#;
+
+    fn validate(args: &SshPodmanExecArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("container", &args.container)?;
+        // `sh -c` reads a command string that starts with `-` as its own options.
+        refuse_option_like("command", &args.command)
+    }
+
+    /// `command` is a free-form script from the request, so it faces the same
+    /// whitelist as `ssh_exec`, not only the blacklist `validate_builtin`
+    /// applies to builder-produced commands.
+    fn pre_execute(
+        args: &SshPodmanExecArgs,
+        ctx: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        std::future::ready(
+            validate_free_form_command(ctx, Self::NAME, &args.host, &args.command).map(|()| None),
+        )
+    }
 
     fn build_command(args: &SshPodmanExecArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(PodmanCommandBuilder::build_exec_command(
@@ -298,5 +321,74 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_container_starting_with_dash_is_refused() {
+        let handler = SshPodmanExecHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = handler
+            .execute(
+                Some(json!({"host": "server1", "container": "-x", "command": "ls"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'container' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_build_command_runs_command_through_sh_c() {
+        let args: SshPodmanExecArgs = serde_json::from_value(
+            json!({"host": "s", "container": "c", "command": "true; id; #"}),
+        )
+        .unwrap();
+        let cmd = PodmanExecTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.ends_with(" 'c' sh -c 'true; id; #'"), "{cmd}");
+    }
+
+    #[tokio::test]
+    async fn test_command_outside_whitelist_is_denied() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshPodmanExecArgs =
+            serde_json::from_value(json!({"host": "server1", "container": "c", "command": "id"}))
+                .unwrap();
+        let result = PodmanExecTool::pre_execute(&args, &ctx).await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "command must be whitelist-checked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_whitelisted_command_is_allowed() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let args: SshPodmanExecArgs = serde_json::from_value(
+            json!({"host": "server1", "container": "c", "command": "echo ok"}),
+        )
+        .unwrap();
+        let result = PodmanExecTool::pre_execute(&args, &ctx).await;
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_command_starting_with_a_dash_is_refused() {
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        let err = SshPodmanExecHandler::new()
+            .execute(
+                Some(json!({"host": "server1", "container": "c", "command": "-s"})),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'command' must not start with '-'"),
+            "{err}"
+        );
     }
 }

@@ -214,25 +214,20 @@ pub fn validate_config(config: &Config) -> Result<()> {
             warn!(host = %name, "this WinRM/PSRP host will be refused: {reason}");
         }
 
-        // WinRM and PSRP run the command text in PowerShell whatever `shell`
-        // says, so an explicit `cmd` or `posix` makes `working_dir` emit
-        // syntax PowerShell rejects (`cd /d "…" && …`, `cd '…' && …`), and
-        // `posix` also puts `export LC_ALL=C;` in front of every standard
-        // tool. The tools' own argument quoting does not follow `shell`. The
-        // value is honoured, as an explicit `shell` always is; a warning, not
-        // an error, keeps a config that loaded before loading now.
-        #[cfg(any(feature = "winrm", feature = "psrp"))]
-        if protocol_is_winrm_like(host)
+        // WinRM and PSRP run the command text in PowerShell, and SSM in the
+        // shell of its document, whatever `shell` says: `effective_shell`
+        // ignores the value there (`HostConfig::protocol_shell`). Say so, so
+        // that nobody reads the YAML and believes `shell: posix` holds. A
+        // warning, not an error, keeps a config that loaded before loading now.
+        if let Some(fixed) = host.protocol_shell()
             && let Some(shell) = host.shell
-            && shell != super::types::ShellType::PowerShell
+            && shell != fixed
         {
             warn!(
                 host = %name,
                 shell = ?shell,
-                "hosts.{name}.shell is {shell:?}, but WinRM/PSRP run the command text in \
-                 PowerShell: working_dir (and, with posix, the locale prefix of standard \
-                 tools) will produce syntax PowerShell rejects. Remove `shell` (WinRM/PSRP \
-                 default to powershell) or set `shell: powershell`"
+                "hosts.{name}.shell is {shell:?}, but this host's protocol runs every \
+                 command in {fixed:?}: the value is ignored. Remove `shell`"
             );
         }
 
@@ -1150,11 +1145,12 @@ http:
         load_config(file.path())
     }
 
-    /// A `WinRM` host with an explicit non-PowerShell `shell` still loads and
-    /// keeps it: the loader only warns. One without `shell` gets `PowerShell`.
+    /// A `WinRM` host with an explicit non-PowerShell `shell` still loads (the
+    /// loader only warns), and the value is ignored: `WinRM` runs every
+    /// command in `PowerShell`, with or without `shell`.
     #[cfg(feature = "winrm")]
     #[test]
-    fn a_winrm_host_with_shell_cmd_loads_and_keeps_it() {
+    fn a_winrm_host_with_shell_cmd_loads_and_ignores_it() {
         let config = load_yaml(
             r#"
 hosts:
@@ -1182,12 +1178,79 @@ hosts:
         .expect("an explicit shell on a WinRM host is a warning, not an error");
         assert_eq!(
             config.hosts["explicit"].effective_shell(),
-            crate::config::ShellType::Cmd
+            crate::config::ShellType::PowerShell
         );
         assert_eq!(
             config.hosts["inferred"].effective_shell(),
             crate::config::ShellType::PowerShell
         );
+    }
+
+    /// A YAML with one `WinRM` host `w` carrying `shell_line` (or no `shell`).
+    #[cfg(feature = "winrm")]
+    fn winrm_yaml(shell_line: &str) -> String {
+        format!(
+            r#"
+hosts:
+  w:
+    hostname: "10.0.0.1"
+    port: 5986
+    user: Administrator
+    protocol: winrm
+    os_type: windows
+    {shell_line}
+    auth:
+      type: ntlm
+      password: "x"
+"#
+        )
+    }
+
+    /// The loader says that a `shell` the protocol overrides is ignored, and
+    /// says nothing when `shell` agrees with the protocol or is absent.
+    #[cfg(feature = "winrm")]
+    #[tracing_test::traced_test]
+    #[test]
+    fn a_winrm_host_with_shell_posix_warns_that_it_is_ignored() {
+        load_yaml(&winrm_yaml("shell: posix")).expect("loads");
+        assert!(logs_contain("the value is ignored"));
+    }
+
+    #[cfg(feature = "winrm")]
+    #[tracing_test::traced_test]
+    #[test]
+    fn a_winrm_host_with_shell_powershell_or_no_shell_does_not_warn() {
+        load_yaml(&winrm_yaml("shell: powershell")).expect("loads");
+        load_yaml(&winrm_yaml("")).expect("loads");
+        assert!(!logs_contain("the value is ignored"));
+    }
+
+    /// SSM: the default Windows document runs `PowerShell`, so `shell: cmd` is
+    /// ignored and said so; a custom document leaves `shell` in charge.
+    #[cfg(feature = "ssm")]
+    #[tracing_test::traced_test]
+    #[test]
+    fn an_ssm_host_warns_only_when_its_document_fixes_the_shell() {
+        let yaml = |description: &str| {
+            format!(
+                r#"
+hosts:
+  s:
+    hostname: "i-0123456789abcdef0"
+    user: us-east-1
+    protocol: ssm
+    os_type: windows
+    shell: cmd
+    {description}
+    auth:
+      type: agent
+"#
+            )
+        };
+        load_yaml(&yaml("description: Custom-Doc")).expect("loads");
+        assert!(!logs_contain("the value is ignored"));
+        load_yaml(&yaml("")).expect("loads");
+        assert!(logs_contain("the value is ignored"));
     }
 
     /// THE POSITIVE TWIN, and the reason the two rejections below mean

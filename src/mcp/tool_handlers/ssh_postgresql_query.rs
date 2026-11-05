@@ -5,6 +5,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
+use crate::domain::{DatabaseCommandBuilder, DatabaseType};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -118,6 +119,13 @@ impl StandardTool for PostgresqlQueryTool {
             format_flag = format_flag,
             query = shell_escape(&args.query),
         ))
+    }
+
+    fn validate(args: &SshPostgresqlQueryArgs, _host_config: &HostConfig) -> Result<()> {
+        if let Some(db) = args.database.as_deref() {
+            DatabaseCommandBuilder::validate_postgres_database(db)?;
+        }
+        DatabaseCommandBuilder::validate_client_query(&DatabaseType::PostgreSQL, &args.query)
     }
 }
 
@@ -363,5 +371,45 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_refuses_psql_backslash_command() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshPostgresqlQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "query": r"\! id > /tmp/o"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => assert!(reason.contains("'query'")),
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_connection_string_database() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshPostgresqlQueryHandler::new();
+        let ctx = create_test_context_with_host();
+        for database in [
+            "dbname=postgres host=10.0.0.66 port=5432",
+            "postgres://10.0.0.66/db",
+            "PostgreSQL://10.0.0.66/db",
+        ] {
+            let result = handler
+                .execute(
+                    Some(json!({"host": "server1", "query": "SELECT 1", "database": database})),
+                    &ctx,
+                )
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
+                e => panic!("Expected CommandDenied for {database:?}, got: {e:?}"),
+            }
+        }
     }
 }

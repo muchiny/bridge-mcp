@@ -84,11 +84,11 @@ impl StandardTool for FileChmodTool {
     }
 
     fn build_command(args: &SshFileChmodArgs, _host_config: &HostConfig) -> Result<String> {
-        Ok(FileOpsCommandBuilder::build_chmod_command(
+        FileOpsCommandBuilder::build_chmod_command(
             &args.path,
             &args.mode,
             args.recursive.unwrap_or(false),
-        ))
+        )
     }
 }
 

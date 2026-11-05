@@ -111,6 +111,10 @@ impl StandardTool for K8sDescribeTool {
 
     fn build_command(args: &SshK8sDescribeArgs, _host_config: &HostConfig) -> Result<String> {
         use crate::error::BridgeError;
+        crate::domain::use_cases::kubernetes::refuse_option_like_all(&[
+            ("resource", Some(args.resource.as_str())),
+            ("name", args.name.as_deref()),
+        ])?;
         if args.name.is_none() && args.label_selector.is_none() {
             return Err(BridgeError::CommandDenied {
                 reason: "Either name or label_selector must be provided".to_string(),
@@ -389,7 +393,7 @@ mod tests {
         };
         let host_config = test_host_config();
         let cmd = K8sDescribeTool::build_command(&args, &host_config).unwrap();
-        // "k3s kubectl" has a space so is_valid_binary_path rejects it; falls back to auto-detect
+        // "k3s kubectl" has a space so is_named_binary rejects it; falls back to auto-detect
         assert!(cmd.contains("describe 'service' 'my-svc'"));
         assert!(cmd.contains("-n 'kube-system'"));
     }
@@ -453,5 +457,29 @@ mod tests {
         let host_config = test_host_config();
         let cmd = K8sDescribeTool::build_command(&args, &host_config).unwrap();
         assert!(cmd.contains("-A"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_option_like_resource_is_refused() {
+        let args: SshK8sDescribeArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "resource": "-x"})).unwrap();
+        let err = K8sDescribeTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'resource' must not start with '-'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_option_like_name_is_refused() {
+        let args: SshK8sDescribeArgs =
+            serde_json::from_value(serde_json::json!({"host": "h", "resource": "x", "name": "-x"}))
+                .unwrap();
+        let err = K8sDescribeTool::build_command(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'name' must not start with '-'"),
+            "{err}"
+        );
     }
 }

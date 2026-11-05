@@ -5,6 +5,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::domain::use_cases::user_management::UserCommandBuilder;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
@@ -77,6 +78,11 @@ impl StandardTool for UserInfoTool {
 
     fn build_command(args: &SshUserInfoArgs, _host_config: &HostConfig) -> Result<String> {
         Ok(UserCommandBuilder::build_user_info_command(&args.username))
+    }
+
+    fn validate(args: &SshUserInfoArgs, _host_config: &HostConfig) -> Result<()> {
+        refuse_option_like("username", &args.username)?;
+        Ok(())
     }
 }
 
@@ -314,5 +320,17 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_like_username() {
+        let args: SshUserInfoArgs =
+            serde_json::from_value(json!({"host": "s", "username": "-x"})).unwrap();
+        let err = UserInfoTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'username' must not start with '-'"),
+            "{err}"
+        );
     }
 }

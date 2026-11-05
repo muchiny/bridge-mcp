@@ -250,8 +250,9 @@ fn detach_stdin(command: &str) -> String {
 /// The hang protection `-n` gives the no-password form is, here, the
 /// `channel.eof()` sent right after the password is written (see [`elevate`]).
 ///
-/// For a caller that cannot give the process a stdin of its own (a line typed
-/// into an open shell), see [`elevate_with_password_via_pipe`].
+/// There is no form for a line typed into an open shell (`ssh_session_exec`):
+/// the caller owns that shell's functions and traps and could read the
+/// password out of the line, so sessions elevate with [`elevate`] only.
 ///
 /// The command is wrapped in a `bash -c` for the same reason as [`elevate`]:
 /// without it only the first process of the line is elevated.
@@ -291,38 +292,6 @@ pub fn elevate_with_password(
         command,
         stdin: Some(crate::config::RedactedSecret::new(line)),
     }
-}
-
-/// The pre-stdin form of [`elevate_with_password`]: the password is written
-/// into the command text as `printf '%s\n' '<pw>' | sudo -S ...`.
-///
-/// **Its one legitimate use is `ssh_session_exec`**, which writes the string as
-/// a *line* into an already-open shell's stdin. There `printf` is a builtin and
-/// the `sudo` it pipes into carries no password of its own, so nothing lands
-/// in an argv. Sent as an SSH exec request this string would be readable with
-/// `ps` on the remote host: use [`elevate_with_password`] and
-/// `exec_with_stdin` there.
-#[must_use]
-pub fn elevate_with_password_via_pipe(
-    command: &str,
-    args: &PrivilegeArgs,
-    password: Option<&str>,
-) -> String {
-    if !args.sudo {
-        return command.to_string();
-    }
-    let Some(password) = password else {
-        return elevate(command, args);
-    };
-    let quoted = shell::escape(&detach_stdin(command), ShellType::Posix);
-    let pw = shell::escape(password, ShellType::Posix);
-    args.sudo_user.as_ref().map_or_else(
-        || format!("printf '%s\\n' {pw} | sudo -S -p '' bash -c {quoted}"),
-        |user| {
-            let user = shell::escape(user, ShellType::Posix);
-            format!("printf '%s\\n' {pw} | sudo -S -p '' -u {user} bash -c {quoted}")
-        },
-    )
 }
 
 #[cfg(test)]
@@ -538,22 +507,6 @@ mod tests {
         );
     }
 
-    /// The pipe form keeps the password in the line: its one caller writes
-    /// that line into an open shell, and the stdin form must not regress it.
-    #[test]
-    fn via_pipe_keeps_the_password_in_the_line() {
-        let args = PrivilegeArgs {
-            sudo: true,
-            sudo_user: None,
-        };
-        let got = elevate_with_password_via_pipe("id", &args, Some("hunter2"));
-        assert_eq!(
-            got,
-            "printf '%s\\n' 'hunter2' | sudo -S -p '' bash -c 'exec 0</dev/null; id'"
-        );
-        assert_detached_before(&got, "id");
-    }
-
     /// The redirect must come BEFORE the command inside the `bash -c` payload:
     /// after it, it would be useless. Ordering, not mere presence.
     fn assert_detached_before(line: &str, command: &str) {
@@ -580,15 +533,5 @@ mod tests {
                 .starts_with("sudo -S -p '' bash -c 'exec 0</dev/null")
         );
         assert_detached_before(&got.command, "cat");
-    }
-
-    #[test]
-    fn via_pipe_detaches_the_child_stdin_before_the_command() {
-        let args = PrivilegeArgs {
-            sudo: true,
-            sudo_user: Some("postgres".to_string()),
-        };
-        let got = elevate_with_password_via_pipe("cat", &args, Some("hunter2"));
-        assert_detached_before(&got, "cat");
     }
 }

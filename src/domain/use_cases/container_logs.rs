@@ -20,8 +20,9 @@ pub struct ContainerLogCommandBuilder;
 impl ContainerLogCommandBuilder {
     /// Validate a container name or ID.
     ///
-    /// Must be non-empty and contain only alphanumeric characters,
-    /// hyphens, underscores, dots, slashes, and colons.
+    /// Must be non-empty, must not start with `-` (the runtime would read it
+    /// as an option) and contain only alphanumeric characters, hyphens,
+    /// underscores, dots, slashes, and colons.
     ///
     /// # Errors
     ///
@@ -32,6 +33,7 @@ impl ContainerLogCommandBuilder {
                 reason: "Container name cannot be empty".to_string(),
             });
         }
+        super::shell::refuse_option_like("container", name)?;
         if !name
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
@@ -104,7 +106,10 @@ impl ContainerLogCommandBuilder {
     /// Build a command to search container logs for a pattern.
     ///
     /// Constructs: `{docker} logs {container} [--since {since}] [--tail {tail}]
-    /// 2>&1 | grep -i {pattern}`
+    /// 2>&1 | grep -i -- {pattern}`
+    ///
+    /// The `--` keeps a pattern that starts with `-` a pattern, not a `grep`
+    /// option (`-rHe.` would otherwise search the working directory).
     #[must_use]
     pub fn build_log_search_command(
         docker_bin: Option<&str>,
@@ -126,7 +131,7 @@ impl ContainerLogCommandBuilder {
         }
 
         let escaped_pattern = shell_escape(pattern);
-        let _ = write!(cmd, " 2>&1 | grep -i {escaped_pattern}");
+        let _ = write!(cmd, " 2>&1 | grep -i -- {escaped_pattern}");
 
         cmd
     }
@@ -239,6 +244,28 @@ mod tests {
         assert!(ContainerLogCommandBuilder::validate_container_name("ng`inx").is_err());
         assert!(ContainerLogCommandBuilder::validate_container_name("ng$inx").is_err());
         assert!(ContainerLogCommandBuilder::validate_container_name("ng inx").is_err());
+    }
+
+    #[test]
+    fn test_validate_container_name_refuses_leading_dash() {
+        let err = ContainerLogCommandBuilder::validate_container_name("-x").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'container' must not start with '-'")
+        );
+        assert!(ContainerLogCommandBuilder::validate_container_name("a-x").is_ok());
+    }
+
+    #[test]
+    fn test_log_search_pattern_after_double_dash() {
+        let cmd = ContainerLogCommandBuilder::build_log_search_command(
+            Some("docker"),
+            "app",
+            "-rHe.",
+            None,
+            None,
+        );
+        assert!(cmd.ends_with(" 2>&1 | grep -i -- '-rHe.'"), "{cmd}");
     }
 
     // ============== validate_pattern tests ==============

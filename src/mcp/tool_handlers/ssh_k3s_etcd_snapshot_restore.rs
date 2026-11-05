@@ -4,7 +4,7 @@
 use serde::Deserialize;
 
 use crate::config::HostConfig;
-use crate::domain::use_cases::k3s::K3sCommandBuilder;
+use crate::domain::use_cases::k3s::{K3sCommandBuilder, validate_k3s_bin};
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -61,6 +61,9 @@ impl StandardTool for K3sEtcdSnapshotRestoreTool {
         args: &SshK3sEtcdSnapshotRestoreArgs,
         _host_config: &HostConfig,
     ) -> Result<String> {
+        if let Some(b) = args.k3s_bin.as_deref() {
+            validate_k3s_bin(b)?;
+        }
         K3sCommandBuilder::build_etcd_snapshot_restore_command(
             args.k3s_bin.as_deref(),
             &args.snapshot_path,
@@ -249,5 +252,19 @@ mod tests {
         };
         let result = K3sEtcdSnapshotRestoreTool::build_command(&args, &test_host_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_command_refuses_dash_or_foreign_k3s_bin() {
+        for bin in ["-s", "/bin/sh"] {
+            let args: SshK3sEtcdSnapshotRestoreArgs = serde_json::from_value(
+                json!({"host": "s1", "k3s_bin": bin, "snapshot_path": "/srv/snap"}),
+            )
+            .unwrap();
+            let err = K3sEtcdSnapshotRestoreTool::build_command(&args, &test_host_config())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("k3s_bin"), "err: {err}");
+        }
     }
 }

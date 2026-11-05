@@ -147,11 +147,37 @@ impl ResourceHandler for FileResourceHandler {
                     host: parsed.host.clone(),
                 })?;
 
+        // `cat`/`tail` with a POSIX-quoted path: anywhere else the quoting
+        // does not hold and the URI's path would become a command.
+        if let Some(reason) =
+            crate::mcp::tool_handlers::utils::posix_only_refusal(host_config, "file:// resource")
+        {
+            ctx.execute_use_case
+                .log_denied("file://", &parsed.host, "", &reason);
+            return Err(BridgeError::McpInvalidRequest(reason));
+        }
+
+        // A resource read reads a file like `ssh_file_read`, so the client's
+        // workspace roots bound it the same way when they are known.
+        // `resources/read` itself asks no `roots/list` today, so `ctx.roots`
+        // is empty on that path and this check passes: it applies to a
+        // caller that fills them.
+        if let Err(e) = ctx.validate_root_scope(&parsed.path) {
+            ctx.execute_use_case
+                .log_denied("file://", &parsed.host, "", &e.to_string());
+            return Err(e);
+        }
+
         // Use cat to read file content
         let command = file_read_command(&parsed.path);
 
-        // Validate command
-        ctx.execute_use_case.validate(&command)?;
+        // Validate command, audited like a tool's free-form command.
+        crate::mcp::standard_tool::validate_free_form_command(
+            ctx,
+            "file://",
+            &parsed.host,
+            &command,
+        )?;
 
         // Check rate limit
         if ctx.rate_limiter.check(&parsed.host).is_err() {
@@ -191,12 +217,19 @@ impl ResourceHandler for FileResourceHandler {
         )
         .await?;
 
+        // Sanitized, audited and recorded like any tool output: a resource is
+        // not a side door around the secret filters.
+        let output: crate::ports::CommandOutput = output.into();
+        let response =
+            ctx.execute_use_case
+                .process_success("file://", &parsed.host, &command, &output, &[]);
+
         if output.exit_code != 0 {
             return Err(BridgeError::FileTransfer {
                 reason: format!(
                     "Failed to read file '{}': {}",
                     parsed.path,
-                    output.stderr.trim()
+                    response.stderr.trim()
                 ),
             });
         }
@@ -206,7 +239,7 @@ impl ResourceHandler for FileResourceHandler {
         Ok(vec![ResourceContent {
             uri: uri.to_string(),
             mime_type: Some(mime.to_string()),
-            text: Some(output.stdout),
+            text: Some(response.stdout),
         }])
     }
 }
@@ -264,6 +297,43 @@ mod tests {
         assert_eq!(guess_mime("/app/script.sh"), "text/x-shellscript");
     }
 
+    use crate::mcp::tool_handlers::utils::guard_test_support::context_with_target;
+
+    /// The reason the resource refused `target`, which it must do before
+    /// dialing it (the timeout turns a missing guard into a failure).
+    async fn refusal(ctx: &crate::ports::ToolContext) -> String {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            FileResourceHandler.read("file://target/etc/hosts", ctx),
+        )
+        .await
+        .expect("the resource must refuse without dialing the host");
+        let reason = match result {
+            Err(BridgeError::McpInvalidRequest(reason)) => reason,
+            other => panic!("expected McpInvalidRequest, got: {other:?}"),
+        };
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event_type, "command_denied");
+        assert_eq!(events[0].tool_name.as_deref(), Some("file://"));
+        assert_eq!(events[0].host, "target");
+        reason
+    }
+
+    /// The path is POSIX-quoted for `cat`/`tail`; on a Windows host that
+    /// quoting does not hold and the URI's path would become a command.
+    #[tokio::test]
+    async fn test_read_refuses_a_windows_host() {
+        let reason = refusal(&context_with_target("windows", "")).await;
+        assert!(reason.contains("Windows"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn test_read_refuses_a_host_whose_shell_is_powershell() {
+        let reason = refusal(&context_with_target("linux", r#","shell":"powershell""#)).await;
+        assert!(reason.contains("PowerShell"), "{reason}");
+    }
+
     #[tokio::test]
     async fn test_list_returns_empty() {
         let handler = FileResourceHandler;
@@ -317,5 +387,80 @@ mod tests {
             r"cat '/tmp/a'\''; id #'",
             "a `;` reaching the shell here is a command injection, not a filename"
         );
+    }
+
+    /// A context whose Linux host `target` answers every command with
+    /// `stdout`, in permissive mode so the read command passes validation.
+    fn reading_context(stdout: &str) -> crate::ports::ToolContext {
+        let mut config = (*context_with_target("linux", "").config).clone();
+        config.security.mode = crate::config::SecurityMode::Permissive;
+        crate::ports::mock::create_test_context_with_config_and_mock_executor(
+            config,
+            crate::ssh::CommandOutput {
+                exit_code: 0,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                duration_ms: 1,
+            },
+        )
+    }
+
+    /// The content goes through the sanitizer and leaves an audit event, like
+    /// the output of any tool.
+    #[tokio::test]
+    async fn test_read_sanitizes_and_audits_the_content() {
+        let ctx = reading_context("password=secret123\n");
+        let content = FileResourceHandler
+            .read("file://target/etc/hosts", &ctx)
+            .await
+            .expect("the read succeeds");
+        let text = content[0].text.as_deref().unwrap_or_default();
+        assert!(!text.contains("secret123"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].tool_name.as_deref(), Some("file://"));
+        assert_eq!(events[0].host, "target");
+    }
+
+    /// A path outside the client's workspace roots is refused and audited.
+    #[tokio::test]
+    async fn test_read_refuses_a_path_outside_the_roots() {
+        let mut ctx = reading_context("x");
+        ctx.roots = vec![crate::mcp::protocol::RootEntry {
+            uri: "file:///srv".to_string(),
+            name: None,
+        }];
+        let result = FileResourceHandler
+            .read("file://target/etc/hosts", &ctx)
+            .await;
+        assert!(result.is_err(), "{result:?}");
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event_type, "command_denied");
+        assert!(
+            ctx.connection_pool.mock_calls().is_empty(),
+            "nothing was sent"
+        );
+    }
+
+    /// A read the whitelist refuses leaves an audit event, like a refused
+    /// tool command.
+    #[tokio::test]
+    async fn a_read_the_whitelist_refuses_is_audited() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^echo"]);
+        let result = FileResourceHandler
+            .read("file://server1/etc/hosts", &ctx)
+            .await;
+        assert!(
+            matches!(result, Err(BridgeError::CommandDenied { .. })),
+            "{result:?}"
+        );
+        let events = ctx.audit_logger.drain_for_test();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event_type, "command_denied");
+        assert_eq!(events[0].tool_name.as_deref(), Some("file://"));
+        assert_eq!(events[0].host, "server1");
+        assert!(events[0].command.contains("/etc/hosts"), "{events:?}");
     }
 }

@@ -2,4 +2,4 @@
 source: tests/snapshot_commands.rs
 expression: "SystemdCommandBuilder::build_status_command(\"nginx\")"
 ---
-systemctl status 'nginx' --no-pager
+systemctl status --no-pager -- 'nginx'

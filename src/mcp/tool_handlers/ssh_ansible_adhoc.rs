@@ -8,8 +8,12 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::domain::use_cases::ansible::AnsibleCommandBuilder;
 use crate::error::Result;
-use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
+use crate::mcp::protocol::ToolCallResult;
+use crate::mcp::standard_tool::{
+    StandardTool, StandardToolHandler, impl_common_args, validate_free_form_command,
+};
 use crate::mcp_standard_tool;
+use crate::ports::ToolContext;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +63,13 @@ impl StandardTool for AnsibleAdhocTool {
     const NAME: &'static str = "ssh_ansible_adhoc";
 
     const DESCRIPTION: &'static str = "Run an Ansible ad-hoc command on a remote host without a playbook. Execute a single \
-        module (e.g., ping, shell, copy, service) against target hosts. Use \
+        module (e.g., ping, shell, copy, service) against target hosts. In strict and standard \
+        security mode only `ping` without arguments runs freely; any other module is checked \
+        like an ssh_exec command and must match the whitelist: a module that runs a command \
+        (command, shell, raw, script, ...) by its arguments, any other module as the text \
+        `ansible-module <module> <args>` (`ansible-module <module>` without arguments). An \
+        inventory file or directory is read as data (host list, YAML, INI or TOML), never \
+        executed; a vault password file must be a plain file without execute permission. Use \
         ssh_ansible_inventory first to discover hosts. For complex multi-task automation, use \
         ssh_ansible_playbook instead. Supports check mode for dry-run. Requires Ansible \
         installed directly on the bridge host (not AWX/Tower — use ssh_awx_job_launch for \
@@ -82,11 +92,11 @@ impl StandardTool for AnsibleAdhocTool {
             },
             "args": {
                 "type": "string",
-                "description": "Module arguments"
+                "description": "Module arguments as key=value text. For a module that runs a command (command, shell, raw, script, ...) they are checked like an ssh_exec command (whitelist); for any other module the text 'ansible-module <module> <args>' is (only 'ping' without arguments is exempt). Refused: Jinja ({{, {%, {#), the JSON form (starting with '{'), the escapes Ansible decodes (\\U and 8 hex digits, \\u and 4, \\x and 2, \\N{), the sequence \\=, a word starting with '=' that holds a backslash and, for a command module, a word starting with executable=, chdir= or stdin=. Other backslash sequences pass."
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file or comma-separated host list"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
             },
             "become": {
                 "type": "boolean",
@@ -94,11 +104,11 @@ impl StandardTool for AnsibleAdhocTool {
             },
             "become_user": {
                 "type": "string",
-                "description": "User to become"
+                "description": "User to become (letters, digits, '_', '.', '@', '-'; max 64; no leading '-'; optional DOMAIN\\ prefix and trailing '$')"
             },
             "user": {
                 "type": "string",
-                "description": "Remote SSH user"
+                "description": "Remote SSH user (letters, digits, '_', '.', '@', '-'; max 64; no leading '-'; optional DOMAIN\\ prefix and trailing '$')"
             },
             "forks": {
                 "type": "integer",
@@ -117,11 +127,11 @@ impl StandardTool for AnsibleAdhocTool {
             },
             "vault_password_file": {
                 "type": "string",
-                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file)"
+                "description": "Path to an ansible-vault password file on the remote host (--vault-password-file). Must be a plain file without execute permission (Ansible runs an executable one); the call stops with exit status 2 otherwise"
             },
             "vault_id": {
                 "type": "string",
-                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id)"
+                "description": "ansible-vault identity, e.g. 'prod@/etc/ansible/prod-pass' (--vault-id). The file after the first '@' (the whole value without one) must be a plain file without execute permission; 'prompt' and 'prompt_ask_vault_pass' are not files"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -160,8 +170,54 @@ impl StandardTool for AnsibleAdhocTool {
     }
 
     fn validate(args: &SshAnsibleAdhocArgs, _host_config: &HostConfig) -> Result<()> {
+        AnsibleCommandBuilder::validate_pattern(&args.pattern)?;
         AnsibleCommandBuilder::validate_adhoc_module(&args.module, args.args.as_deref())?;
+        // Ansible templates these on the control host (the SSH host): a
+        // `{{ lookup('pipe', ...) }}` runs a command there, for any module.
+        AnsibleCommandBuilder::refuse_jinja_in(&[
+            ("pattern", Some(args.pattern.as_str())),
+            ("module", Some(args.module.as_str())),
+            ("inventory", args.inventory.as_deref()),
+        ])?;
+        if let Some(inventory) = args.inventory.as_deref() {
+            AnsibleCommandBuilder::validate_inventory(inventory)?;
+        }
+        AnsibleCommandBuilder::validate_vault_args(
+            args.vault_password_file.as_deref(),
+            args.vault_id.as_deref(),
+        )?;
+        if let Some(a) = args.args.as_deref() {
+            AnsibleCommandBuilder::validate_adhoc_args(&args.module, a)?;
+        }
+        // `become_user` and `user` end up unquoted in a shell line on the targets.
+        if let Some(user) = args.become_user.as_deref() {
+            AnsibleCommandBuilder::validate_user_name("become_user", user)?;
+        }
+        if let Some(user) = args.user.as_deref() {
+            AnsibleCommandBuilder::validate_user_name("user", user)?;
+        }
         Ok(())
+    }
+
+    /// Judge the module like an `ssh_exec` command, whitelist included.
+    ///
+    /// A module that runs a command line (`shell`, `command`, `raw`, `script`,
+    /// ...) executes `args` as one, on the SSH host with the implicit
+    /// `localhost`: `args` is judged. Every other module (`cron`, `pip`, `at`,
+    /// ... can start any program) is judged as `"ansible-module {module}
+    /// {args}"`, so in strict and standard mode it must be whitelisted
+    /// explicitly, by a pattern that names `ansible-module`. `ping` without
+    /// `args` is the one exemption.
+    fn pre_execute(
+        args: &SshAnsibleAdhocArgs,
+        ctx: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Option<ToolCallResult>>> + Send {
+        let verdict =
+            match AnsibleCommandBuilder::adhoc_policy_text(&args.module, args.args.as_deref()) {
+                Some(text) => validate_free_form_command(ctx, Self::NAME, &args.host, &text),
+                None => Ok(()),
+            };
+        std::future::ready(verdict.map(|()| None))
     }
 }
 
@@ -500,5 +556,436 @@ mod tests {
         assert!(cmd.contains("--become-user 'root'"));
         assert!(cmd.contains("-u 'deploy'"));
         assert!(cmd.contains(" -C"));
+    }
+
+    #[tokio::test]
+    async fn test_option_like_pattern_refused() {
+        let handler = SshAnsibleAdhocHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host":"server1","pattern":"-ZQXdash","module":"ping"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(reason.contains("pattern"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    fn adhoc_args(value: serde_json::Value) -> SshAnsibleAdhocArgs {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_shell_args_outside_the_whitelist_are_refused() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^uptime$"]);
+        for module in [
+            "shell",
+            "ansible.builtin.shell",
+            "ansible.legacy.raw",
+            "script",
+        ] {
+            let args = adhoc_args(json!({
+                "host": "server1", "pattern": "localhost", "module": module, "args": "id > /tmp/x"
+            }));
+            let result = AnsibleAdhocTool::pre_execute(&args, &ctx).await;
+            assert!(
+                matches!(result, Err(BridgeError::CommandDenied { .. })),
+                "{module}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_whitelisted_shell_args_and_bare_ping_pass() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&["^uptime$"]);
+        let shell = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ansible.builtin.shell",
+            "args": "uptime"
+        }));
+        let result = AnsibleAdhocTool::pre_execute(&shell, &ctx).await;
+        assert!(matches!(result, Ok(None)), "{result:?}");
+        for module in ["ping", "ansible.builtin.ping", "PING"] {
+            for extra in [json!({}), json!({"args": "  "})] {
+                let mut value = json!({"host": "server1", "pattern": "all", "module": module});
+                if let Some(a) = extra.get("args") {
+                    value["args"] = a.clone();
+                }
+                let ping = adhoc_args(value);
+                let result = AnsibleAdhocTool::pre_execute(&ping, &ctx).await;
+                assert!(matches!(result, Ok(None)), "{module}: {result:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_other_modules_need_the_whitelist() {
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&[
+            "^uptime$",
+            "^ansible-module service name=nginx state=restarted$",
+            "^ansible-module setup$",
+        ]);
+        // Not whitelisted: refused, command-spawning ones included.
+        for (module, text) in [
+            (
+                "ansible.builtin.cron",
+                Some("name=x minute=* job=\"id > /tmp/x\""),
+            ),
+            (
+                "ansible.builtin.pip",
+                Some("virtualenv=/tmp/v virtualenv_command=\"sh -c id\""),
+            ),
+            ("debug", Some("var=lookup")),
+            ("ping", Some("data=x")),
+            ("service", Some("name=sshd state=stopped")),
+            ("at", None),
+        ] {
+            let mut value = json!({"host": "server1", "pattern": "localhost", "module": module});
+            if let Some(t) = text {
+                value["args"] = json!(t);
+            }
+            let args = adhoc_args(value);
+            let result = AnsibleAdhocTool::pre_execute(&args, &ctx).await;
+            assert!(
+                matches!(result, Err(BridgeError::CommandDenied { .. })),
+                "{module}: {result:?}"
+            );
+        }
+        // Whitelisted as "ansible-module <module> <args>" (or the bare module):
+        // accepted.
+        let service = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "service",
+            "args": "name=nginx state=restarted"
+        }));
+        let result = AnsibleAdhocTool::pre_execute(&service, &ctx).await;
+        assert!(matches!(result, Ok(None)), "{result:?}");
+        let setup = adhoc_args(json!({"host": "server1", "pattern": "all", "module": "setup"}));
+        let result = AnsibleAdhocTool::pre_execute(&setup, &ctx).await;
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_permissive_mode_still_runs_other_modules() {
+        let base = create_test_context_with_host();
+        let mut config = (*base.config).clone();
+        config.security.mode = crate::config::SecurityMode::Permissive;
+        let ctx = crate::ports::mock::create_test_context_with_config(config);
+        let service = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "service",
+            "args": "name=nginx state=restarted"
+        }));
+        let result = AnsibleAdhocTool::pre_execute(&service, &ctx).await;
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    #[test]
+    fn test_json_form_and_decoded_escapes_in_args_are_refused() {
+        for text in [
+            r#"{"msg": "\u007b\u007b lookup('pipe','id') \u007d\u007d"}"#,
+            r#"  {"_raw_params": "id"}"#,
+            r"msg=\x7b\x7b",
+            r"msg=\u007b",
+            r"msg=\U0000007b",
+            r"msg=\N{LEFT CURLY BRACKET}",
+            r"a\=b",
+            r"msg=a =b\\n",
+        ] {
+            let args = adhoc_args(json!({
+                "host": "server1", "pattern": "all", "module": "debug", "args": text
+            }));
+            match AnsibleAdhocTool::validate(&args, &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains("args"), "{text}: {reason}");
+                }
+                other => panic!("{text}: expected CommandDenied, got {other:?}"),
+            }
+        }
+        for text in [
+            "name=nginx state=restarted",
+            "msg='a b'",
+            r"msg=line\nnext",
+            r"path=C:\dir\file",
+            r"msg=\173",
+            r"msg=\0",
+            r"dir C:\x\y",
+            "uptime | grep up",
+        ] {
+            let args = adhoc_args(json!({
+                "host": "server1", "pattern": "all", "module": "shell", "args": text
+            }));
+            assert!(
+                AnsibleAdhocTool::validate(&args, &test_host_config()).is_ok(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_users_with_shell_syntax_are_refused() {
+        for field in ["become_user", "user"] {
+            for name in [
+                "root; id",
+                "root && id",
+                "root id",
+                "$(id)",
+                "-u",
+                "",
+                "a|b",
+                "r\nx",
+            ] {
+                let mut value = json!({"host": "server1", "pattern": "all", "module": "ping"});
+                value[field] = json!(name);
+                let args = adhoc_args(value);
+                match AnsibleAdhocTool::validate(&args, &test_host_config()) {
+                    Err(BridgeError::CommandDenied { reason }) => {
+                        assert!(reason.contains(field), "{field} {name}: {reason}");
+                    }
+                    other => panic!("{field} {name}: expected CommandDenied, got {other:?}"),
+                }
+            }
+            let mut value = json!({"host": "server1", "pattern": "all", "module": "ping"});
+            value[field] = json!("deploy.ops@corp-1");
+            let ok = adhoc_args(value);
+            assert!(AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_jinja_in_play_strings_is_refused() {
+        for field in ["pattern", "module", "inventory"] {
+            let mut value = json!({"host": "server1", "pattern": "all", "module": "ping"});
+            value[field] = json!("{{ lookup('pipe','id') }}");
+            let args = adhoc_args(value);
+            match AnsibleAdhocTool::validate(&args, &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains(field), "{field}: {reason}");
+                }
+                other => panic!("{field}: expected CommandDenied, got {other:?}"),
+            }
+        }
+        let ok = adhoc_args(json!({
+            "host": "server1", "pattern": "web*:!db1", "module": "ansible.builtin.ping",
+            "inventory": "hosts.ini"
+        }));
+        assert!(AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_jinja_in_args_is_refused_for_every_module() {
+        let handler = SshAnsibleAdhocHandler::new();
+        let ctx = create_test_context_with_host();
+        for (module, text) in [
+            ("debug", "msg={{ lookup('pipe','id') }}"),
+            ("ping", "data={% if 1 %}x{% endif %}"),
+            ("ansible.builtin.shell", "{# c #}uptime"),
+        ] {
+            let result = handler
+                .execute(
+                    Some(json!({
+                        "host": "server1", "pattern": "localhost",
+                        "module": module, "args": text
+                    })),
+                    &ctx,
+                )
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("args"), "{reason}");
+                }
+                e => panic!("Expected CommandDenied, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_jinja_in_users_is_refused_and_plain_values_pass() {
+        let bad = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping",
+            "become_user": "{{ lookup('pipe','id') }}"
+        }));
+        assert!(AnsibleAdhocTool::validate(&bad, &test_host_config()).is_err());
+        let bad = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping", "user": "{{ x }}"
+        }));
+        assert!(AnsibleAdhocTool::validate(&bad, &test_host_config()).is_err());
+        let ok = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "service",
+            "args": "name=nginx state=restarted", "become_user": "root", "user": "deploy"
+        }));
+        assert!(AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_a_whitelist_for_the_bare_module_text_does_not_cover_the_module() {
+        // The text a module is judged by starts with `ansible-module`, so a
+        // pattern written for a shell command line does not let it through.
+        let ctx = crate::ports::mock::create_test_context_with_whitelist(&[
+            "^service name=nginx state=restarted$",
+            "^setup$",
+            "^ansible-module ansible.builtin.cron name=x$",
+        ]);
+        for (module, text) in [
+            ("service", Some("name=nginx state=restarted")),
+            ("setup", None),
+            ("ansible.builtin.cron", Some("name=x job=id")),
+        ] {
+            let mut value = json!({"host": "server1", "pattern": "all", "module": module});
+            if let Some(t) = text {
+                value["args"] = json!(t);
+            }
+            let args = adhoc_args(value);
+            let result = AnsibleAdhocTool::pre_execute(&args, &ctx).await;
+            assert!(
+                matches!(result, Err(BridgeError::CommandDenied { .. })),
+                "{module}: {result:?}"
+            );
+        }
+        let ok = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ansible.builtin.cron",
+            "args": " name=x "
+        }));
+        let result = AnsibleAdhocTool::pre_execute(&ok, &ctx).await;
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    #[test]
+    fn test_command_module_options_and_word_leading_equals_are_refused() {
+        let denied = |module: &str, text: &str| {
+            let args = adhoc_args(json!({
+                "host": "server1", "pattern": "all", "module": module, "args": text
+            }));
+            AnsibleAdhocTool::validate(&args, &test_host_config())
+        };
+        for text in [
+            "executable=/tmp/x echo hi",
+            "echo hi chdir=/tmp",
+            "stdin=x cat",
+            "echo a\nexecutable=/bin/sh",
+        ] {
+            assert!(
+                matches!(
+                    denied("ansible.builtin.shell", text),
+                    Err(BridgeError::CommandDenied { .. })
+                ),
+                "{text}"
+            );
+            // Other modules take `chdir`, `executable` and `stdin` as parameters.
+            assert!(denied("copy", text).is_ok(), "{text}");
+        }
+        for text in [
+            "creates=/tmp/x uptime",
+            "removes=/tmp/x true",
+            "warn=false id",
+        ] {
+            assert!(denied("shell", text).is_ok(), "{text}");
+        }
+        for module in ["shell", "copy"] {
+            assert!(denied(module, "x =y\\n").is_err(), "{module}");
+            assert!(denied(module, "=\\ty").is_err(), "{module}");
+            assert!(denied(module, "[ a = b ]").is_ok(), "{module}");
+            assert!(denied(module, "x\\=y").is_err(), "{module}");
+        }
+    }
+
+    #[test]
+    fn test_inventory_is_read_as_data_and_never_starts_with_a_dash() {
+        let args = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping", "inventory": "/tmp/inv"
+        }));
+        let cmd = AnsibleAdhocTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml ansible 'all' -m 'ping' -i '/tmp/inv'"
+        );
+        let none = adhoc_args(json!({"host": "server1", "pattern": "all", "module": "ping"}));
+        let cmd = AnsibleAdhocTool::build_command(&none, &test_host_config()).unwrap();
+        assert_eq!(cmd, "ansible 'all' -m 'ping'");
+
+        let dashed = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping", "inventory": "-ZQXdash"
+        }));
+        match AnsibleAdhocTool::validate(&dashed, &test_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(reason.contains("inventory"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_vault_files_are_guarded_and_vault_arguments_checked() {
+        let args = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping",
+            "vault_password_file": "/etc/ansible/pass",
+            "vault_id": "prod@/etc/ansible/prod-pass"
+        }));
+        assert!(AnsibleAdhocTool::validate(&args, &test_host_config()).is_ok());
+        let cmd = AnsibleAdhocTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.starts_with("if [ -f '/etc/ansible/pass' ] && [ -n \"$(find -L "),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("; fi && if [ -f '/etc/ansible/prod-pass' ] && "),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("; exit 2; fi && ansible 'all' -m 'ping'"),
+            "{cmd}"
+        );
+        assert!(cmd.ends_with(
+            "--vault-password-file '/etc/ansible/pass' --vault-id 'prod@/etc/ansible/prod-pass'"
+        ));
+
+        let prompt = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping", "vault_id": "dev@prompt"
+        }));
+        let cmd = AnsibleAdhocTool::build_command(&prompt, &test_host_config()).unwrap();
+        assert_eq!(cmd, "ansible 'all' -m 'ping' --vault-id 'dev@prompt'");
+
+        for (field, value) in [
+            ("vault_password_file", "-x"),
+            ("vault_password_file", "{{ x }}"),
+            ("vault_id", "p@-x"),
+            ("vault_id", "p@/a\nb"),
+        ] {
+            let mut v = json!({"host": "server1", "pattern": "all", "module": "ping"});
+            v[field] = json!(value);
+            let bad = adhoc_args(v);
+            match AnsibleAdhocTool::validate(&bad, &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains(field), "{field}: {reason}");
+                }
+                other => panic!("{field} {value}: expected CommandDenied, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_windows_domain_and_gmsa_users_pass() {
+        for field in ["become_user", "user"] {
+            for name in ["CORP\\svc", "svc$", "corp.example.com\\gmsa-web$"] {
+                let mut value = json!({"host": "server1", "pattern": "all", "module": "ping"});
+                value[field] = json!(name);
+                let ok = adhoc_args(value);
+                assert!(
+                    AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok(),
+                    "{field} {name}"
+                );
+            }
+            for name in ["CORP\\", "\\svc", "svc$x", "a\\b\\c", "CORP;x\\svc"] {
+                let mut value = json!({"host": "server1", "pattern": "all", "module": "ping"});
+                value[field] = json!(name);
+                let bad = adhoc_args(value);
+                assert!(
+                    AnsibleAdhocTool::validate(&bad, &test_host_config()).is_err(),
+                    "{field} {name}"
+                );
+            }
+        }
     }
 }

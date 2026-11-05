@@ -21,8 +21,10 @@ impl CloudCommandBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `CommandDenied` if the service name contains invalid characters.
+    /// Returns `CommandDenied` if the service name contains invalid characters
+    /// or starts with `-`.
     pub fn validate_aws_service(service: &str) -> Result<()> {
+        super::shell::refuse_option_like("service", service)?;
         if service.is_empty() {
             return Err(BridgeError::CommandDenied {
                 reason: "AWS service name cannot be empty".to_string(),
@@ -45,8 +47,10 @@ impl CloudCommandBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `CommandDenied` if the subcommand contains shell injection characters.
+    /// Returns `CommandDenied` if the subcommand contains shell injection characters
+    /// or starts with `-`.
     pub fn validate_subcommand(cmd: &str) -> Result<()> {
+        super::shell::refuse_option_like("subcommand", cmd)?;
         if cmd.is_empty() {
             return Err(BridgeError::CommandDenied {
                 reason: "Subcommand cannot be empty".to_string(),
@@ -128,11 +132,13 @@ impl CloudCommandBuilder {
              --granularity DAILY --metrics BlendedCost"
         );
         if let Some(svc) = service {
-            let _ = write!(
-                cmd,
-                " --filter '{{\"Dimensions\":{{\"Key\":\"SERVICE\",\"Values\":[{}]}}}}'",
-                shell_escape(svc)
-            );
+            // Build the JSON first (it escapes `svc` for JSON), then quote the
+            // whole document once for the shell.
+            let filter = serde_json::json!({
+                "Dimensions": {"Key": "SERVICE", "Values": [svc]}
+            })
+            .to_string();
+            let _ = write!(cmd, " --filter {}", shell_escape(&filter));
         }
         cmd.push_str(" --output json 2>&1");
         cmd
@@ -265,5 +271,29 @@ mod tests {
     fn test_build_cloud_cost_with_period() {
         let cmd = CloudCommandBuilder::build_cloud_cost_command(None, Some("30d"));
         assert!(cmd.contains("30 days ago"));
+    }
+
+    #[test]
+    fn test_cloud_cost_service_is_one_quoted_json_word() {
+        for svc in ["x; id #", "$(id)", "x';id;'"] {
+            let cmd = CloudCommandBuilder::build_cloud_cost_command(Some(svc), None);
+            let filter = cmd
+                .split(" --filter ")
+                .nth(1)
+                .and_then(|r| r.split(" --output").next())
+                .unwrap();
+            assert!(filter.starts_with("'{\"Dimensions\""), "{filter}");
+            let json = filter.trim_matches('\'').replace("'\\''", "'");
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(v["Dimensions"]["Values"][0], svc);
+        }
+    }
+
+    #[test]
+    fn test_validate_aws_service_and_subcommand_refuse_a_leading_dash() {
+        let err = CloudCommandBuilder::validate_aws_service("-x").unwrap_err();
+        assert!(err.to_string().contains("'service'"), "{err}");
+        let err = CloudCommandBuilder::validate_subcommand("--debug").unwrap_err();
+        assert!(err.to_string().contains("'subcommand'"), "{err}");
     }
 }

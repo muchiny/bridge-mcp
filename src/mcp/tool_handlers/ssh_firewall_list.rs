@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::config::HostConfig;
 use crate::config::OsType;
 use crate::domain::use_cases::firewall::FirewallCommandBuilder;
+use crate::domain::use_cases::shell::refuse_option_like;
 use crate::error::Result;
 use crate::mcp::standard_tool::{StandardTool, StandardToolHandler, impl_common_args};
 use crate::mcp_standard_tool;
@@ -89,6 +90,13 @@ impl StandardTool for FirewallListTool {
             args.firewall_tool.as_deref(),
             args.chain.as_deref(),
         ))
+    }
+
+    fn validate(args: &SshFirewallListArgs, _host_config: &HostConfig) -> Result<()> {
+        if let Some(v) = args.chain.as_deref() {
+            refuse_option_like("chain", v)?;
+        }
+        Ok(())
     }
 }
 
@@ -323,5 +331,16 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_validate_refuses_option_like_chain() {
+        let args: SshFirewallListArgs =
+            serde_json::from_value(json!({"host": "s", "chain": "-x"})).unwrap();
+        let err = FirewallListTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(
+            err.to_string().contains("'chain' must not start with '-'"),
+            "{err}"
+        );
     }
 }
