@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The nightly fuzz job passes again on 6.0.0.** The first nightly run after
+  the release crashed three targets. Each crash came from a stale oracle; none
+  came from product code.
+  - `fuzz_ansible_validation` (#277) asserted that a playbook path without
+    `..` must be accepted, but 6.0.0 refuses a leading `-`. The failing input
+    was `-rf/otsh$()chmo`.
+  - `fuzz_ansible_command_builder` (#276) asserted that the ad-hoc command
+    starts with the word `ansible`. Given a vault password file, the command now
+    starts with the fail-closed file guard instead. The target failed on the
+    empty input, so it had tested nothing since 6.0.0.
+  - `fuzz_process_command_builder` (#222, 19 recurrences since 2026-10-03)
+    searched the whole line for `head -n 0`. The fuzzer had written that text
+    inside a user name, which the builder had quoted correctly. The target
+    now reads the count from the builder's own trailing `head -n N`.
+
+  The two Ansible targets now assert the 6.0.0 rules in the safe direction.
+  Whatever a validator accepts satisfies the rule. Whatever the builder emits
+  carries one fail-closed guard per vault source, in order. Their fixed
+  known-good cases are now unit tests in `ansible.rs`, which run in
+  `make ci` instead of nightly. The vault-guard reader moved to
+  `fuzz/src/lib.rs`, with its own unit tests.
+- **An audit of every fuzz target whose code changed in 6.0.0 found two more
+  stale oracles**, before the fuzzer did:
+  - `fuzz_db_command_builder` asserted that `MYSQL_PWD` and `PGPASSWORD`
+    never appear in a command that echoes its input. An input spelling either
+    token proves it false. The target now also pins `--binary-mode` and
+    checks each field on its own.
+  - The write branch of `fuzz_vault_command_builder` could never run once
+    `build_write_command` started validating its entries. The target now also
+    checks the `--` separator and the JSON heredoc body.
+
 ## [6.0.0] - 2026-11-05
 
 **6.0.0 is a major release because of its breaking changes, and it fixes the
