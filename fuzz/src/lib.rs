@@ -125,6 +125,129 @@ pub fn assert_survives_as_one_word(command: &str, needle: &str, context: &str) {
     );
 }
 
+/// Read ONE shell word from the start of `s` the way `/bin/sh` does: a run of
+/// `'...'`, `"..."`, `\x` and plain characters, up to the first unquoted
+/// blank. Returns the word, quoting resolved, and what follows it (starting at
+/// that blank, or empty).
+///
+/// Unlike [`shell_words`] this reads a single word and leaves the rest alone,
+/// so a caller can walk a command whose fixed text it knows (see
+/// [`take_guard`]) one word at a time. Returns `None` when nothing precedes
+/// the first blank (so on an empty `s`, or a leading blank), on an
+/// unterminated quote, or on a character that would be syntax outside quotes.
+/// A QUOTED empty word (`''`) is a word: it comes back as an empty string.
+///
+/// Inside `"..."` a `$` is kept as text (a leading `~/` is written
+/// `"$HOME"/...`, and that is the one expansion the builders mean); a
+/// backslash or a backtick there is refused, since no builder writes one.
+#[must_use]
+pub fn take_word(s: &str) -> Option<(String, &str)> {
+    let mut value = String::new();
+    let mut chars = s.char_indices().peekable();
+    let mut end = s.len();
+    while let Some(&(i, c)) = chars.peek() {
+        match c {
+            ' ' | '\t' => {
+                end = i;
+                break;
+            }
+            ';' | '|' | '&' | '<' | '>' | '(' | ')' | '`' | '$' | '\n' | '\r' => return None,
+            '\'' | '"' => {
+                chars.next();
+                loop {
+                    match chars.next() {
+                        Some((_, q)) if q == c => break,
+                        Some((_, '\\' | '`')) if c == '"' => return None,
+                        Some((_, q)) => value.push(q),
+                        None => return None,
+                    }
+                }
+            }
+            '\\' => {
+                chars.next();
+                let (_, e) = chars.next()?;
+                value.push(e);
+            }
+            other => {
+                chars.next();
+                value.push(other);
+            }
+        }
+    }
+    (end > 0).then(|| (value, &s[end..]))
+}
+
+/// Fixed text of a vault guard, before the first of its three quoted words.
+pub const GUARD_HEAD: &str = "if [ -f ";
+/// Fixed text of a vault guard between its first and second quoted words.
+pub const GUARD_FIND: &str = " ] && [ -n \"$(find -L ";
+/// Fixed text of a vault guard between its second and third quoted words.
+pub const GUARD_TAIL: &str = " -prune ! -perm -100 ! -perm -010 ! -perm -001 -print 2>/dev/null)\" ]; then :; else echo ";
+/// The refusal that ends a vault guard: stop the shell with status 2, so
+/// nothing after the guard runs.
+pub const GUARD_EXIT: &str = " >&2; exit 2; fi";
+
+/// The three words of a vault guard, quoting resolved.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Guard {
+    /// What `[ -f ... ]` tests.
+    pub path: String,
+    /// What `find -L ... -prune` is given.
+    pub found: String,
+    /// What `echo` prints on stderr before `exit 2`.
+    pub message: String,
+}
+
+/// Read one vault guard, as `AnsibleCommandBuilder::vault_source_guard` writes
+/// it, from the start of `s`, or `None` when `s` does not have the guard's
+/// exact shape (the fixed text of [`GUARD_HEAD`], [`GUARD_FIND`],
+/// [`GUARD_TAIL`] and [`GUARD_EXIT`] around three words read by
+/// [`take_word`]). Returns the guard and what follows it.
+#[must_use]
+pub fn take_guard(s: &str) -> Option<(Guard, &str)> {
+    let rest = s.strip_prefix(GUARD_HEAD)?;
+    let (path, rest) = take_word(rest)?;
+    let rest = rest.strip_prefix(GUARD_FIND)?;
+    let (found, rest) = take_word(rest)?;
+    let rest = rest.strip_prefix(GUARD_TAIL)?;
+    let (message, rest) = take_word(rest)?;
+    let rest = rest.strip_prefix(GUARD_EXIT)?;
+    Some((
+        Guard {
+            path,
+            found,
+            message,
+        },
+        rest,
+    ))
+}
+
+/// Peel every leading vault guard off `cmd`, each one chained to what follows
+/// by `&&`. Returns the guards and the command that is left (all of `cmd` when
+/// it does not start with a guard).
+///
+/// # Panics
+///
+/// Panics, with `context` and `cmd` in the message, when `cmd` starts a guard
+/// that does not have the fail-closed shape, or one that is not chained to
+/// what follows by `&&`: both are what the oracle exists to catch.
+#[must_use]
+pub fn split_guards<'a>(cmd: &'a str, context: &str) -> (Vec<Guard>, &'a str) {
+    let mut guards = Vec::new();
+    let mut rest = cmd;
+    while rest.starts_with(GUARD_HEAD) {
+        let Some((guard, after)) = take_guard(rest) else {
+            panic!("{context}: a vault guard does not have the fail-closed shape: {cmd:?}");
+        };
+        let Some(after) = after.strip_prefix(" && ") else {
+            panic!("{context}: a vault guard is not chained to what follows by '&&': {cmd:?}");
+        };
+        guards.push(guard);
+        rest = after;
+    }
+    (guards, rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +300,191 @@ mod tests {
             assert_survives_as_one_word("show interfaces eth0; id", "eth0; id", "leak");
         });
         assert!(leaked.is_err(), "a bare operator must fail the oracle");
+    }
+
+    // ---- take_word / take_guard / split_guards ----
+
+    /// A word and the rest, for the readers' expectations.
+    fn word_and_rest<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
+        Some((word.to_string(), rest))
+    }
+
+    /// The guard of `/etc/ansible/pass`, verbatim as
+    /// `AnsibleCommandBuilder::vault_source_guard` emits it (the `GUARD_P` of
+    /// `src/domain/use_cases/ansible.rs`).
+    const GUARD_P: &str = "if [ -f '/etc/ansible/pass' ] && [ -n \"$(find -L '/etc/ansible/pass' \
+        -prune ! -perm -100 ! -perm -010 ! -perm -001 -print 2>/dev/null)\" ]; then :; else \
+        echo 'bridge-mcp: vault password file /etc/ansible/pass must be a plain file without \
+        execute permission (Ansible runs an executable one); configure vault scripts in \
+        ansible.cfg instead' >&2; exit 2; fi";
+
+    /// The refusal message `GUARD_P` carries.
+    const MESSAGE_P: &str = "bridge-mcp: vault password file /etc/ansible/pass must be a plain \
+        file without execute permission (Ansible runs an executable one); configure vault \
+        scripts in ansible.cfg instead";
+
+    /// The guard of `/q`, same shape as `GUARD_P`.
+    const GUARD_Q: &str = "if [ -f '/q' ] && [ -n \"$(find -L '/q' -prune ! -perm -100 \
+        ! -perm -010 ! -perm -001 -print 2>/dev/null)\" ]; then :; else echo 'bridge-mcp: vault \
+        password file /q must be a plain file without execute permission (Ansible runs an \
+        executable one); configure vault scripts in ansible.cfg instead' >&2; exit 2; fi";
+
+    #[test]
+    fn take_word_reads_a_quoted_empty_word_as_a_word() {
+        assert_eq!(take_word("''"), word_and_rest("", ""));
+        assert_eq!(take_word("'' rest"), word_and_rest("", " rest"));
+        assert_eq!(take_word("\"\" rest"), word_and_rest("", " rest"));
+    }
+
+    #[test]
+    fn take_word_reads_the_posix_escape_of_a_quote() {
+        // The exact shape `shell_escape` emits for `a'b`.
+        assert_eq!(take_word(r"'a'\''b'"), word_and_rest("a'b", ""));
+        assert_eq!(take_word(r"'a'\''b' tail"), word_and_rest("a'b", " tail"));
+    }
+
+    #[test]
+    fn take_word_keeps_a_dollar_inside_double_quotes() {
+        // A leading `~/` is written `"$HOME"/'rest'`.
+        assert_eq!(
+            take_word("\"$HOME\"/'rest' ]"),
+            word_and_rest("$HOME/rest", " ]")
+        );
+    }
+
+    #[test]
+    fn take_word_reads_a_dot_slash_prefix_before_a_quoted_word() {
+        assert_eq!(take_word("./'!x' -prune"), word_and_rest("./!x", " -prune"));
+    }
+
+    #[test]
+    fn take_word_reads_a_plain_word_up_to_the_first_blank() {
+        assert_eq!(take_word("abc def"), word_and_rest("abc", " def"));
+        assert_eq!(take_word("abc\tdef"), word_and_rest("abc", "\tdef"));
+        assert_eq!(take_word("abc"), word_and_rest("abc", ""));
+    }
+
+    #[test]
+    fn take_word_does_not_skip_a_leading_blank_and_keeps_a_trailing_one() {
+        assert_eq!(take_word(" abc"), None);
+        assert_eq!(take_word("abc  "), word_and_rest("abc", "  "));
+    }
+
+    #[test]
+    fn take_word_refuses_an_empty_input() {
+        assert_eq!(take_word(""), None);
+    }
+
+    #[test]
+    fn take_word_refuses_an_unterminated_quote() {
+        assert_eq!(take_word("'abc"), None);
+        assert_eq!(take_word("\"abc"), None);
+        assert_eq!(take_word("'a'\\''b"), None);
+        assert_eq!(take_word("abc\\"), None);
+    }
+
+    #[test]
+    fn take_word_refuses_syntax_outside_quotes() {
+        for bad in ["a;b", "a|b", "a&b", "a<b", "a>b", "a(b", "a)b", "a`b", "$a", "a\nb"] {
+            assert_eq!(take_word(bad), None, "{bad:?}");
+        }
+        // Inside quotes the same characters are text, except the backslash
+        // and the backtick of a double-quoted run.
+        assert_eq!(take_word("';|&<>()$'"), word_and_rest(";|&<>()$", ""));
+        assert_eq!(take_word("\"a\\b\""), None);
+        assert_eq!(take_word("\"a`b\""), None);
+    }
+
+    #[test]
+    fn take_guard_reads_a_real_guard() {
+        let Some((guard, rest)) = take_guard(GUARD_P) else {
+            panic!("a guard as the builder emits it is not read: {GUARD_P:?}");
+        };
+        assert_eq!(guard.path, "/etc/ansible/pass");
+        assert_eq!(guard.found, "/etc/ansible/pass");
+        assert_eq!(guard.message, MESSAGE_P);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn take_guard_leaves_what_follows_the_guard() {
+        let cmd = format!("{GUARD_P} && ansible 'all'");
+        let Some((guard, rest)) = take_guard(&cmd) else {
+            panic!("a guard followed by a command is not read: {cmd:?}");
+        };
+        assert_eq!(guard.path, "/etc/ansible/pass");
+        assert_eq!(rest, " && ansible 'all'");
+    }
+
+    #[test]
+    fn take_guard_resolves_a_home_path_and_a_dot_slash_operand() {
+        let home = GUARD_P
+            .replace("'/etc/ansible/pass'", "\"$HOME\"/'.vault pass'")
+            .replace("/etc/ansible/pass must", ".vault pass must");
+        let Some((guard, _)) = take_guard(&home) else {
+            panic!("a `~/` guard is not read: {home:?}");
+        };
+        assert_eq!(guard.path, "$HOME/.vault pass");
+        assert_eq!(guard.found, "$HOME/.vault pass");
+
+        let bang = GUARD_Q
+            .replace("-f '/q'", "-f '!x'")
+            .replace("-L '/q'", "-L ./'!x'");
+        let Some((guard, _)) = take_guard(&bang) else {
+            panic!("a `./` guard is not read: {bang:?}");
+        };
+        assert_eq!(guard.path, "!x");
+        assert_eq!(guard.found, "./!x");
+    }
+
+    #[test]
+    fn take_guard_refuses_what_is_not_a_guard() {
+        assert!(take_guard("ansible 'all'").is_none());
+        assert!(take_guard("").is_none());
+        // Cut short, or with its exit removed: not fail-closed.
+        assert!(take_guard(&GUARD_P[..GUARD_P.len() - 1]).is_none());
+        assert!(take_guard(&GUARD_P.replace("exit 2", "exit 0")).is_none());
+        assert!(take_guard(&GUARD_P.replace("; else echo", "; else true")).is_none());
+    }
+
+    #[test]
+    fn split_guards_peels_one_guard() {
+        let cmd = format!("{GUARD_P} && ANSIBLE_INVENTORY_ENABLED=host_list ansible 'all'");
+        let (guards, rest) = split_guards(&cmd, "one");
+        assert_eq!(guards.len(), 1);
+        assert_eq!(guards[0].path, "/etc/ansible/pass");
+        assert_eq!(rest, "ANSIBLE_INVENTORY_ENABLED=host_list ansible 'all'");
+    }
+
+    #[test]
+    fn split_guards_peels_two_consecutive_guards() {
+        let cmd = format!("{GUARD_P} && {GUARD_Q} && ansible 'all' -m 'ping'");
+        let (guards, rest) = split_guards(&cmd, "two");
+        let paths: Vec<&str> = guards.iter().map(|g| g.path.as_str()).collect();
+        assert_eq!(paths, ["/etc/ansible/pass", "/q"]);
+        assert_eq!(rest, "ansible 'all' -m 'ping'");
+    }
+
+    #[test]
+    fn split_guards_leaves_a_command_with_no_guard_alone() {
+        let cmd = "ansible 'all' -m 'ping'";
+        let (guards, rest) = split_guards(cmd, "none");
+        assert!(guards.is_empty());
+        assert_eq!(rest, cmd);
+    }
+
+    #[test]
+    #[should_panic(expected = "not chained")]
+    fn split_guards_refuses_a_guard_that_is_not_chained_with_and_and() {
+        let cmd = format!("{GUARD_P}; ansible 'all'");
+        let _ = split_guards(&cmd, "unchained");
+    }
+
+    #[test]
+    #[should_panic(expected = "fail-closed shape")]
+    fn split_guards_refuses_a_guard_that_is_not_fail_closed() {
+        let cmd = format!("{} && ansible 'all'", GUARD_P.replace("exit 2", "exit 0"));
+        let _ = split_guards(&cmd, "open");
     }
 }
 

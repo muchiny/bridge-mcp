@@ -1343,6 +1343,8 @@ mod tests {
         assert!(AnsibleCommandBuilder::validate_playbook_path("site.yml").is_ok());
         assert!(AnsibleCommandBuilder::validate_playbook_path("playbooks/deploy.yml").is_ok());
         assert!(AnsibleCommandBuilder::validate_playbook_path("/opt/ansible/site.yml").is_ok());
+        // `./` keeps a name that starts with `-` a path.
+        assert!(AnsibleCommandBuilder::validate_playbook_path("./-x").is_ok());
     }
 
     #[test]
@@ -1660,7 +1662,14 @@ mod tests {
             let err = AnsibleCommandBuilder::refuse_jinja("args", v).expect_err(v);
             assert!(err.to_string().contains("'args'"), "{err}");
         }
-        for v in ["", "name=nginx state=restarted", "{ a }", "root", "a}}"] {
+        for v in [
+            "",
+            "name=nginx state=restarted",
+            "{ a }",
+            "{ {",
+            "root",
+            "a}}",
+        ] {
             assert!(
                 AnsibleCommandBuilder::refuse_jinja("args", v).is_ok(),
                 "{v}"
@@ -1682,6 +1691,7 @@ mod tests {
             "ansible.builtin.shell",
             "ansible.legacy.raw",
             "ansible.windows.win_shell",
+            "ANSIBLE.LEGACY.RAW",
             " Shell ",
         ] {
             assert!(AnsibleCommandBuilder::runs_a_command(m), "{m}");
@@ -1704,16 +1714,79 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_adhoc_module_judges_every_command_module() {
+        for module in [
+            "command",
+            "shell",
+            "raw",
+            "script",
+            "expect",
+            "win_command",
+            "win_shell",
+            "win_powershell",
+            "ansible.builtin.shell",
+            "ansible.windows.win_shell",
+            "ANSIBLE.LEGACY.RAW",
+            " Shell ",
+        ] {
+            assert!(
+                AnsibleCommandBuilder::validate_adhoc_module(module, Some("uptime")).is_ok(),
+                "{module:?}"
+            );
+            assert!(
+                AnsibleCommandBuilder::validate_adhoc_module(module, None).is_ok(),
+                "{module:?}"
+            );
+            assert!(
+                AnsibleCommandBuilder::validate_adhoc_module(module, Some("rm -rf /")).is_err(),
+                "{module:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_adhoc_module_does_not_judge_other_modules() {
+        // A module that runs no command line is not judged by the dangerous
+        // patterns (the tool still judges its policy text).
+        for module in ["ping", "copy", "setup", "service", "debug", ""] {
+            for args in [
+                "src=a dest=b",
+                "rm -rf /",
+                "mkfs",
+                "dd if=/dev/zero",
+                "echo > /dev/null",
+                "chmod 777 x",
+                "$(id)",
+                "a; b",
+            ] {
+                assert!(
+                    AnsibleCommandBuilder::validate_adhoc_module(module, Some(args)).is_ok(),
+                    "{module:?} {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_validate_callback_allowed() {
-        assert!(AnsibleCommandBuilder::validate_callback("json").is_ok());
-        assert!(AnsibleCommandBuilder::validate_callback("yaml").is_ok());
-        assert!(AnsibleCommandBuilder::validate_callback("dense").is_ok());
-        assert!(AnsibleCommandBuilder::validate_callback("minimal").is_ok());
-        assert!(AnsibleCommandBuilder::validate_callback("default").is_ok());
+        for callback in [
+            "json", "yaml", "dense", "minimal", "tree", "default", "oneline", "debug", "null",
+        ] {
+            assert!(
+                AnsibleCommandBuilder::validate_callback(callback).is_ok(),
+                "{callback}"
+            );
+        }
     }
 
     #[test]
     fn test_validate_callback_rejected() {
+        for callback in ["", "json;id", "$(id)", "nosuchcallback"] {
+            assert!(
+                AnsibleCommandBuilder::validate_callback(callback).is_err(),
+                "{callback}"
+            );
+        }
         let result = AnsibleCommandBuilder::validate_callback("$(whoami)");
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1768,11 +1841,16 @@ mod tests {
     fn test_validate_lint_target_ok() {
         assert!(AnsibleCommandBuilder::validate_lint_target("site.yml").is_ok());
         assert!(AnsibleCommandBuilder::validate_lint_target("roles/webserver").is_ok());
+        assert!(AnsibleCommandBuilder::validate_lint_target("playbooks/site.yml").is_ok());
+        assert!(AnsibleCommandBuilder::validate_lint_target("/opt/ansible/site.yml").is_ok());
+        assert!(AnsibleCommandBuilder::validate_lint_target("./-x").is_ok());
     }
 
     #[test]
     fn test_validate_lint_target_traversal() {
         assert!(AnsibleCommandBuilder::validate_lint_target("../../etc/passwd").is_err());
+        assert!(AnsibleCommandBuilder::validate_lint_target("../x").is_err());
+        assert!(AnsibleCommandBuilder::validate_lint_target("roles/../site.yml").is_err());
     }
 
     // ============== Vault Passthrough Tests ==============
@@ -1911,7 +1989,9 @@ mod tests {
             m.insert(k.to_string(), v.to_string());
             AnsibleCommandBuilder::validate_extra_vars(&m)
         };
+        assert!(AnsibleCommandBuilder::validate_extra_vars(&HashMap::new()).is_ok());
         assert!(one("env", "prod value").is_ok());
+        assert!(one("app_version", "1.2.3").is_ok());
         for (k, v) in [
             ("ansible_ssh_common_args", "x"),
             ("{\"a\":\"", "\"}"),
@@ -1920,6 +2000,8 @@ mod tests {
             ("1x", "x"),
             ("k", "{{ lookup('pipe','id') }}"),
             ("k", "{% set a=1 %}"),
+            ("k", "{%x"),
+            ("k", "{#x"),
         ] {
             let err = one(k, v).unwrap_err().to_string();
             assert!(err.contains("extra_vars"), "{k}={v}: {err}");
@@ -1943,6 +2025,32 @@ mod tests {
         );
         assert!(AnsibleCommandBuilder::validate_pattern("web:!db").is_ok());
         assert!(AnsibleCommandBuilder::validate_playbook_path("./-x.yml").is_ok());
+        // A double dash is an option too, for every positional.
+        for value in ["-site.yml", "--extra-vars=x", "--list", "-i"] {
+            assert!(
+                AnsibleCommandBuilder::validate_playbook_path(value).is_err(),
+                "playbook {value}"
+            );
+            assert!(
+                AnsibleCommandBuilder::validate_lint_target(value).is_err(),
+                "lint target {value}"
+            );
+            assert!(
+                AnsibleCommandBuilder::validate_inventory(value).is_err(),
+                "inventory {value}"
+            );
+            assert!(
+                AnsibleCommandBuilder::validate_pattern(value).is_err(),
+                "pattern {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_pattern_accepts_host_patterns() {
+        for ok in ["all", "web*", "web:&db", "web:!db", "web-1"] {
+            assert!(AnsibleCommandBuilder::validate_pattern(ok).is_ok(), "{ok}");
+        }
     }
 
     #[test]
@@ -2106,6 +2214,8 @@ mod tests {
                 "\tchdir=/tmp ls",
                 "ls\r\nexecutable=/tmp/x",
                 "ls\x0bstdin=x",
+                "ls\tchdir=/tmp",
+                "ls\nchdir=/tmp",
             ] {
                 let err = AnsibleCommandBuilder::validate_adhoc_args(module, bad)
                     .expect_err(&format!("{module}: {bad}"));
@@ -2136,10 +2246,31 @@ mod tests {
                 "{module}"
             );
         }
-        // The escapes and `=` rules apply to every module.
-        assert!(AnsibleCommandBuilder::validate_adhoc_args("copy", "a\\=b").is_err());
-        assert!(AnsibleCommandBuilder::validate_adhoc_args("copy", "msg=\\x41").is_err());
-        assert!(AnsibleCommandBuilder::validate_adhoc_args("copy", "x =b\\n").is_err());
+        // The Jinja, JSON, escape and `=` rules apply to every module.
+        for module in ["copy", "ping"] {
+            for bad in [
+                "msg={{ x }}",
+                "msg={%x",
+                "msg={#x",
+                "{\"msg\": \"x\"}",
+                " \t{a=b}",
+                "msg=\\x41",
+                "msg=\\u007b",
+                "msg=\\U00000041",
+                "msg=\\N{DIGIT ONE}",
+                "\\\\x41",
+                "a\\=b",
+                "=b\\n",
+                "x =b\\n",
+                "x =y\\n",
+                "x\n=y\\t",
+            ] {
+                assert!(
+                    AnsibleCommandBuilder::validate_adhoc_args(module, bad).is_err(),
+                    "{module}: {bad}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2553,6 +2684,10 @@ mod tests {
         assert!(check(None, Some("dev@prompt_ask_vault_pass")).is_ok());
         assert!(check(Some("./-pass"), Some("v@./-pass")).is_ok());
         assert!(check(Some("~/.vault_pass"), Some("v@keys/a..b")).is_ok());
+        // `~/` and `..` inside a name are fine in either argument.
+        assert!(check(Some("~/vault.txt"), None).is_ok());
+        assert!(check(None, Some("prod@~/vault.txt")).is_ok());
+        assert!(check(Some("keys/a..b"), None).is_ok());
         for (vpf, vid, arg) in [
             (Some("-x"), None, "vault_password_file"),
             (Some("--vault-id=x"), None, "vault_password_file"),
@@ -2576,6 +2711,18 @@ mod tests {
             (None, Some("p@${SHELL}"), "vault_id"),
             (Some("~root/pass"), None, "vault_password_file"),
             (None, Some("p@~"), "vault_id"),
+            // A `..` segment at the start or at the end of the path.
+            (Some("../x"), None, "vault_password_file"),
+            (Some("a/.."), None, "vault_password_file"),
+            // The file a `vault_id` reads gets the same rules as the
+            // file argument.
+            (None, Some("p@a/../b"), "vault_id"),
+            (None, Some("p@~root/x"), "vault_id"),
+            (None, Some("p@a\nb"), "vault_id"),
+            (None, Some("p@{{x"), "vault_id"),
+            (None, Some("p@{%x"), "vault_id"),
+            (Some("{%x"), None, "vault_password_file"),
+            (Some("{#x"), None, "vault_password_file"),
         ] {
             let err = check(vpf, vid).expect_err(&format!("{vpf:?} {vid:?}"));
             assert!(err.to_string().contains(arg), "{err}");
